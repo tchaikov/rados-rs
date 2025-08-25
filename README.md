@@ -39,64 +39,71 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ## 🚀 Quick Start
 
-### Running the Example
+### Running Examples
 
-The project includes a simple client/server example demonstrating the messenger protocol:
+The project includes examples demonstrating various components:
 
 ```bash
-# Terminal 1: Start server
-cargo run --bin rados-client server 6789
+# Test msgr2 session connecting
+cargo run --example test_session_connecting -p msgr2
 
-# Terminal 2: Connect as client  
-cargo run --bin rados-client client 127.0.0.1:6789
+# Test CephX authentication corpus
+cargo run --example test_corpus -p auth
 
-# Terminal 3: Send a single ping
-cargo run --bin rados-client ping 127.0.0.1:6789
+# Test entity address encoding/decoding
+cargo run --example test_entity_addr_corpus -p denc
+
+# Test OSD map decoding
+cargo run --example test_osdmap_decode -p denc
 ```
 
 ### Using the Library
 
 ```rust
-use rados_rs::{
-    messenger::Messenger,
-    types::{EntityName, EntityType, EntityAddr},
-};
-use std::net::SocketAddr;
+use msgr2::{SessionConnecting, ConnectionInfo};
+use denc::{EntityName, EntityAddr};
 
 #[tokio::main]
-async fn main() -> rados_rs::Result<()> {
-    // Create a messenger instance
+async fn main() -> anyhow::Result<()> {
+    // Create connection info
     let local_name = EntityName::client(12345);
-    let bind_addr: SocketAddr = "0.0.0.0:0".parse().unwrap();
-    let mut messenger = Messenger::new(local_name, bind_addr);
-    
-    // Start the messenger
-    messenger.start().await?;
-    
+    let peer_addr = EntityAddr::parse("v2:10.0.0.1:6789/0")?;
+
+    let conn_info = ConnectionInfo {
+        local_name,
+        peer_addr,
+        // ... other fields
+    };
+
     // Connect to a Ceph monitor
-    let mon_addr = EntityAddr::new_with_random_nonce("10.0.0.1:6789".parse().unwrap());
-    let mon_name = EntityName::mon(0);
-    messenger.connect_to(mon_addr, Some(mon_name)).await?;
-    
-    // Send messages...
-    
+    // See examples for complete usage
+
     Ok(())
 }
 ```
 
 ## 🔧 Architecture
 
-### Messenger Layer
-- **Connection Management**: Handles TCP connections with automatic reconnection
-- **Protocol Handling**: Implements Ceph messenger protocol v2 
-- **Message Routing**: Routes messages between local handlers and remote peers
-- **Feature Negotiation**: Negotiates supported features with peers
+The project is organized as a Cargo workspace with three main crates:
 
-### Type System
+### `denc` - Encoding/Decoding
+- **Ceph Encoding**: Implementation of Ceph's DENC encoding/decoding protocol
 - **Entity Types**: Strongly typed entities (MON, OSD, CLIENT, MDS, MGR)
 - **Addresses**: Network addresses with nonces for unique identification
 - **Features**: Capability negotiation and version compatibility
-- **Messages**: Type-safe message construction and parsing
+- **Complex Types**: OSDMap, PgPool, CRUSH map structures
+
+### `msgr2` - Messenger Protocol v2
+- **Protocol Handling**: Complete implementation of Ceph messenger protocol v2.1
+- **State Machine**: State pattern-based protocol state machine
+- **Frame Protocol**: Frame encoding/decoding with encryption and compression
+- **Session Management**: Connection negotiation, authentication, and session handling
+- **Crypto**: AES-128-GCM encryption and CRC32C checksums
+
+### `auth` - Authentication
+- **CephX Protocol**: CephX authentication implementation
+- **Keyring Management**: Keyring parsing and key management
+- **Ticket System**: Service ticket handling
 
 ## 🛠️ Development
 
