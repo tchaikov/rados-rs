@@ -130,6 +130,27 @@ impl std::ops::Not for FeatureSet {
     }
 }
 
+impl denc::zerocopy::Encode for FeatureSet {
+    fn encode<B: bytes::BufMut>(
+        &self,
+        buf: &mut B,
+    ) -> std::result::Result<(), denc::zerocopy::EncodeError> {
+        self.0.encode(buf)
+    }
+
+    fn encoded_size(&self) -> usize {
+        self.0.encoded_size()
+    }
+}
+
+impl denc::zerocopy::Decode for FeatureSet {
+    fn decode<B: bytes::Buf>(
+        buf: &mut B,
+    ) -> std::result::Result<Self, denc::zerocopy::DecodeError> {
+        Ok(Self(u64::decode(buf)?))
+    }
+}
+
 /// Configuration for msgr2 connection behavior
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {

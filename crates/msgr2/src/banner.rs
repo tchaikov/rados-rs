@@ -136,7 +136,7 @@ impl Default for Banner {
 }
 
 #[repr(C, packed)]
-#[derive(Debug)]
+#[derive(Debug, denc::ZeroCopyDencode)]
 pub struct ConnectMessage {
     pub features: FeatureSet,
     pub host_type: u32,
@@ -180,106 +180,6 @@ impl ConnectMessage {
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
         Ok(<Self as denc::zerocopy::Decode>::decode(src)?)
-    }
-}
-
-// Manual implementation to avoid issues with packed struct references
-impl denc::zerocopy::Encode for ConnectMessage {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-    ) -> std::result::Result<(), denc::zerocopy::EncodeError> {
-        let size = std::mem::size_of::<Self>();
-        if buf.remaining_mut() < size {
-            return Err(denc::zerocopy::EncodeError::InsufficientSpace {
-                required: size,
-                available: buf.remaining_mut(),
-            });
-        }
-
-        // Zero-copy for little-endian systems
-        #[cfg(target_endian = "little")]
-        {
-            unsafe {
-                let src_ptr = self as *const Self as *const u8;
-                let src_slice = std::slice::from_raw_parts(src_ptr, size);
-                buf.put_slice(src_slice);
-            }
-        }
-
-        // Field-by-field for big-endian
-        #[cfg(not(target_endian = "little"))]
-        {
-            unsafe {
-                use denc::zerocopy::Encode;
-                let features = std::ptr::addr_of!(self.features).read_unaligned();
-                buf.put_u64_le(features.value());
-                let host_type = std::ptr::addr_of!(self.host_type).read_unaligned();
-                host_type.encode(buf)?;
-                let global_seq = std::ptr::addr_of!(self.global_seq).read_unaligned();
-                global_seq.encode(buf)?;
-                let connect_seq = std::ptr::addr_of!(self.connect_seq).read_unaligned();
-                connect_seq.encode(buf)?;
-                let protocol_version = std::ptr::addr_of!(self.protocol_version).read_unaligned();
-                protocol_version.encode(buf)?;
-                let authorizer_protocol =
-                    std::ptr::addr_of!(self.authorizer_protocol).read_unaligned();
-                authorizer_protocol.encode(buf)?;
-                let authorizer_len = std::ptr::addr_of!(self.authorizer_len).read_unaligned();
-                authorizer_len.encode(buf)?;
-                let flags = std::ptr::addr_of!(self.flags).read_unaligned();
-                flags.encode(buf)?;
-                let padding = std::ptr::addr_of!(self.padding).read_unaligned();
-                padding.encode(buf)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    fn encoded_size(&self) -> usize {
-        std::mem::size_of::<Self>()
-    }
-}
-
-impl denc::zerocopy::Decode for ConnectMessage {
-    fn decode<B: Buf>(buf: &mut B) -> std::result::Result<Self, denc::zerocopy::DecodeError> {
-        let size = std::mem::size_of::<Self>();
-        if buf.remaining() < size {
-            return Err(denc::zerocopy::DecodeError::UnexpectedEof {
-                expected: size,
-                available: buf.remaining(),
-            });
-        }
-
-        // Zero-copy for little-endian systems
-        #[cfg(target_endian = "little")]
-        {
-            unsafe {
-                let mut value = std::mem::MaybeUninit::<Self>::uninit();
-                let dst_ptr = value.as_mut_ptr() as *mut u8;
-                let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
-                buf.copy_to_slice(dst_slice);
-                Ok(value.assume_init())
-            }
-        }
-
-        // Field-by-field for big-endian
-        #[cfg(not(target_endian = "little"))]
-        {
-            use denc::zerocopy::Decode;
-            Ok(Self {
-                features: FeatureSet::new(u64::decode(buf)?),
-                host_type: u32::decode(buf)?,
-                global_seq: u32::decode(buf)?,
-                connect_seq: u32::decode(buf)?,
-                protocol_version: u32::decode(buf)?,
-                authorizer_protocol: u32::decode(buf)?,
-                authorizer_len: u32::decode(buf)?,
-                flags: u8::decode(buf)?,
-                padding: <[u8; 3]>::decode(buf)?,
-            })
-        }
     }
 }
 
