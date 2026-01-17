@@ -22,6 +22,10 @@ pub enum Error {
     Serialization,
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+    #[error("Encode error: {0}")]
+    Encode(#[from] denc::zerocopy::EncodeError),
+    #[error("Decode error: {0}")]
+    Decode(#[from] denc::zerocopy::DecodeError),
 }
 
 impl Error {
