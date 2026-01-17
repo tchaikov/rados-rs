@@ -135,7 +135,8 @@ impl Default for Banner {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[repr(C, packed)]
+#[derive(Debug)]
 pub struct ConnectMessage {
     pub features: FeatureSet,
     pub host_type: u32,
@@ -145,6 +146,7 @@ pub struct ConnectMessage {
     pub authorizer_protocol: u32,
     pub authorizer_len: u32,
     pub flags: u8,
+    padding: [u8; 3], // Explicit padding to match wire format
 }
 
 impl ConnectMessage {
@@ -161,6 +163,7 @@ impl ConnectMessage {
             authorizer_protocol: 0,
             authorizer_len: 0,
             flags: 0,
+            padding: [0; 3],
         }
     }
 
@@ -171,52 +174,119 @@ impl ConnectMessage {
     }
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        if dst.remaining_mut() < Self::LENGTH {
-            return Err(Error::invalid_data("Serialization error"));
-        }
-
-        dst.put_u64_le(self.features.value());
-        dst.put_u32_le(self.host_type);
-        dst.put_u32_le(self.global_seq);
-        dst.put_u32_le(self.connect_seq);
-        dst.put_u32_le(self.protocol_version);
-        dst.put_u32_le(self.authorizer_protocol);
-        dst.put_u32_le(self.authorizer_len);
-        dst.put_u8(self.flags);
-        dst.put_u8(0); // padding
-        dst.put_u8(0); // padding
-        dst.put_u8(0); // padding
-
+        <Self as denc::zerocopy::Encode>::encode(self, dst)?;
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        if src.remaining() < Self::LENGTH {
-            return Err(Error::invalid_data("Incomplete connect message"));
+        Ok(<Self as denc::zerocopy::Decode>::decode(src)?)
+    }
+}
+
+// Manual implementation to avoid issues with packed struct references
+impl denc::zerocopy::Encode for ConnectMessage {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+    ) -> std::result::Result<(), denc::zerocopy::EncodeError> {
+        let size = std::mem::size_of::<Self>();
+        if buf.remaining_mut() < size {
+            return Err(denc::zerocopy::EncodeError::InsufficientSpace {
+                required: size,
+                available: buf.remaining_mut(),
+            });
         }
 
-        let features = FeatureSet::new(src.get_u64_le());
-        let host_type = src.get_u32_le();
-        let global_seq = src.get_u32_le();
-        let connect_seq = src.get_u32_le();
-        let protocol_version = src.get_u32_le();
-        let authorizer_protocol = src.get_u32_le();
-        let authorizer_len = src.get_u32_le();
-        let flags = src.get_u8();
+        // Zero-copy for little-endian systems
+        #[cfg(target_endian = "little")]
+        {
+            unsafe {
+                let src_ptr = self as *const Self as *const u8;
+                let src_slice = std::slice::from_raw_parts(src_ptr, size);
+                buf.put_slice(src_slice);
+            }
+        }
 
-        // Skip padding
-        src.advance(3);
+        // Field-by-field for big-endian
+        #[cfg(not(target_endian = "little"))]
+        {
+            unsafe {
+                use denc::zerocopy::Encode;
+                let features = std::ptr::addr_of!(self.features).read_unaligned();
+                buf.put_u64_le(features.value());
+                let host_type = std::ptr::addr_of!(self.host_type).read_unaligned();
+                host_type.encode(buf)?;
+                let global_seq = std::ptr::addr_of!(self.global_seq).read_unaligned();
+                global_seq.encode(buf)?;
+                let connect_seq = std::ptr::addr_of!(self.connect_seq).read_unaligned();
+                connect_seq.encode(buf)?;
+                let protocol_version = std::ptr::addr_of!(self.protocol_version).read_unaligned();
+                protocol_version.encode(buf)?;
+                let authorizer_protocol =
+                    std::ptr::addr_of!(self.authorizer_protocol).read_unaligned();
+                authorizer_protocol.encode(buf)?;
+                let authorizer_len = std::ptr::addr_of!(self.authorizer_len).read_unaligned();
+                authorizer_len.encode(buf)?;
+                let flags = std::ptr::addr_of!(self.flags).read_unaligned();
+                flags.encode(buf)?;
+                let padding = std::ptr::addr_of!(self.padding).read_unaligned();
+                padding.encode(buf)?;
+            }
+        }
 
-        Ok(Self {
-            features,
-            host_type,
-            global_seq,
-            connect_seq,
-            protocol_version,
-            authorizer_protocol,
-            authorizer_len,
-            flags,
-        })
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        std::mem::size_of::<Self>()
+    }
+}
+
+impl denc::zerocopy::Decode for ConnectMessage {
+    fn decode<B: Buf>(buf: &mut B) -> std::result::Result<Self, denc::zerocopy::DecodeError> {
+        let size = std::mem::size_of::<Self>();
+        if buf.remaining() < size {
+            return Err(denc::zerocopy::DecodeError::UnexpectedEof {
+                expected: size,
+                available: buf.remaining(),
+            });
+        }
+
+        // Zero-copy for little-endian systems
+        #[cfg(target_endian = "little")]
+        {
+            unsafe {
+                let mut value = std::mem::MaybeUninit::<Self>::uninit();
+                let dst_ptr = value.as_mut_ptr() as *mut u8;
+                let dst_slice = std::slice::from_raw_parts_mut(dst_ptr, size);
+                buf.copy_to_slice(dst_slice);
+                Ok(value.assume_init())
+            }
+        }
+
+        // Field-by-field for big-endian
+        #[cfg(not(target_endian = "little"))]
+        {
+            use denc::zerocopy::Decode;
+            Ok(Self {
+                features: FeatureSet::new(u64::decode(buf)?),
+                host_type: u32::decode(buf)?,
+                global_seq: u32::decode(buf)?,
+                connect_seq: u32::decode(buf)?,
+                protocol_version: u32::decode(buf)?,
+                authorizer_protocol: u32::decode(buf)?,
+                authorizer_len: u32::decode(buf)?,
+                flags: u8::decode(buf)?,
+                padding: <[u8; 3]>::decode(buf)?,
+            })
+        }
+    }
+}
+
+impl Clone for ConnectMessage {
+    fn clone(&self) -> Self {
+        // Use read_unaligned to safely copy from packed struct
+        unsafe { std::ptr::addr_of!(*self).read_unaligned() }
     }
 }
 
