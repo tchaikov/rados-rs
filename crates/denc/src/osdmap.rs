@@ -2073,13 +2073,11 @@ impl crate::denc::Denc for OSDMap {
         Self::decode_versioned(buf, features)
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
-        }
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // OSDMap is complex with many nested structures and version-dependent fields.
+        // Calculating size without encoding would be expensive and error-prone.
+        // Return None to indicate that pre-allocation should use a heuristic size.
+        None
     }
 }
 
