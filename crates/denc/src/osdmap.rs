@@ -67,6 +67,51 @@ impl Denc for PgId {
     }
 }
 
+// DencMut implementation for PgId
+impl crate::denc_mut::DencMut for PgId {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 17 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for PgId: need 17, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u8(1); // Version byte
+        buf.put_u64_le(self.pool);
+        buf.put_u32_le(self.seed);
+        buf.put_i32_le(-1); // deprecated preferred field
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 17 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for PgId: need 17, have {}",
+                buf.remaining()
+            )));
+        }
+        let version = buf.get_u8();
+        if version != 1 {
+            return Err(RadosError::Protocol(format!(
+                "Unsupported PgId version: {}",
+                version
+            )));
+        }
+        let pool = buf.get_u64_le();
+        let seed = buf.get_u32_le();
+        buf.advance(4); // Skip deprecated preferred field
+        Ok(PgId { pool, seed })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(17)
+    }
+}
+
+impl crate::denc_mut::FixedSize for PgId {
+    const SIZE: usize = 17;
+}
+
 /// Event Version (eversion_t in C++)
 /// Note: In corpus data, only version and epoch are encoded (12 bytes total)
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -105,6 +150,44 @@ impl Denc for EVersion {
     }
 }
 
+// DencMut implementation for EVersion
+impl crate::denc_mut::DencMut for EVersion {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 12 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for EVersion: need 12, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u64_le(self.version);
+        buf.put_u32_le(self.epoch);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 12 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for EVersion".to_string(),
+            ));
+        }
+        let version = buf.get_u64_le();
+        let epoch = buf.get_u32_le();
+        Ok(EVersion {
+            version,
+            epoch,
+            pad: 0,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(12)
+    }
+}
+
+impl crate::denc_mut::FixedSize for EVersion {
+    const SIZE: usize = 12;
+}
+
 /// Unix timestamp (utime_t in C++)
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct UTime {
@@ -134,6 +217,40 @@ impl Denc for UTime {
     fn encoded_size(&self) -> Option<usize> {
         Some(8)
     }
+}
+
+// DencMut implementation for UTime
+impl crate::denc_mut::DencMut for UTime {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UTime: need 8, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u32_le(self.sec);
+        buf.put_u32_le(self.nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UTime".to_string(),
+            ));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
+        Ok(UTime { sec, nsec })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl crate::denc_mut::FixedSize for UTime {
+    const SIZE: usize = 8;
 }
 
 /// String encoding implementation to match Ceph's string handling
@@ -437,6 +554,39 @@ impl Denc for UuidD {
     fn encoded_size(&self) -> Option<usize> {
         Some(16)
     }
+}
+
+// DencMut implementation for UuidD
+impl crate::denc_mut::DencMut for UuidD {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UuidD: need 16, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_slice(&self.bytes);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UuidD".to_string(),
+            ));
+        }
+        let mut uuid_bytes = [0u8; 16];
+        buf.copy_to_slice(&mut uuid_bytes);
+        Ok(UuidD { bytes: uuid_bytes })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16)
+    }
+}
+
+impl crate::denc_mut::FixedSize for UuidD {
+    const SIZE: usize = 16;
 }
 
 /// OSD extended information structure (osd_xinfo_t in C++)
