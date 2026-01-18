@@ -48,28 +48,40 @@ fn get_ceph_mon_addr() -> SocketAddr {
 /// Helper function to configure authentication method based on CEPH_AUTH_METHOD environment variable
 /// This allows tests to explicitly control authentication via environment variable
 fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
+    // Debug: Print all environment variables related to CEPH
+    tracing::info!("=== Environment Variable Debug ===");
+    for (key, value) in std::env::vars() {
+        if key.starts_with("CEPH") || key.starts_with("RUST") {
+            tracing::info!("  {}={}", key, value);
+        }
+    }
+    tracing::info!("=== End Environment Variables ===");
+    
     match std::env::var("CEPH_AUTH_METHOD") {
         Ok(auth_env) => {
-            tracing::info!("CEPH_AUTH_METHOD environment variable found: '{}'", auth_env);
+            tracing::info!("✓ CEPH_AUTH_METHOD environment variable found: '{}'", auth_env);
+            tracing::info!("  Before: auth_method = {:?}", config.auth_method);
             match auth_env.to_lowercase().as_str() {
                 "none" => {
-                    tracing::info!("Setting auth_method to None (no authentication)");
+                    tracing::info!("  Setting auth_method to None (no authentication)");
                     config.auth_method = Some(AuthMethod::None);
                 }
                 "cephx" => {
-                    tracing::info!("Setting auth_method to Cephx authentication");
+                    tracing::info!("  Setting auth_method to Cephx authentication");
                     config.auth_method = Some(AuthMethod::Cephx);
                 }
                 _ => {
                     tracing::warn!(
-                        "Unknown CEPH_AUTH_METHOD value: '{}', using auto-detection",
+                        "  Unknown CEPH_AUTH_METHOD value: '{}', using auto-detection",
                         auth_env
                     );
                 }
             }
+            tracing::info!("  After: auth_method = {:?}", config.auth_method);
         }
-        Err(_) => {
-            tracing::info!("CEPH_AUTH_METHOD environment variable not set, using auto-detection");
+        Err(e) => {
+            tracing::warn!("✗ CEPH_AUTH_METHOD environment variable not found: {:?}", e);
+            tracing::info!("  Using auto-detection for auth_method");
         }
     }
     config
