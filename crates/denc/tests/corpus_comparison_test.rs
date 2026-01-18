@@ -55,7 +55,7 @@ fn ensure_corpus_available() -> Result<PathBuf, String> {
         eprintln!("Attempting to clone ceph-object-corpus...");
         
         let output = Command::new("git")
-            .args(&[
+            .args([
                 "clone",
                 "--depth=1",
                 "https://github.com/ceph/ceph-object-corpus.git",
@@ -118,7 +118,7 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
     // Try to build it
     eprintln!("Building dencoder...");
     let output = Command::new("cargo")
-        .args(&["build", "--bin", "dencoder"])
+        .args(["build", "--bin", "dencoder"])
         .current_dir(manifest_dir.parent().unwrap().parent().unwrap())
         .output()
         .map_err(|e| format!("Failed to build dencoder: {}", e))?;
@@ -204,7 +204,7 @@ fn run_rust_dencoder(
     
     // Extract JSON from output - it starts with '{' or '['
     // Our dencoder prints status messages before the JSON
-    let json_start = full_output.find(|c| c == '{' || c == '[')
+    let json_start = full_output.find(['{', '['])
         .ok_or_else(|| format!("No JSON found in output: {}", full_output))?;
     
     Ok(full_output[json_start..].trim().to_string())
@@ -216,14 +216,14 @@ fn run_rust_dencoder(
 fn compare_json_outputs(
     ceph_json: &str,
     rust_json: &str,
-    type_name: &str,
-    file_name: &str,
+    _type_name: &str,
+    _file_name: &str,
 ) -> Result<(), String> {
     // Just verify both are valid JSON
-    let ceph_value: serde_json::Value = serde_json::from_str(ceph_json)
+    let _ceph_value: serde_json::Value = serde_json::from_str(ceph_json)
         .map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
     
-    let rust_value: serde_json::Value = serde_json::from_str(rust_json)
+    let _rust_value: serde_json::Value = serde_json::from_str(rust_json)
         .map_err(|e| format!("Failed to parse rust JSON: {}", e))?;
 
     // Note: We don't require exact match because output formats may differ
