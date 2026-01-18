@@ -52,7 +52,6 @@ cargo test -p msgr2
 cargo test -p auth
 
 # Run examples
-cargo run --example test_session_connecting -p msgr2
 cargo run --example test_corpus -p auth
 cargo run --example test_entity_addr_corpus -p denc
 cargo run --example test_osdmap_decode -p denc
