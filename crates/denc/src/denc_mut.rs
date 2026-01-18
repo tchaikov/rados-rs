@@ -558,4 +558,22 @@ mod tests {
         assert_eq!(decoded.footer, 0xABCDEF);
     }
     */
+
+    #[test]
+    fn test_zerocopy_integration() {
+        // Test that ZeroCopyDencode types automatically get DencMut
+        // We'll use a simple array which implements ZeroCopyDencode via the derive macro
+
+        let arr: [u32; 3] = [1, 2, 3];
+
+        // Test that we can use DencMut methods
+        assert_eq!(arr.encoded_size(0), Some(12)); // 3 * 4 bytes
+
+        let mut buf = BytesMut::new();
+        DencMut::encode(&arr, &mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 12);
+
+        let decoded = <[u32; 3] as DencMut>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, arr);
+    }
 }
