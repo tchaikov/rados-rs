@@ -1733,19 +1733,19 @@ impl OSDMap {
 impl VersionedEncode for OSDMap {
     const FEATURE_DEPENDENT: bool = true;
 
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         8 // Meta-encoding version
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         7
     }
 
     fn encode_content<B: BufMut>(
         &self,
-        buf: &mut B,
-        features: u64,
-        version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // For now, we'll focus on decoding. Encoding can be implemented later.
         Err(RadosError::Protocol(
@@ -1757,7 +1757,7 @@ impl VersionedEncode for OSDMap {
         buf: &mut B,
         features: u64,
         version: u8,
-        compat_version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if version < 7 {
             return Err(RadosError::Protocol(format!(
@@ -2057,6 +2057,29 @@ impl VersionedEncode for OSDMap {
         }
 
         Ok(map)
+    }
+}
+
+// Manual Denc implementation for OSDMap (uses VersionedEncode)
+impl crate::denc::Denc for OSDMap {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <OSDMap as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
     }
 }
 

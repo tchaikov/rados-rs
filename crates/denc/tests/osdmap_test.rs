@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use denc::{Denc, OSDMap};
+use denc::{OSDMap, VersionedEncode};
 use std::fs;
 use std::path::PathBuf;
 
