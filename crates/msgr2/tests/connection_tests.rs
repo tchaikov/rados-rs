@@ -1,12 +1,17 @@
 //! Integration tests for msgr2 connection functionality
 //!
 //! These tests require a running Ceph cluster and the CEPH_MON_ADDR environment variable to be set.
-//! Example: CEPH_MON_ADDR=192.168.1.37:40421 cargo test --test connection_tests
+//! They are marked with #[ignore] by default to prevent them from running in CI or during normal `cargo test`.
 //!
 //! To run these tests:
 //! ```bash
 //! export CEPH_MON_ADDR=<your_monitor_address:port>
-//! cargo test --test connection_tests -- --nocapture
+//! cargo test --test connection_tests -- --ignored --nocapture
+//! ```
+//!
+//! Optionally, set CEPH_KEYRING to point to your keyring file:
+//! ```bash
+//! export CEPH_KEYRING=/path/to/ceph/build/keyring
 //! ```
 
 use msgr2::protocol::Connection;
@@ -23,6 +28,7 @@ fn get_ceph_mon_addr() -> SocketAddr {
 }
 
 #[tokio::test]
+#[ignore = "requires running Ceph cluster and CEPH_MON_ADDR"]
 async fn test_compression_disabled() {
     let addr = get_ceph_mon_addr();
 
@@ -52,6 +58,7 @@ async fn test_compression_disabled() {
 }
 
 #[tokio::test]
+#[ignore = "requires running Ceph cluster and CEPH_MON_ADDR"]
 async fn test_compression_enabled() {
     let addr = get_ceph_mon_addr();
 
@@ -81,6 +88,7 @@ async fn test_compression_enabled() {
 }
 
 #[tokio::test]
+#[ignore = "requires running Ceph cluster and CEPH_MON_ADDR"]
 async fn test_crc_mode() {
     let addr = get_ceph_mon_addr();
 
@@ -107,6 +115,7 @@ async fn test_crc_mode() {
 }
 
 #[tokio::test]
+#[ignore = "requires running Ceph cluster and CEPH_MON_ADDR"]
 async fn test_secure_mode() {
     let addr = get_ceph_mon_addr();
 
@@ -133,6 +142,7 @@ async fn test_secure_mode() {
 }
 
 #[tokio::test]
+#[ignore = "requires running Ceph cluster and CEPH_MON_ADDR"]
 async fn test_session_connecting() {
     let addr = get_ceph_mon_addr();
 
