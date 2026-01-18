@@ -302,12 +302,13 @@ fn test_type(
                 eprintln!("    ✓ {}", file_name);
                 matched += 1;
             }
-            Err(_e) => {
+            Err(e) => {
                 // Format mismatch - both decoded but outputs differ
                 format_mismatch += 1;
                 // Only show first mismatch details to avoid spam
                 if format_mismatch == 1 {
                     eprintln!("    ⚠ {} - format mismatch (showing first only)", file_name);
+                    eprintln!("      {}", e);
                 }
             }
         }
