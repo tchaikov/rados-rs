@@ -238,6 +238,25 @@ impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
     const SIZE: usize = T::SIZE * N;
 }
 
+// ============= Integration with zerocopy module =============
+
+use crate::zerocopy;
+
+/// Blanket implementation: ZeroCopyDencode types automatically get DencMut
+impl<T: zerocopy::ZeroCopyDencode> DencMut for T {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        zerocopy::Encode::encode(self, buf).map_err(|e| RadosError::Denc(e.to_string()))
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        zerocopy::Decode::decode(buf).map_err(|e| RadosError::Denc(e.to_string()))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(zerocopy::Encode::encoded_size(self))
+    }
+}
+
 // ============= Variable-Size Type Implementations =============
 
 use bytes::Bytes;
