@@ -190,6 +190,7 @@ pub struct BannerConnecting {
     pub local_supported_features: u64,
     pub local_required_features: u64,
     pub preferred_modes: Vec<crate::ConnectionMode>,
+    pub auth_method: Option<crate::AuthMethod>,
 }
 
 impl State for BannerConnecting {
@@ -216,6 +217,7 @@ impl State for BannerConnecting {
         // Banner is sent outside of frame protocol
         Ok(StateResult::Transition(Box::new(HelloConnecting::new(
             self.preferred_modes.clone(),
+            self.auth_method,
         ))))
     }
 }
@@ -224,13 +226,15 @@ impl State for BannerConnecting {
 pub struct HelloConnecting {
     hello_sent: bool,
     preferred_modes: Vec<crate::ConnectionMode>,
+    auth_method: Option<crate::AuthMethod>,
 }
 
 impl HelloConnecting {
-    pub fn new(preferred_modes: Vec<crate::ConnectionMode>) -> Self {
+    pub fn new(preferred_modes: Vec<crate::ConnectionMode>, auth_method: Option<crate::AuthMethod>) -> Self {
         Self {
             hello_sent: false,
             preferred_modes,
+            auth_method,
         }
     }
 }
@@ -270,6 +274,7 @@ impl State for HelloConnecting {
                 // Transition to auth phase
                 Ok(StateResult::Transition(Box::new(AuthConnecting::new(
                     self.preferred_modes.clone(),
+                    self.auth_method,
                 ))))
             }
             _ => Err(Error::protocol_error(&format!(
@@ -291,7 +296,7 @@ impl State for HelloConnecting {
 
             Ok(StateResult::SendAndWait {
                 frame,
-                next_state: Box::new(HelloConnecting::new(self.preferred_modes.clone())),
+                next_state: Box::new(HelloConnecting::new(self.preferred_modes.clone(), self.auth_method)),
             })
         } else {
             Ok(StateResult::Continue)
@@ -301,27 +306,65 @@ impl State for HelloConnecting {
 
 #[derive(Debug)]
 pub struct AuthConnecting {
-    cephx_handler: CephXClientHandler,
+    auth_method: crate::AuthMethod,
+    cephx_handler: Option<CephXClientHandler>,
     preferred_modes: Vec<crate::ConnectionMode>,
 }
 
 impl AuthConnecting {
-    pub fn new(preferred_modes: Vec<crate::ConnectionMode>) -> Self {
-        // Try environment variable first, then fall back to default path
-        let keyring_path = std::env::var("CEPH_KEYRING")
-            .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+    pub fn new(preferred_modes: Vec<crate::ConnectionMode>, auth_method: Option<crate::AuthMethod>) -> Self {
+        // Determine which auth method to use
+        let actual_auth_method = auth_method.unwrap_or_else(|| {
+            // Auto-detect: try to load keyring, if it fails use None auth
+            let keyring_path = std::env::var("CEPH_KEYRING")
+                .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+            
+            if std::path::Path::new(&keyring_path).exists() {
+                tracing::info!("Keyring file found, using CephX authentication");
+                crate::AuthMethod::Cephx
+            } else {
+                tracing::info!("No keyring file found, using no authentication");
+                crate::AuthMethod::None
+            }
+        });
 
-        Self::with_keyring_path(&keyring_path, preferred_modes.clone())
-            .unwrap_or_else(|e| {
-                tracing::warn!("Failed to load keyring from {}: {}", keyring_path, e);
-                tracing::warn!("Using fallback authentication key");
-                Self::with_fallback_key(preferred_modes)
-            })
+        match actual_auth_method {
+            crate::AuthMethod::None => {
+                tracing::info!("Using AuthMethod::None (no authentication)");
+                Self {
+                    auth_method: actual_auth_method,
+                    cephx_handler: None,
+                    preferred_modes,
+                }
+            }
+            crate::AuthMethod::Cephx => {
+                tracing::info!("Using AuthMethod::Cephx authentication");
+                // Try environment variable first, then fall back to default path
+                let keyring_path = std::env::var("CEPH_KEYRING")
+                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+
+                Self::with_keyring_path(&keyring_path, preferred_modes.clone(), actual_auth_method)
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Failed to load keyring from {}: {}", keyring_path, e);
+                        tracing::warn!("Using fallback authentication key");
+                        Self::with_fallback_key(preferred_modes, actual_auth_method)
+                    })
+            }
+            _ => {
+                tracing::warn!("Unsupported auth method {:?}, falling back to None", actual_auth_method);
+                Self {
+                    auth_method: crate::AuthMethod::None,
+                    cephx_handler: None,
+                    preferred_modes,
+                }
+            }
+        }
     }
 
     pub fn with_keyring_path(
         keyring_path: &str,
         preferred_modes: Vec<crate::ConnectionMode>,
+        auth_method: crate::AuthMethod,
     ) -> Result<Self> {
         let keyring = Keyring::from_file(keyring_path)
             .map_err(|e| Error::Protocol(format!("Failed to load keyring: {}", e)))?;
@@ -335,18 +378,20 @@ impl AuthConnecting {
         handler.set_secret_key(crypto_key.clone());
 
         Ok(Self {
-            cephx_handler: handler,
+            auth_method,
+            cephx_handler: Some(handler),
             preferred_modes,
         })
     }
 
-    fn with_fallback_key(preferred_modes: Vec<crate::ConnectionMode>) -> Self {
+    fn with_fallback_key(preferred_modes: Vec<crate::ConnectionMode>, auth_method: crate::AuthMethod) -> Self {
         let mut handler = CephXClientHandler::new("client.admin".to_string())
             .expect("Failed to create CephXClientHandler");
         let _ = handler.set_secret_key_from_base64("AQAHpMtmRCPGIxAAXvJkMZFCE6/k/x+CxU6t9Q==");
 
         Self {
-            cephx_handler: handler,
+            auth_method,
+            cephx_handler: Some(handler),
             preferred_modes,
         }
     }
@@ -391,37 +436,42 @@ impl State for AuthConnecting {
             }
             Tag::AuthReplyMore => {
                 // Handle CephX multi-round auth
-                if let Some(payload) = frame.segments.first() {
-                    match self.cephx_handler.handle_auth_response(payload.clone()) {
-                        Ok(AuthResult::Success) => {
-                            Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
-                        }
-                        Ok(AuthResult::NeedMoreData) => {
-                            // Need to send another auth request with challenge response
-                            let auth_payload = self
-                                .cephx_handler
-                                .build_authenticate_request()
-                                .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                if let Some(handler) = &mut self.cephx_handler {
+                    if let Some(payload) = frame.segments.first() {
+                        match handler.handle_auth_response(payload.clone()) {
+                            Ok(AuthResult::Success) => {
+                                Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
+                            }
+                            Ok(AuthResult::NeedMoreData) => {
+                                // Need to send another auth request with challenge response
+                                let auth_payload = handler
+                                    .build_authenticate_request()
+                                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
-                            // For AuthRequestMore, we only send the auth_payload (no method/preferred_modes)
-                            let auth_frame = AuthRequestMoreFrame::new(auth_payload);
-                            let response_frame =
-                                create_frame_from_trait(&auth_frame, Tag::AuthRequestMore);
+                                // For AuthRequestMore, we only send the auth_payload (no method/preferred_modes)
+                                let auth_frame = AuthRequestMoreFrame::new(auth_payload);
+                                let response_frame =
+                                    create_frame_from_trait(&auth_frame, Tag::AuthRequestMore);
 
-                            // IMPORTANT: Don't create a new AuthConnecting - we need to preserve
-                            // the CephXClientHandler state (server_challenge, session, etc.)
-                            // The state machine will stay in the current state (self)
-                            Ok(StateResult::SendFrame {
-                                frame: response_frame,
-                                next_state: None,
-                            })
+                                // IMPORTANT: Don't create a new AuthConnecting - we need to preserve
+                                // the CephXClientHandler state (server_challenge, session, etc.)
+                                // The state machine will stay in the current state (self)
+                                Ok(StateResult::SendFrame {
+                                    frame: response_frame,
+                                    next_state: None,
+                                })
+                            }
+                            Ok(AuthResult::Failed(msg)) => Ok(StateResult::Fault(msg)),
+                            Err(e) => Err(Error::protocol_error(&e.to_string())),
                         }
-                        Ok(AuthResult::Failed(msg)) => Ok(StateResult::Fault(msg)),
-                        Err(e) => Err(Error::protocol_error(&e.to_string())),
+                    } else {
+                        Err(Error::protocol_error(
+                            "AUTH_REPLY_MORE frame missing payload",
+                        ))
                     }
                 } else {
                     Err(Error::protocol_error(
-                        "AUTH_REPLY_MORE frame missing payload",
+                        "Received AUTH_REPLY_MORE but using AuthMethod::None",
                     ))
                 }
             }
@@ -445,37 +495,53 @@ impl State for AuthConnecting {
                         con_mode
                     );
 
-                    // Handle AUTH_DONE payload to extract session_key and connection_secret
-                    let (session_key, connection_secret) = self
-                        .cephx_handler
-                        .handle_auth_done(auth_payload, global_id, con_mode)
-                        .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                    // For AuthMethod::None, we don't need to extract session_key and connection_secret
+                    if self.auth_method == crate::AuthMethod::None {
+                        tracing::info!("AuthMethod::None - no session key/connection secret needed");
+                        
+                        // For no-auth with CRC mode, skip directly to session connecting
+                        // For SECURE mode, we'd need signature exchange but that doesn't make sense with no-auth
+                        if con_mode == crate::ConnectionMode::Secure.as_u32() {
+                            tracing::warn!("SECURE mode with AuthMethod::None is unusual, skipping to session");
+                        }
+                        
+                        // Go directly to SessionConnecting
+                        Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
+                    } else {
+                        // CephX authentication - extract session_key and connection_secret
+                        let handler = self.cephx_handler.as_mut()
+                            .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
+                        
+                        let (session_key, connection_secret) = handler
+                            .handle_auth_done(auth_payload, global_id, con_mode)
+                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
-                    tracing::debug!("Extracted from AUTH_DONE - session_key: {:?} bytes, connection_secret: {:?} bytes",
-                        session_key.as_ref().map(|k| k.len()),
-                        connection_secret.as_ref().map(|s| s.len()));
-                    if let Some(ref key) = session_key {
-                        tracing::debug!(
-                            "Session key first 16 bytes: {:02x?}",
-                            &key[..16.min(key.len())]
-                        );
+                        tracing::debug!("Extracted from AUTH_DONE - session_key: {:?} bytes, connection_secret: {:?} bytes",
+                            session_key.as_ref().map(|k| k.len()),
+                            connection_secret.as_ref().map(|s| s.len()));
+                        if let Some(ref key) = session_key {
+                            tracing::debug!(
+                                "Session key first 16 bytes: {:02x?}",
+                                &key[..16.min(key.len())]
+                            );
+                        }
+
+                        // Authentication completed successfully, transition to AUTH_CONNECTING_SIGN
+                        // for signature exchange, then to session phase
+                        // Note: Signature, server_addr, and client_addr will be set in apply_result()
+                        Ok(StateResult::Transition(Box::new(
+                            AuthConnectingSign::new_with_encryption(
+                                con_mode,
+                                session_key,
+                                connection_secret,
+                                Bytes::new(), // Placeholder, will be replaced with computed signature
+                                None, // Placeholder, will be replaced with computed expected server signature
+                                global_id,
+                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
+                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
+                            ),
+                        )))
                     }
-
-                    // Authentication completed successfully, transition to AUTH_CONNECTING_SIGN
-                    // for signature exchange, then to session phase
-                    // Note: Signature, server_addr, and client_addr will be set in apply_result()
-                    Ok(StateResult::Transition(Box::new(
-                        AuthConnectingSign::new_with_encryption(
-                            con_mode,
-                            session_key,
-                            connection_secret,
-                            Bytes::new(), // Placeholder, will be replaced with computed signature
-                            None, // Placeholder, will be replaced with computed expected server signature
-                            global_id,
-                            denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
-                            denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
-                        ),
-                    )))
                 } else {
                     Err(Error::protocol_error("AUTH_DONE frame missing payload"))
                 }
@@ -488,22 +554,42 @@ impl State for AuthConnecting {
     }
 
     fn enter(&mut self) -> Result<StateResult> {
-        // Send initial AUTH_REQUEST frame with entity name and global_id=0
-        let auth_payload = self
-            .cephx_handler
-            .build_initial_request(0) // Initial request uses global_id=0
-            .map_err(|e| Error::protocol_error(&e.to_string()))?;
+        // Send initial AUTH_REQUEST frame
         let preferred_modes: Vec<u32> = self.preferred_modes.iter().map(|m| m.as_u32()).collect();
+        
+        let (method, auth_payload) = match self.auth_method {
+            crate::AuthMethod::None => {
+                tracing::info!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
+                // For no-auth, send empty payload
+                (crate::AuthMethod::None.as_u32(), Bytes::new())
+            }
+            crate::AuthMethod::Cephx => {
+                tracing::info!("Sending AUTH_REQUEST with AuthMethod::Cephx");
+                let handler = self.cephx_handler.as_mut()
+                    .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
+                let payload = handler
+                    .build_initial_request(0) // Initial request uses global_id=0
+                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                (crate::AuthMethod::Cephx.as_u32(), payload)
+            }
+            _ => {
+                return Err(Error::protocol_error(&format!(
+                    "Unsupported auth method: {:?}",
+                    self.auth_method
+                )));
+            }
+        };
+        
         let auth_frame = AuthRequestFrame::new(
-            crate::AuthMethod::Cephx.as_u32(),
-            preferred_modes,
+            method,
+            preferred_modes.clone(),
             auth_payload,
         );
         let frame = create_frame_from_trait(&auth_frame, Tag::AuthRequest);
 
         Ok(StateResult::SendAndWait {
             frame,
-            next_state: Box::new(AuthConnecting::new(self.preferred_modes.clone())),
+            next_state: Box::new(AuthConnecting::new(self.preferred_modes.clone(), Some(self.auth_method))),
         })
     }
 }
@@ -1326,11 +1412,13 @@ impl StateMachine {
     /// Create a new state machine for client connection
     pub fn new_client(config: crate::ConnectionConfig) -> Self {
         let preferred_modes = config.preferred_modes.clone();
+        let auth_method = config.auth_method;
         Self {
             current_state: Box::new(BannerConnecting {
                 local_supported_features: 3, // MSGR2 | REVISION_1
                 local_required_features: 0,
                 preferred_modes: preferred_modes.clone(),
+                auth_method,
             }),
             is_client: true,
             frame_decryptor: None,

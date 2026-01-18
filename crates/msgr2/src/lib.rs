@@ -166,6 +166,12 @@ pub struct ConnectionConfig {
     /// Default: vec![ConnectionMode::Secure, ConnectionMode::Crc] (prefer encryption)
     /// The server will choose the final mode from this list
     pub preferred_modes: Vec<ConnectionMode>,
+
+    /// Authentication method to use
+    /// Default: None (auto-detect from environment or use CephX)
+    /// Set to Some(AuthMethod::None) to skip authentication
+    /// Set to Some(AuthMethod::Cephx) to force CephX authentication
+    pub auth_method: Option<AuthMethod>,
 }
 
 impl Default for ConnectionConfig {
@@ -174,6 +180,7 @@ impl Default for ConnectionConfig {
             supported_features: MSGR2_ALL_FEATURES,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
+            auth_method: None, // Auto-detect
         }
     }
 }
@@ -185,6 +192,7 @@ impl ConnectionConfig {
             supported_features: MSGR2_FEATURE_REVISION_1,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
+            auth_method: None,
         }
     }
 
@@ -199,6 +207,7 @@ impl ConnectionConfig {
             supported_features: MSGR2_ALL_FEATURES,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Crc],
+            auth_method: None,
         }
     }
 
@@ -208,6 +217,7 @@ impl ConnectionConfig {
             supported_features: MSGR2_ALL_FEATURES,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure],
+            auth_method: None,
         }
     }
 
@@ -217,6 +227,7 @@ impl ConnectionConfig {
             supported_features: MSGR2_FEATURE_REVISION_1,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Crc],
+            auth_method: None,
         }
     }
 
@@ -226,6 +237,29 @@ impl ConnectionConfig {
             supported_features: supported,
             required_features: required,
             preferred_modes: modes,
+            auth_method: None,
+        }
+    }
+
+    /// Create config with no authentication
+    /// Use this when connecting to a Ceph cluster with auth disabled
+    pub fn with_no_auth() -> Self {
+        Self {
+            supported_features: MSGR2_ALL_FEATURES,
+            required_features: 0,
+            preferred_modes: vec![ConnectionMode::Crc], // No encryption needed for no-auth
+            auth_method: Some(AuthMethod::None),
+        }
+    }
+
+    /// Create config with CephX authentication
+    /// Use this to force CephX even if auto-detection would suggest otherwise
+    pub fn with_cephx_auth() -> Self {
+        Self {
+            supported_features: MSGR2_ALL_FEATURES,
+            required_features: 0,
+            preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
+            auth_method: Some(AuthMethod::Cephx),
         }
     }
 }
