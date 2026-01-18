@@ -98,7 +98,7 @@ The project uses GitHub Actions for CI with three main checks:
 
 ### Encoding/Decoding (DENC)
 - This project implements Ceph's DENC encoding protocol in Rust
-- Reference implementation: `~/dev/ceph/src/include/denc.h` (if available)
+- Reference implementation: `$HOME/dev/ceph/src/include/denc.h` (if Ceph source available)
 - Corpus files contain binary-encoded Ceph types for validation
 - Encoding may be affected by feature flags (marked with `WRITE_CLASS_ENCODER_FEATURES`)
 - Use versioned encoding for forward compatibility (`VersionedEncode` trait)
@@ -111,30 +111,31 @@ The project uses GitHub Actions for CI with three main checks:
 5. **CRUSH**: Controlled Replication Under Scalable Hashing algorithm
 
 ### Validation Tools
-When debugging encoding/decoding issues:
+When debugging encoding/decoding issues, you can use ceph-dencoder to analyze corpus files (if available):
 ```bash
-# Use ceph-dencoder to analyze corpus files (if available)
-cd ~/dev/ceph/build
+# Example using ceph-dencoder from development build
+cd $HOME/dev/ceph/build
 bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json
 ```
 
 ### Protocol References
-- Official msgr2 protocol documentation: `~/dev/ceph/doc/dev/msgr2.rst`
-- Protocol implementations in Ceph source:
-  - `~/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`
-  - `~/dev/ceph/src/crimson/net/FrameAssemblerV2.{cc,h}`
-  - `~/dev/ceph/src/msg/async/ProtocolV2.{cc,h}`
-  - `~/dev/ceph/src/msg/async/frames_v2.{cc,h}`
+- Official msgr2 protocol documentation: `$HOME/dev/ceph/doc/dev/msgr2.rst` (if Ceph source available)
+- Protocol implementations in Ceph source (if available):
+  - `$HOME/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`
+  - `$HOME/dev/ceph/src/crimson/net/FrameAssemblerV2.{cc,h}`
+  - `$HOME/dev/ceph/src/msg/async/ProtocolV2.{cc,h}`
+  - `$HOME/dev/ceph/src/msg/async/frames_v2.{cc,h}`
 
 ### Testing Against Real Cluster
 A local Ceph cluster may be available for testing:
-- Config: `/home/kefu/dev/ceph/build/ceph.conf`
-- Start: `cd ~/dev/ceph/build; ../src/vstart.sh -d`
-- Stop: `cd ~/dev/ceph/build; ../src/stop.sh`
-- Official client verification:
+- Config: `$HOME/dev/ceph/build/ceph.conf` or custom config path
+- Start: `cd $HOME/dev/ceph/build; ../src/vstart.sh -d`
+- Stop: `cd $HOME/dev/ceph/build; ../src/stop.sh`
+- Official client verification (example):
   ```bash
-  LD_PRELOAD=/usr/lib/libasan.so.8 /home/kefu/dev/ceph/build/bin/ceph \
-    --conf "/home/kefu/dev/rust-app-ceres/docker/ceph-config/ceph.conf" \
+  # Using development build with AddressSanitizer
+  LD_PRELOAD=/usr/lib/libasan.so.8 $HOME/dev/ceph/build/bin/ceph \
+    --conf "<path-to-ceph.conf>" \
     -s 2>/dev/null
   ```
 
