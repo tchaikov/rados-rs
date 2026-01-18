@@ -1538,7 +1538,7 @@ impl crate::denc::Denc for PgPool {
 }
 
 /// PG Merge Metadata (pg_merge_meta_t in C++)
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct PgMergeMeta {
     pub source_pgid: PgId,
     pub ready_epoch: Epoch,
@@ -1547,10 +1547,38 @@ pub struct PgMergeMeta {
     pub source_version: EVersion,
     pub target_version: EVersion,
     // Extra fields found in corpus data (purpose unknown)
-    #[serde(skip_serializing)]
     pub extra_field: Padding<u32>,
-    #[serde(skip_serializing)]
     pub extra_padding: Padding<u8>,
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for PgMergeMeta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PgMergeMeta", 6)?;
+        
+        // Format source_pgid as "pool.seed" string
+        let source_pgid_str = format!("{}.{}", self.source_pgid.pool, self.source_pgid.seed);
+        state.serialize_field("source_pgid", &source_pgid_str)?;
+        
+        state.serialize_field("ready_epoch", &self.ready_epoch)?;
+        state.serialize_field("last_epoch_started", &self.last_epoch_started)?;
+        state.serialize_field("last_epoch_clean", &self.last_epoch_clean)?;
+        
+        // Format versions as "epoch'version" string
+        let source_version_str = format!("{}'{}",  self.source_version.epoch, self.source_version.version);
+        state.serialize_field("source_version", &source_version_str)?;
+        
+        let target_version_str = format!("{}'{}", self.target_version.epoch, self.target_version.version);
+        state.serialize_field("target_version", &target_version_str)?;
+        
+        // Skip extra_field and extra_padding (they're Padding types)
+        
+        state.end()
+    }
 }
 
 impl VersionedEncode for PgMergeMeta {
