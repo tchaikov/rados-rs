@@ -469,7 +469,9 @@ pub trait EncodeWithFeatures {
 // Default implementation for types that implement Denc
 impl<T: Denc> EncodeWithFeatures for T {
     fn encode_with_features(&self, features: u64) -> Result<Bytes, RadosError> {
-        self.encode(features)
+        let mut buf = BytesMut::new();
+        self.encode(&mut buf, features)?;
+        Ok(buf.freeze())
     }
 }
 
@@ -551,7 +553,7 @@ macro_rules! define_control_frame {
                 }
                 let mut payload = segments.remove(0);
                 Ok(Self {
-                    $($field_name: <$field_type as Denc>::decode(&mut payload).map_err(|e| RadosError::Denc(e.to_string()))?,)*
+                    $($field_name: <$field_type as Denc>::decode(&mut payload, 0).map_err(|e| RadosError::Denc(e.to_string()))?,)*
                 })
             }
         }

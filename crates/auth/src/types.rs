@@ -96,40 +96,43 @@ impl std::str::FromStr for EntityName {
 }
 
 impl Denc for EntityName {
-    fn encode(&self, _features: u64) -> std::result::Result<Bytes, RadosError> {
-        let mut buf = BytesMut::new();
-
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
         // Encode type (u32)
         buf.put_u32_le(self.entity_type);
 
         // Encode id (string with length prefix)
         buf.put_u32_le(self.id.len() as u32);
-        buf.extend_from_slice(self.id.as_bytes());
+        buf.put_slice(self.id.as_bytes());
 
-        Ok(buf.freeze())
+        Ok(())
     }
 
-    fn decode(data: &mut Bytes) -> std::result::Result<Self, RadosError> {
-        if data.len() < 8 {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 8 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for EntityName".to_string(),
             ));
         }
 
-        let entity_type = data.get_u32_le();
+        let entity_type = buf.get_u32_le();
 
-        let id_len = data.get_u32_le() as usize;
-        if data.len() < id_len {
+        let id_len = buf.get_u32_le() as usize;
+        if buf.remaining() < id_len {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for EntityName id".to_string(),
             ));
         }
 
-        let id_bytes = data.split_to(id_len);
-        let id = String::from_utf8(id_bytes.to_vec())
+        let mut id_bytes = vec![0u8; id_len];
+        buf.copy_to_slice(&mut id_bytes);
+        let id = String::from_utf8(id_bytes)
             .map_err(|e| RadosError::Protocol(format!("Invalid UTF-8 in EntityName: {}", e)))?;
 
         Ok(Self::new(entity_type, id))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(4 + 4 + self.id.len())
     }
 }
 
@@ -268,8 +271,7 @@ impl CryptoKey {
 }
 
 impl Denc for CryptoKey {
-    fn encode(&self, _features: u64) -> std::result::Result<Bytes, RadosError> {
-        let mut buf = BytesMut::new();
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
         // Encode type (u16)
         buf.put_u16_le(self.crypto_type);
 
@@ -283,37 +285,43 @@ impl Denc for CryptoKey {
 
         // Encode secret length (u16) + secret data
         buf.put_u16_le(self.secret.len() as u16);
-        buf.extend_from_slice(&self.secret);
-        Ok(buf.freeze())
+        buf.put_slice(&self.secret);
+        Ok(())
     }
 
-    fn decode(data: &mut Bytes) -> std::result::Result<Self, RadosError> {
-        if data.len() < 10 {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 10 {
             // u16 + u32 + u32 + u16 minimum
             return Err(RadosError::Protocol(
                 "Insufficient bytes for CryptoKey".to_string(),
             ));
         }
 
-        let crypto_type = data.get_u16_le();
-        let sec = data.get_u32_le();
-        let nsec = data.get_u32_le();
+        let crypto_type = buf.get_u16_le();
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
         let created =
             UNIX_EPOCH + Duration::from_secs(sec as u64) + Duration::from_nanos(nsec as u64);
 
-        let secret_len = data.get_u16_le() as usize;
-        if data.len() < secret_len {
+        let secret_len = buf.get_u16_le() as usize;
+        if buf.remaining() < secret_len {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for secret".to_string(),
             ));
         }
 
-        let secret = data.split_to(secret_len);
+        let mut secret_bytes = vec![0u8; secret_len];
+        buf.copy_to_slice(&mut secret_bytes);
+        let secret = Bytes::from(secret_bytes);
         Ok(Self {
             crypto_type,
             created,
             secret,
         })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(2 + 4 + 4 + 2 + self.secret.len())
     }
 }
 
@@ -372,9 +380,7 @@ impl Default for CephXTicketBlob {
 }
 
 impl Denc for CephXTicketBlob {
-    fn encode(&self, _features: u64) -> std::result::Result<Bytes, RadosError> {
-        let mut buf = BytesMut::new();
-
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         // Encode struct version
         buf.put_u8(1);
 
@@ -382,25 +388,28 @@ impl Denc for CephXTicketBlob {
         buf.put_u64_le(self.secret_id);
 
         // Encode blob with length prefix
-        let blob_encoded = self.blob.encode(0)?;
-        buf.extend_from_slice(&blob_encoded);
+        self.blob.encode(buf, features)?;
 
-        Ok(buf.freeze())
+        Ok(())
     }
 
-    fn decode(data: &mut Bytes) -> std::result::Result<Self, RadosError> {
-        if data.len() < 9 {
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 9 {
             // u8 + u64 minimum
             return Err(RadosError::Protocol(
                 "Insufficient bytes for CephXTicketBlob".to_string(),
             ));
         }
 
-        let _struct_v = data.get_u8(); // version, currently ignored
-        let secret_id = data.get_u64_le();
-        let blob = Bytes::decode(data)?;
+        let _struct_v = buf.get_u8(); // version, currently ignored
+        let secret_id = buf.get_u64_le();
+        let blob = Bytes::decode(buf, features)?;
 
         Ok(Self { secret_id, blob })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(1 + 8 + self.blob.encoded_size(features)?)
     }
 }
 

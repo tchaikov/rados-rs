@@ -86,8 +86,8 @@ impl CephXClientHandler {
         payload.put_u8(AUTH_MODE_MON);
 
         // 2. entity_name (encoded string)
-        let entity_name_bytes = self.entity_name.encode(0)?;
-        payload.extend_from_slice(&entity_name_bytes);
+        self.entity_name.encode(&mut payload, 0)?;
+        let entity_name_len = self.entity_name.encoded_size(0).unwrap_or(0);
 
         // 3. global_id (u64)
         payload.put_u64_le(global_id);
@@ -97,7 +97,7 @@ impl CephXClientHandler {
         trace!(
             "CephX initial request built, size: {} bytes (auth_mode=1, entity_name={}, global_id=8)",
             payload.len(),
-            entity_name_bytes.len()
+            entity_name_len
         );
         Ok(payload.freeze())
     }
@@ -148,17 +148,17 @@ impl CephXClientHandler {
 
         // Encode header + authenticate (NO auth_mode for second request)
         let mut payload = BytesMut::new();
-        let header_bytes = header.encode(0)?;
-        let auth_bytes = auth_request.encode(0)?;
-
-        payload.extend_from_slice(&header_bytes);
-        payload.extend_from_slice(&auth_bytes);
+        let header_size = header.encoded_size(0).unwrap_or(0);
+        let auth_size = auth_request.encoded_size(0).unwrap_or(0);
+        
+        header.encode(&mut payload, 0)?;
+        auth_request.encode(&mut payload, 0)?;
 
         trace!(
             "CephX authenticate request built, size: {} bytes (header={}, auth={})",
             payload.len(),
-            header_bytes.len(),
-            auth_bytes.len()
+            header_size,
+            auth_size
         );
         Ok(payload.freeze())
     }
@@ -209,14 +209,13 @@ impl CephXClientHandler {
         debug!("Step 2: Added AUTH_ENC_MAGIC = 0x{:016x}", magic);
 
         // Encode the challenge blob itself
-        let challenge_encoded = challenge_blob.encode(0).map_err(|e| {
+        let challenge_size = challenge_blob.encoded_size(0).unwrap_or(0);
+        challenge_blob.encode(&mut bl, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to encode challenge: {:?}", e))
         })?;
-        bl.extend_from_slice(&challenge_encoded);
         debug!(
-            "Step 3: Added challenge blob ({} bytes): {}",
-            challenge_encoded.len(),
-            hex::encode(&challenge_encoded)
+            "Step 3: Added challenge blob ({} bytes)",
+            challenge_size
         );
 
         // Prepare for AES encryption
@@ -372,7 +371,7 @@ impl CephXClientHandler {
                 response.len()
             );
 
-            let challenge = CephXServerChallenge::decode(&mut response)?;
+            let challenge = CephXServerChallenge::decode(&mut response, 0)?;
             self.server_challenge = Some(challenge.server_challenge);
             self.starting = false;
 
@@ -447,7 +446,7 @@ impl CephXClientHandler {
         }
 
         // Decode CephXResponseHeader
-        let header = CephXResponseHeader::decode(&mut auth_payload).map_err(|e| {
+        let header = CephXResponseHeader::decode(&mut auth_payload, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to decode CephXResponseHeader: {:?}", e))
         })?;
         debug!(
@@ -570,7 +569,7 @@ impl CephXClientHandler {
         );
 
         // Decode session_key (CryptoKey structure)
-        let session_key = CryptoKey::decode(&mut decrypted_data).map_err(|e| {
+        let session_key = CryptoKey::decode(&mut decrypted_data, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to decode session_key: {:?}", e))
         })?;
         debug!(

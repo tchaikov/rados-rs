@@ -258,10 +258,10 @@ impl State for HelloConnecting {
 
                 // Deserialize HELLO frame from segment data
                 let mut payload = frame.segments[0].clone();
-                let entity_type = u8::decode(&mut payload).map_err(|e| {
+                let entity_type = u8::decode(&mut payload, 0).map_err(|e| {
                     Error::protocol_error(&format!("Failed to decode entity_type: {:?}", e))
                 })?;
-                let _peer_addr = denc::EntityAddr::decode(&mut payload).map_err(|e| {
+                let _peer_addr = denc::EntityAddr::decode(&mut payload, 0).map_err(|e| {
                     Error::protocol_error(&format!("Failed to decode peer_addr: {:?}", e))
                 })?;
 
@@ -375,8 +375,8 @@ impl State for AuthConnecting {
                     // method: u32, result: i32, allowed_methods: Vec<u32>, allowed_modes: Vec<u32>
                     if segment.len() >= 8 {
                         let mut payload = segment.clone();
-                        let method = u32::decode(&mut payload).unwrap_or(0);
-                        let result = i32::decode(&mut payload).unwrap_or(0);
+                        let method = u32::decode(&mut payload, 0).unwrap_or(0);
+                        let result = i32::decode(&mut payload, 0).unwrap_or(0);
                         tracing::error!("AuthBadMethod: method={}, result={}", method, result);
                     }
                 }
@@ -424,13 +424,13 @@ impl State for AuthConnecting {
                 // Parse AUTH_DONE frame to get global_id and connection mode
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let global_id = u64::decode(&mut payload).map_err(|e| {
+                    let global_id = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode global_id: {:?}", e))
                     })?;
-                    let con_mode = u32::decode(&mut payload).map_err(|e| {
+                    let con_mode = u32::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode con_mode: {:?}", e))
                     })?;
-                    let auth_payload = Bytes::decode(&mut payload).map_err(|e| {
+                    let auth_payload = Bytes::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode auth_payload: {:?}", e))
                     })?;
 
@@ -579,10 +579,10 @@ impl State for CompressionConnecting {
                 // Parse COMPRESSION_DONE frame
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let is_compress = bool::decode(&mut payload).map_err(|e| {
+                    let is_compress = bool::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode is_compress: {:?}", e))
                     })?;
-                    let method = u32::decode(&mut payload).map_err(|e| {
+                    let method = u32::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode method: {:?}", e))
                     })?;
 
@@ -860,32 +860,32 @@ impl State for SessionConnecting {
                 // Parse SERVER_IDENT frame
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let addrvec = denc::EntityAddrvec::decode(&mut payload).map_err(|e| {
+                    let addrvec = denc::EntityAddrvec::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode addrs: {:?}", e))
                     })?;
                     let addrs = addrvec.addrs;
-                    let gid = u64::decode(&mut payload).map_err(|e| {
+                    let gid = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode gid: {:?}", e))
                     })?;
-                    let global_seq = u64::decode(&mut payload).map_err(|e| {
+                    let global_seq = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode global_seq: {:?}", e))
                     })?;
-                    let features_supported = u64::decode(&mut payload).map_err(|e| {
+                    let features_supported = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!(
                             "Failed to decode features_supported: {:?}",
                             e
                         ))
                     })?;
-                    let features_required = u64::decode(&mut payload).map_err(|e| {
+                    let features_required = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!(
                             "Failed to decode features_required: {:?}",
                             e
                         ))
                     })?;
-                    let flags = u64::decode(&mut payload).map_err(|e| {
+                    let flags = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode flags: {:?}", e))
                     })?;
-                    let cookie = u64::decode(&mut payload).map_err(|e| {
+                    let cookie = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode cookie: {:?}", e))
                     })?;
 
@@ -955,7 +955,7 @@ impl State for SessionConnecting {
                     // Extract server's signature from frame payload
                     if let Some(segment) = frame.segments.first() {
                         let mut payload = segment.clone();
-                        let server_signature = Bytes::decode(&mut payload).map_err(|e| {
+                        let server_signature = Bytes::decode(&mut payload, 0).map_err(|e| {
                             Error::protocol_error(&format!(
                                 "Failed to decode server AUTH_SIGNATURE: {:?}",
                                 e
@@ -1234,10 +1234,10 @@ impl State for Ready {
                 // Parse keepalive and send ack with same timestamp
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let timestamp_sec = u32::decode(&mut payload).map_err(|e| {
+                    let timestamp_sec = u32::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode timestamp_sec: {:?}", e))
                     })?;
-                    let timestamp_nsec = u32::decode(&mut payload).map_err(|e| {
+                    let timestamp_nsec = u32::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode timestamp_nsec: {:?}", e))
                     })?;
 
@@ -1263,8 +1263,8 @@ impl State for Ready {
                 // Handle keepalive ack - just log it
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let timestamp_sec = u32::decode(&mut payload).unwrap_or(0);
-                    let timestamp_nsec = u32::decode(&mut payload).unwrap_or(0);
+                    let timestamp_sec = u32::decode(&mut payload, 0).unwrap_or(0);
+                    let timestamp_nsec = u32::decode(&mut payload, 0).unwrap_or(0);
 
                     tracing::debug!(
                         "Received KEEPALIVE2_ACK with timestamp {}.{:09}",
