@@ -173,5 +173,6 @@ jobs:
         env:
           CEPH_CONF: /etc/ceph/ceph.conf
           CEPH_MON_ADDR: 127.0.0.1:3300
+          CEPH_AUTH_METHOD: none
           RUST_BACKTRACE: full
           RUST_LOG: debug
