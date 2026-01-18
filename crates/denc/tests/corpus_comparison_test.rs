@@ -211,24 +211,30 @@ fn run_rust_dencoder(
 }
 
 /// Compare two JSON outputs
-/// Note: We only check that both parse successfully, not that they match exactly
-/// The output format of dencoder may differ from ceph-dencoder
+/// Performs strict comparison and reports differences
 fn compare_json_outputs(
     ceph_json: &str,
     rust_json: &str,
-    _type_name: &str,
-    _file_name: &str,
+    type_name: &str,
+    file_name: &str,
 ) -> Result<(), String> {
-    // Just verify both are valid JSON
-    let _ceph_value: serde_json::Value = serde_json::from_str(ceph_json)
+    let ceph_value: serde_json::Value = serde_json::from_str(ceph_json)
         .map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
     
-    let _rust_value: serde_json::Value = serde_json::from_str(rust_json)
+    let rust_value: serde_json::Value = serde_json::from_str(rust_json)
         .map_err(|e| format!("Failed to parse rust JSON: {}", e))?;
 
-    // Note: We don't require exact match because output formats may differ
-    // The goal is to ensure both can decode successfully
-    // Format differences are documented and expected
+    // Perform strict comparison
+    if ceph_value != rust_value {
+        // Format both for easy comparison
+        let ceph_pretty = serde_json::to_string_pretty(&ceph_value).unwrap();
+        let rust_pretty = serde_json::to_string_pretty(&rust_value).unwrap();
+        
+        return Err(format!(
+            "JSON output mismatch for {} in {}:\n\nCeph output:\n{}\n\nRust output:\n{}\n",
+            type_name, file_name, ceph_pretty, rust_pretty
+        ));
+    }
     
     Ok(())
 }
@@ -240,12 +246,12 @@ fn test_type(
     ceph_dencoder: &Path,
     rust_dencoder: &Path,
     features: Option<u64>,
-) -> Result<(usize, usize, usize), String> {
+) -> Result<(usize, usize, usize, usize), String> {
     let type_dir = corpus_base.join(type_name);
     
     if !type_dir.exists() {
         eprintln!("  ⚠ No corpus directory found for {}", type_name);
-        return Ok((0, 0, 0));
+        return Ok((0, 0, 0, 0));
     }
 
     let entries: Vec<_> = fs::read_dir(&type_dir)
@@ -256,12 +262,13 @@ fn test_type(
 
     if entries.is_empty() {
         eprintln!("  ⚠ No corpus files found in {}", type_dir.display());
-        return Ok((0, 0, 0));
+        return Ok((0, 0, 0, 0));
     }
 
-    let mut passed = 0;
+    let mut matched = 0;
     let mut total = 0;
     let mut both_decoded = 0;
+    let mut format_mismatch = 0;
 
     for entry in entries {
         let corpus_file = entry.path();
@@ -289,19 +296,24 @@ fn test_type(
         // Both decoders succeeded
         both_decoded += 1;
 
-        // Compare outputs (just verify both are valid JSON)
+        // Compare outputs (strict comparison)
         match compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name) {
             Ok(()) => {
                 eprintln!("    ✓ {}", file_name);
-                passed += 1;
+                matched += 1;
             }
-            Err(e) => {
-                eprintln!("    ✗ {}: {}", file_name, e);
+            Err(_e) => {
+                // Format mismatch - both decoded but outputs differ
+                format_mismatch += 1;
+                // Only show first mismatch details to avoid spam
+                if format_mismatch == 1 {
+                    eprintln!("    ⚠ {} - format mismatch (showing first only)", file_name);
+                }
             }
         }
     }
 
-    Ok((passed, total, both_decoded))
+    Ok((matched, total, both_decoded, format_mismatch))
 }
 
 /// Main integration test
@@ -367,10 +379,12 @@ fn test_corpus_comparison() {
         ("pg_pool_t", None),
     ];
 
-    let mut overall_passed = 0;
+    let mut overall_matched = 0;
     let mut overall_total = 0;
     let mut overall_both_decoded = 0;
-    let mut failed_types = Vec::new();
+    let mut overall_format_mismatch = 0;
+    let mut types_with_format_differences = Vec::new();
+    let mut types_with_decode_failures = Vec::new();
 
     for (type_name, features) in types_to_test {
         eprintln!("Testing type: {}", type_name);
@@ -379,21 +393,27 @@ fn test_corpus_comparison() {
         }
 
         match test_type(type_name, &corpus_base, &ceph_dencoder, &rust_dencoder, features) {
-            Ok((passed, total, both_decoded)) => {
-                overall_passed += passed;
+            Ok((matched, total, both_decoded, format_mismatch)) => {
+                overall_matched += matched;
                 overall_total += total;
                 overall_both_decoded += both_decoded;
+                overall_format_mismatch += format_mismatch;
                 
                 if total > 0 {
-                    eprintln!("  Result: {}/{} samples passed (both decoded: {})", passed, total, both_decoded);
-                    if passed < total {
-                        failed_types.push(type_name);
+                    eprintln!("  Result: {}/{} exact match, {} format differences, {} decode failures", 
+                             matched, total, format_mismatch, total - both_decoded);
+                    
+                    if format_mismatch > 0 {
+                        types_with_format_differences.push(type_name);
+                    }
+                    if both_decoded < total {
+                        types_with_decode_failures.push(type_name);
                     }
                 }
             }
             Err(e) => {
                 eprintln!("  ✗ Error testing {}: {}", type_name, e);
-                failed_types.push(type_name);
+                types_with_decode_failures.push(type_name);
             }
         }
         eprintln!();
@@ -402,25 +422,43 @@ fn test_corpus_comparison() {
     eprintln!("===========================================");
     eprintln!("Overall Results");
     eprintln!("===========================================");
-    eprintln!("Total: {}/{} samples passed", overall_passed, overall_total);
-    eprintln!("Both decoders succeeded: {}/{} samples", overall_both_decoded, overall_total);
+    eprintln!("Total samples: {}", overall_total);
+    eprintln!("  Exact match: {}/{} ({:.1}%)", overall_matched, overall_total, 
+             (overall_matched as f64 / overall_total as f64) * 100.0);
+    eprintln!("  Format differences: {}/{} ({:.1}%)", overall_format_mismatch, overall_total,
+             (overall_format_mismatch as f64 / overall_total as f64) * 100.0);
+    eprintln!("  Decode failures: {}/{} ({:.1}%)", overall_total - overall_both_decoded, overall_total,
+             ((overall_total - overall_both_decoded) as f64 / overall_total as f64) * 100.0);
+    eprintln!();
     
-    if !failed_types.is_empty() {
-        eprintln!("Types with some failures: {:?}", failed_types);
+    if !types_with_format_differences.is_empty() {
+        eprintln!("Types with format differences (need custom serialization):");
+        for type_name in &types_with_format_differences {
+            eprintln!("  - {}", type_name);
+        }
+        eprintln!();
+    }
+    
+    if !types_with_decode_failures.is_empty() {
+        eprintln!("Types with decode failures (implementation bugs):");
+        for type_name in &types_with_decode_failures {
+            eprintln!("  - {}", type_name);
+        }
+        eprintln!();
     }
 
     // The goal is to ensure both dencoders can decode the corpus
-    // We measure success by whether both dencoders succeed, not by JSON equality
+    // We require exact match for now to track format differences
     if overall_total > 0 {
-        let decode_success_rate = (overall_both_decoded as f64) / (overall_total as f64);
-        eprintln!("Decode success rate: {:.1}%", decode_success_rate * 100.0);
+        let exact_match_rate = (overall_matched as f64) / (overall_total as f64);
         
-        // We expect at least 50% of samples to decode successfully with both dencoders
-        // This is a realistic expectation given that some types may have incomplete implementations
+        // We require at least 20% exact match to pass
+        // This allows for format differences while catching major issues
         assert!(
-            decode_success_rate >= 0.5,
-            "Decode success rate too low: {:.1}%. Expected at least 50%",
-            decode_success_rate * 100.0
+            exact_match_rate >= 0.2,
+            "Exact match rate too low: {:.1}%. Expected at least 20%. \
+             Types with format differences need custom serialization to match ceph-dencoder output.",
+            exact_match_rate * 100.0
         );
     } else {
         panic!("No corpus samples were tested!");
