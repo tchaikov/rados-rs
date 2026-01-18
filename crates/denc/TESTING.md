@@ -95,21 +95,22 @@ Testing type: pool_snap_info_t
   Result: 0/10 exact match, 10 format differences, 0 decode failures
 
 Testing type: pg_pool_t
-    ✗ rust dencoder failed for efa76e5beacb68688f21e74648f2aa3d: memory allocation error
-  Result: 0/10 exact match, 0 format differences, 10 decode failures
+    ⚠ efa76e5beacb68688f21e74648f2aa3d - format mismatch (UTime formatting)
+  Result: 0/10 exact match, 10 format differences, 0 decode failures
 
 Overall Results
 Total samples: 83
   Exact match: 53/83 (63.9%)
-  Format differences: 20/83 (24.1%)
-  Decode failures: 10/83 (12.0%)
+  Format differences: 30/83 (36.1%)
+  Decode failures: 0/83 (0.0%)
 
 Types with format differences (need custom serialization):
   - pool_snap_info_t
   - osd_xinfo_t
+  - pg_pool_t
 
 Types with decode failures (implementation bugs):
-  - pg_pool_t
+  - None! All types decode successfully.
 ```
 
 ### Expected Success Rate
@@ -118,7 +119,7 @@ The test requires at least a **20% exact match rate** to pass. This acknowledges
 - Some types may have different JSON output formats (requiring custom serialization)
 - Some types may have incomplete implementations (causing decode failures)
 
-As of this writing, the exact match rate is approximately **64%**, with most remaining failures being format differences that need context-dependent UTime serialization.
+As of this writing, the exact match rate is approximately **64%**, with remaining format differences requiring context-dependent UTime serialization. **All types decode successfully** (0% decode failures).
 
 ### Format Differences
 
@@ -155,7 +156,7 @@ The strict comparison test helps identify and track format differences.
 - Most differences are expected format differences, not bugs
 - Check the test output to see breakdown of exact matches, format differences, and decode failures
 - Format differences need custom `Serialize` implementations
-- Decode failures indicate actual implementation bugs
+- **All types now decode successfully** (0% decode failures)
 
 ## CI Integration
 
