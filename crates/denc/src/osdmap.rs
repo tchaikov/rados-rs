@@ -1147,7 +1147,6 @@ impl VersionedEncode for PgPool {
             );
 
             pool.auid = buf.get_u64_le();
-            println!("  Debug: After auid, remaining bytes: {}", buf.remaining());
         } else {
             // For older versions, use different encoding format
             return Err(RadosError::Protocol(
@@ -1157,7 +1156,6 @@ impl VersionedEncode for PgPool {
 
         if version >= 4 {
             pool.flags = buf.get_u64_le();
-            println!("  Debug: After flags, remaining bytes: {}", buf.remaining());
 
             // Read crash_replay_interval but don't store it (matches C++ behavior)
             let _crash_replay_interval = buf.get_u32_le();
@@ -1206,20 +1204,7 @@ impl VersionedEncode for PgPool {
                 buf.remaining()
             );
 
-            // Debug: peek at the tiers length before decoding
-            if buf.remaining() >= 4 {
-                let tiers_len = buf.get_u32_le();
-                if tiers_len < 1000 {
-                } else {
-                    println!(
-                        "  Debug: tiers_len is suspiciously large - likely reading wrong offset"
-                    );
-                }
-                // Note: Cannot put bytes back with generic Buf - just decode as-is
-            }
-
             // Decode tiers using generic Vec implementation
-            // Note: tiers_len was already read above, so we decode directly
             pool.tiers = Vec::decode(buf, features)?;
             println!(
                 "  Debug: After tiers decode, tiers.len()={}, remaining bytes: {}",
@@ -1406,10 +1391,7 @@ impl VersionedEncode for PgPool {
             );
             if buf.remaining() >= 8 {
                 // Debug array removed - cannot index generic Buf
-                println!(
-                    "  Debug: Next 8 bytes at opts position: {:02x?}",
-                    [] as [u8; 0]
-                );
+                
             }
 
             // opts is versioned encoded - read version header first
@@ -1432,11 +1414,8 @@ impl VersionedEncode for PgPool {
                     if opts_len > 0 {
                         buf.copy_to_slice(&mut pool.opts_data);
                     }
-                    println!("  Debug: After opts, remaining bytes: {}", buf.remaining());
                 } else {
-                    println!(
-                        "  Debug: Skipping opts due to unreasonable length or insufficient bytes"
-                    );
+                    
                     pool.opts_data = Vec::new();
                 }
             } else {
