@@ -80,6 +80,8 @@ The project uses GitHub Actions for CI with three main checks:
 3. **Type safety** - Leverage Rust's type system for correctness
 4. **Async/await** - Use Tokio for all async operations
 5. **Error handling** - Use `thiserror` for custom errors, `anyhow` for application errors
+6. **Cross-validation** - Always cross-validate implementations with Ceph's C++ reference implementation
+7. **Test before commit** - Ensure all tests pass before committing any changes
 
 ### Code Style
 - Follow standard Rust formatting (enforced by `cargo fmt`)
@@ -92,12 +94,15 @@ The project uses GitHub Actions for CI with three main checks:
 - Integration tests go in the `tests/` directory
 - Use corpus files from Ceph for validation when available
 - Always include roundtrip tests for encoding/decoding
+- **Run all tests before committing**: Use `cargo test --workspace --all-targets` to ensure nothing breaks
+- Cross-validate with Ceph's C++ implementation when implementing protocol features
 
 ## Ceph-Specific Context
 
 ### Encoding/Decoding (DENC)
 - This project implements Ceph's DENC encoding protocol in Rust
 - Reference implementation: `$HOME/dev/ceph/src/include/denc.h` (if Ceph source available)
+- **Always cross-validate** with Ceph's C++ implementation when implementing encoding/decoding
 - Corpus files contain binary-encoded Ceph types for validation
 - Encoding may be affected by feature flags (marked with `WRITE_CLASS_ENCODER_FEATURES`)
 - Use versioned encoding for forward compatibility (`VersionedEncode` trait)
@@ -227,10 +232,12 @@ impl VersionedEncode for MyType {
 ## Important Notes
 
 1. **No starting from scratch**: Always modify existing code rather than creating new files unless absolutely necessary
-2. **Cross-validation**: When implementing encoding, always validate against ceph-dencoder output when available
-3. **Feature flags**: Be aware that encoding may differ based on feature flags negotiated during connection
-4. **Async patterns**: All I/O should use Tokio's async runtime
-5. **Error context**: Provide meaningful error messages that help debug Ceph protocol issues
+2. **Cross-validation with C++ implementation**: When implementing any Ceph protocol feature, always cross-validate behavior and output with Ceph's C++ reference implementation
+3. **Validate against ceph-dencoder**: When implementing encoding, always validate against ceph-dencoder output when available
+4. **Test before commit**: Always run `cargo test --workspace --all-targets` and ensure all tests pass before committing changes
+5. **Feature flags**: Be aware that encoding may differ based on feature flags negotiated during connection
+6. **Async patterns**: All I/O should use Tokio's async runtime
+7. **Error context**: Provide meaningful error messages that help debug Ceph protocol issues
 
 ## Dependencies
 
