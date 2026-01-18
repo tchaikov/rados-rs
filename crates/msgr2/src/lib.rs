@@ -152,6 +152,35 @@ impl denc::zerocopy::Decode for FeatureSet {
 }
 
 /// Configuration for msgr2 connection behavior
+///
+/// # Authentication
+///
+/// The authentication method can be configured in three ways (in order of precedence):
+///
+/// 1. **Explicitly via `auth_method` field**: Set to `Some(AuthMethod::None)` or `Some(AuthMethod::Cephx)`
+/// 2. **Via environment variable**: Set `CEPH_AUTH_METHOD=none` or `CEPH_AUTH_METHOD=cephx`
+/// 3. **Auto-detection**: If not explicitly set, auto-detects based on keyring file existence
+///
+/// ## Auto-detection behavior:
+/// - Checks if `CEPH_KEYRING` environment variable is set and points to an existing file
+/// - Falls back to checking `/etc/ceph/ceph.client.admin.keyring`
+/// - If keyring file exists → uses `AuthMethod::Cephx`
+/// - If keyring file doesn't exist → uses `AuthMethod::None`
+///
+/// # Example
+///
+/// ```rust,no_run
+/// use msgr2::ConnectionConfig;
+///
+/// // Auto-detect authentication (recommended)
+/// let config = ConnectionConfig::default();
+///
+/// // Explicitly use no authentication
+/// let config = ConnectionConfig::with_no_auth();
+///
+/// // Explicitly use CephX authentication
+/// let config = ConnectionConfig::with_cephx_auth();
+/// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
     /// Features to advertise as supported in banner exchange
@@ -168,9 +197,11 @@ pub struct ConnectionConfig {
     pub preferred_modes: Vec<ConnectionMode>,
 
     /// Authentication method to use
-    /// Default: None (auto-detect from environment or use CephX)
-    /// Set to Some(AuthMethod::None) to skip authentication
-    /// Set to Some(AuthMethod::Cephx) to force CephX authentication
+    /// - `None`: Auto-detect from environment (checks keyring file, CEPH_AUTH_METHOD env var)
+    /// - `Some(AuthMethod::None)`: Force no authentication
+    /// - `Some(AuthMethod::Cephx)`: Force CephX authentication
+    ///
+    /// See struct-level documentation for auto-detection behavior.
     pub auth_method: Option<AuthMethod>,
 }
 

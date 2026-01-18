@@ -9,10 +9,35 @@
 //! cargo test --test connection_tests -- --nocapture
 //! ```
 //!
-//! Optionally, set CEPH_KEYRING to point to your keyring file:
+//! ## Authentication Configuration
+//!
+//! The tests support both CephX authentication and no-auth clusters:
+//!
+//! ### For clusters with authentication enabled (CephX):
 //! ```bash
+//! # Option 1: Point to your keyring file (recommended)
+//! export CEPH_KEYRING=/path/to/ceph/build/keyring
+//! 
+//! # Option 2: Explicitly set auth method
+//! export CEPH_AUTH_METHOD=cephx
 //! export CEPH_KEYRING=/path/to/ceph/build/keyring
 //! ```
+//!
+//! ### For clusters with authentication disabled:
+//! ```bash
+//! # Option 1: Explicit (recommended for CI)
+//! export CEPH_AUTH_METHOD=none
+//!
+//! # Option 2: Auto-detection (will use no-auth if keyring file doesn't exist)
+//! # No additional configuration needed
+//! ```
+//!
+//! ### Auto-detection behavior:
+//! - If CEPH_AUTH_METHOD is not set, the client will auto-detect:
+//!   - If CEPH_KEYRING is set and the file exists → use CephX authentication
+//!   - If /etc/ceph/ceph.client.admin.keyring exists → use CephX authentication
+//!   - Otherwise → use no authentication
+//!
 
 use msgr2::protocol::Connection;
 use msgr2::ConnectionConfig;
