@@ -14,7 +14,7 @@ cargo test --lib
 
 ### Integration Tests
 
-The integration tests in `tests/connection_tests.rs` require a running Ceph cluster and are marked as `#[ignore]` by default.
+The integration tests in `tests/connection_tests.rs` require a running Ceph cluster. **These tests will fail if the prerequisites are not met.**
 
 #### Prerequisites
 
@@ -30,8 +30,8 @@ export CEPH_MON_ADDR=<monitor_ip>:40390
 # Optionally set the keyring path (defaults to /etc/ceph/ceph.client.admin.keyring)
 export CEPH_KEYRING=/path/to/ceph/build/keyring
 
-# Run the ignored integration tests
-cargo test --test connection_tests -- --ignored --nocapture
+# Run the integration tests
+cargo test --test connection_tests -- --nocapture
 ```
 
 #### Keyring Configuration
@@ -45,4 +45,11 @@ For best results, always set `CEPH_KEYRING` to point to your cluster's keyring f
 
 ## CI/CD
 
-The CI workflow automatically excludes these integration tests since they require external dependencies. Only unit tests are run in CI.
+**Important**: The integration tests require a running Ceph cluster and will fail in CI if `CEPH_MON_ADDR` is not set. Make sure your CI environment either:
+1. Sets up a Ceph cluster and provides the `CEPH_MON_ADDR` environment variable, or
+2. Explicitly excludes the `connection_tests` from the test run
+
+To exclude integration tests in CI:
+```bash
+cargo test --workspace --lib --bins
+```
