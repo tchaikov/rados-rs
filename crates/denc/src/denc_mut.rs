@@ -257,8 +257,17 @@ impl<T: zerocopy::ZeroCopyDencode> DencMut for T {
     }
 }
 
-// ============= Variable-Size Type Implementations =============
+// ============= Backward Compatibility Bridge =============
 
+/// Bridge implementation: DencMut types automatically get Denc trait
+///
+/// This allows gradual migration - existing code using `Denc` trait will work
+/// with new `DencMut` types without changes.
+///
+/// Note: This implementation has a conflict with the blanket impl for ZeroCopyDencode,
+/// so we need to be careful about which types get which implementation.
+/// For now, we'll implement this manually for specific types rather than as a blanket impl.
+// ============= Variable-Size Type Implementations =============
 use bytes::Bytes;
 
 // Vec<T> implementation - encodes length as u32 followed by elements
@@ -266,22 +275,22 @@ impl<T: DencMut> DencMut for Vec<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         // Encode length as u32
         let len = self.len() as u32;
-        len.encode(buf, features)?;
+        DencMut::encode(&len, buf, features)?;
 
         // Encode each element
         for item in self {
-            item.encode(buf, features)?;
+            DencMut::encode(item, buf, features)?;
         }
 
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = u32::decode(buf, features)? as usize;
+        let len = <u32 as DencMut>::decode(buf, features)? as usize;
         let mut vec = Vec::with_capacity(len);
 
         for _ in 0..len {
-            vec.push(T::decode(buf, features)?);
+            vec.push(<T as DencMut>::decode(buf, features)?);
         }
 
         Ok(vec)
@@ -293,7 +302,7 @@ impl<T: DencMut> DencMut for Vec<T> {
 
         // Add size of each element
         for item in self {
-            size += item.encoded_size(features)?;
+            size += DencMut::encoded_size(item, features)?;
         }
 
         Some(size)
@@ -306,7 +315,7 @@ impl DencMut for Bytes {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         // Encode length as u32
         let len = self.len() as u32;
-        len.encode(buf, features)?;
+        DencMut::encode(&len, buf, features)?;
 
         // Copy bytes
         if buf.remaining_mut() < self.len() {
@@ -322,7 +331,7 @@ impl DencMut for Bytes {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = u32::decode(buf, features)? as usize;
+        let len = <u32 as DencMut>::decode(buf, features)? as usize;
 
         if buf.remaining() < len {
             return Err(RadosError::Protocol(format!(
@@ -345,7 +354,7 @@ impl DencMut for String {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         // Encode length as u32
         let len = self.len() as u32;
-        len.encode(buf, features)?;
+        DencMut::encode(&len, buf, features)?;
 
         // Copy string bytes
         if buf.remaining_mut() < self.len() {
@@ -361,7 +370,7 @@ impl DencMut for String {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = u32::decode(buf, features)? as usize;
+        let len = <u32 as DencMut>::decode(buf, features)? as usize;
 
         if buf.remaining() < len {
             return Err(RadosError::Protocol(format!(
@@ -393,10 +402,10 @@ mod tests {
 
         // Test u32
         let val: u32 = 0x12345678;
-        val.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&val, &mut buf, 0).unwrap();
         assert_eq!(buf.len(), 4);
 
-        let decoded = u32::decode(&mut buf, 0).unwrap();
+        let decoded = <u32 as DencMut>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, val);
         assert_eq!(buf.len(), 0);
     }
@@ -405,11 +414,11 @@ mod tests {
     fn test_bool_roundtrip() {
         let mut buf = BytesMut::new();
 
-        true.encode(&mut buf, 0).unwrap();
-        false.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&true, &mut buf, 0).unwrap();
+        DencMut::encode(&false, &mut buf, 0).unwrap();
 
-        assert!(bool::decode(&mut buf, 0).unwrap());
-        assert!(!bool::decode(&mut buf, 0).unwrap());
+        assert!(<bool as DencMut>::decode(&mut buf, 0).unwrap());
+        assert!(!(<bool as DencMut>::decode(&mut buf, 0).unwrap()));
     }
 
     #[test]
@@ -417,10 +426,10 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let arr: [u32; 4] = [1, 2, 3, 4];
-        arr.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&arr, &mut buf, 0).unwrap();
         assert_eq!(buf.len(), 16);
 
-        let decoded = <[u32; 4]>::decode(&mut buf, 0).unwrap();
+        let decoded = <[u32; 4] as DencMut>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, arr);
     }
 
@@ -429,12 +438,12 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let vec = vec![1u32, 2, 3, 4, 5];
-        vec.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&vec, &mut buf, 0).unwrap();
 
         // Length (4 bytes) + 5 * u32 (20 bytes) = 24 bytes
         assert_eq!(buf.len(), 24);
 
-        let decoded = Vec::<u32>::decode(&mut buf, 0).unwrap();
+        let decoded = <Vec<u32> as DencMut>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, vec);
     }
 
@@ -443,12 +452,12 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let data = Bytes::from_static(b"hello world");
-        data.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&data, &mut buf, 0).unwrap();
 
         // Length (4 bytes) + data (11 bytes) = 15 bytes
         assert_eq!(buf.len(), 15);
 
-        let decoded = Bytes::decode(&mut buf, 0).unwrap();
+        let decoded = <Bytes as DencMut>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, data);
     }
 
@@ -457,26 +466,26 @@ mod tests {
         let mut buf = BytesMut::new();
 
         let s = String::from("hello world");
-        s.encode(&mut buf, 0).unwrap();
+        DencMut::encode(&s, &mut buf, 0).unwrap();
 
         // Length (4 bytes) + data (11 bytes) = 15 bytes
         assert_eq!(buf.len(), 15);
 
-        let decoded = String::decode(&mut buf, 0).unwrap();
+        let decoded = <String as DencMut>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, s);
     }
 
     #[test]
     fn test_encoded_size() {
-        assert_eq!(42u32.encoded_size(0), Some(4));
-        assert_eq!(true.encoded_size(0), Some(1));
-        assert_eq!([1u32, 2, 3].encoded_size(0), Some(12));
+        assert_eq!(DencMut::encoded_size(&42u32, 0), Some(4));
+        assert_eq!(DencMut::encoded_size(&true, 0), Some(1));
+        assert_eq!(DencMut::encoded_size(&[1u32, 2, 3], 0), Some(12));
 
         let vec = vec![1u32, 2, 3];
-        assert_eq!(vec.encoded_size(0), Some(16)); // 4 + 3*4
+        assert_eq!(DencMut::encoded_size(&vec, 0), Some(16)); // 4 + 3*4
 
         let s = String::from("test");
-        assert_eq!(s.encoded_size(0), Some(8)); // 4 + 4
+        assert_eq!(DencMut::encoded_size(&s, 0), Some(8)); // 4 + 4
     }
 
     #[test]
