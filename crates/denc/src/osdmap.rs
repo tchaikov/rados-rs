@@ -746,6 +746,58 @@ impl Denc for OsdInfo {
     }
 }
 
+// DencMut implementation for OsdInfo
+impl crate::denc_mut::DencMut for OsdInfo {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 25 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for OsdInfo: need 25, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u8(1); // struct_v = 1
+        buf.put_u32_le(self.last_clean_begin);
+        buf.put_u32_le(self.last_clean_end);
+        buf.put_u32_le(self.up_from);
+        buf.put_u32_le(self.up_thru);
+        buf.put_u32_le(self.down_at);
+        buf.put_u32_le(self.lost_at);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 25 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for OsdInfo".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let last_clean_begin = buf.get_u32_le();
+        let last_clean_end = buf.get_u32_le();
+        let up_from = buf.get_u32_le();
+        let up_thru = buf.get_u32_le();
+        let down_at = buf.get_u32_le();
+        let lost_at = buf.get_u32_le();
+
+        Ok(OsdInfo {
+            last_clean_begin,
+            last_clean_end,
+            up_from,
+            up_thru,
+            down_at,
+            lost_at,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(25)
+    }
+}
+
+impl crate::denc_mut::FixedSize for OsdInfo {
+    const SIZE: usize = 25;
+}
+
 /// Pool type constants matching Ceph
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PoolType {
@@ -943,6 +995,40 @@ impl Denc for SnapInterval {
     fn encoded_size(&self) -> Option<usize> {
         Some(16)
     }
+}
+
+// DencMut implementation for SnapInterval
+impl crate::denc_mut::DencMut for SnapInterval {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for SnapInterval: need 16, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u64_le(self.start);
+        buf.put_u64_le(self.len);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for SnapInterval".to_string(),
+            ));
+        }
+        let start = buf.get_u64_le();
+        let len = buf.get_u64_le();
+        Ok(SnapInterval { start, len })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16)
+    }
+}
+
+impl crate::denc_mut::FixedSize for SnapInterval {
+    const SIZE: usize = 16;
 }
 
 impl PgPool {
