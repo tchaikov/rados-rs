@@ -1755,6 +1755,22 @@ impl Denc for SnapIntervalSet {
     }
 }
 
+// DencMut implementation for SnapIntervalSet
+impl crate::denc_mut::DencMut for SnapIntervalSet {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        <Vec<SnapInterval> as crate::denc_mut::DencMut>::encode(&self.intervals, buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let intervals = <Vec<SnapInterval> as crate::denc_mut::DencMut>::decode(buf, features)?;
+        Ok(SnapIntervalSet { intervals })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        <Vec<SnapInterval> as crate::denc_mut::DencMut>::encoded_size(&self.intervals, features)
+    }
+}
+
 /// Ceph release type (ceph_release_t in C++)
 pub type CephRelease = u8;
 
