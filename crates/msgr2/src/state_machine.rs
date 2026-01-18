@@ -315,23 +315,6 @@ impl AuthConnecting {
     pub fn new(preferred_modes: Vec<crate::ConnectionMode>, auth_method: Option<crate::AuthMethod>) -> Self {
         // Determine which auth method to use
         let actual_auth_method = auth_method.unwrap_or_else(|| {
-            // Check environment variable first
-            if let Ok(auth_env) = std::env::var("CEPH_AUTH_METHOD") {
-                match auth_env.to_lowercase().as_str() {
-                    "none" => {
-                        tracing::info!("CEPH_AUTH_METHOD=none, using no authentication");
-                        return crate::AuthMethod::None;
-                    }
-                    "cephx" => {
-                        tracing::info!("CEPH_AUTH_METHOD=cephx, using CephX authentication");
-                        return crate::AuthMethod::Cephx;
-                    }
-                    _ => {
-                        tracing::warn!("Unknown CEPH_AUTH_METHOD value: {}, auto-detecting", auth_env);
-                    }
-                }
-            }
-            
             // Auto-detect: try to load keyring, if it fails use None auth
             let keyring_path = std::env::var("CEPH_KEYRING")
                 .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());

@@ -155,17 +155,19 @@ impl denc::zerocopy::Decode for FeatureSet {
 ///
 /// # Authentication
 ///
-/// The authentication method can be configured in three ways (in order of precedence):
+/// The authentication method can be configured in two ways (in order of precedence):
 ///
 /// 1. **Explicitly via `auth_method` field**: Set to `Some(AuthMethod::None)` or `Some(AuthMethod::Cephx)`
-/// 2. **Via environment variable**: Set `CEPH_AUTH_METHOD=none` or `CEPH_AUTH_METHOD=cephx`
-/// 3. **Auto-detection**: If not explicitly set, auto-detects based on keyring file existence
+/// 2. **Auto-detection**: If not explicitly set, auto-detects based on keyring file existence
 ///
 /// ## Auto-detection behavior:
 /// - Checks if `CEPH_KEYRING` environment variable is set and points to an existing file
 /// - Falls back to checking `/etc/ceph/ceph.client.admin.keyring`
 /// - If keyring file exists → uses `AuthMethod::Cephx`
 /// - If keyring file doesn't exist → uses `AuthMethod::None`
+///
+/// **Note**: Applications can check environment variables (e.g., `CEPH_AUTH_METHOD`) and
+/// explicitly set the `auth_method` field to override auto-detection.
 ///
 /// # Example
 ///
@@ -197,7 +199,7 @@ pub struct ConnectionConfig {
     pub preferred_modes: Vec<ConnectionMode>,
 
     /// Authentication method to use
-    /// - `None`: Auto-detect from environment (checks keyring file, CEPH_AUTH_METHOD env var)
+    /// - `None`: Auto-detect from keyring file existence
     /// - `Some(AuthMethod::None)`: Force no authentication
     /// - `Some(AuthMethod::Cephx)`: Force CephX authentication
     ///

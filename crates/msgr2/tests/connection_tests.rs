@@ -11,36 +11,29 @@
 //!
 //! ## Authentication Configuration
 //!
-//! The tests support both CephX authentication and no-auth clusters:
+//! The tests support both CephX authentication and no-auth clusters.
+//! Authentication method can be controlled via the `CEPH_AUTH_METHOD` environment variable:
+//!
+//! ### For clusters with authentication disabled (no-auth):
+//! ```bash
+//! export CEPH_AUTH_METHOD=none
+//! ```
 //!
 //! ### For clusters with authentication enabled (CephX):
 //! ```bash
-//! # Option 1: Point to your keyring file (recommended)
-//! export CEPH_KEYRING=/path/to/ceph/build/keyring
-//! 
-//! # Option 2: Explicitly set auth method
 //! export CEPH_AUTH_METHOD=cephx
 //! export CEPH_KEYRING=/path/to/ceph/build/keyring
 //! ```
 //!
-//! ### For clusters with authentication disabled:
-//! ```bash
-//! # Option 1: Explicit (recommended for CI)
-//! export CEPH_AUTH_METHOD=none
-//!
-//! # Option 2: Auto-detection (will use no-auth if keyring file doesn't exist)
-//! # No additional configuration needed
-//! ```
-//!
 //! ### Auto-detection behavior:
-//! - If CEPH_AUTH_METHOD is not set, the client will auto-detect:
-//!   - If CEPH_KEYRING is set and the file exists → use CephX authentication
-//!   - If /etc/ceph/ceph.client.admin.keyring exists → use CephX authentication
-//!   - Otherwise → use no authentication
+//! If `CEPH_AUTH_METHOD` is not set, the protocol layer will auto-detect:
+//! - If `CEPH_KEYRING` is set and the file exists → use CephX authentication
+//! - If `/etc/ceph/ceph.client.admin.keyring` exists → use CephX authentication
+//! - Otherwise → use no authentication
 //!
 
 use msgr2::protocol::Connection;
-use msgr2::ConnectionConfig;
+use msgr2::{AuthMethod, ConnectionConfig};
 use std::net::SocketAddr;
 
 /// Helper function to get the Ceph monitor address from environment variable
@@ -50,6 +43,30 @@ fn get_ceph_mon_addr() -> SocketAddr {
         .expect("CEPH_MON_ADDR environment variable not set. Set it with: export CEPH_MON_ADDR=<monitor_address:port>")
         .parse()
         .expect("Failed to parse CEPH_MON_ADDR as a valid socket address (format: IP:PORT)")
+}
+
+/// Helper function to configure authentication method based on CEPH_AUTH_METHOD environment variable
+/// This allows tests to explicitly control authentication via environment variable
+fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
+    if let Ok(auth_env) = std::env::var("CEPH_AUTH_METHOD") {
+        match auth_env.to_lowercase().as_str() {
+            "none" => {
+                tracing::info!("CEPH_AUTH_METHOD=none, using no authentication");
+                config.auth_method = Some(AuthMethod::None);
+            }
+            "cephx" => {
+                tracing::info!("CEPH_AUTH_METHOD=cephx, using CephX authentication");
+                config.auth_method = Some(AuthMethod::Cephx);
+            }
+            _ => {
+                tracing::warn!(
+                    "Unknown CEPH_AUTH_METHOD value: {}, using auto-detection",
+                    auth_env
+                );
+            }
+        }
+    }
+    config
 }
 
 #[tokio::test]
@@ -62,7 +79,7 @@ async fn test_compression_disabled() {
     tracing::info!("===================================================");
 
     // Explicitly disable compression
-    let config = ConnectionConfig::without_compression();
+    let config = configure_auth_method(ConnectionConfig::without_compression());
     tracing::info!(
         "Config: supported_features={:#x}",
         config.supported_features
@@ -91,7 +108,7 @@ async fn test_compression_enabled() {
     tracing::info!("================================================");
 
     // Explicitly enable compression
-    let config = ConnectionConfig::with_compression();
+    let config = configure_auth_method(ConnectionConfig::with_compression());
     tracing::info!(
         "Config: supported_features={:#x}",
         config.supported_features
@@ -120,7 +137,7 @@ async fn test_crc_mode() {
     tracing::info!("=======================================================");
 
     // Request CRC mode (no encryption)
-    let config = ConnectionConfig::prefer_crc_mode();
+    let config = configure_auth_method(ConnectionConfig::prefer_crc_mode());
     tracing::info!("Config: preferred_modes={:?}", config.preferred_modes);
 
     let mut conn = Connection::connect(addr, config)
@@ -146,7 +163,7 @@ async fn test_secure_mode() {
     tracing::info!("========================================================");
 
     // Request SECURE mode (encryption)
-    let config = ConnectionConfig::prefer_secure_mode();
+    let config = configure_auth_method(ConnectionConfig::prefer_secure_mode());
     tracing::info!("Config: preferred_modes={:?}", config.preferred_modes);
 
     let mut conn = Connection::connect(addr, config)
@@ -172,7 +189,8 @@ async fn test_session_connecting() {
     tracing::info!("==============================================");
 
     // Connect to Ceph cluster using the high-level API with default config
-    let mut conn = Connection::connect(addr, ConnectionConfig::default())
+    let config = configure_auth_method(ConnectionConfig::default());
+    let mut conn = Connection::connect(addr, config)
         .await
         .expect("Failed to establish connection");
     tracing::info!("✓ Connection established and banner exchanged");
