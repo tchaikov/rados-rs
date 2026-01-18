@@ -119,10 +119,24 @@ impl crate::denc::FixedSize for EVersion {
 }
 
 /// Unix timestamp (utime_t in C++)
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct UTime {
     pub sec: u32,
     pub nsec: u32,
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for UTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UTime", 2)?;
+        state.serialize_field("seconds", &self.sec)?;
+        state.serialize_field("nanoseconds", &self.nsec)?;
+        state.end()
+    }
 }
 
 // DencMut implementation for UTime
@@ -391,9 +405,30 @@ impl crate::denc::Denc for HitSetParams {
 }
 
 /// Ceph UUID type (uuid_d in C++)
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UuidD {
     pub bytes: [u8; 16],
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for UuidD {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UuidD", 1)?;
+        // Format as UUID string to match ceph-dencoder
+        let uuid_str = format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
+            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
+            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
+        );
+        state.serialize_field("uuid", &uuid_str)?;
+        state.end()
+    }
 }
 
 impl UuidD {
