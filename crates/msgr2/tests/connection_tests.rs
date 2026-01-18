@@ -48,22 +48,28 @@ fn get_ceph_mon_addr() -> SocketAddr {
 /// Helper function to configure authentication method based on CEPH_AUTH_METHOD environment variable
 /// This allows tests to explicitly control authentication via environment variable
 fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
-    if let Ok(auth_env) = std::env::var("CEPH_AUTH_METHOD") {
-        match auth_env.to_lowercase().as_str() {
-            "none" => {
-                tracing::info!("CEPH_AUTH_METHOD=none, using no authentication");
-                config.auth_method = Some(AuthMethod::None);
+    match std::env::var("CEPH_AUTH_METHOD") {
+        Ok(auth_env) => {
+            tracing::info!("CEPH_AUTH_METHOD environment variable found: '{}'", auth_env);
+            match auth_env.to_lowercase().as_str() {
+                "none" => {
+                    tracing::info!("Setting auth_method to None (no authentication)");
+                    config.auth_method = Some(AuthMethod::None);
+                }
+                "cephx" => {
+                    tracing::info!("Setting auth_method to Cephx authentication");
+                    config.auth_method = Some(AuthMethod::Cephx);
+                }
+                _ => {
+                    tracing::warn!(
+                        "Unknown CEPH_AUTH_METHOD value: '{}', using auto-detection",
+                        auth_env
+                    );
+                }
             }
-            "cephx" => {
-                tracing::info!("CEPH_AUTH_METHOD=cephx, using CephX authentication");
-                config.auth_method = Some(AuthMethod::Cephx);
-            }
-            _ => {
-                tracing::warn!(
-                    "Unknown CEPH_AUTH_METHOD value: {}, using auto-detection",
-                    auth_env
-                );
-            }
+        }
+        Err(_) => {
+            tracing::info!("CEPH_AUTH_METHOD environment variable not set, using auto-detection");
         }
     }
     config
@@ -81,8 +87,9 @@ async fn test_compression_disabled() {
     // Explicitly disable compression
     let config = configure_auth_method(ConnectionConfig::without_compression());
     tracing::info!(
-        "Config: supported_features={:#x}",
-        config.supported_features
+        "Config: supported_features={:#x}, auth_method={:?}",
+        config.supported_features,
+        config.auth_method
     );
 
     let mut conn = Connection::connect(addr, config)
@@ -110,8 +117,9 @@ async fn test_compression_enabled() {
     // Explicitly enable compression
     let config = configure_auth_method(ConnectionConfig::with_compression());
     tracing::info!(
-        "Config: supported_features={:#x}",
-        config.supported_features
+        "Config: supported_features={:#x}, auth_method={:?}",
+        config.supported_features,
+        config.auth_method
     );
 
     let mut conn = Connection::connect(addr, config)
@@ -138,7 +146,7 @@ async fn test_crc_mode() {
 
     // Request CRC mode (no encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_crc_mode());
-    tracing::info!("Config: preferred_modes={:?}", config.preferred_modes);
+    tracing::info!("Config: preferred_modes={:?}, auth_method={:?}", config.preferred_modes, config.auth_method);
 
     let mut conn = Connection::connect(addr, config)
         .await
@@ -164,7 +172,7 @@ async fn test_secure_mode() {
 
     // Request SECURE mode (encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_secure_mode());
-    tracing::info!("Config: preferred_modes={:?}", config.preferred_modes);
+    tracing::info!("Config: preferred_modes={:?}, auth_method={:?}", config.preferred_modes, config.auth_method);
 
     let mut conn = Connection::connect(addr, config)
         .await
