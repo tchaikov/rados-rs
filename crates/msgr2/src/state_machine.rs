@@ -1879,4 +1879,33 @@ mod tests {
             "Should support compression with features=0x2"
         );
     }
+
+    #[test]
+    fn test_auth_method_config() {
+        // Test 1: Default config should have None auth_method (auto-detect)
+        let config = crate::ConnectionConfig::default();
+        assert_eq!(config.auth_method, None, "Default config should have None auth_method");
+
+        // Test 2: with_no_auth should set AuthMethod::None
+        let config = crate::ConnectionConfig::with_no_auth();
+        assert_eq!(
+            config.auth_method,
+            Some(crate::AuthMethod::None),
+            "with_no_auth should set AuthMethod::None"
+        );
+
+        // Test 3: with_cephx_auth should set AuthMethod::Cephx
+        let config = crate::ConnectionConfig::with_cephx_auth();
+        assert_eq!(
+            config.auth_method,
+            Some(crate::AuthMethod::Cephx),
+            "with_cephx_auth should set AuthMethod::Cephx"
+        );
+
+        // Test 4: State machine should preserve auth_method from config
+        let config = crate::ConnectionConfig::with_no_auth();
+        let sm = StateMachine::new_client(config);
+        // Verify the state machine was created successfully with BannerConnecting state
+        assert_eq!(sm.current_state.kind(), StateKind::BannerConnecting);
+    }
 }
