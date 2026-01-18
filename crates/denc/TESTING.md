@@ -72,8 +72,9 @@ Testing type: pg_t
   Result: 10/10 exact match, 0 format differences, 0 decode failures
 
 Testing type: eversion_t
-    ⚠ fd259e78b480855515f5e871a5b571d5 - format mismatch (showing first only)
-  Result: 0/10 exact match, 10 format differences, 0 decode failures
+    ✓ fd259e78b480855515f5e871a5b571d5
+    ✓ fcf6c89e8ebea2811929b48e42f5fd83
+  Result: 10/10 exact match, 0 format differences, 0 decode failures
 
 Testing type: pg_pool_t
     ✗ rust dencoder failed for efa76e5beacb68688f21e74648f2aa3d: memory allocation error
@@ -81,12 +82,11 @@ Testing type: pg_pool_t
 
 Overall Results
 Total samples: 83
-  Exact match: 20/83 (24.1%)
-  Format differences: 53/83 (63.9%)
+  Exact match: 30/83 (36.1%)
+  Format differences: 43/83 (51.8%)
   Decode failures: 10/83 (12.0%)
 
 Types with format differences (need custom serialization):
-  - eversion_t
   - utime_t
   - uuid_d
   - entity_addr_t
@@ -104,19 +104,23 @@ The test requires at least a **20% exact match rate** to pass. This acknowledges
 - Some types may have different JSON output formats (requiring custom serialization)
 - Some types may have incomplete implementations (causing decode failures)
 
-As of this writing, the exact match rate is approximately **24%**, with most failing samples being format differences that need custom serialization work.
+As of this writing, the exact match rate is approximately **36%**, with most failing samples being format differences that need custom serialization work.
 
 ### Format Differences
 
 The test identifies types where JSON output format differs between `ceph-dencoder` and our `dencoder`. These differences are expected and tracked:
 
-**eversion_t**: Rust includes `"pad": 0` field; ceph doesn't serialize this field  
+**eversion_t**: ✅ **FIXED** - Now uses `Padding<u32>` type to automatically skip `pad` field serialization  
 **utime_t**: Rust uses `"sec"`/`"nsec"`; ceph uses `"seconds"`/`"nanoseconds"`  
 **uuid_d**: Rust outputs byte array `[1, 2, 3, ...]`; ceph uses UUID string `"01234567-89ab-cdef-..."`  
 **entity_addr_t**: Rust outputs sockaddr byte array; ceph uses formatted address string  
-**pg_merge_meta_t**: Rust uses nested objects for PgId/EVersion; ceph uses formatted strings like `"2.1"` and `"4'5"`
+**pg_merge_meta_t**: Rust uses nested objects for PgId/EVersion; ceph uses formatted strings like `"2.1"` and `"4'5"` (extra padding fields fixed with `Padding<T>`)
 
-To fix these, each type needs custom `Serialize` implementation to match ceph-dencoder's output format.
+To fix remaining differences, each type needs custom `Serialize` implementation to match ceph-dencoder's output format.
+
+#### Padding Fields
+
+The `Padding<T>` generic wrapper type automatically skips JSON serialization for padding fields that exist in binary formats but should not appear in JSON output. Use it with `#[serde(skip_serializing)]` for fields that match ceph-dencoder behavior.
 
 ### Legacy JSON Format Notes
 
