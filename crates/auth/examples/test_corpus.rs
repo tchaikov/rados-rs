@@ -1,5 +1,5 @@
 use auth::{CryptoKey, CEPH_CRYPTO_AES};
-use bytes::{Bytes, BytesMut, BufMut};
+use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 

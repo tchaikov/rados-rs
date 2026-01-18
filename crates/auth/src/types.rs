@@ -96,7 +96,11 @@ impl std::str::FromStr for EntityName {
 }
 
 impl Denc for EntityName {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         // Encode type (u32)
         buf.put_u32_le(self.entity_type);
 
@@ -271,7 +275,11 @@ impl CryptoKey {
 }
 
 impl Denc for CryptoKey {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         // Encode type (u16)
         buf.put_u16_le(self.crypto_type);
 

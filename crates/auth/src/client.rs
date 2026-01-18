@@ -150,7 +150,7 @@ impl CephXClientHandler {
         let mut payload = BytesMut::new();
         let header_size = header.encoded_size(0).unwrap_or(0);
         let auth_size = auth_request.encoded_size(0).unwrap_or(0);
-        
+
         header.encode(&mut payload, 0)?;
         auth_request.encode(&mut payload, 0)?;
 
@@ -213,10 +213,7 @@ impl CephXClientHandler {
         challenge_blob.encode(&mut bl, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to encode challenge: {:?}", e))
         })?;
-        debug!(
-            "Step 3: Added challenge blob ({} bytes)",
-            challenge_size
-        );
+        debug!("Step 3: Added challenge blob ({} bytes)", challenge_size);
 
         // Prepare for AES encryption
         let plaintext = bl.freeze();

@@ -33,7 +33,11 @@ pub struct CephXRequestHeader {
 }
 
 impl Denc for CephXRequestHeader {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         buf.put_u16_le(self.request_type);
         Ok(())
     }
@@ -69,7 +73,11 @@ pub struct CephXResponseHeader {
 }
 
 impl Denc for CephXResponseHeader {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         buf.put_u16_le(self.request_type);
         buf.put_i32_le(self.status);
         Ok(())
@@ -202,7 +210,11 @@ pub struct CephXServerChallenge {
 }
 
 impl Denc for CephXServerChallenge {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         buf.put_u64_le(self.server_challenge);
         Ok(())
     }
@@ -244,7 +256,11 @@ pub struct CephXChallengeBlob {
 }
 
 impl Denc for CephXChallengeBlob {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
         buf.put_u64_le(self.server_challenge);
         buf.put_u64_le(self.client_challenge);
         Ok(())
@@ -383,8 +399,7 @@ impl CephXReply {
 
         match &self.session_key {
             Some(key) => {
-                key
-                    .encode(&mut buf, 0)
+                key.encode(&mut buf, 0)
                     .map_err(|e| CephXError::EncodingError(e.to_string()))?;
             }
             None => {
