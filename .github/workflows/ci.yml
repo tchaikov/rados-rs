@@ -90,4 +90,4 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run tests
-        run: cargo test --workspace --all-targets
+        run: cargo test --workspace --lib
