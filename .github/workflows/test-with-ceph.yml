@@ -1,0 +1,177 @@
+name: Integration Tests (with Ceph)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  test-ceph:
+    name: Ceph Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            git \
+            wget \
+            lsb-release \
+            gnupg \
+            uuid-runtime
+
+      - name: Install Ceph Libraries and Daemon
+        run: |
+          # Install Ceph packages
+          sudo apt-get install -y \
+            ceph-common \
+            ceph-mon \
+            ceph-osd \
+            ceph-mgr
+
+      - name: Setup Minimal Ceph Cluster
+        run: |
+          # Create base directory
+          CEPH_DIR=/tmp/ceph-test
+          sudo mkdir -p ${CEPH_DIR}
+
+          # Create subdirectories
+          LOG_DIR=${CEPH_DIR}/log
+          MON_DATA=${CEPH_DIR}/mon
+          OSD_DATA=${CEPH_DIR}/osd
+          sudo mkdir -p ${LOG_DIR} ${MON_DATA} ${OSD_DATA} ${CEPH_DIR}/run
+
+          # Define names
+          MON_NAME="a"
+          MGR_NAME="x"
+
+          # Create ceph.conf with msgr v2 enabled
+          sudo tee ${CEPH_DIR}/ceph.conf > /dev/null <<EOF
+          [global]
+          fsid = $(uuidgen)
+          osd crush chooseleaf type = 0
+          run dir = ${CEPH_DIR}/run
+          auth cluster required = none
+          auth service required = none
+          auth client required = none
+          osd pool default size = 1
+          osd pool default min size = 1
+
+          # Enable msgr v2
+          ms_bind_msgr1 = false
+          ms_bind_msgr2 = true
+
+          # Performance settings for CI
+          osd_op_threads = 2
+          osd_recovery_threads = 1
+          osd_recovery_max_active = 1
+
+          [mon.${MON_NAME}]
+          log file = ${LOG_DIR}/mon.log
+          chdir = ""
+          mon cluster log file = ${LOG_DIR}/mon-cluster.log
+          mon data = ${MON_DATA}
+          mon addr = v2:127.0.0.1:3300
+          mon allow pool delete = true
+
+          [osd.0]
+          log file = ${LOG_DIR}/osd.0.log
+          chdir = ""
+          osd data = ${OSD_DATA}/0
+          osd journal = ${OSD_DATA}/0.journal
+          osd journal size = 100
+          osd objectstore = memstore
+          osd class load list = *
+          osd class default list = *
+
+          [mgr.${MGR_NAME}]
+          log file = ${LOG_DIR}/mgr.log
+
+          [client]
+          log file = ${LOG_DIR}/client.log
+          EOF
+
+          # Copy to /etc/ceph for client access
+          sudo mkdir -p /etc/ceph
+          sudo cp ${CEPH_DIR}/ceph.conf /etc/ceph/ceph.conf
+
+          # Set environment
+          export CEPH_CONF=${CEPH_DIR}/ceph.conf
+
+          # Initialize and start monitor
+          sudo ceph-mon --id ${MON_NAME} --mkfs --keyring /dev/null
+          sudo touch ${MON_DATA}/keyring
+          sudo ceph-mon --id ${MON_NAME} &
+
+          # Wait for monitor to start
+          sleep 5
+
+          # Create and start OSD
+          OSD_ID=$(sudo ceph osd create)
+          sudo mkdir -p ${OSD_DATA}/${OSD_ID}
+          sudo ceph osd crush add osd.${OSD_ID} 1 root=default host=localhost
+          sudo ceph-osd --id ${OSD_ID} --mkjournal --mkfs
+          sudo ceph-osd --id ${OSD_ID} &
+
+          # Start manager
+          sudo ceph-mgr --id ${MGR_NAME} &
+
+          # Wait for cluster to be ready
+          timeout 60 bash -c 'until sudo ceph -s | grep -q "HEALTH_OK\|HEALTH_WARN"; do echo "Waiting for Ceph..."; sleep 2; done'
+
+      - name: Verify Ceph Cluster
+        run: |
+          # Test the setup
+          ceph --version
+          ceph status
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build msgr2 crate
+        run: |
+          cd crates/msgr2
+          cargo build --verbose
+
+      - name: Run Ceph Integration Tests
+        run: |
+          cd crates/msgr2
+          cargo test --test connection_tests --verbose -- --test-threads=1 --nocapture
+        env:
+          CEPH_CONF: /etc/ceph/ceph.conf
+          CEPH_MON_ADDR: 127.0.0.1:3300
+          RUST_BACKTRACE: full
+          RUST_LOG: debug
