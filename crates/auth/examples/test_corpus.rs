@@ -1,7 +1,7 @@
 use auth::{CryptoKey, CEPH_CRYPTO_AES};
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut, BufMut};
 use denc::Denc;
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test decoding the corpus file
@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut data = Bytes::copy_from_slice(&corpus_data);
     println!("Attempting to decode CryptoKey from corpus...");
 
-    match CryptoKey::decode(&mut data) {
+    match CryptoKey::decode(&mut data, 0) {
         Ok(key) => {
             println!("Successfully decoded CryptoKey:");
             println!("  Type: {} (expected: {})", key.get_type(), CEPH_CRYPTO_AES);
@@ -25,12 +25,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Test encoding it back
             println!("\nTesting re-encoding...");
-            match key.encode(0) {
-                Ok(encoded) => {
+            let mut buf = BytesMut::new();
+            match key.encode(&mut buf, 0) {
+                Ok(()) => {
+                    let encoded = buf.freeze();
                     println!("Re-encoded length: {} bytes", encoded.len());
                     println!("Re-encoded hex: {:02x?}", encoded.as_ref());
 
-                    if encoded == corpus_data {
+                    if encoded.as_ref() == corpus_data.as_slice() {
                         println!("✓ Perfect match! Encoding is correct.");
                     } else {
                         println!("✗ Mismatch detected:");
@@ -69,18 +71,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let created_time =
         UNIX_EPOCH + Duration::from_secs(1727590173) + Duration::from_nanos(674657455);
 
+    // Manually create a CryptoKey with specific values for testing
     let test_key = CryptoKey {
         crypto_type: CEPH_CRYPTO_AES,
         created: created_time,
         secret: Bytes::from(secret),
     };
 
-    match test_key.encode(0) {
-        Ok(encoded) => {
+    let mut test_buf = BytesMut::new();
+    match test_key.encode(&mut test_buf, 0) {
+        Ok(()) => {
+            let encoded = test_buf.freeze();
             println!("Test key encoded length: {} bytes", encoded.len());
             println!("Test key hex: {:02x?}", encoded.as_ref());
 
-            if encoded == corpus_data {
+            if encoded.as_ref() == corpus_data.as_slice() {
                 println!("✓ Test key matches corpus perfectly!");
             } else {
                 println!("✗ Test key differs from corpus");
