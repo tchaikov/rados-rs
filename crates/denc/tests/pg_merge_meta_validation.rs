@@ -4,6 +4,14 @@ use std::path::Path;
 
 #[test]
 fn validate_pg_merge_meta_against_ceph_dencoder() {
+    // Check if corpus directory exists first
+    let corpus_dir = Path::new("/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_merge_meta_t");
+    if !corpus_dir.exists() {
+        eprintln!("Corpus directory not found: {}", corpus_dir.display());
+        eprintln!("Skipping validation test");
+        return;
+    }
+
     // Test file 1: 25fffed8c8919b9fc1f82035e31e3e43
     // Expected from ceph-dencoder:
     // {
@@ -15,7 +23,7 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     //     "target_version": "6'7"
     // }
 
-    let file1_path = Path::new("/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_merge_meta_t/25fffed8c8919b9fc1f82035e31e3e43");
+    let file1_path = corpus_dir.join("25fffed8c8919b9fc1f82035e31e3e43");
     let file1_data = fs::read(file1_path).expect("Failed to read file1");
     let mut file1_bytes = bytes::Bytes::from(file1_data.clone());
 
@@ -69,7 +77,7 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     //     "target_version": "0'0"
     // }
 
-    let file2_path = Path::new("/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_merge_meta_t/f76105741a846b08ff2b262929d0a196");
+    let file2_path = corpus_dir.join("f76105741a846b08ff2b262929d0a196");
     let file2_data = fs::read(file2_path).expect("Failed to read file2");
     let mut file2_bytes = bytes::Bytes::from(file2_data.clone());
 
