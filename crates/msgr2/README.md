@@ -25,7 +25,7 @@ The integration tests in `tests/connection_tests.rs` require a running Ceph clus
 
 ```bash
 # Set the monitor address
-export CEPH_MON_ADDR=192.168.1.37:40390
+export CEPH_MON_ADDR=<monitor_ip>:40390
 
 # Optionally set the keyring path (defaults to /etc/ceph/ceph.client.admin.keyring)
 export CEPH_KEYRING=/path/to/ceph/build/keyring

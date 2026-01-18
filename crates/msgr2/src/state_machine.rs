@@ -310,7 +310,7 @@ impl AuthConnecting {
         // Try environment variable first, then fall back to default path
         let keyring_path = std::env::var("CEPH_KEYRING")
             .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
-        
+
         Self::with_keyring_path(&keyring_path, preferred_modes.clone())
             .unwrap_or_else(|e| {
                 tracing::warn!("Failed to load keyring from {}: {}", keyring_path, e);
