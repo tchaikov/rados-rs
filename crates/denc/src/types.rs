@@ -91,46 +91,6 @@ impl fmt::Display for EntityName {
 
 // Denc implementations for EntityType and EntityName
 
-impl Denc for EntityType {
-    fn decode(bytes: &mut Bytes) -> Result<Self, RadosError> {
-        if bytes.remaining() < 1 {
-            return Err(RadosError::InvalidData(
-                "Insufficient bytes for EntityType".into(),
-            ));
-        }
-        let val = bytes.get_u8();
-        EntityType::try_from(val)
-    }
-
-    fn encode(&self, _features: u64) -> Result<Bytes, RadosError> {
-        let mut buf = BytesMut::new();
-        buf.put_u8(self.0 as u8);
-        Ok(buf.freeze())
-    }
-}
-
-impl Denc for EntityName {
-    fn decode(bytes: &mut Bytes) -> Result<Self, RadosError> {
-        if bytes.remaining() < 9 {
-            // 1 byte for type + 8 bytes for num
-            return Err(RadosError::InvalidData(
-                "Insufficient bytes for EntityName".into(),
-            ));
-        }
-        let entity_type = EntityType::decode(bytes)?;
-        let num = bytes.get_u64_le();
-        Ok(Self::new(entity_type, num))
-    }
-
-    fn encode(&self, features: u64) -> Result<Bytes, RadosError> {
-        let mut buf = BytesMut::new();
-        let type_bytes = self.entity_type.encode(features)?;
-        buf.extend_from_slice(&type_bytes);
-        buf.put_u64_le(self.num);
-        Ok(buf.freeze())
-    }
-}
-
 // ============= Encoding Metadata Registration =============
 
 // Both EntityType and EntityName are simple types (no versioning, no feature dependency)

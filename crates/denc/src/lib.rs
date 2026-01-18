@@ -1,5 +1,4 @@
 pub mod denc;
-pub mod denc_mut;
 pub mod encoding_metadata;
 pub mod entity_addr;
 pub mod entity_addr_dencmut;
@@ -10,7 +9,6 @@ pub mod types;
 pub mod zerocopy;
 
 pub use denc::*;
-pub use denc_mut::*;
 pub use encoding_metadata::*;
 pub use entity_addr::*;
 pub use error::*;

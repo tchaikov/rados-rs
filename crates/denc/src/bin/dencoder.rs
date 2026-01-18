@@ -86,70 +86,100 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // pg_t (PgId) - Dependencies: u64, u32
         "pg_t" | "pg_id" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = PgId::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = PgId::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<PgId>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
         // eversion_t (EVersion) - Dependencies: u64, u32
         "eversion_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = EVersion::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = EVersion::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<EVersion>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
         // utime_t (UTime) - Dependencies: u32, u32
         "utime_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = UTime::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = UTime::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<UTime>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
         // uuid_d (UuidD) - Dependencies: [u8; 16]
         "uuid_d" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = UuidD::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = UuidD::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<UuidD>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
         // osd_info_t (OsdInfo) - Dependencies: multiple u32 fields
         "osd_info_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = OsdInfo::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = OsdInfo::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<OsdInfo>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
@@ -162,14 +192,20 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // entity_addr_t (EntityAddr) - Dependencies: EntityAddrType (Level 1), u32, Vec<u8>
         "entity_addr_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = EntityAddr::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = EntityAddr::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<EntityAddr>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
@@ -177,30 +213,38 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         "pool_snap_info_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
                 let obj =
-                    PoolSnapInfo::decode_versioned(bytes).map_err(DencoderError::DecodeError)?;
+                    PoolSnapInfo::decode_versioned(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<PoolSnapInfo>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
+                let mut buf = bytes::BytesMut::new();
                 typed
-                    .encode_versioned(features)
-                    .map_err(DencoderError::EncodeError)
+                    .encode_versioned(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
             },
         }),
 
         // osd_xinfo_t (OsdXInfo) - Dependencies: UTime×2 (Level 1), f32, u32, u64
         "osd_xinfo_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = OsdXInfo::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = OsdXInfo::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<OsdXInfo>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
@@ -213,14 +257,20 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // pg_merge_meta_t (PgMergeMeta) - Dependencies: PgId (L1), EVersion×2 (L1), u32
         "pg_merge_meta_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = PgMergeMeta::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = PgMergeMeta::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<PgMergeMeta>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
@@ -228,14 +278,20 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // This is the most complex type - test LAST
         "pg_pool_t" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = PgPool::decode(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = PgPool::decode(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<PgPool>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
-                typed.encode(features).map_err(DencoderError::EncodeError)
+                {
+                    let mut buf = bytes::BytesMut::new();
+                    typed
+                        .encode(&mut buf, features)
+                        .map_err(DencoderError::EncodeError)?;
+                    Ok(buf.freeze())
+                }
             },
         }),
 
@@ -243,16 +299,18 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // Dependencies: All of the above types plus many more
         "OSDMap" => Some(TypeInfo {
             decode_fn: |bytes, _features| {
-                let obj = OSDMap::decode_versioned(bytes).map_err(DencoderError::DecodeError)?;
+                let obj = OSDMap::decode_versioned(bytes, 0).map_err(DencoderError::DecodeError)?;
                 Ok(Box::new(obj))
             },
             encode_fn: |obj: &dyn SerializableType, features| {
                 let typed = obj.as_any().downcast_ref::<OSDMap>().ok_or_else(|| {
                     DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
                 })?;
+                let mut buf = bytes::BytesMut::new();
                 typed
-                    .encode_versioned(features)
-                    .map_err(DencoderError::EncodeError)
+                    .encode_versioned(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
             },
         }),
 
@@ -260,7 +318,7 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // "CryptoKey" => Some(TypeInfo {
         //     name: "CryptoKey",
         //     decode_fn: |bytes, _features| {
-        //         let obj = CryptoKey::decode(bytes)?;
+        //         let obj = CryptoKey::decode(bytes, 0)?;
         //         Ok(Box::new(obj))
         //     },
         //     encode_fn: |obj, features| {

@@ -1,9 +1,10 @@
-//! EntityAddr implementation using DencMut for better performance
+//! EntityAddr implementation using Denc for better performance
 //!
-//! This is a migration from the old Denc trait to the new DencMut trait,
+//! This is a migration from the old Denc trait to the new Denc trait,
 //! which provides zero-allocation encoding by writing directly to buffers.
 
-use crate::denc_mut::DencMut;
+use crate::denc::Denc;
+use crate::entity_addr::EntityAddrvec;
 use crate::error::RadosError;
 use crate::features::CEPH_FEATURE_MSG_ADDR2;
 use bytes::{Buf, BufMut};
@@ -32,15 +33,15 @@ impl From<u32> for EntityAddrType {
     }
 }
 
-// EntityAddrType is just a u32 enum, so we can implement DencMut for it
-impl DencMut for EntityAddrType {
+// EntityAddrType is just a u32 enum, so we can implement Denc for it
+impl Denc for EntityAddrType {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         let val = *self as u32;
-        DencMut::encode(&val, buf, features)
+        Denc::encode(&val, buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let val = <u32 as DencMut>::decode(buf, features)?;
+        let val = <u32 as Denc>::decode(buf, features)?;
         Ok(EntityAddrType::from(val))
     }
 
@@ -126,9 +127,9 @@ impl EntityAddr {
         let mut content = buf.take(struct_len);
 
         // Decode content
-        let addr_type = <EntityAddrType as DencMut>::decode(&mut content, 0)?;
-        let nonce = <u32 as DencMut>::decode(&mut content, 0)?;
-        let elen = <u32 as DencMut>::decode(&mut content, 0)? as usize;
+        let addr_type = <EntityAddrType as Denc>::decode(&mut content, 0)?;
+        let nonce = <u32 as Denc>::decode(&mut content, 0)?;
+        let elen = <u32 as Denc>::decode(&mut content, 0)? as usize;
 
         let mut sockaddr_data = Vec::new();
         if elen > 0 {
@@ -194,9 +195,9 @@ impl EntityAddr {
         buf.put_u32_le(content_size as u32); // struct length
 
         // Encode content
-        DencMut::encode(&self.addr_type, buf, features)?;
-        DencMut::encode(&self.nonce, buf, features)?;
-        DencMut::encode(&(self.sockaddr_data.len() as u32), buf, features)?;
+        Denc::encode(&self.addr_type, buf, features)?;
+        Denc::encode(&self.nonce, buf, features)?;
+        Denc::encode(&(self.sockaddr_data.len() as u32), buf, features)?;
 
         if !self.sockaddr_data.is_empty() {
             buf.put_slice(&self.sockaddr_data);
@@ -206,7 +207,7 @@ impl EntityAddr {
     }
 }
 
-impl DencMut for EntityAddr {
+impl Denc for EntityAddr {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
@@ -249,35 +250,96 @@ impl DencMut for EntityAddr {
     }
 }
 
-// ============= Backward Compatibility: Denc trait implementation =============
-
-use crate::denc::Denc;
-use bytes::{Bytes, BytesMut};
-
-impl Denc for EntityAddr {
+// Manual Denc implementation for EntityAddrvec
+impl crate::denc::Denc for EntityAddrvec {
     const FEATURE_DEPENDENT: bool = true;
 
-    fn encode(&self, features: u64) -> Result<Bytes, RadosError> {
-        let size = <Self as DencMut>::encoded_size(self, features).unwrap_or(256);
-        let mut buf = BytesMut::with_capacity(size);
-        <Self as DencMut>::encode(self, &mut buf, features)?;
-        Ok(buf.freeze())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        use crate::features::CEPH_FEATURE_MSG_ADDR2;
+
+        if (features & CEPH_FEATURE_MSG_ADDR2) == 0 {
+            // Legacy format: encode a single legacy entity_addr_t
+            if let Some(legacy_addr) = self.addrs.first() {
+                legacy_addr.encode(buf, 0)?;
+            }
+        } else {
+            // MSG_ADDR2 format: marker byte + vector
+            buf.put_u8(2); // Marker byte to indicate MSG_ADDR2 format
+
+            // Encode the number of addresses
+            buf.put_u32_le(self.addrs.len() as u32);
+
+            // Encode each address
+            for addr in &self.addrs {
+                addr.encode(buf, features)?;
+            }
+        }
+
+        Ok(())
     }
 
-    fn decode(bytes: &mut Bytes) -> Result<Self, RadosError> {
-        <Self as DencMut>::decode(bytes, 0)
-    }
-}
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        use crate::features::CEPH_FEATURE_MSG_ADDR2;
 
-impl Denc for EntityAddrType {
-    fn encode(&self, features: u64) -> Result<Bytes, RadosError> {
-        let mut buf = BytesMut::with_capacity(4);
-        <Self as DencMut>::encode(self, &mut buf, features)?;
-        Ok(buf.freeze())
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for EntityAddrvec marker".to_string(),
+            ));
+        }
+
+        // Read the marker byte
+        let marker = buf.get_u8();
+
+        match marker {
+            0 | 1 => {
+                // Legacy format - single address
+                // Put the marker byte back by creating a new buffer with it prepended
+                let mut temp = bytes::BytesMut::with_capacity(1 + buf.remaining());
+                temp.put_u8(marker);
+                temp.put(buf.chunk());
+                buf.advance(buf.remaining());
+
+                let addr = EntityAddr::decode(&mut temp, 0)?;
+                Ok(EntityAddrvec { addrs: vec![addr] })
+            }
+            2 => {
+                // MSG_ADDR2 format - vector of addresses
+                if buf.remaining() < 4 {
+                    return Err(RadosError::Protocol(
+                        "Insufficient bytes for EntityAddrvec count".to_string(),
+                    ));
+                }
+
+                let count = buf.get_u32_le() as usize;
+                let mut addrs = Vec::with_capacity(count);
+
+                for _ in 0..count {
+                    addrs.push(EntityAddr::decode(buf, features)?);
+                }
+
+                Ok(EntityAddrvec { addrs })
+            }
+            _ => Err(RadosError::Protocol(format!(
+                "Invalid EntityAddrvec marker: {}",
+                marker
+            ))),
+        }
     }
 
-    fn decode(bytes: &mut Bytes) -> Result<Self, RadosError> {
-        <Self as DencMut>::decode(bytes, 0)
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        use crate::features::CEPH_FEATURE_MSG_ADDR2;
+
+        if (features & CEPH_FEATURE_MSG_ADDR2) == 0 {
+            // Legacy format
+            self.addrs.first().and_then(|addr| addr.encoded_size(0))
+        } else {
+            // MSG_ADDR2 format: marker (1) + count (4) + addresses
+            let mut size = 5;
+            for addr in &self.addrs {
+                size += addr.encoded_size(features)?;
+            }
+            Some(size)
+        }
     }
 }
 
@@ -297,13 +359,13 @@ mod tests {
         };
 
         // Encode with legacy features (no MSG_ADDR2)
-        DencMut::encode(&addr, &mut buf, 0).unwrap();
+        Denc::encode(&addr, &mut buf, 0).unwrap();
 
         // Should be 136 bytes (4 marker + 4 nonce + 128 sockaddr)
         assert_eq!(buf.len(), 136);
 
         // Decode
-        let decoded = <EntityAddr as DencMut>::decode(&mut buf, 0).unwrap();
+        let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Legacy);
         assert_eq!(decoded.nonce, 0x12345678);
         assert_eq!(decoded.sockaddr_data.len(), 128);
@@ -321,10 +383,10 @@ mod tests {
         };
 
         // Encode with MSG_ADDR2 feature
-        DencMut::encode(&addr, &mut buf, CEPH_FEATURE_MSG_ADDR2).unwrap();
+        Denc::encode(&addr, &mut buf, CEPH_FEATURE_MSG_ADDR2).unwrap();
 
         // Decode
-        let decoded = <EntityAddr as DencMut>::decode(&mut buf, CEPH_FEATURE_MSG_ADDR2).unwrap();
+        let decoded = <EntityAddr as Denc>::decode(&mut buf, CEPH_FEATURE_MSG_ADDR2).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Msgr2);
         assert_eq!(decoded.nonce, 0xABCDEF01);
         assert_eq!(decoded.sockaddr_data, vec![10, 20, 30, 40, 50]);
@@ -339,11 +401,11 @@ mod tests {
         };
 
         // Legacy size: 4 + 4 + 128 = 136
-        assert_eq!(<EntityAddr as DencMut>::encoded_size(&addr, 0), Some(136));
+        assert_eq!(<EntityAddr as Denc>::encoded_size(&addr, 0), Some(136));
 
         // MSG_ADDR2 size: 1 + 1 + 1 + 4 + 4 + 4 + 4 + 3 = 22
         assert_eq!(
-            <EntityAddr as DencMut>::encoded_size(&addr, CEPH_FEATURE_MSG_ADDR2),
+            <EntityAddr as Denc>::encoded_size(&addr, CEPH_FEATURE_MSG_ADDR2),
             Some(22)
         );
     }

@@ -31,7 +31,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
         let mut bytes = bytes::Bytes::from(original_data.clone());
 
         // Try to decode
-        match EntityAddr::decode(&mut bytes) {
+        match EntityAddr::decode(&mut bytes, 0) {
             Ok(entity_addr) => {
                 println!(
                     "  Decoded successfully: type={:?}, nonce={}, sockaddr_len={}",
@@ -103,7 +103,7 @@ fn test_specific_entity_addr_sample() {
     println!("Sample data: {}", hex::encode(&sample_data));
     println!("Data length: {} bytes", sample_data.len());
 
-    let entity_addr = EntityAddr::decode(&mut bytes).expect("Failed to decode sample");
+    let entity_addr = EntityAddr::decode(&mut bytes, 0).expect("Failed to decode sample");
 
     println!(
         "Decoded: type={:?}, nonce={}, sockaddr_len={}",

@@ -31,7 +31,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         let mut bytes = bytes::Bytes::from(original_data.clone());
 
         // Try to decode
-        match PgPool::decode(&mut bytes) {
+        match PgPool::decode(&mut bytes, 0) {
             Ok(pg_pool) => {
                 println!(
                     "  Decoded successfully: type={}, size={}, pg_num={}, pgp_num={}",

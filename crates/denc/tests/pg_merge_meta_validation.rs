@@ -19,7 +19,7 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     let file1_data = fs::read(file1_path).expect("Failed to read file1");
     let mut file1_bytes = bytes::Bytes::from(file1_data.clone());
 
-    let merge_meta1 = PgMergeMeta::decode(&mut file1_bytes).expect("Failed to decode file1");
+    let merge_meta1 = PgMergeMeta::decode(&mut file1_bytes, 0).expect("Failed to decode file1");
 
     println!("File 1 (25fffed8c8919b9fc1f82035e31e3e43):");
     println!(
@@ -73,7 +73,7 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     let file2_data = fs::read(file2_path).expect("Failed to read file2");
     let mut file2_bytes = bytes::Bytes::from(file2_data.clone());
 
-    let merge_meta2 = PgMergeMeta::decode(&mut file2_bytes).expect("Failed to decode file2");
+    let merge_meta2 = PgMergeMeta::decode(&mut file2_bytes, 0).expect("Failed to decode file2");
 
     println!("\nFile 2 (f76105741a846b08ff2b262929d0a196):");
     println!(

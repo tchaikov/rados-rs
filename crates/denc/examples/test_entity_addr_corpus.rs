@@ -14,7 +14,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Hex: {:02x?}", &data1[..std::cmp::min(16, data1.len())]);
 
     let mut cursor1 = Bytes::from(data1);
-    match EntityAddr::decode(&mut cursor1) {
+    match EntityAddr::decode(&mut cursor1, 0) {
         Ok(addr) => {
             println!("  ✓ Decoded successfully: {:?}", addr);
             println!(
@@ -38,7 +38,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Hex: {:02x?}", &data2[..std::cmp::min(16, data2.len())]);
 
     let mut cursor2 = Bytes::from(data2);
-    match EntityAddr::decode(&mut cursor2) {
+    match EntityAddr::decode(&mut cursor2, 0) {
         Ok(addr) => {
             println!("  ✓ Decoded successfully: {:?}", addr);
             println!(
@@ -74,7 +74,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // Try to decode our own encoding
             let mut test_cursor = encoded.clone();
-            match EntityAddr::decode(&mut test_cursor) {
+            match EntityAddr::decode(&mut test_cursor, 0) {
                 Ok(decoded) => {
                     println!("  ✓ Round-trip successful: {:?}", decoded);
                 }

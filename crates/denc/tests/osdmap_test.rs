@@ -23,7 +23,7 @@ fn test_osdmap_decode() {
     println!("First 32 bytes: {:02x?}", &bytes[..32.min(bytes.len())]);
 
     // Decode the OSDMap
-    match OSDMap::decode(&mut bytes) {
+    match OSDMap::decode(&mut bytes, 0) {
         Ok(osdmap) => {
             println!("Successfully decoded OSDMap!");
             println!("  Epoch: {}", osdmap.epoch);
@@ -83,7 +83,7 @@ fn test_all_osdmap_corpus_files() {
         let mut bytes = Bytes::from(data);
         let original_len = bytes.len();
 
-        match OSDMap::decode(&mut bytes) {
+        match OSDMap::decode(&mut bytes, 0) {
             Ok(osdmap) => {
                 println!(
                     "  ✓ Success! Epoch: {}, Max OSD: {}, Pools: {}, Remaining: {} bytes",

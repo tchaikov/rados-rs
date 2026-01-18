@@ -37,7 +37,7 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
         );
 
         // Try to decode
-        match PgMergeMeta::decode(&mut bytes) {
+        match PgMergeMeta::decode(&mut bytes, 0) {
             Ok(merge_meta) => {
                 println!("  ✓ Decoded successfully:");
                 println!(
