@@ -3,12 +3,8 @@ name: Integration Tests (with Ceph)
 on:
   push:
     branches: [ main ]
-    paths: &msgr2-paths
-      - 'crates/msgr2/**'
-      - '.github/workflows/test-with-ceph.yml'
   pull_request:
     branches: [ main ]
-    paths: *msgr2-paths
 
 env:
   CARGO_TERM_COLOR: always
