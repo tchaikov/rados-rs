@@ -5,6 +5,7 @@ pub mod entity_addr_dencmut;
 pub mod error;
 pub mod features;
 pub mod osdmap;
+pub mod padding;
 pub mod types;
 pub mod zerocopy;
 
@@ -14,6 +15,7 @@ pub use entity_addr::*;
 pub use error::*;
 pub use features::*;
 pub use osdmap::*;
+pub use padding::*;
 pub use types::*;
 pub use zerocopy::*;
 

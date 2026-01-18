@@ -1,6 +1,7 @@
 use crate::denc::{Denc, VersionedEncode};
 use crate::entity_addr::{EntityAddr, EntityAddrvec};
 use crate::error::RadosError;
+use crate::padding::Padding;
 use crate::{mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
@@ -75,7 +76,8 @@ impl crate::denc::FixedSize for PgId {
 pub struct EVersion {
     pub version: Version,
     pub epoch: Epoch,
-    pub pad: u32, // __pad field from C++, but not encoded in corpus data
+    #[serde(skip_serializing)]
+    pub pad: Padding<u32>, // __pad field from C++, but not encoded in corpus data
 }
 
 // DencMut implementation for EVersion
@@ -103,7 +105,7 @@ impl crate::denc::Denc for EVersion {
         Ok(EVersion {
             version,
             epoch,
-            pad: 0,
+            pad: Padding::zero(),
         })
     }
 
@@ -1510,8 +1512,10 @@ pub struct PgMergeMeta {
     pub source_version: EVersion,
     pub target_version: EVersion,
     // Extra fields found in corpus data (purpose unknown)
-    pub extra_field: u32,
-    pub extra_padding: u8,
+    #[serde(skip_serializing)]
+    pub extra_field: Padding<u32>,
+    #[serde(skip_serializing)]
+    pub extra_padding: Padding<u8>,
 }
 
 impl VersionedEncode for PgMergeMeta {
@@ -1543,9 +1547,9 @@ impl VersionedEncode for PgMergeMeta {
         self.target_version.encode(buf, features)?;
 
         // Only add extra bytes if they are non-zero (they exist in corpus but may not be standard)
-        if self.extra_field != 0 || self.extra_padding != 0 {
-            buf.put_u32_le(self.extra_field);
-            buf.put_u8(self.extra_padding);
+        if *self.extra_field != 0 || *self.extra_padding != 0 {
+            buf.put_u32_le(*self.extra_field);
+            buf.put_u8(*self.extra_padding);
         }
 
         Ok(())
@@ -1565,11 +1569,11 @@ impl VersionedEncode for PgMergeMeta {
         let target_version = EVersion::decode(buf, features)?;
 
         // In corpus data, there are 5 extra bytes at the end
-        let mut extra_field = 0u32;
-        let mut extra_padding = 0u8;
+        let mut extra_field = Padding::zero();
+        let mut extra_padding = Padding::zero();
         if buf.remaining() >= 5 {
-            extra_field = buf.get_u32_le();
-            extra_padding = buf.get_u8();
+            *extra_field = buf.get_u32_le();
+            *extra_padding = buf.get_u8();
         }
 
         Ok(PgMergeMeta {
