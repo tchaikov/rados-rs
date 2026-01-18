@@ -22,7 +22,7 @@ fn main() {
     let mut bytes = Bytes::from(data);
     println!("\nAttempting to decode OSDMap...");
 
-    match OSDMap::decode_versioned(&mut bytes) {
+    match OSDMap::decode_versioned(&mut bytes, 0) {
         Ok(map) => {
             println!("Successfully decoded OSDMap!");
             println!("  fsid: {:?}", map.fsid);

@@ -1,3 +1,4 @@
+use bytes::BytesMut;
 use denc::{Denc, PgPool};
 use std::fs;
 use std::path::Path;
@@ -39,11 +40,12 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                 );
 
                 // Try to encode back
-                match pg_pool.encode(0) {
-                    Ok(encoded_data) => {
-                        let encoded_bytes = encoded_data.to_vec();
+                let mut encoded_buf = BytesMut::new();
+                match pg_pool.encode(&mut encoded_buf, 0) {
+                    Ok(()) => {
+                        let encoded_bytes = encoded_buf.freeze();
 
-                        if encoded_bytes == original_data {
+                        if encoded_bytes.as_ref() == original_data.as_slice() {
                             println!("  ✓ Perfect roundtrip");
                             success_count += 1;
                         } else {

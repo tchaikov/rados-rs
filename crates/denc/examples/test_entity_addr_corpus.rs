@@ -1,4 +1,4 @@
-use bytes::Bytes;
+use bytes::{Bytes, BytesMut};
 use denc::{Denc, EntityAddr};
 use std::fs;
 
@@ -64,8 +64,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let default_addr = EntityAddr::default();
     println!("  Default addr: {:?}", default_addr);
 
-    match default_addr.encode(0) {
-        Ok(encoded) => {
+    let mut encoded_buf = BytesMut::new();
+    match default_addr.encode(&mut encoded_buf, 0) {
+        Ok(()) => {
+            let encoded = encoded_buf.freeze();
             println!("  ✓ Encoded to {} bytes", encoded.len());
             println!(
                 "  Hex: {:02x?}",

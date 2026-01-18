@@ -14,11 +14,6 @@ denc-derive = { path = "../denc-derive" }
 [dev-dependencies]
 hex = "0.4"
 glob = "0.3"
-criterion = "0.5"
-
-[[bench]]
-name = "denc_comparison"
-harness = false
 
 [[bin]]
 name = "dencoder"
