@@ -1,12 +1,17 @@
 //! Integration tests for msgr2 connection functionality
 //!
 //! These tests require a running Ceph cluster and the CEPH_MON_ADDR environment variable to be set.
-//! Example: CEPH_MON_ADDR=192.168.1.37:40421 cargo test --test connection_tests
+//! Tests will fail if CEPH_MON_ADDR is not set or the cluster is not accessible.
 //!
 //! To run these tests:
 //! ```bash
 //! export CEPH_MON_ADDR=<your_monitor_address:port>
 //! cargo test --test connection_tests -- --nocapture
+//! ```
+//!
+//! Optionally, set CEPH_KEYRING to point to your keyring file:
+//! ```bash
+//! export CEPH_KEYRING=/path/to/ceph/build/keyring
 //! ```
 
 use msgr2::protocol::Connection;

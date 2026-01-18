@@ -64,6 +64,8 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    env:
+      CEPH_KEYRING: /etc/ceph/ceph.client.admin.keyring
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
