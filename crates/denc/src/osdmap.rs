@@ -1169,20 +1169,7 @@ impl VersionedEncode for PgPool {
                 buf.remaining()
             );
 
-            // Debug: peek at the tiers length before decoding
-            if buf.remaining() >= 4 {
-                let tiers_len = buf.get_u32_le();
-                if tiers_len < 1000 {
-                } else {
-                    println!(
-                        "  Debug: tiers_len is suspiciously large - likely reading wrong offset"
-                    );
-                }
-                // Note: Cannot put bytes back with generic Buf - just decode as-is
-            }
-
             // Decode tiers using generic Vec implementation
-            // Note: tiers_len was already read above, so we decode directly
             pool.tiers = Vec::decode(buf, features)?;
             println!(
                 "  Debug: After tiers decode, tiers.len()={}, remaining bytes: {}",
