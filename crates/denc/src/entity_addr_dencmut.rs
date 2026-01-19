@@ -50,7 +50,7 @@ impl Denc for EntityAddrType {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct EntityAddr {
     pub addr_type: EntityAddrType,
     pub nonce: u32,
@@ -63,6 +63,56 @@ impl EntityAddr {
             addr_type: EntityAddrType::None,
             nonce: 0,
             sockaddr_data: Vec::new(),
+        }
+    }
+
+    /// Format sockaddr_data as IP:port string (matching ceph-dencoder output)
+    fn format_addr(&self) -> String {
+        if self.sockaddr_data.len() < 8 {
+            return "(unrecognized address family 0)".to_string();
+        }
+
+        // Parse sockaddr structure
+        // Bytes [0-1]: address family (little-endian u16)
+        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        
+        match af {
+            2 => {
+                // AF_INET (IPv4)
+                // Bytes [2-3]: port (big-endian)
+                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
+                // Bytes [4-7]: IPv4 address
+                if self.sockaddr_data.len() >= 8 {
+                    format!("{}.{}.{}.{}:{}",
+                        self.sockaddr_data[4],
+                        self.sockaddr_data[5],
+                        self.sockaddr_data[6],
+                        self.sockaddr_data[7],
+                        port
+                    )
+                } else {
+                    "(unrecognized address family 0)".to_string()
+                }
+            }
+            10 => {
+                // AF_INET6 (IPv6)
+                // Bytes [2-3]: port (big-endian)
+                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
+                // Bytes [8-23]: IPv6 address (16 bytes)
+                if self.sockaddr_data.len() >= 24 {
+                    let addr_bytes = &self.sockaddr_data[8..24];
+                    format!("[{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}]:{}",
+                        addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3],
+                        addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7],
+                        addr_bytes[8], addr_bytes[9], addr_bytes[10], addr_bytes[11],
+                        addr_bytes[12], addr_bytes[13], addr_bytes[14], addr_bytes[15],
+                        port
+                    )
+                } else {
+                    "(unrecognized address family 0)".to_string()
+                }
+            }
+            _ => "(unrecognized address family 0)".to_string(),
         }
     }
 
@@ -204,6 +254,30 @@ impl EntityAddr {
         }
 
         Ok(())
+    }
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for EntityAddr {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EntityAddr", 3)?;
+        
+        // Serialize type as lowercase string
+        let type_str = match self.addr_type {
+            EntityAddrType::None => "none",
+            EntityAddrType::Legacy => "v1",
+            EntityAddrType::Msgr2 => "v2",
+            EntityAddrType::Any => "any",
+            EntityAddrType::Cidr => "cidr",
+        };
+        state.serialize_field("type", type_str)?;
+        state.serialize_field("addr", &self.format_addr())?;
+        state.serialize_field("nonce", &self.nonce)?;
+        state.end()
     }
 }
 
