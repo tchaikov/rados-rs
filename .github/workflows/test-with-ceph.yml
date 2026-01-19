@@ -116,6 +116,12 @@ jobs:
           # Initialize and start monitor without authentication
           # Use --keyring /dev/null and do NOT create a keyring file to fully disable auth
           sudo ceph-mon --id ${MON_NAME} --mkfs --keyring /dev/null
+          
+          # Remove any auto-generated keyring files that would enable authentication
+          # ceph-mon --mkfs may create these files even when --keyring /dev/null is specified
+          sudo rm -f ${MON_DATA}/keyring
+          sudo rm -f ${MON_DATA}/keyring.tmp
+          
           # Note: Do NOT create ${MON_DATA}/keyring - this would enable authentication
           sudo ceph-mon --id ${MON_NAME} --keyring /dev/null &
 
