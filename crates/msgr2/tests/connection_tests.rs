@@ -27,14 +27,17 @@
 //!
 //! ### Auto-detection behavior:
 //! If `CEPH_AUTH_METHOD` is not set, the protocol layer will auto-detect:
-//! - If `CEPH_KEYRING` is set and the file exists → use CephX authentication
-//! - If `/etc/ceph/ceph.client.admin.keyring` exists → use CephX authentication
-//! - Otherwise → use no authentication
+//! - If ceph.conf is found → parse `auth client required` setting
+//! - Filter out cephx if keyring is not available or not readable
+//! - Use the available authentication methods from ceph.conf
 //!
+
+mod ceph_config;
 
 use msgr2::protocol::Connection;
 use msgr2::{AuthMethod, ConnectionConfig};
 use std::net::SocketAddr;
+use std::path::Path;
 
 /// Helper function to get the Ceph monitor address from environment variable
 /// Panics if CEPH_MON_ADDR is not set or invalid
@@ -45,8 +48,9 @@ fn get_ceph_mon_addr() -> SocketAddr {
         .expect("Failed to parse CEPH_MON_ADDR as a valid socket address (format: IP:PORT)")
 }
 
-/// Helper function to configure authentication method based on CEPH_AUTH_METHOD environment variable
-/// This allows tests to explicitly control authentication via environment variable
+/// Helper function to configure authentication method based on ceph.conf
+/// This reads the ceph.conf file, parses the 'auth client required' setting,
+/// and configures the authentication methods accordingly.
 fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
     // Debug: Print all environment variables related to CEPH
     tracing::info!("=== Environment Variable Debug ===");
@@ -57,34 +61,85 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
     }
     tracing::info!("=== End Environment Variables ===");
     
-    match std::env::var("CEPH_AUTH_METHOD") {
-        Ok(auth_env) => {
-            tracing::info!("✓ CEPH_AUTH_METHOD environment variable found: '{}'", auth_env);
-            tracing::info!("  Before: supported_auth_methods = {:?}", config.supported_auth_methods);
-            match auth_env.to_lowercase().as_str() {
-                "none" => {
-                    tracing::info!("  Setting supported_auth_methods to [None] (no authentication only)");
-                    config.supported_auth_methods = vec![AuthMethod::None];
-                    config.keyring_path = None;
+    // Try to find ceph.conf
+    let ceph_conf_path = std::env::var("CEPH_CONF")
+        .unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
+    
+    tracing::info!("Looking for ceph.conf at: {}", ceph_conf_path);
+    
+    if !Path::new(&ceph_conf_path).exists() {
+        tracing::warn!("ceph.conf not found at {}, using default authentication", ceph_conf_path);
+        return config;
+    }
+    
+    // Parse ceph.conf
+    match ceph_config::parse_ceph_conf(Path::new(&ceph_conf_path)) {
+        Ok(ceph_config) => {
+            tracing::info!("✓ Successfully parsed ceph.conf");
+            
+            // Get auth_client_required setting
+            if let Some(auth_methods_str) = ceph_config::get_auth_client_required(&ceph_config) {
+                tracing::info!("  auth_client_required = {:?}", auth_methods_str);
+                
+                // Convert string auth methods to AuthMethod enum
+                let mut supported_methods = Vec::new();
+                
+                for method in auth_methods_str {
+                    match method.as_str() {
+                        "cephx" => {
+                            // Check if keyring is available
+                            let keyring_path = std::env::var("CEPH_KEYRING")
+                                .or_else(|_| std::env::var("CEPH_CLIENT_KEYRING"))
+                                .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+                            
+                            tracing::info!("  Checking for keyring at: {}", keyring_path);
+                            
+                            if Path::new(&keyring_path).exists() {
+                                // Check if readable
+                                match std::fs::metadata(&keyring_path) {
+                                    Ok(metadata) => {
+                                        if metadata.permissions().readonly() && 
+                                           std::fs::read(&keyring_path).is_err() {
+                                            tracing::warn!("  Keyring exists but is not readable, skipping cephx");
+                                        } else {
+                                            tracing::info!("  ✓ Keyring is available and readable");
+                                            supported_methods.push(AuthMethod::Cephx);
+                                            config.keyring_path = Some(keyring_path);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("  Failed to check keyring metadata: {}, skipping cephx", e);
+                                    }
+                                }
+                            } else {
+                                tracing::warn!("  Keyring not found at {}, skipping cephx", keyring_path);
+                            }
+                        }
+                        "none" => {
+                            tracing::info!("  ✓ Adding AuthMethod::None");
+                            supported_methods.push(AuthMethod::None);
+                        }
+                        _ => {
+                            tracing::warn!("  Unknown auth method: {}", method);
+                        }
+                    }
                 }
-                "cephx" => {
-                    tracing::info!("  Setting supported_auth_methods to [Cephx] (CephX authentication only)");
-                    config.supported_auth_methods = vec![AuthMethod::Cephx];
+                
+                if !supported_methods.is_empty() {
+                    tracing::info!("  Final supported_auth_methods = {:?}", supported_methods);
+                    config.supported_auth_methods = supported_methods;
+                } else {
+                    tracing::warn!("  No supported auth methods found, using default");
                 }
-                _ => {
-                    tracing::warn!(
-                        "  Unknown CEPH_AUTH_METHOD value: '{}', using auto-detection",
-                        auth_env
-                    );
-                }
+            } else {
+                tracing::info!("  auth_client_required not found in ceph.conf, using default");
             }
-            tracing::info!("  After: supported_auth_methods = {:?}", config.supported_auth_methods);
         }
         Err(e) => {
-            tracing::warn!("✗ CEPH_AUTH_METHOD environment variable not found: {:?}", e);
-            tracing::info!("  Using auto-detection for supported_auth_methods");
+            tracing::error!("Failed to parse ceph.conf: {}", e);
         }
     }
+    
     config
 }
 
