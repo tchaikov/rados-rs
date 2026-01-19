@@ -88,12 +88,17 @@ pub fn parse_auth_methods(value: &str) -> Vec<String> {
 
 /// Get the 'auth client required' setting from the global section
 /// Returns None if not found
+/// 
+/// Supports multiple key name variations for compatibility with different Ceph versions:
+/// - "auth client required" (standard format with spaces)
+/// - "auth_client_required" (underscore format, common in older versions)
+/// - "authclientrequired" (no separator, rare but supported)
 pub fn get_auth_client_required(config: &HashMap<String, HashMap<String, String>>) -> Option<Vec<String>> {
     // Try different common variations of the key name
     let key_variations = [
-        "auth client required",
-        "auth_client_required",
-        "authclientrequired",
+        "auth client required",      // Standard format
+        "auth_client_required",      // Underscore format
+        "authclientrequired",        // No separator (rare)
     ];
     
     if let Some(global) = config.get("global") {
