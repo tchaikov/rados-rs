@@ -142,12 +142,12 @@ mod tests {
         struct TestStruct {
             value: u32,
             #[serde(skip_serializing)]
-            pad: Padding<u32>,
+            _pad: Padding<u32>,
         }
 
         let s = TestStruct {
             value: 42,
-            pad: Padding::new(0),
+            _pad: Padding::new(0),
         };
 
         let json = serde_json::to_string(&s).unwrap();

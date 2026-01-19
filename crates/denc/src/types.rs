@@ -1,10 +1,8 @@
 // Re-export types from other modules for consistency
 pub use crate::entity_addr::{EntityAddr, EntityAddrType};
 
-use crate::denc::Denc;
 use crate::error::RadosError;
 use crate::mark_simple_encoding;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
 use serde::Serialize;
 use std::convert::TryFrom;
 use std::fmt;

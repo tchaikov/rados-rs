@@ -1,7 +1,7 @@
 use auth::{CryptoKey, CEPH_CRYPTO_AES};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use denc::Denc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Test decoding the corpus file

@@ -19,9 +19,9 @@
 //! cargo test --test corpus_comparison_test -- --ignored --nocapture
 //! ```
 
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs;
 
 /// The version of the corpus to test against
 const CORPUS_VERSION: &str = "19.2.0-404-g78ddc7f9027";
@@ -31,8 +31,7 @@ fn get_corpus_dir() -> PathBuf {
     // Try multiple locations for the corpus
     let possible_paths = [
         PathBuf::from("/tmp/ceph-object-corpus"),
-        PathBuf::from(std::env::var("HOME").unwrap_or_default())
-            .join("ceph-object-corpus"),
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("ceph-object-corpus"),
         PathBuf::from(std::env::var("CORPUS_DIR").unwrap_or_default()),
     ];
 
@@ -49,11 +48,11 @@ fn get_corpus_dir() -> PathBuf {
 /// Download the corpus if it doesn't exist
 fn ensure_corpus_available() -> Result<PathBuf, String> {
     let corpus_dir = get_corpus_dir();
-    
+
     if !corpus_dir.exists() {
         eprintln!("Corpus not found at {:?}", corpus_dir);
         eprintln!("Attempting to clone ceph-object-corpus...");
-        
+
         let output = Command::new("git")
             .args([
                 "clone",
@@ -70,11 +69,14 @@ fn ensure_corpus_available() -> Result<PathBuf, String> {
                 String::from_utf8_lossy(&output.stderr)
             ));
         }
-        
+
         eprintln!("Successfully cloned corpus to {:?}", corpus_dir);
     }
 
-    let version_path = corpus_dir.join("archive").join(CORPUS_VERSION).join("objects");
+    let version_path = corpus_dir
+        .join("archive")
+        .join(CORPUS_VERSION)
+        .join("objects");
     if !version_path.exists() {
         return Err(format!(
             "Corpus version {} not found at {:?}",
@@ -110,7 +112,7 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
         .parent()
         .unwrap()
         .join("target/debug/dencoder");
-    
+
     if debug_path.exists() {
         return Ok(debug_path);
     }
@@ -146,11 +148,11 @@ fn run_ceph_dencoder(
 ) -> Result<String, String> {
     let mut cmd = Command::new(ceph_dencoder);
     cmd.arg("type").arg(type_name);
-    
+
     if let Some(f) = features {
         cmd.arg("set_features").arg(format!("0x{:x}", f));
     }
-    
+
     cmd.arg("import")
         .arg(corpus_file)
         .arg("decode")
@@ -179,11 +181,11 @@ fn run_rust_dencoder(
 ) -> Result<String, String> {
     let mut cmd = Command::new(rust_dencoder);
     cmd.arg("type").arg(type_name);
-    
+
     if let Some(f) = features {
         cmd.arg("set_features").arg(format!("0x{:x}", f));
     }
-    
+
     cmd.arg("import")
         .arg(corpus_file)
         .arg("decode")
@@ -201,12 +203,13 @@ fn run_rust_dencoder(
     }
 
     let full_output = String::from_utf8_lossy(&output.stdout).to_string();
-    
+
     // Extract JSON from output - it starts with '{' or '['
     // Our dencoder prints status messages before the JSON
-    let json_start = full_output.find(['{', '['])
+    let json_start = full_output
+        .find(['{', '['])
         .ok_or_else(|| format!("No JSON found in output: {}", full_output))?;
-    
+
     Ok(full_output[json_start..].trim().to_string())
 }
 
@@ -219,31 +222,31 @@ fn compare_json_outputs(
     file_name: &str,
     is_exception: bool,
 ) -> Result<(), String> {
-    let ceph_value: serde_json::Value = serde_json::from_str(ceph_json)
-        .map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
-    
-    let rust_value: serde_json::Value = serde_json::from_str(rust_json)
-        .map_err(|e| format!("Failed to parse rust JSON: {}", e))?;
+    let ceph_value: serde_json::Value =
+        serde_json::from_str(ceph_json).map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
+
+    let rust_value: serde_json::Value =
+        serde_json::from_str(rust_json).map_err(|e| format!("Failed to parse rust JSON: {}", e))?;
 
     // Perform strict comparison
     if ceph_value != rust_value {
         // Format both for easy comparison
         let ceph_pretty = serde_json::to_string_pretty(&ceph_value).unwrap();
         let rust_pretty = serde_json::to_string_pretty(&rust_value).unwrap();
-        
+
         let error_msg = format!(
             "JSON output mismatch for {} in {}:\n\nCeph output:\n{}\n\nRust output:\n{}\n",
             type_name, file_name, ceph_pretty, rust_pretty
         );
-        
+
         // For exception types (like pg_pool_t), we report but don't fail
         if is_exception {
             return Err(error_msg);
         }
-        
+
         return Err(error_msg);
     }
-    
+
     Ok(())
 }
 
@@ -257,7 +260,7 @@ fn test_type(
     is_exception: bool,
 ) -> Result<(usize, usize, usize, usize), String> {
     let type_dir = corpus_base.join(type_name);
-    
+
     if !type_dir.exists() {
         eprintln!("  ⚠ No corpus directory found for {}", type_name);
         return Ok((0, 0, 0, 0));
@@ -282,7 +285,7 @@ fn test_type(
     for entry in entries {
         let corpus_file = entry.path();
         let file_name = corpus_file.file_name().unwrap().to_string_lossy();
-        
+
         total += 1;
 
         // Run both dencoders
@@ -316,8 +319,11 @@ fn test_type(
                 format_mismatch += 1;
                 // Only show first mismatch details to avoid spam
                 if format_mismatch == 1 {
-                    let marker = if is_exception { "⚠" } else { "⚠" };
-                    eprintln!("    {} {} - format mismatch (showing first only)", marker, file_name);
+                    let marker = "⚠";
+                    eprintln!(
+                        "    {} {} - format mismatch (showing first only)",
+                        marker, file_name
+                    );
                     eprintln!("      {}", e);
                 }
             }
@@ -380,24 +386,22 @@ fn test_corpus_comparison() {
         ("utime_t", None, false),
         ("uuid_d", None, false),
         ("osd_info_t", None, false),
-        
         // Level 2: Types depending on Level 1
         ("entity_addr_t", Some(0x40000000000000), false), // MSG_ADDR2 feature
         ("pool_snap_info_t", None, false),
         ("osd_xinfo_t", None, false),
-        
         // Level 3: Complex types
         ("pg_merge_meta_t", None, false),
         // pg_pool_t is marked as exception because ceph-dencoder adds computed/derived fields
         // not present in the binary encoding (flags_names, options, is_stretch_pool, etc.)
-        ("pg_pool_t", None, true),  // Exception: ceph-dencoder adds computed fields
+        ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields
     ];
 
     let mut overall_matched = 0;
     let mut overall_total = 0;
     let mut overall_both_decoded = 0;
     let mut overall_format_mismatch = 0;
-    let mut exception_format_mismatch = 0;  // Track exceptions separately
+    let mut exception_format_mismatch = 0; // Track exceptions separately
     let mut types_with_format_differences = Vec::new();
     let mut exception_types_with_differences = Vec::new();
     let mut types_with_decode_failures = Vec::new();
@@ -409,21 +413,33 @@ fn test_corpus_comparison() {
             eprintln!("  Features: 0x{:x}", f);
         }
 
-        match test_type(type_name, &corpus_base, &ceph_dencoder, &rust_dencoder, features, is_exception) {
+        match test_type(
+            type_name,
+            &corpus_base,
+            &ceph_dencoder,
+            &rust_dencoder,
+            features,
+            is_exception,
+        ) {
             Ok((matched, total, both_decoded, format_mismatch)) => {
                 overall_matched += matched;
                 overall_total += total;
                 overall_both_decoded += both_decoded;
                 overall_format_mismatch += format_mismatch;
-                
+
                 if is_exception && format_mismatch > 0 {
                     exception_format_mismatch += format_mismatch;
                 }
-                
+
                 if total > 0 {
-                    eprintln!("  Result: {}/{} exact match, {} format differences, {} decode failures", 
-                             matched, total, format_mismatch, total - both_decoded);
-                    
+                    eprintln!(
+                        "  Result: {}/{} exact match, {} format differences, {} decode failures",
+                        matched,
+                        total,
+                        format_mismatch,
+                        total - both_decoded
+                    );
+
                     if format_mismatch > 0 {
                         if is_exception {
                             exception_types_with_differences.push(type_name);
@@ -448,16 +464,31 @@ fn test_corpus_comparison() {
     eprintln!("Overall Results");
     eprintln!("===========================================");
     eprintln!("Total samples: {}", overall_total);
-    eprintln!("  Exact match: {}/{} ({:.1}%)", overall_matched, overall_total, 
-             (overall_matched as f64 / overall_total as f64) * 100.0);
-    eprintln!("  Format differences: {}/{} ({:.1}%)", overall_format_mismatch, overall_total,
-             (overall_format_mismatch as f64 / overall_total as f64) * 100.0);
+    eprintln!(
+        "  Exact match: {}/{} ({:.1}%)",
+        overall_matched,
+        overall_total,
+        (overall_matched as f64 / overall_total as f64) * 100.0
+    );
+    eprintln!(
+        "  Format differences: {}/{} ({:.1}%)",
+        overall_format_mismatch,
+        overall_total,
+        (overall_format_mismatch as f64 / overall_total as f64) * 100.0
+    );
     eprintln!("    - Exception types: {}", exception_format_mismatch);
-    eprintln!("    - Non-exception types: {}", overall_format_mismatch - exception_format_mismatch);
-    eprintln!("  Decode failures: {}/{} ({:.1}%)", overall_total - overall_both_decoded, overall_total,
-             ((overall_total - overall_both_decoded) as f64 / overall_total as f64) * 100.0);
+    eprintln!(
+        "    - Non-exception types: {}",
+        overall_format_mismatch - exception_format_mismatch
+    );
+    eprintln!(
+        "  Decode failures: {}/{} ({:.1}%)",
+        overall_total - overall_both_decoded,
+        overall_total,
+        ((overall_total - overall_both_decoded) as f64 / overall_total as f64) * 100.0
+    );
     eprintln!();
-    
+
     if !types_with_format_differences.is_empty() {
         eprintln!("Types with format differences (need custom serialization):");
         for type_name in &types_with_format_differences {
@@ -465,15 +496,18 @@ fn test_corpus_comparison() {
         }
         eprintln!();
     }
-    
+
     if !exception_types_with_differences.is_empty() {
         eprintln!("Exception types with format differences (not considered failures):");
         for type_name in &exception_types_with_differences {
-            eprintln!("  - {} (ceph-dencoder adds computed/derived fields)", type_name);
+            eprintln!(
+                "  - {} (ceph-dencoder adds computed/derived fields)",
+                type_name
+            );
         }
         eprintln!();
     }
-    
+
     if !types_with_decode_failures.is_empty() {
         eprintln!("Types with decode failures (implementation bugs):");
         for type_name in &types_with_decode_failures {
@@ -487,7 +521,7 @@ fn test_corpus_comparison() {
     if overall_total > 0 {
         let non_exception_mismatch = overall_format_mismatch - exception_format_mismatch;
         let exact_match_rate = (overall_matched as f64) / (overall_total as f64);
-        
+
         // Require 100% exact match for non-exception types
         // Exception types (like pg_pool_t) are allowed to have differences
         assert!(
@@ -502,13 +536,14 @@ fn test_corpus_comparison() {
             exact_match_rate * 100.0,
             exception_format_mismatch
         );
-        
+
         // Also ensure no decode failures
         assert!(
             overall_total == overall_both_decoded,
             "Decode failures detected! {}/{} samples failed to decode.\n\
              Types with decode failures: {:?}",
-            overall_total - overall_both_decoded, overall_total,
+            overall_total - overall_both_decoded,
+            overall_total,
             types_with_decode_failures
         );
     } else {

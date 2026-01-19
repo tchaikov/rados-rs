@@ -60,40 +60,45 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
         }
     }
     tracing::info!("=== End Environment Variables ===");
-    
+
     // Try to find ceph.conf
-    let ceph_conf_path = std::env::var("CEPH_CONF")
-        .unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
-    
+    let ceph_conf_path =
+        std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
+
     tracing::info!("Looking for ceph.conf at: {}", ceph_conf_path);
-    
+
     if !Path::new(&ceph_conf_path).exists() {
-        tracing::warn!("ceph.conf not found at {}, using default authentication", ceph_conf_path);
+        tracing::warn!(
+            "ceph.conf not found at {}, using default authentication",
+            ceph_conf_path
+        );
         return config;
     }
-    
+
     // Parse ceph.conf
     match ceph_config::parse_ceph_conf(Path::new(&ceph_conf_path)) {
         Ok(ceph_config) => {
             tracing::info!("✓ Successfully parsed ceph.conf");
-            
+
             // Get auth_client_required setting
             if let Some(auth_methods_str) = ceph_config::get_auth_client_required(&ceph_config) {
                 tracing::info!("  auth_client_required = {:?}", auth_methods_str);
-                
+
                 // Convert string auth methods to AuthMethod enum
                 let mut supported_methods = Vec::new();
-                
+
                 for method in auth_methods_str {
                     match method.as_str() {
                         "cephx" => {
                             // Check if keyring is available
                             let keyring_path = std::env::var("CEPH_KEYRING")
                                 .or_else(|_| std::env::var("CEPH_CLIENT_KEYRING"))
-                                .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
-                            
+                                .unwrap_or_else(|_| {
+                                    "/etc/ceph/ceph.client.admin.keyring".to_string()
+                                });
+
                             tracing::info!("  Checking for keyring at: {}", keyring_path);
-                            
+
                             if Path::new(&keyring_path).exists() {
                                 // Check if readable by trying to read it
                                 match std::fs::read(&keyring_path) {
@@ -107,7 +112,10 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                                     }
                                 }
                             } else {
-                                tracing::warn!("  Keyring not found at {}, skipping cephx", keyring_path);
+                                tracing::warn!(
+                                    "  Keyring not found at {}, skipping cephx",
+                                    keyring_path
+                                );
                             }
                         }
                         "none" => {
@@ -119,7 +127,7 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                         }
                     }
                 }
-                
+
                 if !supported_methods.is_empty() {
                     tracing::info!("  Final supported_auth_methods = {:?}", supported_methods);
                     config.supported_auth_methods = supported_methods;
@@ -134,7 +142,7 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
             tracing::error!("Failed to parse ceph.conf: {}", e);
         }
     }
-    
+
     config
 }
 
@@ -209,7 +217,11 @@ async fn test_crc_mode() {
 
     // Request CRC mode (no encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_crc_mode());
-    tracing::info!("Config: preferred_modes={:?}, supported_auth_methods={:?}", config.preferred_modes, config.supported_auth_methods);
+    tracing::info!(
+        "Config: preferred_modes={:?}, supported_auth_methods={:?}",
+        config.preferred_modes,
+        config.supported_auth_methods
+    );
 
     let mut conn = Connection::connect(addr, config)
         .await
@@ -235,7 +247,11 @@ async fn test_secure_mode() {
 
     // Request SECURE mode (encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_secure_mode());
-    tracing::info!("Config: preferred_modes={:?}, supported_auth_methods={:?}", config.preferred_modes, config.supported_auth_methods);
+    tracing::info!(
+        "Config: preferred_modes={:?}, supported_auth_methods={:?}",
+        config.preferred_modes,
+        config.supported_auth_methods
+    );
 
     let mut conn = Connection::connect(addr, config)
         .await
