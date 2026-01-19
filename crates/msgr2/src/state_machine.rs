@@ -313,8 +313,11 @@ pub struct AuthConnecting {
 
 impl AuthConnecting {
     pub fn new(preferred_modes: Vec<crate::ConnectionMode>, auth_method: Option<crate::AuthMethod>) -> Self {
+        tracing::info!("AuthConnecting::new called with auth_method = {:?}", auth_method);
+        
         // Determine which auth method to use
         let actual_auth_method = auth_method.unwrap_or_else(|| {
+            tracing::info!("auth_method is None, using auto-detection");
             // Auto-detect: try to load keyring, if it fails use None auth
             let keyring_path = std::env::var("CEPH_KEYRING")
                 .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
@@ -327,6 +330,8 @@ impl AuthConnecting {
                 crate::AuthMethod::None
             }
         });
+        
+        tracing::info!("actual_auth_method determined as: {:?}", actual_auth_method);
 
         match actual_auth_method {
             crate::AuthMethod::None => {
