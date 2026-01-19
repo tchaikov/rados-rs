@@ -406,13 +406,44 @@ impl VersionedEncode for BloomHitSetParams {
 }
 
 /// HitSet parameter types - using dedicated types for each variant
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Default)]
 pub enum HitSetParams {
     #[default]
     None,
     ExplicitHash(ExplicitHashHitSetParams),
     ExplicitObject(ExplicitObjectHitSetParams),
     Bloom(BloomHitSetParams),
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for HitSetParams {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("HitSetParams", 1)?;
+        
+        match self {
+            HitSetParams::None => {
+                state.serialize_field("type", "none")?;
+            }
+            HitSetParams::ExplicitHash(_params) => {
+                state.serialize_field("type", "explicit_hash")?;
+                // TODO: serialize params fields
+            }
+            HitSetParams::ExplicitObject(_params) => {
+                state.serialize_field("type", "explicit_object")?;
+                // TODO: serialize params fields
+            }
+            HitSetParams::Bloom(_params) => {
+                state.serialize_field("type", "bloom")?;
+                // TODO: serialize params fields
+            }
+        }
+        
+        state.end()
+    }
 }
 
 impl VersionedEncode for HitSetParams {
@@ -956,64 +987,95 @@ impl Serialize for PgPool {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PgPool", 40)?; // approximate field count
         
-        state.serialize_field("pool_type", &self.pool_type)?;
-        state.serialize_field("size", &self.size)?;
-        state.serialize_field("crush_rule", &self.crush_rule)?;
-        state.serialize_field("object_hash", &self.object_hash)?;
-        state.serialize_field("pg_num", &self.pg_num)?;
-        state.serialize_field("pgp_num", &self.pgp_num)?;
-        state.serialize_field("lpg_num", &self.lpg_num)?;
-        state.serialize_field("lpgp_num", &self.lpgp_num)?;
-        state.serialize_field("last_change", &self.last_change)?;
-        state.serialize_field("snap_seq", &self.snap_seq)?;
-        state.serialize_field("snap_epoch", &self.snap_epoch)?;
-        state.serialize_field("snaps", &self.snaps)?;
-        state.serialize_field("removed_snaps", &self.removed_snaps)?;
+        // Application metadata first (matches ceph order)
+        state.serialize_field("application_metadata", &self.application_metadata)?;
         state.serialize_field("auid", &self.auid)?;
-        state.serialize_field("flags", &self.flags)?;
-        state.serialize_field("min_size", &self.min_size)?;
-        state.serialize_field("quota_max_bytes", &self.quota_max_bytes)?;
-        state.serialize_field("quota_max_objects", &self.quota_max_objects)?;
-        state.serialize_field("tiers", &self.tiers)?;
-        state.serialize_field("tier_of", &self.tier_of)?;
-        state.serialize_field("cache_mode", &self.cache_mode)?;
-        state.serialize_field("read_tier", &self.read_tier)?;
-        state.serialize_field("write_tier", &self.write_tier)?;
-        state.serialize_field("properties", &self.properties)?;
-        state.serialize_field("hit_set_params", &self.hit_set_params)?;
-        state.serialize_field("hit_set_period", &self.hit_set_period)?;
-        state.serialize_field("hit_set_count", &self.hit_set_count)?;
-        state.serialize_field("stripe_width", &self.stripe_width)?;
-        state.serialize_field("target_max_bytes", &self.target_max_bytes)?;
-        state.serialize_field("target_max_objects", &self.target_max_objects)?;
+        state.serialize_field("cache_min_evict_age", &self.cache_min_evict_age)?;
+        state.serialize_field("cache_min_flush_age", &self.cache_min_flush_age)?;
+        
+        // cache_mode as string
+        let cache_mode_str = match self.cache_mode {
+            0 => "none",
+            1 => "writeback",
+            2 => "forward",
+            3 => "readonly",
+            4 => "readforward",
+            5 => "readproxy",
+            _ => "unknown",
+        };
+        state.serialize_field("cache_mode", &cache_mode_str)?;
+        
+        state.serialize_field("cache_target_dirty_high_ratio_micro", &self.cache_target_dirty_high_ratio_micro)?;
         state.serialize_field("cache_target_dirty_ratio_micro", &self.cache_target_dirty_ratio_micro)?;
         state.serialize_field("cache_target_full_ratio_micro", &self.cache_target_full_ratio_micro)?;
-        state.serialize_field("cache_min_flush_age", &self.cache_min_flush_age)?;
-        state.serialize_field("cache_min_evict_age", &self.cache_min_evict_age)?;
-        state.serialize_field("erasure_code_profile", &self.erasure_code_profile)?;
-        state.serialize_field("last_force_op_resend_preluminous", &self.last_force_op_resend_preluminous)?;
-        state.serialize_field("min_read_recency_for_promote", &self.min_read_recency_for_promote)?;
-        state.serialize_field("expected_num_objects", &self.expected_num_objects)?;
-        state.serialize_field("cache_target_dirty_high_ratio_micro", &self.cache_target_dirty_high_ratio_micro)?;
-        state.serialize_field("min_write_recency_for_promote", &self.min_write_recency_for_promote)?;
-        state.serialize_field("use_gmt_hitset", &self.use_gmt_hitset)?;
-        state.serialize_field("fast_read", &self.fast_read)?;
-        state.serialize_field("hit_set_grade_decay_rate", &self.hit_set_grade_decay_rate)?;
-        state.serialize_field("hit_set_search_last_n", &self.hit_set_search_last_n)?;
-        state.serialize_field("opts_data", &self.opts_data)?;
-        state.serialize_field("last_force_op_resend_prenautilus", &self.last_force_op_resend_prenautilus)?;
-        state.serialize_field("application_metadata", &self.application_metadata)?;
         
         // Format create_time as timestamp string
         let create_time_str = format_utime_as_timestamp(&self.create_time);
         state.serialize_field("create_time", &create_time_str)?;
         
-        state.serialize_field("pg_num_target", &self.pg_num_target)?;
-        state.serialize_field("pgp_num_target", &self.pgp_num_target)?;
-        state.serialize_field("pg_num_pending", &self.pg_num_pending)?;
-        state.serialize_field("last_force_op_resend", &self.last_force_op_resend)?;
-        state.serialize_field("pg_autoscale_mode", &self.pg_autoscale_mode)?;
+        state.serialize_field("crush_rule", &self.crush_rule)?;
+        state.serialize_field("erasure_code_profile", &self.erasure_code_profile)?;
+        state.serialize_field("expected_num_objects", &self.expected_num_objects)?;
+        state.serialize_field("fast_read", &self.fast_read)?;
+        state.serialize_field("flags", &self.flags)?;
+        state.serialize_field("hit_set_count", &self.hit_set_count)?;
+        state.serialize_field("hit_set_grade_decay_rate", &self.hit_set_grade_decay_rate)?;
+        state.serialize_field("hit_set_params", &self.hit_set_params)?;
+        state.serialize_field("hit_set_period", &self.hit_set_period)?;
+        state.serialize_field("hit_set_search_last_n", &self.hit_set_search_last_n)?;
+        
+        // last_change as string
+        state.serialize_field("last_change", &self.last_change.to_string())?;
+        state.serialize_field("last_force_op_resend", &self.last_force_op_resend.to_string())?;
+        state.serialize_field("last_force_op_resend_preluminous", &self.last_force_op_resend_preluminous.to_string())?;
+        state.serialize_field("last_force_op_resend_prenautilus", &self.last_force_op_resend_prenautilus.to_string())?;
+        
         state.serialize_field("last_pg_merge_meta", &self.last_pg_merge_meta)?;
+        state.serialize_field("min_read_recency_for_promote", &self.min_read_recency_for_promote)?;
+        state.serialize_field("min_size", &self.min_size)?;
+        state.serialize_field("min_write_recency_for_promote", &self.min_write_recency_for_promote)?;
+        state.serialize_field("object_hash", &self.object_hash)?;
+        
+        // Note: ceph-dencoder adds computed fields like "options", "flags_names", "is_stretch_pool", etc.
+        // We skip lpg_num, lpgp_num (legacy, always 0), opts_data (not in ceph output)
+        
+        // pg_autoscale_mode as string
+        let pg_autoscale_mode_str = match self.pg_autoscale_mode {
+            0 => "off",
+            1 => "warn",
+            2 => "on",
+            _ => "unknown",
+        };
+        state.serialize_field("pg_autoscale_mode", &pg_autoscale_mode_str)?;
+        
+        state.serialize_field("pg_num", &self.pg_num)?;
+        state.serialize_field("pg_num_pending", &self.pg_num_pending)?;
+        state.serialize_field("pg_num_target", &self.pg_num_target)?;
+        
+        // Use ceph's field name
+        state.serialize_field("pg_placement_num", &self.pgp_num)?;
+        state.serialize_field("pg_placement_num_target", &self.pgp_num_target)?;
+        
+        // pool_snaps - use field name from ceph
+        state.serialize_field("pool_snaps", &self.snaps)?;
+        
+        state.serialize_field("quota_max_bytes", &self.quota_max_bytes)?;
+        state.serialize_field("quota_max_objects", &self.quota_max_objects)?;
+        state.serialize_field("read_tier", &self.read_tier)?;
+        
+        // removed_snaps using ceph's field name
+        state.serialize_field("removed_snaps", &self.removed_snaps)?;
+        
+        state.serialize_field("size", &self.size)?;
+        state.serialize_field("snap_epoch", &self.snap_epoch)?;
+        state.serialize_field("snap_seq", &self.snap_seq)?;
+        state.serialize_field("stripe_width", &self.stripe_width)?;
+        state.serialize_field("target_max_bytes", &self.target_max_bytes)?;
+        state.serialize_field("target_max_objects", &self.target_max_objects)?;
+        state.serialize_field("tier_of", &self.tier_of)?;
+        state.serialize_field("tiers", &self.tiers)?;
+        state.serialize_field("use_gmt_hitset", &self.use_gmt_hitset)?;
+        state.serialize_field("write_tier", &self.write_tier)?;
         
         state.end()
     }
