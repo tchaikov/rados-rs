@@ -271,12 +271,19 @@ impl MonMap {
             let mut addrs = EntityAddrVec::new();
             for denc_addr in &mon.public_addrs.addrs {
                 if let Some(socket_addr) = denc_addr.to_socket_addr() {
+                    let addr_type = match denc_addr.addr_type {
+                        denc::EntityAddrType::Legacy => AddrType::Legacy,
+                        denc::EntityAddrType::Msgr2 => AddrType::Msgr2,
+                        denc::EntityAddrType::None
+                        | denc::EntityAddrType::Any
+                        | denc::EntityAddrType::Cidr => {
+                            // These types should not appear in monitor addresses
+                            // Default to Msgr2 for robustness
+                            AddrType::Msgr2
+                        }
+                    };
                     let addr = EntityAddr {
-                        addr_type: match denc_addr.addr_type {
-                            denc::EntityAddrType::Legacy => AddrType::Legacy,
-                            denc::EntityAddrType::Msgr2 => AddrType::Msgr2,
-                            _ => AddrType::Msgr2, // default to msgr2
-                        },
+                        addr_type,
                         nonce: denc_addr.nonce,
                         addr: socket_addr,
                     };

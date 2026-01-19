@@ -324,6 +324,22 @@ impl Denc for MonInfo {
 
 /// Monitor map (MonMap in C++)
 /// Version 9 encoding format
+///
+/// ## Supported Versions
+/// - **Encoding**: v6-v9 (modern format with mon_info and ranks)
+/// - **Decoding**: v2-v9 (with limited legacy support)
+///
+/// ## Version History
+/// - v1: Legacy format with entity_inst_t (not supported)
+/// - v2: Legacy format with mon_addr map (basic support)
+/// - v3-v5: Legacy format with ENCODE_START (basic support)
+/// - v6: Added ranks field
+/// - v7: Added min_mon_release
+/// - v8: Added removed_ranks, strategy, and disallowed_leaders
+/// - v9: Added stretch mode fields (stretch_mode_enabled, tiebreaker_mon, stretch_marked_down_mons)
+///
+/// The implementation focuses on modern formats (v6+) as these are used in
+/// all actively supported Ceph releases (Nautilus and later).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MonMap {
     pub fsid: FsId,
@@ -395,15 +411,13 @@ impl VersionedEncode for MonMap {
 
         if version < 6 {
             // Build legacy mon_addr map from mon_info
-            // For simplicity in v6+ decoding, we skip this for now
-            // In a real implementation, we'd need to handle legacy encoding
-            if version < 3 {
-                // v1-v2: not implemented (needs special handling)
-                return Err(RadosError::Protocol(
-                    "MonMap encoding version < 3 not supported".to_string(),
-                ));
-            }
-            // v3-v5: would encode legacy_mon_addr map, but we focus on v6+
+            // Note: We currently only support encoding version 6+ (modern format)
+            // Legacy versions 1-5 would require encoding old format maps
+            // which is not commonly needed for new implementations
+            return Err(RadosError::Protocol(format!(
+                "MonMap encoding version {} not supported (only v6+ supported)",
+                version
+            )));
         }
 
         // Encode timestamps
@@ -473,9 +487,10 @@ impl VersionedEncode for MonMap {
 
         if version == 1 {
             // v1: decode vector<entity_inst_t>
-            // Not implemented for now
+            // This legacy format is rarely encountered in modern Ceph deployments
+            // and requires special handling of entity_inst_t structures
             return Err(RadosError::Protocol(
-                "MonMap decoding version 1 not supported".to_string(),
+                "MonMap decoding version 1 not supported (legacy format)".to_string(),
             ));
         } else if version < 6 {
             // v2-v5: decode map<string, entity_addr_t>
