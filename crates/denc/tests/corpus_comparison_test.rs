@@ -449,17 +449,31 @@ fn test_corpus_comparison() {
     }
 
     // The goal is to ensure both dencoders can decode the corpus
-    // We require exact match for now to track format differences
+    // and produce identical output
     if overall_total > 0 {
         let exact_match_rate = (overall_matched as f64) / (overall_total as f64);
         
-        // We require at least 20% exact match to pass
-        // This allows for format differences while catching major issues
+        // Require 100% exact match - all format differences must be fixed
+        // Any format mismatch indicates a serialization issue that needs to be addressed
         assert!(
-            exact_match_rate >= 0.2,
-            "Exact match rate too low: {:.1}%. Expected at least 20%. \
-             Types with format differences need custom serialization to match ceph-dencoder output.",
+            overall_format_mismatch == 0 && overall_total == overall_matched,
+            "Format mismatches detected! {}/{} samples have format differences ({:.1}%).\n\
+             Types with format differences: {:?}\n\
+             All types must have custom serialization to exactly match ceph-dencoder output.\n\
+             Current exact match rate: {:.1}%",
+            overall_format_mismatch, overall_total,
+            (overall_format_mismatch as f64 / overall_total as f64) * 100.0,
+            types_with_format_differences,
             exact_match_rate * 100.0
+        );
+        
+        // Also ensure no decode failures
+        assert!(
+            overall_total == overall_both_decoded,
+            "Decode failures detected! {}/{} samples failed to decode.\n\
+             Types with decode failures: {:?}",
+            overall_total - overall_both_decoded, overall_total,
+            types_with_decode_failures
         );
     } else {
         panic!("No corpus samples were tested!");

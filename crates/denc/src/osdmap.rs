@@ -173,6 +173,91 @@ impl crate::denc::FixedSize for UTime {
     const SIZE: usize = 8;
 }
 
+/// Helper function to format UTime as ISO 8601 timestamp string
+/// Matches ceph-dencoder output format: "YYYY-MM-DDTHH:MM:SS.ffffff+0000"
+/// Special case: if timestamp is 0, output "0.000000"
+fn format_utime_as_timestamp(utime: &UTime) -> String {
+    use std::time::Duration;
+    
+    // Special case: zero timestamp outputs as "0.000000"
+    if utime.sec == 0 && utime.nsec == 0 {
+        return "0.000000".to_string();
+    }
+    
+    // Convert UTime to SystemTime
+    let duration = Duration::new(utime.sec as u64, utime.nsec);
+    
+    // Format as ISO 8601 with nanoseconds
+    // Note: The nsec field in UTime is already nanoseconds, but we need microseconds for display
+    let microseconds = utime.nsec / 1000;
+    
+    // Convert to datetime components manually to match ceph format exactly
+    // Using chrono-like formatting but without the dependency
+    let secs_since_epoch = utime.sec as i64;
+    
+    // Days since epoch (1970-01-01)
+    let days = secs_since_epoch / 86400;
+    let remaining_secs = secs_since_epoch % 86400;
+    
+    // Calculate year, month, day from days since epoch
+    // This is a simplified version - for production you'd want chrono crate
+    let (year, month, day) = days_to_ymd(days);
+    
+    // Calculate hours, minutes, seconds
+    let hours = remaining_secs / 3600;
+    let minutes = (remaining_secs % 3600) / 60;
+    let seconds = remaining_secs % 60;
+    
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+0000",
+            year, month, day, hours, minutes, seconds, microseconds)
+}
+
+/// Convert days since Unix epoch to year/month/day
+/// Simplified algorithm - should match ceph's output
+fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
+    // Days since 1970-01-01
+    // This is a simplified Gregorian calendar calculation
+    
+    // Adjust for epoch (Unix epoch is 1970-01-01)
+    let mut year = 1970;
+    
+    // Handle years
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days >= days_in_year {
+            days -= days_in_year;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+    
+    // Handle months
+    let days_in_months = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    
+    let mut month = 1;
+    for &days_in_month in &days_in_months {
+        if days >= days_in_month as i64 {
+            days -= days_in_month as i64;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+    
+    let day = days as u32 + 1; // Days are 1-indexed
+    
+    (year, month, day)
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
 /// String encoding implementation to match Ceph's string handling
 
 /// Generic BTreeMap encoding - matches Ceph's map encoding  
@@ -492,7 +577,7 @@ impl crate::denc::FixedSize for UuidD {
 }
 
 /// OSD extended information structure (osd_xinfo_t in C++)
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct OsdXInfo {
     pub down_stamp: UTime,              // timestamp when we were last marked down
     pub laggy_probability: f32,         // 0.0 = definitely not laggy, 1.0 = definitely laggy
@@ -501,6 +586,32 @@ pub struct OsdXInfo {
     pub old_weight: u32,     // weight prior to being auto marked out
     pub last_purged_snaps_scrub: UTime, // last scrub of purged_snaps
     pub dead_epoch: Epoch,   // last epoch we were confirmed dead (not just down)
+}
+
+// Custom Serialize implementation to match ceph-dencoder timestamp format
+impl Serialize for OsdXInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("OsdXInfo", 7)?;
+        
+        // Format UTime fields as ISO 8601 timestamp strings to match ceph-dencoder
+        let down_stamp_str = format_utime_as_timestamp(&self.down_stamp);
+        state.serialize_field("down_stamp", &down_stamp_str)?;
+        
+        state.serialize_field("laggy_probability", &self.laggy_probability)?;
+        state.serialize_field("laggy_interval", &self.laggy_interval)?;
+        state.serialize_field("features", &self.features)?;
+        state.serialize_field("old_weight", &self.old_weight)?;
+        
+        let last_purged_snaps_scrub_str = format_utime_as_timestamp(&self.last_purged_snaps_scrub);
+        state.serialize_field("last_purged_snaps_scrub", &last_purged_snaps_scrub_str)?;
+        
+        state.serialize_field("dead_epoch", &self.dead_epoch)?;
+        state.end()
+    }
 }
 
 impl VersionedEncode for OsdXInfo {
@@ -702,7 +813,7 @@ impl From<u8> for PoolType {
 
 /// Simplified pg_pool_t implementation based on actual Ceph encoding
 /// This follows the exact field order from osd_types.cc
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct PgPool {
     // Basic pool configuration (always present)
     pub pool_type: u8, // TYPE_REPLICATED=1, TYPE_ERASURE=3
@@ -808,12 +919,104 @@ pub struct PgPool {
     // Additional version-specific fields would go here
 }
 
+// Custom Serialize implementation for PgPool to format create_time as timestamp
+impl Serialize for PgPool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PgPool", 40)?; // approximate field count
+        
+        state.serialize_field("pool_type", &self.pool_type)?;
+        state.serialize_field("size", &self.size)?;
+        state.serialize_field("crush_rule", &self.crush_rule)?;
+        state.serialize_field("object_hash", &self.object_hash)?;
+        state.serialize_field("pg_num", &self.pg_num)?;
+        state.serialize_field("pgp_num", &self.pgp_num)?;
+        state.serialize_field("lpg_num", &self.lpg_num)?;
+        state.serialize_field("lpgp_num", &self.lpgp_num)?;
+        state.serialize_field("last_change", &self.last_change)?;
+        state.serialize_field("snap_seq", &self.snap_seq)?;
+        state.serialize_field("snap_epoch", &self.snap_epoch)?;
+        state.serialize_field("snaps", &self.snaps)?;
+        state.serialize_field("removed_snaps", &self.removed_snaps)?;
+        state.serialize_field("auid", &self.auid)?;
+        state.serialize_field("flags", &self.flags)?;
+        state.serialize_field("min_size", &self.min_size)?;
+        state.serialize_field("quota_max_bytes", &self.quota_max_bytes)?;
+        state.serialize_field("quota_max_objects", &self.quota_max_objects)?;
+        state.serialize_field("tiers", &self.tiers)?;
+        state.serialize_field("tier_of", &self.tier_of)?;
+        state.serialize_field("cache_mode", &self.cache_mode)?;
+        state.serialize_field("read_tier", &self.read_tier)?;
+        state.serialize_field("write_tier", &self.write_tier)?;
+        state.serialize_field("properties", &self.properties)?;
+        state.serialize_field("hit_set_params", &self.hit_set_params)?;
+        state.serialize_field("hit_set_period", &self.hit_set_period)?;
+        state.serialize_field("hit_set_count", &self.hit_set_count)?;
+        state.serialize_field("stripe_width", &self.stripe_width)?;
+        state.serialize_field("target_max_bytes", &self.target_max_bytes)?;
+        state.serialize_field("target_max_objects", &self.target_max_objects)?;
+        state.serialize_field("cache_target_dirty_ratio_micro", &self.cache_target_dirty_ratio_micro)?;
+        state.serialize_field("cache_target_full_ratio_micro", &self.cache_target_full_ratio_micro)?;
+        state.serialize_field("cache_min_flush_age", &self.cache_min_flush_age)?;
+        state.serialize_field("cache_min_evict_age", &self.cache_min_evict_age)?;
+        state.serialize_field("erasure_code_profile", &self.erasure_code_profile)?;
+        state.serialize_field("last_force_op_resend_preluminous", &self.last_force_op_resend_preluminous)?;
+        state.serialize_field("min_read_recency_for_promote", &self.min_read_recency_for_promote)?;
+        state.serialize_field("expected_num_objects", &self.expected_num_objects)?;
+        state.serialize_field("cache_target_dirty_high_ratio_micro", &self.cache_target_dirty_high_ratio_micro)?;
+        state.serialize_field("min_write_recency_for_promote", &self.min_write_recency_for_promote)?;
+        state.serialize_field("use_gmt_hitset", &self.use_gmt_hitset)?;
+        state.serialize_field("fast_read", &self.fast_read)?;
+        state.serialize_field("hit_set_grade_decay_rate", &self.hit_set_grade_decay_rate)?;
+        state.serialize_field("hit_set_search_last_n", &self.hit_set_search_last_n)?;
+        state.serialize_field("opts_data", &self.opts_data)?;
+        state.serialize_field("last_force_op_resend_prenautilus", &self.last_force_op_resend_prenautilus)?;
+        state.serialize_field("application_metadata", &self.application_metadata)?;
+        
+        // Format create_time as timestamp string
+        let create_time_str = format_utime_as_timestamp(&self.create_time);
+        state.serialize_field("create_time", &create_time_str)?;
+        
+        state.serialize_field("pg_num_target", &self.pg_num_target)?;
+        state.serialize_field("pgp_num_target", &self.pgp_num_target)?;
+        state.serialize_field("pg_num_pending", &self.pg_num_pending)?;
+        state.serialize_field("last_force_op_resend", &self.last_force_op_resend)?;
+        state.serialize_field("pg_autoscale_mode", &self.pg_autoscale_mode)?;
+        state.serialize_field("last_pg_merge_meta", &self.last_pg_merge_meta)?;
+        
+        state.end()
+    }
+}
+
 /// Pool snapshot information structure
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default)]
 pub struct PoolSnapInfo {
     pub snapid: u64,
     pub stamp: UTime,
     pub name: String,
+}
+
+// Custom Serialize implementation to match ceph-dencoder timestamp format
+impl Serialize for PoolSnapInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PoolSnapInfo", 3)?;
+        
+        state.serialize_field("snapid", &self.snapid)?;
+        
+        // Format UTime as ISO 8601 timestamp string to match ceph-dencoder
+        let timestamp_str = format_utime_as_timestamp(&self.stamp);
+        state.serialize_field("stamp", &timestamp_str)?;
+        
+        state.serialize_field("name", &self.name)?;
+        state.end()
+    }
 }
 
 impl VersionedEncode for PoolSnapInfo {
