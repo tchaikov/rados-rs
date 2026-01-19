@@ -16,6 +16,13 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     // }
 
     let file1_path = Path::new("/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_merge_meta_t/25fffed8c8919b9fc1f82035e31e3e43");
+
+    if !file1_path.exists() {
+        eprintln!("Test corpus file not found: {}", file1_path.display());
+        eprintln!("Skipping test");
+        return;
+    }
+
     let file1_data = fs::read(file1_path).expect("Failed to read file1");
     let mut file1_bytes = bytes::Bytes::from(file1_data.clone());
 
