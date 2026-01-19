@@ -60,15 +60,16 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
     match std::env::var("CEPH_AUTH_METHOD") {
         Ok(auth_env) => {
             tracing::info!("✓ CEPH_AUTH_METHOD environment variable found: '{}'", auth_env);
-            tracing::info!("  Before: auth_method = {:?}", config.auth_method);
+            tracing::info!("  Before: supported_auth_methods = {:?}", config.supported_auth_methods);
             match auth_env.to_lowercase().as_str() {
                 "none" => {
-                    tracing::info!("  Setting auth_method to None (no authentication)");
-                    config.auth_method = Some(AuthMethod::None);
+                    tracing::info!("  Setting supported_auth_methods to [None] (no authentication only)");
+                    config.supported_auth_methods = vec![AuthMethod::None];
+                    config.keyring_path = None;
                 }
                 "cephx" => {
-                    tracing::info!("  Setting auth_method to Cephx authentication");
-                    config.auth_method = Some(AuthMethod::Cephx);
+                    tracing::info!("  Setting supported_auth_methods to [Cephx] (CephX authentication only)");
+                    config.supported_auth_methods = vec![AuthMethod::Cephx];
                 }
                 _ => {
                     tracing::warn!(
@@ -77,11 +78,11 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                     );
                 }
             }
-            tracing::info!("  After: auth_method = {:?}", config.auth_method);
+            tracing::info!("  After: supported_auth_methods = {:?}", config.supported_auth_methods);
         }
         Err(e) => {
             tracing::warn!("✗ CEPH_AUTH_METHOD environment variable not found: {:?}", e);
-            tracing::info!("  Using auto-detection for auth_method");
+            tracing::info!("  Using auto-detection for supported_auth_methods");
         }
     }
     config
@@ -99,9 +100,9 @@ async fn test_compression_disabled() {
     // Explicitly disable compression
     let config = configure_auth_method(ConnectionConfig::without_compression());
     tracing::info!(
-        "Config: supported_features={:#x}, auth_method={:?}",
+        "Config: supported_features={:#x}, supported_auth_methods={:?}",
         config.supported_features,
-        config.auth_method
+        config.supported_auth_methods
     );
 
     let mut conn = Connection::connect(addr, config)
@@ -129,9 +130,9 @@ async fn test_compression_enabled() {
     // Explicitly enable compression
     let config = configure_auth_method(ConnectionConfig::with_compression());
     tracing::info!(
-        "Config: supported_features={:#x}, auth_method={:?}",
+        "Config: supported_features={:#x}, supported_auth_methods={:?}",
         config.supported_features,
-        config.auth_method
+        config.supported_auth_methods
     );
 
     let mut conn = Connection::connect(addr, config)
@@ -158,7 +159,7 @@ async fn test_crc_mode() {
 
     // Request CRC mode (no encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_crc_mode());
-    tracing::info!("Config: preferred_modes={:?}, auth_method={:?}", config.preferred_modes, config.auth_method);
+    tracing::info!("Config: preferred_modes={:?}, supported_auth_methods={:?}", config.preferred_modes, config.supported_auth_methods);
 
     let mut conn = Connection::connect(addr, config)
         .await
@@ -184,7 +185,7 @@ async fn test_secure_mode() {
 
     // Request SECURE mode (encryption)
     let config = configure_auth_method(ConnectionConfig::prefer_secure_mode());
-    tracing::info!("Config: preferred_modes={:?}, auth_method={:?}", config.preferred_modes, config.auth_method);
+    tracing::info!("Config: preferred_modes={:?}, supported_auth_methods={:?}", config.preferred_modes, config.supported_auth_methods);
 
     let mut conn = Connection::connect(addr, config)
         .await

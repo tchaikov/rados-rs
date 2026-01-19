@@ -155,24 +155,24 @@ impl denc::zerocopy::Decode for FeatureSet {
 ///
 /// # Authentication
 ///
-/// The authentication method can be configured in two ways (in order of precedence):
+/// The authentication methods can be configured in two ways (in order of precedence):
 ///
-/// 1. **Explicitly via `auth_method` field**: Set to `Some(AuthMethod::None)` or `Some(AuthMethod::Cephx)`
-/// 2. **Auto-detection**: If not explicitly set, auto-detects based on keyring file existence
+/// 1. **Explicitly via `supported_auth_methods` field**: Set to specific auth methods in order of preference
+/// 2. **Auto-detection**: If using `Default`, auto-detects based on keyring file existence
 ///
 /// ## Auto-detection behavior:
 /// - Checks if `CEPH_KEYRING` environment variable is set and points to an existing file
 /// - Falls back to checking `/etc/ceph/ceph.client.admin.keyring`
-/// - If keyring file exists → uses `AuthMethod::Cephx`
-/// - If keyring file doesn't exist → uses `AuthMethod::None`
+/// - If keyring file exists → uses `vec![AuthMethod::Cephx, AuthMethod::None]` (prefer CephX, fall back to None)
+/// - If keyring file doesn't exist → uses `vec![AuthMethod::None]` (only no-auth)
 ///
 /// **Note**: Applications can check environment variables (e.g., `CEPH_AUTH_METHOD`) and
-/// explicitly set the `auth_method` field to override auto-detection.
+/// explicitly set the `supported_auth_methods` field to override auto-detection.
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use msgr2::ConnectionConfig;
+/// use msgr2::{ConnectionConfig, AuthMethod};
 ///
 /// // Auto-detect authentication (recommended)
 /// let config = ConnectionConfig::default();
@@ -182,6 +182,14 @@ impl denc::zerocopy::Decode for FeatureSet {
 ///
 /// // Explicitly use CephX authentication
 /// let config = ConnectionConfig::with_cephx_auth();
+///
+/// // Custom: prefer CephX but fall back to no-auth
+/// let mut config = ConnectionConfig::default();
+/// config.supported_auth_methods = vec![AuthMethod::Cephx, AuthMethod::None];
+///
+/// // Custom: only no-auth, with custom keyring path
+/// let mut config = ConnectionConfig::with_no_auth();
+/// config.keyring_path = Some("/custom/path/to/keyring".to_string());
 /// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
@@ -198,22 +206,49 @@ pub struct ConnectionConfig {
     /// The server will choose the final mode from this list
     pub preferred_modes: Vec<ConnectionMode>,
 
-    /// Authentication method to use
-    /// - `None`: Auto-detect from keyring file existence
-    /// - `Some(AuthMethod::None)`: Force no authentication
-    /// - `Some(AuthMethod::Cephx)`: Force CephX authentication
+    /// Authentication methods supported by the client (in order of preference)
+    /// The client will negotiate with the server to select a mutually supported method.
+    /// Default: vec![AuthMethod::Cephx, AuthMethod::None] (prefer CephX if available)
     ///
-    /// See struct-level documentation for auto-detection behavior.
-    pub auth_method: Option<AuthMethod>,
+    /// Examples:
+    /// - vec![AuthMethod::None] - Only support no-auth clusters
+    /// - vec![AuthMethod::Cephx] - Only support CephX auth clusters
+    /// - vec![AuthMethod::Cephx, AuthMethod::None] - Try CephX first, fall back to None
+    pub supported_auth_methods: Vec<AuthMethod>,
+
+    /// Path to the keyring file for CephX authentication
+    /// - `None`: Auto-detect (checks CEPH_KEYRING env var, then /etc/ceph/ceph.client.admin.keyring)
+    /// - `Some(path)`: Use the specified keyring file path
+    ///
+    /// Only used when CephX authentication is in supported_auth_methods.
+    pub keyring_path: Option<String>,
 }
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
+        // Auto-detect keyring path from environment or use default
+        let keyring_path = std::env::var("CEPH_KEYRING").ok().or_else(|| {
+            let default_path = "/etc/ceph/ceph.client.admin.keyring";
+            if std::path::Path::new(default_path).exists() {
+                Some(default_path.to_string())
+            } else {
+                None
+            }
+        });
+
+        // Default: try CephX first if keyring exists, otherwise fall back to None
+        let supported_auth_methods = if keyring_path.is_some() {
+            vec![AuthMethod::Cephx, AuthMethod::None]
+        } else {
+            vec![AuthMethod::None]
+        };
+
         Self {
             supported_features: MSGR2_ALL_FEATURES,
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
-            auth_method: None, // Auto-detect
+            supported_auth_methods,
+            keyring_path,
         }
     }
 }
@@ -223,9 +258,7 @@ impl ConnectionConfig {
     pub fn without_compression() -> Self {
         Self {
             supported_features: MSGR2_FEATURE_REVISION_1,
-            required_features: 0,
-            preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
-            auth_method: None,
+            ..Default::default()
         }
     }
 
@@ -237,20 +270,16 @@ impl ConnectionConfig {
     /// Create config preferring CRC mode (no encryption)
     pub fn prefer_crc_mode() -> Self {
         Self {
-            supported_features: MSGR2_ALL_FEATURES,
-            required_features: 0,
             preferred_modes: vec![ConnectionMode::Crc],
-            auth_method: None,
+            ..Default::default()
         }
     }
 
     /// Create config preferring SECURE mode (with encryption)
     pub fn prefer_secure_mode() -> Self {
         Self {
-            supported_features: MSGR2_ALL_FEATURES,
-            required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure],
-            auth_method: None,
+            ..Default::default()
         }
     }
 
@@ -258,9 +287,8 @@ impl ConnectionConfig {
     pub fn minimal() -> Self {
         Self {
             supported_features: MSGR2_FEATURE_REVISION_1,
-            required_features: 0,
             preferred_modes: vec![ConnectionMode::Crc],
-            auth_method: None,
+            ..Default::default()
         }
     }
 
@@ -270,7 +298,7 @@ impl ConnectionConfig {
             supported_features: supported,
             required_features: required,
             preferred_modes: modes,
-            auth_method: None,
+            ..Default::default()
         }
     }
 
@@ -278,10 +306,9 @@ impl ConnectionConfig {
     /// Use this when connecting to a Ceph cluster with auth disabled
     pub fn with_no_auth() -> Self {
         Self {
-            supported_features: MSGR2_ALL_FEATURES,
-            required_features: 0,
-            preferred_modes: vec![ConnectionMode::Crc], // No encryption needed for no-auth
-            auth_method: Some(AuthMethod::None),
+            supported_auth_methods: vec![AuthMethod::None],
+            keyring_path: None,
+            ..Default::default()
         }
     }
 
@@ -289,10 +316,8 @@ impl ConnectionConfig {
     /// Use this to force CephX even if auto-detection would suggest otherwise
     pub fn with_cephx_auth() -> Self {
         Self {
-            supported_features: MSGR2_ALL_FEATURES,
-            required_features: 0,
-            preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
-            auth_method: Some(AuthMethod::Cephx),
+            supported_auth_methods: vec![AuthMethod::Cephx],
+            ..Default::default()
         }
     }
 }
