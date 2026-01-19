@@ -21,6 +21,12 @@ pub struct FrameIO {
     stream: TcpStream,
 }
 
+impl Drop for FrameIO {
+    fn drop(&mut self) {
+        tracing::warn!("🔴 FrameIO is being dropped! TCP stream will close!");
+    }
+}
+
 impl FrameIO {
     const PREAMBLE_SIZE: usize = 32;
     const INLINE_SIZE: usize = 48;
@@ -28,6 +34,7 @@ impl FrameIO {
 
     /// Create a new FrameIO from an existing TCP stream
     pub fn new(stream: TcpStream) -> Self {
+        tracing::info!("✅ FrameIO::new() - Creating new FrameIO with TcpStream");
         Self { stream }
     }
 
@@ -83,33 +90,47 @@ impl FrameIO {
                 frame.preamble.num_segments,
                 payload_bytes.len()
             );
-            // For single-segment frames in secure mode:
-            // 1. Remove CRC + late_status (5 bytes total) added by assemble_crc_rev1
-            // 2. Add alignment padding to CRYPTO_BLOCK_SIZE (16 bytes), not segment align
+
+            // Rebuild payload from segments with proper alignment for secure mode
             // Secure frames don't use CRC; they use GCM auth tags instead
-            if frame.preamble.num_segments == 1 {
-                let segment_len = frame.segments[0].len();
-                const CRYPTO_BLOCK_SIZE: usize = 16;
+            const CRYPTO_BLOCK_SIZE: usize = 16;
+            const FRAME_LATE_STATUS_COMPLETE: u8 = 0x0e;
 
-                // Remove CRC (4 bytes) + late_status (1 byte) = 5 bytes total
-                // assemble_crc_rev1 adds: segment + CRC (4 bytes) + late_status in some cases
-                // But for single segment it's: segment + CRC (4 bytes)
-                // Let me just rebuild the payload from scratch
-                payload_bytes.clear();
-                payload_bytes.extend_from_slice(&frame.segments[0]);
+            payload_bytes.clear();
 
-                // Add alignment padding to 16-byte boundary (CRYPTO_BLOCK_SIZE)
+            // Add all segments with 16-byte alignment padding (skip empty segments)
+            for segment in &frame.segments {
+                let segment_len = segment.len();
+                if segment_len == 0 {
+                    continue; // Don't add or pad empty segments
+                }
+
+                payload_bytes.extend_from_slice(segment);
+
+                // Pad to 16-byte boundary
                 let aligned_len = (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
                 let padding_needed = aligned_len - segment_len;
                 if padding_needed > 0 {
                     payload_bytes.extend_from_slice(&vec![0u8; padding_needed]);
                 }
+            }
+
+            // For multi-segment frames, add epilogue
+            if frame.preamble.num_segments > 1 {
+                // epilogue_secure_rev1_block_t: 1 byte late_status + 15 bytes padding = 16 bytes
+                let mut epilogue = vec![FRAME_LATE_STATUS_COMPLETE];
+                epilogue.extend_from_slice(&vec![0u8; CRYPTO_BLOCK_SIZE - 1]);
+                payload_bytes.extend_from_slice(&epilogue);
 
                 tracing::info!(
-                    "Secure single-segment: original={}, aligned={}, padding={}, payload_bytes.len()={}",
-                    segment_len,
-                    aligned_len,
-                    padding_needed,
+                    "Secure multi-segment: num_segments={}, total_payload={} (includes {} byte epilogue)",
+                    frame.preamble.num_segments,
+                    payload_bytes.len(),
+                    CRYPTO_BLOCK_SIZE
+                );
+            } else {
+                tracing::info!(
+                    "Secure single-segment: payload_len={}",
                     payload_bytes.len()
                 );
             }
@@ -210,12 +231,23 @@ impl FrameIO {
             final_bytes.len(),
             frame.preamble.tag
         );
+        tracing::warn!(
+            "🔴 WRITING TO TCP: {} bytes for frame tag={:?}",
+            final_bytes.len(),
+            frame.preamble.tag
+        );
         self.stream.write_all(&final_bytes).await?;
+        tracing::warn!(
+            "🔴 TCP WRITE COMPLETE: {} bytes written successfully",
+            final_bytes.len()
+        );
         tracing::debug!(
             "RUST_DEBUG: Successfully wrote {} bytes to TCP stream",
             final_bytes.len()
         );
+        tracing::warn!("🔴 FLUSHING TCP stream...");
         self.stream.flush().await?;
+        tracing::warn!("🔴 TCP FLUSH COMPLETE");
         tracing::debug!("RUST_DEBUG: Successfully flushed TCP stream");
         Ok(())
     }
@@ -243,20 +275,33 @@ impl FrameIO {
 
         // Try to peek first to see if data is available
         let mut peek_buf = [0u8; 1];
+        tracing::warn!("🔵 RECV: About to peek at TCP socket...");
         match self.stream.peek(&mut peek_buf).await {
             Ok(n) => {
-                tracing::debug!("Peek successful: {} bytes available", n);
+                tracing::warn!("🔵 RECV: Peek successful: {} bytes available", n);
+                if n == 0 {
+                    tracing::error!("🔵 RECV: Peek returned 0 bytes - connection might be closed!");
+                }
             }
             Err(e) => {
-                tracing::error!("Peek failed: {:?}", e);
+                tracing::error!("🔵 RECV: Peek failed: {:?}", e);
             }
         }
 
+        tracing::warn!(
+            "🔵 RECV: About to read_exact {} bytes from TCP socket...",
+            preamble_block_size
+        );
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
+                tracing::warn!(
+                    "🔵 RECV: Successfully read {} bytes from TCP",
+                    preamble_block_size
+                );
                 tracing::debug!("Successfully read preamble block");
             }
             Err(e) => {
+                tracing::error!("🔵 RECV: Failed to read preamble block: {:?}", e);
                 tracing::error!("Failed to read preamble block: {:?}", e);
                 return Err(e.into());
             }
@@ -271,6 +316,10 @@ impl FrameIO {
 
         // Decrypt preamble block if encrypted
         let preamble_and_inline = if has_encryption {
+            tracing::info!(
+                "📥 Decrypting preamble block: {} bytes",
+                preamble_block_buf.len()
+            );
             let decrypted = state_machine.decrypt_frame_data(&preamble_block_buf)?;
             tracing::debug!(
                 "Decrypted preamble block: {} bytes → {} bytes",
@@ -314,14 +363,22 @@ impl FrameIO {
             total_segment_size += preamble.segments[i].logical_len as usize;
         }
 
-        tracing::debug!("Total segment size: {} bytes", total_segment_size);
+        tracing::info!(
+            "📊 Frame info: tag={:?}, num_segments={}, segments={:?}, total_size={}",
+            preamble.tag,
+            preamble.num_segments,
+            &preamble.segments[0..preamble.num_segments as usize]
+                .iter()
+                .map(|s| s.logical_len)
+                .collect::<Vec<_>>(),
+            total_segment_size
+        );
 
-        // For secure mode single-segment frames, use 16-byte aligned size (CRYPTO_BLOCK_SIZE)
-        // For plaintext or multi-segment frames, add CRC
-        let total_payload_size =
-            if has_encryption && preamble.num_segments == 1 && total_segment_size > 0 {
-                // Secure mode single segment: align to 16-byte boundary (CRYPTO_BLOCK_SIZE)
-                const CRYPTO_BLOCK_SIZE: usize = 16;
+        // Calculate total payload size based on encryption mode and number of segments
+        const CRYPTO_BLOCK_SIZE: usize = 16;
+        let total_payload_size = if has_encryption && total_segment_size > 0 {
+            if preamble.num_segments == 1 {
+                // Secure mode single segment: align to 16-byte boundary
                 let aligned_len =
                     (total_segment_size + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
                 tracing::debug!(
@@ -331,10 +388,29 @@ impl FrameIO {
                 );
                 aligned_len
             } else {
-                // Plaintext or multi-segment: add CRC
-                let needs_crc = preamble.num_segments == 1 && total_segment_size > 0;
-                total_segment_size + if needs_crc { 4 } else { 0 }
-            };
+                // Secure mode multi-segment: pad each segment + add epilogue
+                let mut padded_size = 0;
+                for i in 0..preamble.num_segments as usize {
+                    let seg_len = preamble.segments[i].logical_len as usize;
+                    if seg_len > 0 {
+                        let aligned = (seg_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
+                        padded_size += aligned;
+                    }
+                }
+                // Add epilogue for multi-segment frames
+                padded_size += CRYPTO_BLOCK_SIZE;
+                tracing::debug!(
+                    "Secure multi-segment RX: logical={}, padded={}",
+                    total_segment_size,
+                    padded_size
+                );
+                padded_size
+            }
+        } else {
+            // Plaintext: add CRC for single-segment frames
+            let needs_crc = preamble.num_segments == 1 && total_segment_size > 0;
+            total_segment_size + if needs_crc { 4 } else { 0 }
+        };
 
         if total_payload_size == 0 {
             tracing::debug!("Empty frame, returning immediately");
@@ -357,12 +433,11 @@ impl FrameIO {
             total_payload_size
         };
 
-        tracing::debug!(
-            "Reading additional {} bytes (total_payload={}, inline={}, encryption={})",
-            remaining_needed,
+        tracing::info!(
+            "📏 Sizes: total_payload={}, remaining_needed={}, inline={}",
             total_payload_size,
-            if has_encryption { Self::INLINE_SIZE } else { 0 },
-            has_encryption
+            remaining_needed,
+            if has_encryption { Self::INLINE_SIZE } else { 0 }
         );
 
         let full_payload = if remaining_needed > 0 {
@@ -378,6 +453,10 @@ impl FrameIO {
 
             if has_encryption {
                 // Decrypt remaining data
+                tracing::info!(
+                    "📥 Decrypting remaining data: {} bytes",
+                    remaining_buf.len()
+                );
                 let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
                 tracing::debug!(
                     "Decrypted remaining: {} bytes → {} bytes",
@@ -411,8 +490,8 @@ impl FrameIO {
                 let segment_data = &full_payload[offset..offset + segment_len];
                 segments.push(Bytes::copy_from_slice(segment_data));
 
-                // For secure single-segment frames, skip 16-byte alignment padding
-                if has_encryption && preamble.num_segments == 1 {
+                // For secure frames, skip 16-byte alignment padding
+                if has_encryption {
                     const CRYPTO_BLOCK_SIZE: usize = 16;
                     let aligned_len =
                         (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
@@ -422,6 +501,9 @@ impl FrameIO {
                 }
             }
         }
+
+        // For secure multi-segment frames, skip the epilogue (already at the end of full_payload)
+        // The epilogue was included in total_payload_size but we don't need to parse it
 
         tracing::debug!("Parsed {} segments", segments.len());
 
@@ -433,6 +515,8 @@ impl FrameIO {
 pub struct ConnectionState {
     state_machine: StateMachine,
     frame_io: FrameIO,
+    /// Outgoing message sequence number (incremented for each message sent)
+    out_seq: u64,
 }
 
 impl ConnectionState {
@@ -442,6 +526,7 @@ impl ConnectionState {
         Self {
             state_machine,
             frame_io,
+            out_seq: 0, // Starts at 0, first message will get seq=1
         }
     }
 
@@ -496,7 +581,9 @@ impl Connection {
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
         // Establish TCP connection
+        tracing::warn!("🔵 About to call TcpStream::connect() to {}", addr);
         let mut stream = TcpStream::connect(addr).await?;
+        tracing::warn!("🔵 TcpStream::connect() returned successfully");
         tracing::info!("✓ TCP connection established to {}", addr);
 
         // Get our local address from the connection
@@ -803,9 +890,25 @@ impl Connection {
     }
 
     /// Send a Ceph message over the established session
-    pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+    pub async fn send_message(&mut self, mut msg: Message) -> Result<()> {
         let msg_type = msg.msg_type();
+
+        // Increment sequence number (pre-increment, like C++ does with ++out_seq)
+        self.state.out_seq += 1;
+        msg.header.seq = self.state.out_seq;
         let seq = msg.seq();
+
+        tracing::warn!(
+            "🟢 send_message() called: type=0x{:04x}, seq={}",
+            msg_type,
+            seq
+        );
+        tracing::warn!(
+            "🟢 Message payload sizes: front={}, middle={}, data={}",
+            msg.front.len(),
+            msg.middle.len(),
+            msg.data.len()
+        );
 
         // Convert Message to MessageFrame
         let msg_frame = MessageFrame::new(
@@ -818,8 +921,15 @@ impl Connection {
         // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message);
 
+        tracing::warn!("🟢 Created frame with {} segments", frame.segments.len());
+        for (i, seg) in frame.segments.iter().enumerate() {
+            tracing::warn!("🟢   Segment {}: {} bytes", i, seg.len());
+        }
+
         // Send the frame
+        tracing::warn!("🟢 About to call send_frame()...");
         self.state.send_frame(&frame).await?;
+        tracing::warn!("🟢 send_frame() returned successfully");
 
         tracing::debug!("Sent message: type={}, seq={}", msg_type, seq);
         Ok(())
@@ -827,45 +937,74 @@ impl Connection {
 
     /// Receive a Ceph message from the established session
     pub async fn recv_message(&mut self) -> Result<Message> {
-        // Receive a frame
-        let frame = self.state.recv_frame().await?;
+        // Loop until we get a Message frame, handling ACKs along the way
+        loop {
+            // Receive a frame
+            let frame = self.state.recv_frame().await?;
 
-        // Verify it's a Message frame
-        if frame.preamble.tag != Tag::Message {
-            return Err(Error::protocol_error(&format!(
-                "Expected Message frame, got {:?}",
-                frame.preamble.tag
-            )));
+            match frame.preamble.tag {
+                Tag::Ack => {
+                    // Handle ACK frame - decode sequence number and continue
+                    if frame.segments.is_empty() {
+                        return Err(Error::protocol_error("ACK frame missing payload"));
+                    }
+
+                    // ACK frame contains a single uint64_t sequence number
+                    let payload = frame.segments[0].clone();
+                    if payload.len() < 8 {
+                        return Err(Error::protocol_error(&format!(
+                            "ACK frame payload too short: {} bytes",
+                            payload.len()
+                        )));
+                    }
+
+                    let ack_seq = u64::from_le_bytes([
+                        payload[0], payload[1], payload[2], payload[3],
+                        payload[4], payload[5], payload[6], payload[7],
+                    ]);
+
+                    tracing::info!("✓ Received ACK frame: seq={}", ack_seq);
+                    // Continue loop to wait for Message frame
+                    continue;
+                }
+                Tag::Message => {
+                    // Convert Frame to MessageFrame
+                    // MessageFrame has 4 segments: header, front, middle, data
+                    if frame.segments.is_empty() {
+                        return Err(Error::protocol_error(
+                            "Message frame missing header segment",
+                        ));
+                    }
+
+                    let mut header_buf = frame.segments[0].clone();
+                    let header = MsgHeader::decode(&mut header_buf)?;
+
+                    let front = frame.segments.get(1).cloned().unwrap_or_default();
+                    let middle = frame.segments.get(2).cloned().unwrap_or_default();
+                    let data = frame.segments.get(3).cloned().unwrap_or_default();
+
+                    let msg = Message {
+                        header,
+                        front,
+                        middle,
+                        data,
+                        footer: None,
+                    };
+
+                    tracing::debug!(
+                        "Received message: type={}, seq={}",
+                        msg.msg_type(),
+                        msg.seq()
+                    );
+                    return Ok(msg);
+                }
+                _ => {
+                    return Err(Error::protocol_error(&format!(
+                        "Unexpected frame type in recv_message: {:?}",
+                        frame.preamble.tag
+                    )));
+                }
+            }
         }
-
-        // Convert Frame to MessageFrame
-        // MessageFrame has 4 segments: header, front, middle, data
-        if frame.segments.is_empty() {
-            return Err(Error::protocol_error(
-                "Message frame missing header segment",
-            ));
-        }
-
-        let mut header_buf = frame.segments[0].clone();
-        let header = MsgHeader::decode(&mut header_buf)?;
-
-        let front = frame.segments.get(1).cloned().unwrap_or_default();
-        let middle = frame.segments.get(2).cloned().unwrap_or_default();
-        let data = frame.segments.get(3).cloned().unwrap_or_default();
-
-        let msg = Message {
-            header,
-            front,
-            middle,
-            data,
-            footer: None,
-        };
-
-        tracing::debug!(
-            "Received message: type={}, seq={}",
-            msg.msg_type(),
-            msg.seq()
-        );
-        Ok(msg)
     }
 }

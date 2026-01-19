@@ -117,7 +117,12 @@ impl FrameDecryptor for Aes128GcmDecryptor {
             Aes128Gcm, Nonce,
         };
 
-        tracing::debug!("Decrypting with sequence: {}", self.sequence);
+        tracing::info!("🔐 RX Decrypting with sequence: {}", self.sequence);
+        tracing::info!(
+            "RX ciphertext ({} bytes): {:02x?}",
+            ciphertext.len(),
+            &ciphertext[..ciphertext.len().min(64)]
+        );
 
         // Build nonce from base nonce + sequence number
         // Nonce structure (12 bytes):
@@ -137,6 +142,7 @@ impl FrameDecryptor for Aes128GcmDecryptor {
             .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
 
         let nonce_array = Nonce::from_slice(&full_nonce);
+        tracing::info!("RX nonce: {:02x?}", &full_nonce[..]);
 
         let plaintext = cipher.decrypt(nonce_array, ciphertext).map_err(|e| {
             CryptoError::DecryptionFailed(format!(
@@ -199,7 +205,7 @@ impl FrameEncryptor for Aes128GcmEncryptor {
             Aes128Gcm, Nonce,
         };
 
-        tracing::debug!("Encrypting with sequence: {}", self.sequence);
+        tracing::info!("🔐 TX Encrypting with sequence: {}", self.sequence);
 
         // Build nonce from base nonce + sequence number
         // Nonce structure (12 bytes):

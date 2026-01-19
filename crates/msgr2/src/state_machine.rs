@@ -284,7 +284,7 @@ impl State for HelloConnecting {
             self.hello_sent = true;
             // Create HELLO frame
             let hello_frame = HelloFrame::new(
-                denc::EntityType::TYPE_MON.value() as u8,
+                denc::EntityType::TYPE_CLIENT.value() as u8,
                 denc::EntityAddr::default(),
             );
             let frame = create_frame_from_trait(&hello_frame, Tag::Hello);
@@ -1090,7 +1090,7 @@ impl State for HelloAccepting {
             Tag::Hello => {
                 // Send HELLO response and transition to auth
                 let hello_frame = HelloFrame::new(
-                    denc::EntityType::TYPE_MON.value() as u8,
+                    denc::EntityType::TYPE_CLIENT.value() as u8,
                     denc::EntityAddr::default(),
                 );
                 let response_frame = create_frame_from_trait(&hello_frame, Tag::Hello);
@@ -1449,12 +1449,13 @@ impl StateMachine {
                 Error::protocol_error(&format!("Failed to parse connection_secret: {}", e))
             })?;
 
-        // Setup decryptor (uses rx_nonce for receiving)
+        // Setup decryptor and encryptor with nonces
+        // Client uses crossed=false (no swap): rx_nonce for RX, tx_nonce for TX
+        // Server uses crossed=true (swapped): tx_nonce for RX, rx_nonce for TX
         let decryptor = Aes128GcmDecryptor::new(key.clone(), rx_nonce)
             .map_err(|e| Error::protocol_error(&format!("Failed to create decryptor: {}", e)))?;
         self.frame_decryptor = Some(Box::new(decryptor));
 
-        // Setup encryptor (uses tx_nonce for sending)
         let encryptor = Aes128GcmEncryptor::new(key, tx_nonce)
             .map_err(|e| Error::protocol_error(&format!("Failed to create encryptor: {}", e)))?;
         self.frame_encryptor = Some(Box::new(encryptor));
