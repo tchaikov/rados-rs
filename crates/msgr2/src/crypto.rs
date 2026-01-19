@@ -117,7 +117,6 @@ impl FrameDecryptor for Aes128GcmDecryptor {
             Aes128Gcm, Nonce,
         };
 
-        tracing::info!("🔐 RX Decrypting with sequence: {}", self.sequence);
         tracing::info!(
             "RX ciphertext ({} bytes): {:02x?}",
             ciphertext.len(),
@@ -205,7 +204,6 @@ impl FrameEncryptor for Aes128GcmEncryptor {
             Aes128Gcm, Nonce,
         };
 
-        tracing::info!("🔐 TX Encrypting with sequence: {}", self.sequence);
 
         // Build nonce from base nonce + sequence number
         // Nonce structure (12 bytes):

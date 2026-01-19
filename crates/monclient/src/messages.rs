@@ -42,7 +42,6 @@ impl MMonSubscribe {
 
         // Encode map size
         buf.put_u32_le(self.what.len() as u32);
-        tracing::info!("📦 Encoding {} subscriptions", self.what.len());
 
         // Encode each subscription
         for (name, item) in &self.what {
@@ -67,8 +66,6 @@ impl MMonSubscribe {
         tracing::info!("  🖥️  Hostname: '{}'", self.hostname);
 
         let bytes = buf.freeze();
-        tracing::warn!("📨 Encoded subscription payload: {} bytes", bytes.len());
-        tracing::warn!("📨 Payload hex: {}", hex::encode(&bytes));
 
         Ok(bytes)
     }

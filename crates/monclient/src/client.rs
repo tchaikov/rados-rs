@@ -313,13 +313,11 @@ impl MonClient {
         // Create actual msgr2 connection
         let mon_con = Arc::new(MonConnection::connect(socket_addr, rank, addrs).await?);
 
-        info!("✅ MonConnection created, testing if connection is alive...");
 
         // Test if connection is alive by trying to get a lock
         {
             let conn_arc = mon_con.connection();
             let _conn_test = conn_arc.lock().await;
-            info!("✅ Connection lock acquired successfully");
         }
 
         // Store as active connection
