@@ -75,7 +75,7 @@ impl EntityAddr {
         // Parse sockaddr structure
         // Bytes [0-1]: address family (little-endian u16)
         let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
-        
+
         match af {
             2 => {
                 // AF_INET (IPv4)
@@ -83,7 +83,8 @@ impl EntityAddr {
                 let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
                 // Bytes [4-7]: IPv4 address
                 if self.sockaddr_data.len() >= 8 {
-                    format!("{}.{}.{}.{}:{}",
+                    format!(
+                        "{}.{}.{}.{}:{}",
                         self.sockaddr_data[4],
                         self.sockaddr_data[5],
                         self.sockaddr_data[6],
@@ -265,7 +266,7 @@ impl Serialize for EntityAddr {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("EntityAddr", 3)?;
-        
+
         // Serialize type as lowercase string
         let type_str = match self.addr_type {
             EntityAddrType::None => "none",
@@ -353,8 +354,6 @@ impl crate::denc::Denc for EntityAddrvec {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        use crate::features::CEPH_FEATURE_MSG_ADDR2;
-
         if buf.remaining() < 1 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for EntityAddrvec marker".to_string(),

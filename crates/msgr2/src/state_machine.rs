@@ -379,12 +379,23 @@ impl AuthConnecting {
                     .clone()
                     .unwrap_or_else(|| "/etc/ceph/ceph.client.admin.keyring".to_string());
 
-                Self::with_keyring_path(&keyring_file, preferred_modes.clone(), preferred_auth_method, supported_auth_methods.clone(), keyring_path.clone())
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Failed to load keyring from {}: {}", keyring_file, e);
-                        tracing::warn!("Using fallback authentication key");
-                        Self::with_fallback_key(preferred_modes, preferred_auth_method, supported_auth_methods, keyring_path)
-                    })
+                Self::with_keyring_path(
+                    &keyring_file,
+                    preferred_modes.clone(),
+                    preferred_auth_method,
+                    supported_auth_methods.clone(),
+                    keyring_path.clone(),
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Failed to load keyring from {}: {}", keyring_file, e);
+                    tracing::warn!("Using fallback authentication key");
+                    Self::with_fallback_key(
+                        preferred_modes,
+                        preferred_auth_method,
+                        supported_auth_methods,
+                        keyring_path,
+                    )
+                })
             }
             _ => {
                 tracing::warn!(
@@ -549,21 +560,27 @@ impl State for AuthConnecting {
 
                     // For AuthMethod::None, we don't need to extract session_key and connection_secret
                     if self.auth_method == crate::AuthMethod::None {
-                        tracing::info!("AuthMethod::None - no session key/connection secret needed");
-                        
+                        tracing::info!(
+                            "AuthMethod::None - no session key/connection secret needed"
+                        );
+
                         // For no-auth with CRC mode, skip directly to session connecting
                         // For SECURE mode, we'd need signature exchange but that doesn't make sense with no-auth
                         if con_mode == crate::ConnectionMode::Secure.as_u32() {
-                            tracing::warn!("SECURE mode with AuthMethod::None is unusual, skipping to session");
+                            tracing::warn!(
+                                "SECURE mode with AuthMethod::None is unusual, skipping to session"
+                            );
                         }
-                        
+
                         // Go directly to SessionConnecting
                         Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
                     } else {
                         // CephX authentication - extract session_key and connection_secret
-                        let handler = self.cephx_handler.as_mut()
+                        let handler = self
+                            .cephx_handler
+                            .as_mut()
                             .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
-                        
+
                         let (session_key, connection_secret) = handler
                             .handle_auth_done(auth_payload, global_id, con_mode)
                             .map_err(|e| Error::protocol_error(&e.to_string()))?;
@@ -608,7 +625,7 @@ impl State for AuthConnecting {
     fn enter(&mut self) -> Result<StateResult> {
         // Send initial AUTH_REQUEST frame
         let preferred_modes: Vec<u32> = self.preferred_modes.iter().map(|m| m.as_u32()).collect();
-        
+
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
                 tracing::info!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
@@ -617,7 +634,9 @@ impl State for AuthConnecting {
             }
             crate::AuthMethod::Cephx => {
                 tracing::info!("Sending AUTH_REQUEST with AuthMethod::Cephx");
-                let handler = self.cephx_handler.as_mut()
+                let handler = self
+                    .cephx_handler
+                    .as_mut()
                     .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
                 let payload = handler
                     .build_initial_request(0) // Initial request uses global_id=0
@@ -631,12 +650,8 @@ impl State for AuthConnecting {
                 )));
             }
         };
-        
-        let auth_frame = AuthRequestFrame::new(
-            method,
-            preferred_modes.clone(),
-            auth_payload,
-        );
+
+        let auth_frame = AuthRequestFrame::new(method, preferred_modes.clone(), auth_payload);
         let frame = create_frame_from_trait(&auth_frame, Tag::AuthRequest);
 
         Ok(StateResult::SendAndWait {
@@ -1938,8 +1953,7 @@ mod tests {
             "with_no_auth should set only AuthMethod::None"
         );
         assert_eq!(
-            config.keyring_path,
-            None,
+            config.keyring_path, None,
             "with_no_auth should have no keyring path"
         );
 

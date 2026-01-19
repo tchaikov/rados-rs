@@ -57,9 +57,10 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
                 );
 
                 // Try to encode back
-                match merge_meta.encode(0) {
-                    Ok(encoded_data) => {
-                        let encoded_bytes = encoded_data.to_vec();
+                let mut encoded_buf = bytes::BytesMut::new();
+                match merge_meta.encode(&mut encoded_buf, 0) {
+                    Ok(()) => {
+                        let encoded_bytes = encoded_buf.to_vec();
 
                         println!("  Original bytes: {}", hex::encode(&original_data));
                         println!("  Encoded bytes:  {}", hex::encode(&encoded_bytes));

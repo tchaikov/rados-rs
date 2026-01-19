@@ -3,7 +3,7 @@ use crate::entity_addr::{EntityAddr, EntityAddrvec};
 use crate::error::RadosError;
 use crate::padding::Padding;
 use crate::{mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -27,7 +27,7 @@ pub struct PgId {
 
 // DencMut implementation for PgId
 impl crate::denc::Denc for PgId {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 17 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for PgId: need 17, have {}",
@@ -41,7 +41,7 @@ impl crate::denc::Denc for PgId {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 17 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient bytes for PgId: need 17, have {}",
@@ -61,7 +61,7 @@ impl crate::denc::Denc for PgId {
         Ok(PgId { pool, seed })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(17)
     }
 }
@@ -82,7 +82,7 @@ pub struct EVersion {
 
 // DencMut implementation for EVersion
 impl crate::denc::Denc for EVersion {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 12 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for EVersion: need 12, have {}",
@@ -94,7 +94,7 @@ impl crate::denc::Denc for EVersion {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 12 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for EVersion".to_string(),
@@ -109,7 +109,7 @@ impl crate::denc::Denc for EVersion {
         })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(12)
     }
 }
@@ -141,7 +141,7 @@ impl Serialize for UTime {
 
 // DencMut implementation for UTime
 impl crate::denc::Denc for UTime {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 8 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for UTime: need 8, have {}",
@@ -153,7 +153,7 @@ impl crate::denc::Denc for UTime {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 8 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for UTime".to_string(),
@@ -164,7 +164,7 @@ impl crate::denc::Denc for UTime {
         Ok(UTime { sec, nsec })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(8)
     }
 }
@@ -180,45 +180,48 @@ impl crate::denc::FixedSize for UTime {
 ///   - if timestamp is < 365 days (31536000 seconds), output as "seconds.microseconds"
 fn format_utime_as_timestamp(utime: &UTime) -> String {
     use std::time::Duration;
-    
+
     // Special case: zero timestamp outputs as "0.000000"
     if utime.sec == 0 && utime.nsec == 0 {
         return "0.000000".to_string();
     }
-    
+
     // Special case: timestamps < 1 year output as "seconds.microseconds"
     // This matches ceph-dencoder behavior for small timestamps
-    if utime.sec < 31536000 {  // 365 days
+    if utime.sec < 31536000 {
+        // 365 days
         let microseconds = utime.nsec / 1000;
         return format!("{}.{:06}", utime.sec, microseconds);
     }
-    
+
     // Convert UTime to SystemTime
-    let duration = Duration::new(utime.sec as u64, utime.nsec);
-    
+    let _duration = Duration::new(utime.sec as u64, utime.nsec);
+
     // Format as ISO 8601 with nanoseconds
     // Note: The nsec field in UTime is already nanoseconds, but we need microseconds for display
     let microseconds = utime.nsec / 1000;
-    
+
     // Convert to datetime components manually to match ceph format exactly
     // Using chrono-like formatting but without the dependency
     let secs_since_epoch = utime.sec as i64;
-    
+
     // Days since epoch (1970-01-01)
     let days = secs_since_epoch / 86400;
     let remaining_secs = secs_since_epoch % 86400;
-    
+
     // Calculate year, month, day from days since epoch
     // This is a simplified version - for production you'd want chrono crate
     let (year, month, day) = days_to_ymd(days);
-    
+
     // Calculate hours, minutes, seconds
     let hours = remaining_secs / 3600;
     let minutes = (remaining_secs % 3600) / 60;
     let seconds = remaining_secs % 60;
-    
-    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+0000",
-            year, month, day, hours, minutes, seconds, microseconds)
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+0000",
+        year, month, day, hours, minutes, seconds, microseconds
+    )
 }
 
 /// Convert days since Unix epoch to year/month/day
@@ -226,10 +229,10 @@ fn format_utime_as_timestamp(utime: &UTime) -> String {
 fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
     // Days since 1970-01-01
     // This is a simplified Gregorian calendar calculation
-    
+
     // Adjust for epoch (Unix epoch is 1970-01-01)
     let mut year = 1970;
-    
+
     // Handle years
     loop {
         let days_in_year = if is_leap_year(year) { 366 } else { 365 };
@@ -240,14 +243,14 @@ fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
             break;
         }
     }
-    
+
     // Handle months
     let days_in_months = if is_leap_year(year) {
         [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     } else {
         [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
     };
-    
+
     let mut month = 1;
     for &days_in_month in &days_in_months {
         if days >= days_in_month as i64 {
@@ -257,9 +260,9 @@ fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
             break;
         }
     }
-    
+
     let day = days as u32 + 1; // Days are 1-indexed
-    
+
     (year, month, day)
 }
 
@@ -267,50 +270,36 @@ fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
-/// Helper to serialize f32 as integer when value is exactly 0.0
-/// Matches ceph-dencoder behavior
-fn serialize_float_as_int_if_zero<S>(value: &f32, serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: serde::Serializer,
-{
-    if *value == 0.0 {
-        serializer.serialize_i32(0)
-    } else {
-        serializer.serialize_f32(*value)
-    }
-}
-
-/// String encoding implementation to match Ceph's string handling
-
-/// Generic BTreeMap encoding - matches Ceph's map encoding  
+// String encoding implementation to match Ceph's string handling
+// Generic BTreeMap encoding - matches Ceph's map encoding
 
 /// Explicit Hash HitSet parameters - no additional parameters needed
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ExplicitHashHitSetParams;
 
 impl VersionedEncode for ExplicitHashHitSetParams {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
     fn encode_content<B: BufMut>(
         &self,
-        buf: &mut B,
-        features: u64,
-        version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // No parameters to encode
         Ok(())
     }
 
     fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        compat_version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // No parameters to decode for ExplicitHash
         Ok(ExplicitHashHitSetParams)
@@ -322,28 +311,28 @@ impl VersionedEncode for ExplicitHashHitSetParams {
 pub struct ExplicitObjectHitSetParams;
 
 impl VersionedEncode for ExplicitObjectHitSetParams {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
     fn encode_content<B: BufMut>(
         &self,
-        buf: &mut B,
-        features: u64,
-        version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // No parameters to encode
         Ok(())
     }
 
     fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        compat_version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // No parameters to decode for ExplicitObject
         Ok(ExplicitObjectHitSetParams)
@@ -359,19 +348,19 @@ pub struct BloomHitSetParams {
 }
 
 impl VersionedEncode for BloomHitSetParams {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
     fn encode_content<B: BufMut>(
         &self,
         buf: &mut B,
-        features: u64,
-        version: u8,
+        _features: u64,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // Write directly to buf parameter
         buf.put_u32_le(self.fpp_micro);
@@ -382,9 +371,9 @@ impl VersionedEncode for BloomHitSetParams {
 
     fn decode_content<B: Buf>(
         buf: &mut B,
-        features: u64,
-        version: u8,
-        compat_version: u8,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if buf.remaining() < 20 {
             // 4 + 8 + 8 = 20 buf
@@ -423,7 +412,7 @@ impl Serialize for HitSetParams {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("HitSetParams", 1)?;
-        
+
         match self {
             HitSetParams::None => {
                 state.serialize_field("type", "none")?;
@@ -441,17 +430,17 @@ impl Serialize for HitSetParams {
                 // TODO: serialize params fields
             }
         }
-        
+
         state.end()
     }
 }
 
 impl VersionedEncode for HitSetParams {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
@@ -459,7 +448,7 @@ impl VersionedEncode for HitSetParams {
         &self,
         buf: &mut B,
         features: u64,
-        version: u8,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // Write directly to buf parameter
 
@@ -487,8 +476,8 @@ impl VersionedEncode for HitSetParams {
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
-        version: u8,
-        compat_version: u8,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if buf.remaining() < 1 {
             return Err(RadosError::Protocol(
@@ -598,7 +587,7 @@ impl std::fmt::Display for UuidD {
 
 // DencMut implementation for UuidD
 impl crate::denc::Denc for UuidD {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 16 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for UuidD: need 16, have {}",
@@ -609,7 +598,7 @@ impl crate::denc::Denc for UuidD {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 16 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for UuidD".to_string(),
@@ -620,7 +609,7 @@ impl crate::denc::Denc for UuidD {
         Ok(UuidD { bytes: uuid_bytes })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(16)
     }
 }
@@ -649,25 +638,25 @@ impl Serialize for OsdXInfo {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("OsdXInfo", 7)?;
-        
+
         // Format UTime fields as ISO 8601 timestamp strings to match ceph-dencoder
         let down_stamp_str = format_utime_as_timestamp(&self.down_stamp);
         state.serialize_field("down_stamp", &down_stamp_str)?;
-        
+
         // Serialize laggy_probability as integer 0 when it's 0.0, otherwise as float
         if self.laggy_probability == 0.0 {
             state.serialize_field("laggy_probability", &0)?;
         } else {
             state.serialize_field("laggy_probability", &self.laggy_probability)?;
         }
-        
+
         state.serialize_field("laggy_interval", &self.laggy_interval)?;
         state.serialize_field("features", &self.features)?;
         state.serialize_field("old_weight", &self.old_weight)?;
-        
+
         let last_purged_snaps_scrub_str = format_utime_as_timestamp(&self.last_purged_snaps_scrub);
         state.serialize_field("last_purged_snaps_scrub", &last_purged_snaps_scrub_str)?;
-        
+
         state.serialize_field("dead_epoch", &self.dead_epoch)?;
         state.end()
     }
@@ -687,7 +676,7 @@ impl VersionedEncode for OsdXInfo {
         }
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
@@ -731,7 +720,7 @@ impl VersionedEncode for OsdXInfo {
         buf: &mut B,
         features: u64,
         version: u8,
-        compat_version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Version 1+ fields
         let down_stamp = UTime::decode(buf, features)?;
@@ -803,7 +792,7 @@ pub struct OsdInfo {
 
 // DencMut implementation for OsdInfo
 impl crate::denc::Denc for OsdInfo {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 25 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for OsdInfo: need 25, have {}",
@@ -820,7 +809,7 @@ impl crate::denc::Denc for OsdInfo {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 25 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for OsdInfo".to_string(),
@@ -844,7 +833,7 @@ impl crate::denc::Denc for OsdInfo {
         })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(25)
     }
 }
@@ -986,13 +975,13 @@ impl Serialize for PgPool {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PgPool", 40)?; // approximate field count
-        
+
         // Application metadata first (matches ceph order)
         state.serialize_field("application_metadata", &self.application_metadata)?;
         state.serialize_field("auid", &self.auid)?;
         state.serialize_field("cache_min_evict_age", &self.cache_min_evict_age)?;
         state.serialize_field("cache_min_flush_age", &self.cache_min_flush_age)?;
-        
+
         // cache_mode as string
         let cache_mode_str = match self.cache_mode {
             0 => "none",
@@ -1004,15 +993,24 @@ impl Serialize for PgPool {
             _ => "unknown",
         };
         state.serialize_field("cache_mode", &cache_mode_str)?;
-        
-        state.serialize_field("cache_target_dirty_high_ratio_micro", &self.cache_target_dirty_high_ratio_micro)?;
-        state.serialize_field("cache_target_dirty_ratio_micro", &self.cache_target_dirty_ratio_micro)?;
-        state.serialize_field("cache_target_full_ratio_micro", &self.cache_target_full_ratio_micro)?;
-        
+
+        state.serialize_field(
+            "cache_target_dirty_high_ratio_micro",
+            &self.cache_target_dirty_high_ratio_micro,
+        )?;
+        state.serialize_field(
+            "cache_target_dirty_ratio_micro",
+            &self.cache_target_dirty_ratio_micro,
+        )?;
+        state.serialize_field(
+            "cache_target_full_ratio_micro",
+            &self.cache_target_full_ratio_micro,
+        )?;
+
         // Format create_time as timestamp string
         let create_time_str = format_utime_as_timestamp(&self.create_time);
         state.serialize_field("create_time", &create_time_str)?;
-        
+
         state.serialize_field("crush_rule", &self.crush_rule)?;
         state.serialize_field("erasure_code_profile", &self.erasure_code_profile)?;
         state.serialize_field("expected_num_objects", &self.expected_num_objects)?;
@@ -1023,22 +1021,37 @@ impl Serialize for PgPool {
         state.serialize_field("hit_set_params", &self.hit_set_params)?;
         state.serialize_field("hit_set_period", &self.hit_set_period)?;
         state.serialize_field("hit_set_search_last_n", &self.hit_set_search_last_n)?;
-        
+
         // last_change as string
         state.serialize_field("last_change", &self.last_change.to_string())?;
-        state.serialize_field("last_force_op_resend", &self.last_force_op_resend.to_string())?;
-        state.serialize_field("last_force_op_resend_preluminous", &self.last_force_op_resend_preluminous.to_string())?;
-        state.serialize_field("last_force_op_resend_prenautilus", &self.last_force_op_resend_prenautilus.to_string())?;
-        
+        state.serialize_field(
+            "last_force_op_resend",
+            &self.last_force_op_resend.to_string(),
+        )?;
+        state.serialize_field(
+            "last_force_op_resend_preluminous",
+            &self.last_force_op_resend_preluminous.to_string(),
+        )?;
+        state.serialize_field(
+            "last_force_op_resend_prenautilus",
+            &self.last_force_op_resend_prenautilus.to_string(),
+        )?;
+
         state.serialize_field("last_pg_merge_meta", &self.last_pg_merge_meta)?;
-        state.serialize_field("min_read_recency_for_promote", &self.min_read_recency_for_promote)?;
+        state.serialize_field(
+            "min_read_recency_for_promote",
+            &self.min_read_recency_for_promote,
+        )?;
         state.serialize_field("min_size", &self.min_size)?;
-        state.serialize_field("min_write_recency_for_promote", &self.min_write_recency_for_promote)?;
+        state.serialize_field(
+            "min_write_recency_for_promote",
+            &self.min_write_recency_for_promote,
+        )?;
         state.serialize_field("object_hash", &self.object_hash)?;
-        
+
         // Note: ceph-dencoder adds computed fields like "options", "flags_names", "is_stretch_pool", etc.
         // We skip lpg_num, lpgp_num (legacy, always 0), opts_data (not in ceph output)
-        
+
         // pg_autoscale_mode as string
         let pg_autoscale_mode_str = match self.pg_autoscale_mode {
             0 => "off",
@@ -1047,25 +1060,25 @@ impl Serialize for PgPool {
             _ => "unknown",
         };
         state.serialize_field("pg_autoscale_mode", &pg_autoscale_mode_str)?;
-        
+
         state.serialize_field("pg_num", &self.pg_num)?;
         state.serialize_field("pg_num_pending", &self.pg_num_pending)?;
         state.serialize_field("pg_num_target", &self.pg_num_target)?;
-        
+
         // Use ceph's field name
         state.serialize_field("pg_placement_num", &self.pgp_num)?;
         state.serialize_field("pg_placement_num_target", &self.pgp_num_target)?;
-        
+
         // pool_snaps - use field name from ceph
         state.serialize_field("pool_snaps", &self.snaps)?;
-        
+
         state.serialize_field("quota_max_bytes", &self.quota_max_bytes)?;
         state.serialize_field("quota_max_objects", &self.quota_max_objects)?;
         state.serialize_field("read_tier", &self.read_tier)?;
-        
+
         // removed_snaps using ceph's field name
         state.serialize_field("removed_snaps", &self.removed_snaps)?;
-        
+
         state.serialize_field("size", &self.size)?;
         state.serialize_field("snap_epoch", &self.snap_epoch)?;
         state.serialize_field("snap_seq", &self.snap_seq)?;
@@ -1076,7 +1089,7 @@ impl Serialize for PgPool {
         state.serialize_field("tiers", &self.tiers)?;
         state.serialize_field("use_gmt_hitset", &self.use_gmt_hitset)?;
         state.serialize_field("write_tier", &self.write_tier)?;
-        
+
         state.end()
     }
 }
@@ -1097,24 +1110,24 @@ impl Serialize for PoolSnapInfo {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PoolSnapInfo", 3)?;
-        
+
         state.serialize_field("snapid", &self.snapid)?;
-        
+
         // Format UTime as ISO 8601 timestamp string to match ceph-dencoder
         let timestamp_str = format_utime_as_timestamp(&self.stamp);
         state.serialize_field("stamp", &timestamp_str)?;
-        
+
         state.serialize_field("name", &self.name)?;
         state.end()
     }
 }
 
 impl VersionedEncode for PoolSnapInfo {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         2
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         2
     }
 
@@ -1122,7 +1135,7 @@ impl VersionedEncode for PoolSnapInfo {
         &self,
         buf: &mut B,
         features: u64,
-        version: u8,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // Write directly to buf parameter
         buf.put_u64_le(self.snapid);
@@ -1134,8 +1147,8 @@ impl VersionedEncode for PoolSnapInfo {
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
-        version: u8,
-        compat_version: u8,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         let snapid = buf.get_u64_le();
         let stamp = UTime::decode(buf, features)?;
@@ -1179,7 +1192,7 @@ pub struct SnapInterval {
 
 // DencMut implementation for SnapInterval
 impl crate::denc::Denc for SnapInterval {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 16 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for SnapInterval: need 16, have {}",
@@ -1191,7 +1204,7 @@ impl crate::denc::Denc for SnapInterval {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 16 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for SnapInterval".to_string(),
@@ -1202,7 +1215,7 @@ impl crate::denc::Denc for SnapInterval {
         Ok(SnapInterval { start, len })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(16)
     }
 }
@@ -1261,7 +1274,7 @@ impl VersionedEncode for PgPool {
         v
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         Self::COMPAT_VERSION
     }
 
@@ -1386,7 +1399,7 @@ impl VersionedEncode for PgPool {
         buf: &mut B,
         features: u64,
         version: u8,
-        compat_version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if version < Self::COMPAT_VERSION {
             return Err(RadosError::Protocol(format!(
@@ -1684,7 +1697,6 @@ impl VersionedEncode for PgPool {
             );
             if buf.remaining() >= 8 {
                 // Debug array removed - cannot index generic Buf
-                
             }
 
             // opts is versioned encoded - read version header first
@@ -1708,7 +1720,6 @@ impl VersionedEncode for PgPool {
                         buf.copy_to_slice(&mut pool.opts_data);
                     }
                 } else {
-                    
                     pool.opts_data = Vec::new();
                 }
             } else {
@@ -1831,34 +1842,40 @@ impl Serialize for PgMergeMeta {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("PgMergeMeta", 6)?;
-        
+
         // Format source_pgid as "pool.seed" string
         let source_pgid_str = format!("{}.{}", self.source_pgid.pool, self.source_pgid.seed);
         state.serialize_field("source_pgid", &source_pgid_str)?;
-        
+
         state.serialize_field("ready_epoch", &self.ready_epoch)?;
         state.serialize_field("last_epoch_started", &self.last_epoch_started)?;
         state.serialize_field("last_epoch_clean", &self.last_epoch_clean)?;
-        
+
         // Format versions as "epoch'version" string
-        let source_version_str = format!("{}'{}",  self.source_version.epoch, self.source_version.version);
+        let source_version_str = format!(
+            "{}'{}",
+            self.source_version.epoch, self.source_version.version
+        );
         state.serialize_field("source_version", &source_version_str)?;
-        
-        let target_version_str = format!("{}'{}", self.target_version.epoch, self.target_version.version);
+
+        let target_version_str = format!(
+            "{}'{}",
+            self.target_version.epoch, self.target_version.version
+        );
         state.serialize_field("target_version", &target_version_str)?;
-        
+
         // Skip extra_field and extra_padding (they're Padding types)
-        
+
         state.end()
     }
 }
 
 impl VersionedEncode for PgMergeMeta {
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         1
     }
 
@@ -1866,7 +1883,7 @@ impl VersionedEncode for PgMergeMeta {
         &self,
         buf: &mut B,
         features: u64,
-        version: u8,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // Write directly to buf parameter
 
@@ -1893,8 +1910,8 @@ impl VersionedEncode for PgMergeMeta {
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
-        version: u8,
-        compat_version: u8,
+        _version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         let source_pgid = PgId::decode(buf, features)?;
         let ready_epoch = buf.get_u32_le();
@@ -2072,19 +2089,19 @@ impl OSDMap {
 impl VersionedEncode for OSDMap {
     const FEATURE_DEPENDENT: bool = true;
 
-    fn encoding_version(&self, features: u64) -> u8 {
+    fn encoding_version(&self, _features: u64) -> u8 {
         8 // Meta-encoding version
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
+    fn compat_version(&self, _features: u64) -> u8 {
         7
     }
 
     fn encode_content<B: BufMut>(
         &self,
-        buf: &mut B,
-        features: u64,
-        version: u8,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
     ) -> Result<(), RadosError> {
         // For now, we'll focus on decoding. Encoding can be implemented later.
         Err(RadosError::Protocol(
@@ -2096,7 +2113,7 @@ impl VersionedEncode for OSDMap {
         buf: &mut B,
         features: u64,
         version: u8,
-        compat_version: u8,
+        _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if version < 7 {
             return Err(RadosError::Protocol(format!(

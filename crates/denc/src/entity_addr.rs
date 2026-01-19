@@ -6,10 +6,6 @@
 pub use crate::entity_addr_dencmut::{EntityAddr, EntityAddrType};
 
 // EntityAddrvec - keep old implementation for now (TODO: migrate to DencMut)
-use crate::denc::Denc;
-use crate::error::RadosError;
-use crate::features::CEPH_FEATURE_MSG_ADDR2;
-use bytes::{BufMut, BytesMut};
 use serde::Serialize;
 
 /// EntityAddrvec - a vector of EntityAddr (entity_addrvec_t in C++)

@@ -268,7 +268,6 @@ impl<T: zerocopy::ZeroCopyDencode> Denc for T {
 /// so we need to be careful about which types get which implementation.
 /// For now, we'll implement this manually for specific types rather than as a blanket impl.
 // ============= Versioned Encoding =============
-
 /// Trait for types that add version metadata during encoding
 /// Follows Ceph's ENCODE_START/DECODE_START pattern
 ///

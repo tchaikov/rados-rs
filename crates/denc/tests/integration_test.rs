@@ -44,9 +44,10 @@ fn test_entity_addr_decode_encode_roundtrip() {
                 let features_to_test = [0u64, 1u64 << 59]; // without and with MSG_ADDR2
 
                 for features in features_to_test {
-                    match entity_addr.encode(features) {
-                        Ok(encoded_data) => {
-                            let encoded_bytes = encoded_data.to_vec();
+                    let mut encoded_buf = bytes::BytesMut::new();
+                    match entity_addr.encode(&mut encoded_buf, features) {
+                        Ok(()) => {
+                            let encoded_bytes = encoded_buf.to_vec();
 
                             if encoded_bytes == original_data {
                                 println!("  ✓ Perfect roundtrip with features=0x{:x}", features);
@@ -116,8 +117,11 @@ fn test_specific_entity_addr_sample() {
     assert_eq!(entity_addr.nonce, 0);
 
     // Try encoding back
-    let encoded = entity_addr.encode(1u64 << 59).expect("Failed to encode");
-    let encoded_bytes = encoded.to_vec();
+    let mut encoded_buf = bytes::BytesMut::new();
+    entity_addr
+        .encode(&mut encoded_buf, 1u64 << 59)
+        .expect("Failed to encode");
+    let encoded_bytes = encoded_buf.to_vec();
 
     if encoded_bytes == sample_data {
         println!("✓ Sample roundtrip successful");
@@ -127,8 +131,11 @@ fn test_specific_entity_addr_sample() {
         println!("Encoded:  {}", hex::encode(&encoded_bytes));
 
         // Let's also try without MSG_ADDR2 feature
-        let encoded_legacy = entity_addr.encode(0).expect("Failed to encode legacy");
-        let encoded_legacy_bytes = encoded_legacy.to_vec();
+        let mut encoded_legacy_buf = bytes::BytesMut::new();
+        entity_addr
+            .encode(&mut encoded_legacy_buf, 0)
+            .expect("Failed to encode legacy");
+        let encoded_legacy_bytes = encoded_legacy_buf.to_vec();
         println!("Legacy:   {}", hex::encode(&encoded_legacy_bytes));
     }
 }
