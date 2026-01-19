@@ -1,0 +1,217 @@
+services:
+  ceph-mon:
+    image: quay.io/ceph/ceph:v18.2.7
+    pull_policy: missing
+    hostname: ceph-mon
+    container_name: ceph-mon
+    network_mode: host
+    environment:
+      - CEPH_PUBLIC_NETWORK=127.0.0.1/32
+      - MON_IP=127.0.0.1
+      - CEPH_MON_PORT=6789
+      - CEPH_PORT_MIN=6000
+      - CEPH_PORT_MAX=7000
+    volumes:
+      - ceph-mon-etc:/etc/ceph
+      - ceph-mon-lib:/var/lib/ceph
+      - ceph-mon-logs:/var/log/ceph
+    command: |
+      bash -c "
+      MON_ID=a
+
+      if [ ! -f /etc/ceph/ceph.conf ]; then
+        mkdir -p /etc/ceph /var/lib/ceph/mon/ceph-ceph-mon
+
+        # Generate fsid
+        export FSID=$$(uuidgen)
+        echo $$FSID > /etc/ceph/fsid
+
+        # Create minimal ceph.conf
+        cat > /etc/ceph/ceph.conf <<EOF
+      [global]
+      fsid = $$FSID
+      ms bind msgr1 = false
+      ms bind msgr2 = true
+      ms bind port min = $$CEPH_PORT_MIN
+      ms bind port max = $$CEPH_PORT_MAX
+      mon_max_pg_per_osd = 1000
+      mon_initial_members = $$MON_ID
+      mon host = v2:$$MON_IP:$$CEPH_MON_PORT
+      public_network = $$CEPH_PUBLIC_NETWORK
+      auth_cluster_required = cephx
+      auth_service_required = cephx
+      auth_client_required = cephx
+      osd_pool_default_size = 1
+      osd_pool_default_min_size = 1
+      osd_crush_chooseleaf_type = 0
+      mon_warn_on_pool_no_redundancy = false
+
+      [mon]
+      mon_allow_pool_delete = true
+      auth allow insecure global id reclaim = false
+
+      [mgr]
+      mgr disabled modules = rook
+      debug mgrc = 20
+
+      [osd]
+      debug ms = 1
+      debug osd = 25
+      debug monc = 20
+      debug mgrc = 20
+      osd_check_max_object_name_len_on_startup = false
+
+      EOF
+
+        # Create keyring
+        ceph-authtool --create-keyring /etc/ceph/ceph.mon.keyring --gen-key -n mon. --cap mon 'allow *'
+        ceph-authtool --create-keyring /etc/ceph/ceph.client.admin.keyring --gen-key -n client.admin --cap mon 'allow *' --cap osd 'allow *' --cap mgr 'allow *'
+        ceph-authtool /etc/ceph/ceph.mon.keyring --import-keyring /etc/ceph/ceph.client.admin.keyring
+
+        # Create monitor map
+        monmaptool --create --clobber --addv $$MON_ID v2:$$MON_IP:$$CEPH_MON_PORT --fsid $$FSID /etc/ceph/monmap
+
+        # Initialize monitor
+        ceph-mon --mkfs -i $$MON_ID --monmap /etc/ceph/monmap --keyring /etc/ceph/ceph.mon.keyring
+
+        # Fix permissions (both for container and host access)
+        chown -R ceph:ceph /var/lib/ceph
+        # Make config files readable by host user
+        chmod 644 /etc/ceph/ceph.conf /etc/ceph/ceph.client.admin.keyring
+      fi
+
+      # Start monitor
+      exec ceph-mon -f -i $$MON_ID --public-addr $${MON_IP:-127.0.0.1}:$${CEPH_MON_PORT:-6789}
+      "
+    privileged: true
+
+  ceph-mgr:
+    image: quay.io/ceph/ceph:v18.2.7
+    pull_policy: missing
+    hostname: ceph-mgr
+    container_name: ceph-mgr
+    depends_on:
+      - ceph-mon
+    network_mode: host
+    environment:
+      - HOST_IP=${HOST_IP:-127.0.0.1}
+      - CEPH_MGR_PORT=${CEPH_MGR_PORT:-6804}
+      - CEPH_MGR_DASHBOARD_PORT=${CEPH_MGR_DASHBOARD_PORT:-8443}
+    volumes:
+      - ceph-mon-etc:/etc/ceph:ro
+      - ceph-mgr-lib:/var/lib/ceph
+      - ceph-mgr-logs:/var/log/ceph
+    command: |
+      bash -c "
+      # Wait for monitor to be ready
+      max_attempts=30
+      attempt=0
+      while [ $$attempt -lt $$max_attempts ]; do
+        if ceph -s 2>/dev/null; then
+          break
+        fi
+        echo 'Waiting for monitor...'
+        sleep 2
+        attempt=$$((attempt + 1))
+      done
+
+      if [ $$attempt -eq $$max_attempts ]; then
+        echo 'Monitor did not become ready in time'
+        exit 1
+      fi
+
+      MGR_ID=x
+      # Create MGR directory and keyring
+      MGR_PATH=/var/lib/ceph/mgr/ceph-$$MGR_ID
+      mkdir -p $$MGR_PATH
+
+      # Create MGR auth
+      ceph auth get-or-create mgr.$$MGR_ID mon 'allow profile mgr' osd 'allow *' mds 'allow *' > $$MGR_PATH/keyring
+
+      # Fix permissions
+      chown -R ceph:ceph /var/lib/ceph/mgr
+
+      # Start manager
+      exec ceph-mgr -f -i $$MGR_ID
+      "
+    privileged: true
+
+  ceph-osd:
+    image: quay.io/ceph/ceph:v18.2.7
+    pull_policy: missing
+    hostname: ceph-osd
+    container_name: ceph-osd
+    depends_on:
+      - ceph-mon
+      - ceph-mgr
+    network_mode: host
+    environment:
+      - HOST_IP=127.0.0.1
+      - OSD_DEVICE=/var/lib/ceph/osd/ceph-0/data
+      - CEPH_OSD_PORT=6800
+    volumes:
+      - ceph-mon-etc:/etc/ceph
+      - ceph-osd-lib:/var/lib/ceph
+      - ceph-osd-logs:/var/log/ceph
+    command: |
+      bash -c "
+      # Wait for monitor to be ready
+      max_attempts=30
+      attempt=0
+      while [ $$attempt -lt $$max_attempts ]; do
+        if ceph mgr stat | jq -e '.available'; then
+          break
+        fi
+        echo 'Waiting for mgr...'
+        sleep 1
+        attempt=$$((attempt + 1))
+      done
+
+      if [ $$attempt -eq $$max_attempts ]; then
+        echo 'Manager did not become ready in time'
+        exit 1
+      fi
+
+      # Create OSD UUID
+      UUID=$$(uuidgen)
+
+      # Create the OSD
+      OSD_ID=$$(ceph osd new $$UUID)
+      echo Created OSD with ID: $$OSD_ID
+
+      # Create OSD directory structure
+      OSD_PATH=/var/lib/ceph/osd/ceph-$$OSD_ID
+      mkdir -p $$OSD_PATH
+
+      # Add a secret key for OSD
+      ceph auth get-or-create osd.$$OSD_ID mon 'allow profile osd' osd 'allow *' -o $$OSD_PATH/keyring
+
+      # Initialize the OSD data directory and keyring
+      OSD_SECRET=$$(ceph-authtool --print-key --name osd.$$OSD_ID $$OSD_PATH/keyring)
+      ceph-osd -i $$OSD_ID --mkfs --key $$OSD_SECRET --osd-uuid $$UUID
+
+      # Add OSD-specific configuration to ceph.conf
+      HOSTNAME=$$(hostname -s)
+      cat >> /etc/ceph/ceph.conf <<EOF
+      [osd.$$OSD_ID]
+      host = $$HOSTNAME
+      osd objectstore = memstore
+      osd numa_node = -1
+
+      EOF
+      # Fix permissions
+      chown -R ceph:ceph $$OSD_PATH
+
+      # Start OSD daemon
+      exec ceph-osd -f -i $$OSD_ID --public-addr $${HOST_IP:-127.0.0.1}:$${CEPH_OSD_PORT:-6800} --keyring $$OSD_PATH/keyring
+      "
+    privileged: true
+
+volumes:
+  ceph-mon-etc:
+  ceph-mon-lib:
+  ceph-mon-logs:
+  ceph-mgr-lib:
+  ceph-mgr-logs:
+  ceph-osd-lib:
+  ceph-osd-logs:
