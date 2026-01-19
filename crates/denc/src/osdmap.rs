@@ -175,13 +175,22 @@ impl crate::denc::FixedSize for UTime {
 
 /// Helper function to format UTime as ISO 8601 timestamp string
 /// Matches ceph-dencoder output format: "YYYY-MM-DDTHH:MM:SS.ffffff+0000"
-/// Special case: if timestamp is 0, output "0.000000"
+/// Special cases:
+///   - if timestamp is 0, output "0.000000"
+///   - if timestamp is < 365 days (31536000 seconds), output as "seconds.microseconds"
 fn format_utime_as_timestamp(utime: &UTime) -> String {
     use std::time::Duration;
     
     // Special case: zero timestamp outputs as "0.000000"
     if utime.sec == 0 && utime.nsec == 0 {
         return "0.000000".to_string();
+    }
+    
+    // Special case: timestamps < 1 year output as "seconds.microseconds"
+    // This matches ceph-dencoder behavior for small timestamps
+    if utime.sec < 31536000 {  // 365 days
+        let microseconds = utime.nsec / 1000;
+        return format!("{}.{:06}", utime.sec, microseconds);
     }
     
     // Convert UTime to SystemTime
@@ -256,6 +265,19 @@ fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
 
 fn is_leap_year(year: i32) -> bool {
     (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+/// Helper to serialize f32 as integer when value is exactly 0.0
+/// Matches ceph-dencoder behavior
+fn serialize_float_as_int_if_zero<S>(value: &f32, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    if *value == 0.0 {
+        serializer.serialize_i32(0)
+    } else {
+        serializer.serialize_f32(*value)
+    }
 }
 
 /// String encoding implementation to match Ceph's string handling
@@ -601,7 +623,13 @@ impl Serialize for OsdXInfo {
         let down_stamp_str = format_utime_as_timestamp(&self.down_stamp);
         state.serialize_field("down_stamp", &down_stamp_str)?;
         
-        state.serialize_field("laggy_probability", &self.laggy_probability)?;
+        // Serialize laggy_probability as integer 0 when it's 0.0, otherwise as float
+        if self.laggy_probability == 0.0 {
+            state.serialize_field("laggy_probability", &0)?;
+        } else {
+            state.serialize_field("laggy_probability", &self.laggy_probability)?;
+        }
+        
         state.serialize_field("laggy_interval", &self.laggy_interval)?;
         state.serialize_field("features", &self.features)?;
         state.serialize_field("old_weight", &self.old_weight)?;
