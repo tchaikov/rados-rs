@@ -113,10 +113,11 @@ jobs:
           # Set environment
           export CEPH_CONF=${CEPH_DIR}/ceph.conf
 
-          # Initialize and start monitor
+          # Initialize and start monitor without authentication
+          # Use --keyring /dev/null and do NOT create a keyring file to fully disable auth
           sudo ceph-mon --id ${MON_NAME} --mkfs --keyring /dev/null
-          sudo touch ${MON_DATA}/keyring
-          sudo ceph-mon --id ${MON_NAME} &
+          # Note: Do NOT create ${MON_DATA}/keyring - this would enable authentication
+          sudo ceph-mon --id ${MON_NAME} --keyring /dev/null &
 
           # Wait for monitor to start
           sleep 5
