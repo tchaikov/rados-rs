@@ -162,19 +162,147 @@ impl MonMap {
 
     /// Encode monmap to bytes (for sending in messages)
     pub fn encode(&self) -> Result<bytes::Bytes> {
-        // TODO: Implement proper Ceph encoding
-        // For now, use JSON as placeholder
-        let json = serde_json::to_vec(self)
-            .map_err(|e: serde_json::Error| MonClientError::EncodingError(e.to_string()))?;
-        Ok(bytes::Bytes::from(json))
+        use bytes::BytesMut;
+        use denc::Denc;
+
+        // Convert to denc MonMap
+        let denc_monmap = self.to_denc_monmap();
+
+        // Encode with full features
+        let mut buf = BytesMut::new();
+        denc_monmap
+            .encode(&mut buf, u64::MAX)
+            .map_err(|e| MonClientError::EncodingError(e.to_string()))?;
+
+        Ok(buf.freeze())
     }
 
     /// Decode monmap from bytes
     pub fn decode(data: &[u8]) -> Result<Self> {
-        // TODO: Implement proper Ceph decoding
-        // For now, use JSON as placeholder
-        let mut monmap: Self = serde_json::from_slice(data)
-            .map_err(|e: serde_json::Error| MonClientError::DecodingError(e.to_string()))?;
+        use denc::Denc;
+
+        // Decode using denc
+        let mut bytes = bytes::Bytes::from(data.to_vec());
+        let denc_monmap = denc::MonMap::decode(&mut bytes, u64::MAX)
+            .map_err(|e| MonClientError::DecodingError(e.to_string()))?;
+
+        // Convert to monclient MonMap
+        Self::from_denc_monmap(denc_monmap)
+    }
+
+    /// Convert to denc MonMap for encoding
+    fn to_denc_monmap(&self) -> denc::MonMap {
+        use denc::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo as DencMonInfo, UTime};
+        use std::collections::BTreeMap;
+
+        // Convert fsid from Uuid to [u8; 16]
+        let fsid = *self.fsid.as_bytes();
+
+        // Convert monitors to mon_info BTreeMap
+        let mut mon_info = BTreeMap::new();
+        for mon in &self.monitors {
+            // Convert EntityAddrVec to EntityAddrvec
+            let mut public_addrs = denc::EntityAddrvec::new();
+            for addr in &mon.addrs.addrs {
+                let denc_addr_type = match addr.addr_type {
+                    crate::types::AddrType::Legacy => denc::EntityAddrType::Legacy,
+                    crate::types::AddrType::Msgr2 => denc::EntityAddrType::Msgr2,
+                };
+                let denc_addr = denc::EntityAddr::from_socket_addr(denc_addr_type, addr.addr);
+                public_addrs.addrs.push(denc_addr);
+            }
+
+            let denc_mon = DencMonInfo {
+                name: mon.name.clone(),
+                public_addrs,
+                priority: mon.priority as u16,
+                weight: mon.weight,
+                crush_loc: BTreeMap::new(),
+                time_added: UTime::default(),
+            };
+            mon_info.insert(mon.name.clone(), denc_mon);
+        }
+
+        // Build ranks from monitors
+        let ranks: Vec<String> = self.monitors.iter().map(|m| m.name.clone()).collect();
+
+        denc::MonMap {
+            fsid,
+            epoch: self.epoch,
+            last_changed: UTime {
+                sec: (self.modified / 1000) as u32,
+                nsec: ((self.modified % 1000) * 1_000_000) as u32,
+            },
+            created: UTime {
+                sec: (self.created / 1000) as u32,
+                nsec: ((self.created % 1000) * 1_000_000) as u32,
+            },
+            persistent_features: MonFeature::default(),
+            optional_features: MonFeature::default(),
+            mon_info,
+            ranks,
+            min_mon_release: MonCephRelease::default(),
+            removed_ranks: Vec::new(),
+            strategy: ElectionStrategy::default(),
+            disallowed_leaders: Vec::new(),
+            stretch_mode_enabled: false,
+            tiebreaker_mon: String::new(),
+            stretch_marked_down_mons: Vec::new(),
+        }
+    }
+
+    /// Convert from denc MonMap after decoding
+    fn from_denc_monmap(denc_monmap: denc::MonMap) -> Result<Self> {
+        use crate::types::{AddrType, EntityAddr, EntityAddrVec};
+
+        // Convert fsid from [u8; 16] to Uuid
+        let fsid = uuid::Uuid::from_bytes(denc_monmap.fsid);
+
+        // Convert UTime to Unix timestamp (milliseconds)
+        let created = (denc_monmap.created.sec as u64) * 1000
+            + (denc_monmap.created.nsec as u64) / 1_000_000;
+        let modified = (denc_monmap.last_changed.sec as u64) * 1000
+            + (denc_monmap.last_changed.nsec as u64) / 1_000_000;
+
+        // Convert mon_info to monitors
+        let mut monitors = Vec::new();
+        for (rank, (name, mon)) in denc_monmap.mon_info.iter().enumerate() {
+            // Convert EntityAddrvec to EntityAddrVec
+            let mut addrs = EntityAddrVec::new();
+            for denc_addr in &mon.public_addrs.addrs {
+                if let Some(socket_addr) = denc_addr.to_socket_addr() {
+                    let addr = EntityAddr {
+                        addr_type: match denc_addr.addr_type {
+                            denc::EntityAddrType::Legacy => AddrType::Legacy,
+                            denc::EntityAddrType::Msgr2 => AddrType::Msgr2,
+                            _ => AddrType::Msgr2, // default to msgr2
+                        },
+                        nonce: denc_addr.nonce,
+                        addr: socket_addr,
+                    };
+                    addrs.addrs.push(addr);
+                }
+            }
+
+            monitors.push(MonInfo {
+                name: name.clone(),
+                rank,
+                addrs,
+                priority: mon.priority as i32,
+                weight: mon.weight,
+            });
+        }
+
+        let mut monmap = Self {
+            fsid,
+            epoch: denc_monmap.epoch,
+            created,
+            modified,
+            monitors,
+            name_to_rank: HashMap::new(),
+            addr_to_rank: HashMap::new(),
+        };
+
         monmap.rebuild_indices();
         Ok(monmap)
     }

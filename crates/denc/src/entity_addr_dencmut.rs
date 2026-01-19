@@ -117,6 +117,87 @@ impl EntityAddr {
         }
     }
 
+    /// Convert sockaddr_data to SocketAddr
+    pub fn to_socket_addr(&self) -> Option<std::net::SocketAddr> {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+
+        if self.sockaddr_data.len() < 8 {
+            return None;
+        }
+
+        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+
+        match af {
+            2 => {
+                // AF_INET (IPv4)
+                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
+                if self.sockaddr_data.len() >= 8 {
+                    let ip = Ipv4Addr::new(
+                        self.sockaddr_data[4],
+                        self.sockaddr_data[5],
+                        self.sockaddr_data[6],
+                        self.sockaddr_data[7],
+                    );
+                    Some(SocketAddr::new(IpAddr::V4(ip), port))
+                } else {
+                    None
+                }
+            }
+            10 => {
+                // AF_INET6 (IPv6)
+                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
+                if self.sockaddr_data.len() >= 24 {
+                    let addr_bytes: [u8; 16] = self.sockaddr_data[8..24].try_into().ok()?;
+                    let ip = Ipv6Addr::from(addr_bytes);
+                    Some(SocketAddr::new(IpAddr::V6(ip), port))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Create from SocketAddr
+    pub fn from_socket_addr(addr_type: EntityAddrType, addr: std::net::SocketAddr) -> Self {
+        use std::net::IpAddr;
+
+        let mut sockaddr_data = vec![0u8; 128];
+
+        match addr.ip() {
+            IpAddr::V4(ip) => {
+                // AF_INET = 2 (little-endian)
+                sockaddr_data[0] = 2;
+                sockaddr_data[1] = 0;
+                // Port (big-endian)
+                let port_bytes = addr.port().to_be_bytes();
+                sockaddr_data[2] = port_bytes[0];
+                sockaddr_data[3] = port_bytes[1];
+                // IPv4 address
+                let octets = ip.octets();
+                sockaddr_data[4..8].copy_from_slice(&octets);
+            }
+            IpAddr::V6(ip) => {
+                // AF_INET6 = 10 (little-endian)
+                sockaddr_data[0] = 10;
+                sockaddr_data[1] = 0;
+                // Port (big-endian)
+                let port_bytes = addr.port().to_be_bytes();
+                sockaddr_data[2] = port_bytes[0];
+                sockaddr_data[3] = port_bytes[1];
+                // IPv6 address (starting at offset 8)
+                let octets = ip.octets();
+                sockaddr_data[8..24].copy_from_slice(&octets);
+            }
+        }
+
+        Self {
+            addr_type,
+            nonce: 0,
+            sockaddr_data,
+        }
+    }
+
     /// Decode legacy format (marker byte already consumed)
     fn decode_legacy<B: Buf>(buf: &mut B) -> Result<Self, RadosError> {
         // The marker is a u32 (4 bytes), but the first byte (0x00) was already consumed
