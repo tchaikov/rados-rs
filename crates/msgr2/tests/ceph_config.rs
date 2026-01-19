@@ -44,18 +44,23 @@ pub fn parse_ceph_conf(path: &Path) -> Result<HashMap<String, HashMap<String, St
 /// Parse a single configuration line into key-value pair
 /// Supports multiple delimiters: '=', ':', and whitespace
 fn parse_config_line(line: &str) -> Option<(String, String)> {
+    // Helper to split by delimiter and extract key-value
+    fn try_split_by(line: &str, delim: char) -> Option<(String, String)> {
+        line.find(delim).map(|pos| {
+            let key = line[..pos].trim().to_string();
+            let value = line[pos+1..].trim().to_string();
+            (key, value)
+        })
+    }
+    
     // Try '=' delimiter first
-    if let Some(pos) = line.find('=') {
-        let key = line[..pos].trim().to_string();
-        let value = line[pos+1..].trim().to_string();
-        return Some((key, value));
+    if let Some(result) = try_split_by(line, '=') {
+        return Some(result);
     }
     
     // Try ':' delimiter
-    if let Some(pos) = line.find(':') {
-        let key = line[..pos].trim().to_string();
-        let value = line[pos+1..].trim().to_string();
-        return Some((key, value));
+    if let Some(result) = try_split_by(line, ':') {
+        return Some(result);
     }
     
     // Try whitespace delimiter

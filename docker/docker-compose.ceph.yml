@@ -190,9 +190,6 @@ services:
       OSD_SECRET=$$(ceph-authtool --print-key --name osd.$$OSD_ID $$OSD_PATH/keyring)
       ceph-osd -i $$OSD_ID --mkfs --key $$OSD_SECRET --osd-uuid $$UUID
 
-      # Add OSD to CRUSH map
-      # ceph osd crush add osd.$$OSD_ID 1.0 root=default host=ceph-osd
-
       # set host for me in the shared ceph.conf
       HOSTNAME=$$(hostname -s)
       cat >> /etc/ceph/ceph.conf <<EOF

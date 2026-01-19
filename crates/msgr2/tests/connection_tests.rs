@@ -95,20 +95,15 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                             tracing::info!("  Checking for keyring at: {}", keyring_path);
                             
                             if Path::new(&keyring_path).exists() {
-                                // Check if readable
-                                match std::fs::metadata(&keyring_path) {
-                                    Ok(metadata) => {
-                                        if metadata.permissions().readonly() && 
-                                           std::fs::read(&keyring_path).is_err() {
-                                            tracing::warn!("  Keyring exists but is not readable, skipping cephx");
-                                        } else {
-                                            tracing::info!("  ✓ Keyring is available and readable");
-                                            supported_methods.push(AuthMethod::Cephx);
-                                            config.keyring_path = Some(keyring_path);
-                                        }
+                                // Check if readable by trying to read it
+                                match std::fs::read(&keyring_path) {
+                                    Ok(_) => {
+                                        tracing::info!("  ✓ Keyring is available and readable");
+                                        supported_methods.push(AuthMethod::Cephx);
+                                        config.keyring_path = Some(keyring_path);
                                     }
                                     Err(e) => {
-                                        tracing::warn!("  Failed to check keyring metadata: {}, skipping cephx", e);
+                                        tracing::warn!("  Keyring exists but is not readable: {}, skipping cephx", e);
                                     }
                                 }
                             } else {
