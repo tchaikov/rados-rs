@@ -106,7 +106,7 @@ impl MonSub {
     pub fn reload(&mut self) -> bool {
         for (what, item) in &self.sub_sent {
             if !self.sub_new.contains_key(what) {
-                self.sub_new.insert(what.clone(), item.clone());
+                self.sub_new.insert(what.clone(), *item);
             }
         }
         self.have_new()

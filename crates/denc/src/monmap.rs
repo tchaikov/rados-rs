@@ -482,8 +482,7 @@ impl VersionedEncode for MonMap {
 
         // For v1, decode vector<entity_inst_t> and build mon_addr
         // For v2-v5, decode legacy mon_addr map
-        let mut legacy_mon_addr: BTreeMap<String, crate::entity_addr::EntityAddr> =
-            BTreeMap::new();
+        let mut legacy_mon_addr: BTreeMap<String, crate::entity_addr::EntityAddr> = BTreeMap::new();
 
         if version == 1 {
             // v1: decode vector<entity_inst_t>
@@ -517,9 +516,15 @@ impl VersionedEncode for MonMap {
             // Build mon_info from legacy_mon_addr
             let mut info_map = BTreeMap::new();
             for (name, addr) in legacy_mon_addr {
-                let mut mon = MonInfo::default();
-                mon.name = name.clone();
-                mon.public_addrs.addrs.push(addr);
+                let mon = MonInfo {
+                    name: name.clone(),
+                    public_addrs: {
+                        let mut addrvec = crate::entity_addr::EntityAddrvec::new();
+                        addrvec.addrs.push(addr);
+                        addrvec
+                    },
+                    ..Default::default()
+                };
                 info_map.insert(name, mon);
             }
             info_map
@@ -615,7 +620,9 @@ mod tests {
 
     #[test]
     fn test_mon_feature_roundtrip() {
-        let feature = MonFeature { features: 0x12345678 };
+        let feature = MonFeature {
+            features: 0x12345678,
+        };
         let mut buf = BytesMut::new();
         feature.encode(&mut buf, 0).unwrap();
         let decoded = MonFeature::decode(&mut buf.freeze(), 0).unwrap();
@@ -642,10 +649,12 @@ mod tests {
 
     #[test]
     fn test_mon_info_roundtrip() {
-        let mut mon_info = MonInfo::default();
-        mon_info.name = "mon.a".to_string();
-        mon_info.priority = 100;
-        mon_info.weight = 200;
+        let mon_info = MonInfo {
+            name: "mon.a".to_string(),
+            priority: 100,
+            weight: 200,
+            ..Default::default()
+        };
 
         let mut buf = BytesMut::new();
         mon_info.encode(&mut buf, u64::MAX).unwrap();
@@ -657,9 +666,11 @@ mod tests {
 
     #[test]
     fn test_monmap_roundtrip() {
-        let mut monmap = MonMap::default();
-        monmap.epoch = 1;
-        monmap.fsid = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let monmap = MonMap {
+            epoch: 1,
+            fsid: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            ..Default::default()
+        };
 
         let mut buf = BytesMut::new();
         monmap.encode(&mut buf, u64::MAX).unwrap();

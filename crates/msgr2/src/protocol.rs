@@ -119,7 +119,7 @@ impl FrameIO {
             if frame.preamble.num_segments > 1 {
                 // epilogue_secure_rev1_block_t: 1 byte late_status + 15 bytes padding = 16 bytes
                 let mut epilogue = vec![FRAME_LATE_STATUS_COMPLETE];
-                epilogue.extend_from_slice(&vec![0u8; CRYPTO_BLOCK_SIZE - 1]);
+                epilogue.extend_from_slice(&[0u8; CRYPTO_BLOCK_SIZE - 1]);
                 payload_bytes.extend_from_slice(&epilogue);
 
                 tracing::info!(
@@ -129,10 +129,7 @@ impl FrameIO {
                     CRYPTO_BLOCK_SIZE
                 );
             } else {
-                tracing::info!(
-                    "Secure single-segment: payload_len={}",
-                    payload_bytes.len()
-                );
+                tracing::info!("Secure single-segment: payload_len={}", payload_bytes.len());
             }
 
             let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
@@ -959,8 +956,8 @@ impl Connection {
                     }
 
                     let ack_seq = u64::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3],
-                        payload[4], payload[5], payload[6], payload[7],
+                        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
+                        payload[6], payload[7],
                     ]);
 
                     tracing::info!("✓ Received ACK frame: seq={}", ack_seq);

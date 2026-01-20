@@ -5,7 +5,6 @@
 
 use monclient::{MonClient, MonClientConfig};
 use std::time::Duration;
-use tracing_subscriber;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

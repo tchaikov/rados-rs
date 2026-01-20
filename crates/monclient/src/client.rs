@@ -64,6 +64,7 @@ pub struct MonClient {
     state: Arc<RwLock<MonClientState>>,
 
     /// Tokio runtime handle
+    #[allow(dead_code)]
     runtime: tokio::runtime::Handle,
 
     /// Message receive task handle
@@ -93,6 +94,7 @@ struct MonClientState {
     pending_cons: HashMap<usize, Arc<MonConnection>>,
 
     /// Monitors we've tried (to avoid retry storms)
+    #[allow(dead_code)]
     tried: std::collections::HashSet<usize>,
 
     /// Subscription manager
@@ -111,6 +113,7 @@ struct MonClientState {
 
     /// State flags
     authenticated: bool,
+    #[allow(dead_code)]
     global_id: u64,
     hunting: bool,
     want_monmap: bool,
@@ -119,20 +122,29 @@ struct MonClientState {
 }
 
 struct MapWaiter {
+    #[allow(dead_code)]
     what: String,
+    #[allow(dead_code)]
     version: u64,
+    #[allow(dead_code)]
     tx: oneshot::Sender<()>,
 }
 
 struct CommandTracker {
+    #[allow(dead_code)]
     tid: u64,
+    #[allow(dead_code)]
     cmd: Vec<String>,
+    #[allow(dead_code)]
     result_tx: oneshot::Sender<CommandResult>,
 }
 
 struct VersionTracker {
+    #[allow(dead_code)]
     req_id: u64,
+    #[allow(dead_code)]
     what: String,
+    #[allow(dead_code)]
     result_tx: oneshot::Sender<(u64, u64)>,
 }
 
@@ -490,7 +502,7 @@ impl MonClient {
     /// Handle MonMap message
     async fn handle_monmap(
         state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
+        _map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());

@@ -49,7 +49,12 @@ impl MMonSubscribe {
             // Encode name length and name
             buf.put_u32_le(name.len() as u32);
             buf.put_slice(name.as_bytes());
-            tracing::info!("  📝 Subscription: '{}' start={} flags={}", name, item.start, item.flags);
+            tracing::info!(
+                "  📝 Subscription: '{}' start={} flags={}",
+                name,
+                item.start,
+                item.flags
+            );
 
             // Encode subscribe item
             buf.put_u64_le(item.start);

@@ -37,10 +37,6 @@ impl EntityName {
     pub fn mgr(id: impl Into<String>) -> Self {
         Self::new("mgr", id)
     }
-
-    pub fn to_string(&self) -> String {
-        format!("{}.{}", self.entity_type, self.entity_id)
-    }
 }
 
 impl std::fmt::Display for EntityName {
