@@ -22,6 +22,7 @@ use bytes::Bytes;
 use denc::denc::{Denc, VersionedEncode};
 use denc::entity_addr::EntityAddr;
 use denc::error::RadosError;
+use denc::monmap::*;
 use denc::osdmap::*;
 use serde::Serialize;
 use std::any::Any;
@@ -314,6 +315,44 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
             },
         }),
 
+        // mon_info_t (MonInfo) - Monitor information
+        // Dependencies: String, EntityAddrvec (Level 2), u16, BTreeMap, UTime (Level 1)
+        "mon_info_t" => Some(TypeInfo {
+            decode_fn: |bytes, features| {
+                let obj = MonInfo::decode(bytes, features).map_err(DencoderError::DecodeError)?;
+                Ok(Box::new(obj))
+            },
+            encode_fn: |obj: &dyn SerializableType, features| {
+                let typed = obj.as_any().downcast_ref::<MonInfo>().ok_or_else(|| {
+                    DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
+                })?;
+                let mut buf = bytes::BytesMut::new();
+                typed
+                    .encode(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
+            },
+        }),
+
+        // MonMap - Monitor cluster map
+        // Dependencies: FsId, UTime×2 (Level 1), MonFeature×2, MonInfo (Level 3), MonCephRelease, ElectionStrategy
+        "MonMap" => Some(TypeInfo {
+            decode_fn: |bytes, features| {
+                let obj = MonMap::decode(bytes, features).map_err(DencoderError::DecodeError)?;
+                Ok(Box::new(obj))
+            },
+            encode_fn: |obj: &dyn SerializableType, features| {
+                let typed = obj.as_any().downcast_ref::<MonMap>().ok_or_else(|| {
+                    DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
+                })?;
+                let mut buf = bytes::BytesMut::new();
+                typed
+                    .encode(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
+            },
+        }),
+
         // Auth types (commented out if auth crate not available)
         // "CryptoKey" => Some(TypeInfo {
         //     name: "CryptoKey",
@@ -360,6 +399,8 @@ fn list_types() {
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");
     println!("  OSDMap            - OSD cluster map [versioned, feature-dependent: multiple]");
+    println!("  mon_info_t        - Monitor information [versioned, feature-dependent: SERVER_NAUTILUS]");
+    println!("  MonMap            - Monitor cluster map [versioned, feature-dependent: MONENC, SERVER_NAUTILUS]");
     println!();
     println!("Encoding Properties:");
     println!("  [simple]              - No versioning, no feature dependency");
