@@ -612,6 +612,148 @@ impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
     const SIZE: usize = T::SIZE * N;
 }
 
+// ============================================================================
+// Ceph-Specific Types
+// ============================================================================
+
+/// Unix timestamp (utime_t in C++)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UTime {
+    pub sec: u32,
+    pub nsec: u32,
+}
+
+impl serde::Serialize for UTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UTime", 2)?;
+        state.serialize_field("seconds", &self.sec)?;
+        state.serialize_field("nanoseconds", &self.nsec)?;
+        state.end()
+    }
+}
+
+impl Denc for UTime {
+    fn encode<B: bytes::BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UTime: need 8, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u32_le(self.sec);
+        buf.put_u32_le(self.nsec);
+        Ok(())
+    }
+
+    fn decode<B: bytes::Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UTime".to_string(),
+            ));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
+        Ok(UTime { sec, nsec })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl FixedSize for UTime {
+    const SIZE: usize = 8;
+}
+
+/// Ceph UUID type (uuid_d in C++)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UuidD {
+    pub bytes: [u8; 16],
+}
+
+impl serde::Serialize for UuidD {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UuidD", 1)?;
+        // Format as UUID string to match ceph-dencoder
+        let uuid_str = format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
+            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
+            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
+        );
+        state.serialize_field("uuid", &uuid_str)?;
+        state.end()
+    }
+}
+
+impl UuidD {
+    pub fn new() -> Self {
+        Self { bytes: [0; 16] }
+    }
+
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self { bytes }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.bytes.iter().all(|&b| b == 0)
+    }
+}
+
+impl std::fmt::Display for UuidD {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
+            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
+            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
+        )
+    }
+}
+
+impl Denc for UuidD {
+    fn encode<B: bytes::BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UuidD: need 16, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_slice(&self.bytes);
+        Ok(())
+    }
+
+    fn decode<B: bytes::Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UuidD".to_string(),
+            ));
+        }
+        let mut uuid_bytes = [0u8; 16];
+        buf.copy_to_slice(&mut uuid_bytes);
+        Ok(UuidD { bytes: uuid_bytes })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16)
+    }
+}
+
+impl FixedSize for UuidD {
+    const SIZE: usize = 16;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1133,5 +1275,73 @@ mod tests {
     fn test_array_encoded_size() {
         let arr: [u32; 3] = [1, 2, 3];
         assert_eq!(arr.encoded_size(0), Some(12)); // 3 * 4
+    }
+
+    // UTime tests
+    #[test]
+    fn test_utime_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let utime = UTime {
+            sec: 1234567890,
+            nsec: 123456789,
+        };
+        utime.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+        let decoded = UTime::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, utime);
+    }
+
+    #[test]
+    fn test_utime_default() {
+        let utime = UTime::default();
+        assert_eq!(utime.sec, 0);
+        assert_eq!(utime.nsec, 0);
+    }
+
+    #[test]
+    fn test_utime_fixed_size() {
+        assert_eq!(UTime::SIZE, 8);
+        let utime = UTime {
+            sec: 100,
+            nsec: 200,
+        };
+        assert_eq!(utime.encoded_size(0), Some(8));
+    }
+
+    // UuidD tests
+    #[test]
+    fn test_uuid_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let uuid = UuidD::from_bytes([
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ]);
+        uuid.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 16);
+        let decoded = UuidD::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, uuid);
+    }
+
+    #[test]
+    fn test_uuid_default() {
+        let uuid = UuidD::default();
+        assert!(uuid.is_zero());
+    }
+
+    #[test]
+    fn test_uuid_fixed_size() {
+        assert_eq!(UuidD::SIZE, 16);
+        let uuid = UuidD::new();
+        assert_eq!(uuid.encoded_size(0), Some(16));
+    }
+
+    #[test]
+    fn test_uuid_display() {
+        let uuid = UuidD::from_bytes([
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xab, 0xcd, 0xef, 0xfe, 0xdc, 0xba, 0x98, 0x76, 0x54,
+            0x32, 0x10,
+        ]);
+        let display = format!("{}", uuid);
+        assert_eq!(display, "01234567-89ab-cdef-fedc-ba9876543210");
     }
 }
