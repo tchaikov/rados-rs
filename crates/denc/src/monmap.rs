@@ -22,12 +22,11 @@ pub struct MonFeature {
 
 // Version header constants for ENCODE_START/DECODE_START format
 // These match the encoding in VersionedEncode::encode_versioned()
-const VERSION_HEADER_VERSION_SIZE: usize = std::mem::size_of::<u8>();  // version byte
-const VERSION_HEADER_COMPAT_SIZE: usize = std::mem::size_of::<u8>();   // compat byte
+const VERSION_HEADER_VERSION_SIZE: usize = std::mem::size_of::<u8>(); // version byte
+const VERSION_HEADER_COMPAT_SIZE: usize = std::mem::size_of::<u8>(); // compat byte
 const VERSION_HEADER_LENGTH_SIZE: usize = std::mem::size_of::<u32>(); // length field
-const VERSION_HEADER_SIZE: usize = VERSION_HEADER_VERSION_SIZE 
-                                 + VERSION_HEADER_COMPAT_SIZE 
-                                 + VERSION_HEADER_LENGTH_SIZE;
+const VERSION_HEADER_SIZE: usize =
+    VERSION_HEADER_VERSION_SIZE + VERSION_HEADER_COMPAT_SIZE + VERSION_HEADER_LENGTH_SIZE;
 
 // MonFeature content size - directly tied to the field type
 const MON_FEATURE_CONTENT_SIZE: usize = std::mem::size_of::<u64>(); // features field
