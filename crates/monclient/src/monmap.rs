@@ -259,8 +259,8 @@ impl MonMap {
         let fsid = uuid::Uuid::from_bytes(denc_monmap.fsid);
 
         // Convert UTime to Unix timestamp (milliseconds)
-        let created = (denc_monmap.created.sec as u64) * 1000
-            + (denc_monmap.created.nsec as u64) / 1_000_000;
+        let created =
+            (denc_monmap.created.sec as u64) * 1000 + (denc_monmap.created.nsec as u64) / 1_000_000;
         let modified = (denc_monmap.last_changed.sec as u64) * 1000
             + (denc_monmap.last_changed.nsec as u64) / 1_000_000;
 

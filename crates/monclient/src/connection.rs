@@ -55,7 +55,7 @@ impl MonConnection {
         // Connect using msgr2 (banner exchange only)
         let mut connection = Msgr2Connection::connect(addr, config)
             .await
-            .map_err(|e| MonClientError::MessageError(e))?;
+            .map_err(MonClientError::MessageError)?;
 
         tracing::info!("Banner exchange complete, establishing session...");
 
@@ -63,7 +63,7 @@ impl MonConnection {
         connection
             .establish_session()
             .await
-            .map_err(|e| MonClientError::MessageError(e))?;
+            .map_err(MonClientError::MessageError)?;
 
         tracing::info!("✓ Session established with monitor rank {}", rank);
 
@@ -144,7 +144,7 @@ impl MonConnection {
         let mut conn = self.connection.lock().await;
         conn.send_message(msg)
             .await
-            .map_err(|e| MonClientError::MessageError(e))?;
+            .map_err(MonClientError::MessageError)?;
         Ok(())
     }
 
@@ -154,7 +154,7 @@ impl MonConnection {
         let msg = conn
             .recv_message()
             .await
-            .map_err(|e| MonClientError::MessageError(e))?;
+            .map_err(MonClientError::MessageError)?;
         tracing::debug!(
             "Received message type {} from mon.{}",
             msg.msg_type(),
