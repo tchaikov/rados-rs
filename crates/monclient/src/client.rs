@@ -315,8 +315,15 @@ impl MonClient {
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
 
+        // Get keyring path from config
+        let keyring_path = if self.config.keyring_path.is_empty() {
+            None
+        } else {
+            Some(self.config.keyring_path.clone())
+        };
+
         // Create actual msgr2 connection
-        let mon_con = Arc::new(MonConnection::connect(socket_addr, rank, addrs).await?);
+        let mon_con = Arc::new(MonConnection::connect(socket_addr, rank, addrs, keyring_path).await?);
 
         // Test if connection is alive by trying to get a lock
         {
