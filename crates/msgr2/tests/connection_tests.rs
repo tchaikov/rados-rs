@@ -1,12 +1,17 @@
 //! Integration tests for msgr2 connection functionality
 //!
 //! These tests require a running Ceph cluster and the CEPH_MON_ADDR environment variable to be set.
-//! Tests will fail if CEPH_MON_ADDR is not set or the cluster is not accessible.
+//! Tests are marked with `#[ignore]` to skip them during regular `cargo test` runs.
 //!
 //! To run these tests:
 //! ```bash
 //! export CEPH_MON_ADDR=<your_monitor_address:port>
-//! cargo test --test connection_tests -- --nocapture
+//! cargo test --test connection_tests -- --ignored --nocapture
+//! ```
+//!
+//! To run all tests including these integration tests locally:
+//! ```bash
+//! cargo test --workspace --all-targets -- --include-ignored
 //! ```
 //!
 //! ## Authentication Configuration
@@ -147,6 +152,7 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_compression_disabled() {
     let addr = get_ceph_mon_addr();
 
@@ -177,6 +183,7 @@ async fn test_compression_disabled() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_compression_enabled() {
     let addr = get_ceph_mon_addr();
 
@@ -207,6 +214,7 @@ async fn test_compression_enabled() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_crc_mode() {
     let addr = get_ceph_mon_addr();
 
@@ -237,6 +245,7 @@ async fn test_crc_mode() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_secure_mode() {
     let addr = get_ceph_mon_addr();
 
@@ -267,6 +276,7 @@ async fn test_secure_mode() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_session_connecting() {
     let addr = get_ceph_mon_addr();
 

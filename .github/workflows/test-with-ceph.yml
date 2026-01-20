@@ -99,7 +99,7 @@ jobs:
       - name: Run Ceph Integration Tests
         run: |
           cd crates/msgr2
-          cargo test --test connection_tests --verbose -- --test-threads=1 --nocapture
+          cargo test --test connection_tests --verbose -- --ignored --test-threads=1 --nocapture
         env:
           CEPH_CONF: /tmp/rados-rs/ceph.conf
           CEPH_KEYRING: /tmp/rados-rs/ceph.client.admin.keyring
