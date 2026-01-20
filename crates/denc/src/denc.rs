@@ -4,7 +4,7 @@
 //! Ceph data structures.
 
 use crate::error::RadosError;
-use bytes::{Buf, BufMut};
+use bytes::{Buf, BufMut, Bytes};
 
 /// Core encoding/decoding trait for Ceph types
 ///
@@ -332,6 +332,45 @@ impl Denc for String {
         buf.copy_to_slice(&mut bytes);
 
         String::from_utf8(bytes).map_err(|e| RadosError::Protocol(format!("Invalid UTF-8: {}", e)))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(4 + self.len())
+    }
+}
+
+// Bytes implementation - encoded as raw bytes with length prefix
+impl Denc for Bytes {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        // Encode length as u32
+        let len = self.len() as u32;
+        Denc::encode(&len, buf, features)?;
+
+        // Copy bytes
+        if buf.remaining_mut() < self.len() {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space: need {} bytes, have {}",
+                self.len(),
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_slice(self);
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let len = <u32 as Denc>::decode(buf, features)? as usize;
+
+        if buf.remaining() < len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for Bytes content: need {}, have {}",
+                len,
+                buf.remaining()
+            )));
+        }
+
+        Ok(buf.copy_to_bytes(len))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
