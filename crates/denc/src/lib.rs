@@ -4,6 +4,7 @@
 //! and decoding Ceph protocol data structures.
 
 mod error;
+mod primitives;
 mod traits;
 
 pub use error::RadosError;
