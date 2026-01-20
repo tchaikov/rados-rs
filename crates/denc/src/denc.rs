@@ -754,6 +754,153 @@ impl FixedSize for UuidD {
     const SIZE: usize = 16;
 }
 
+/// Entity type identifier (entity_type_t in C++)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityType(u32);
+
+impl EntityType {
+    pub const TYPE_MON: Self = Self(0x01);
+    pub const TYPE_MDS: Self = Self(0x02);
+    pub const TYPE_OSD: Self = Self(0x04);
+    pub const TYPE_CLIENT: Self = Self(0x08);
+    pub const TYPE_MGR: Self = Self(0x10);
+
+    pub fn new(value: u32) -> Self {
+        Self(value)
+    }
+
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+}
+
+impl serde::Serialize for EntityType {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(self.0)
+    }
+}
+
+impl std::convert::TryFrom<u8> for EntityType {
+    type Error = RadosError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x01 => Ok(Self::TYPE_MON),
+            0x02 => Ok(Self::TYPE_MDS),
+            0x04 => Ok(Self::TYPE_OSD),
+            0x08 => Ok(Self::TYPE_CLIENT),
+            0x10 => Ok(Self::TYPE_MGR),
+            _ => Err(RadosError::Protocol(format!(
+                "Unknown entity type: {}",
+                value
+            ))),
+        }
+    }
+}
+
+impl std::fmt::Display for EntityType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::TYPE_MON => write!(f, "mon"),
+            Self::TYPE_MDS => write!(f, "mds"),
+            Self::TYPE_OSD => write!(f, "osd"),
+            Self::TYPE_CLIENT => write!(f, "client"),
+            Self::TYPE_MGR => write!(f, "mgr"),
+            _ => write!(f, "unknown({})", self.0),
+        }
+    }
+}
+
+impl Denc for EntityType {
+    fn encode<B: bytes::BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)
+    }
+
+    fn decode<B: bytes::Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let value = u32::decode(buf, features)?;
+        Ok(EntityType(value))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        self.0.encoded_size(features)
+    }
+}
+
+impl FixedSize for EntityType {
+    const SIZE: usize = 4;
+}
+
+/// Entity name (entity_name_t in C++)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntityName {
+    pub entity_type: EntityType,
+    pub num: u64,
+}
+
+impl EntityName {
+    pub fn new(entity_type: EntityType, num: u64) -> Self {
+        Self { entity_type, num }
+    }
+
+    pub fn client(num: u64) -> Self {
+        Self::new(EntityType::TYPE_CLIENT, num)
+    }
+
+    pub fn osd(num: u64) -> Self {
+        Self::new(EntityType::TYPE_OSD, num)
+    }
+
+    pub fn mon(num: u64) -> Self {
+        Self::new(EntityType::TYPE_MON, num)
+    }
+}
+
+impl serde::Serialize for EntityName {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("EntityName", 2)?;
+        state.serialize_field("type", &self.entity_type)?;
+        state.serialize_field("num", &self.num)?;
+        state.end()
+    }
+}
+
+impl std::fmt::Display for EntityName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.entity_type, self.num)
+    }
+}
+
+impl Denc for EntityName {
+    fn encode<B: bytes::BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.entity_type.encode(buf, features)?;
+        self.num.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: bytes::Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let entity_type = EntityType::decode(buf, features)?;
+        let num = u64::decode(buf, features)?;
+        Ok(EntityName { entity_type, num })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            self.entity_type.encoded_size(features)? + self.num.encoded_size(features)?,
+        )
+    }
+}
+
+impl FixedSize for EntityName {
+    const SIZE: usize = 12; // 4 (EntityType) + 8 (u64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1343,5 +1490,81 @@ mod tests {
         ]);
         let display = format!("{}", uuid);
         assert_eq!(display, "01234567-89ab-cdef-fedc-ba9876543210");
+    }
+
+    // EntityType tests
+    #[test]
+    fn test_entity_type_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let entity_type = EntityType::TYPE_CLIENT;
+        entity_type.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4);
+        let decoded = EntityType::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, entity_type);
+    }
+
+    #[test]
+    fn test_entity_type_constants() {
+        assert_eq!(EntityType::TYPE_MON.value(), 0x01);
+        assert_eq!(EntityType::TYPE_MDS.value(), 0x02);
+        assert_eq!(EntityType::TYPE_OSD.value(), 0x04);
+        assert_eq!(EntityType::TYPE_CLIENT.value(), 0x08);
+        assert_eq!(EntityType::TYPE_MGR.value(), 0x10);
+    }
+
+    #[test]
+    fn test_entity_type_display() {
+        assert_eq!(format!("{}", EntityType::TYPE_MON), "mon");
+        assert_eq!(format!("{}", EntityType::TYPE_OSD), "osd");
+        assert_eq!(format!("{}", EntityType::TYPE_CLIENT), "client");
+    }
+
+    #[test]
+    fn test_entity_type_fixed_size() {
+        assert_eq!(EntityType::SIZE, 4);
+        let entity_type = EntityType::TYPE_OSD;
+        assert_eq!(entity_type.encoded_size(0), Some(4));
+    }
+
+    // EntityName tests
+    #[test]
+    fn test_entity_name_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let entity_name = EntityName::client(12345);
+        entity_name.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 12);
+        let decoded = EntityName::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, entity_name);
+    }
+
+    #[test]
+    fn test_entity_name_constructors() {
+        let client = EntityName::client(100);
+        assert_eq!(client.entity_type, EntityType::TYPE_CLIENT);
+        assert_eq!(client.num, 100);
+
+        let osd = EntityName::osd(5);
+        assert_eq!(osd.entity_type, EntityType::TYPE_OSD);
+        assert_eq!(osd.num, 5);
+
+        let mon = EntityName::mon(0);
+        assert_eq!(mon.entity_type, EntityType::TYPE_MON);
+        assert_eq!(mon.num, 0);
+    }
+
+    #[test]
+    fn test_entity_name_display() {
+        let entity_name = EntityName::client(12345);
+        assert_eq!(format!("{}", entity_name), "client.12345");
+
+        let osd_name = EntityName::osd(7);
+        assert_eq!(format!("{}", osd_name), "osd.7");
+    }
+
+    #[test]
+    fn test_entity_name_fixed_size() {
+        assert_eq!(EntityName::SIZE, 12);
+        let entity_name = EntityName::client(100);
+        assert_eq!(entity_name.encoded_size(0), Some(12));
     }
 }
