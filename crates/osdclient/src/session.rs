@@ -6,8 +6,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{oneshot, RwLock};
-use tracing::{debug, info, warn};
+use tokio::sync::{oneshot, Mutex, RwLock};
+use tracing::{debug, error, info, warn};
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::{MOSDOp, MOSDOpReply};
@@ -16,7 +16,7 @@ use crate::types::{OpResult, RequestId};
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
     pub osd_id: i32,
-    connection: Arc<RwLock<Option<msgr2::protocol::Connection>>>,
+    connection: Arc<Mutex<Option<msgr2::protocol::Connection>>>,
     pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
     next_tid: AtomicU64,
     entity_name: String,
@@ -36,7 +36,7 @@ impl OSDSession {
     pub fn new(osd_id: i32, entity_name: String, client_inc: u32) -> Self {
         Self {
             osd_id,
-            connection: Arc::new(RwLock::new(None)),
+            connection: Arc::new(Mutex::new(None)),
             pending_ops: Arc::new(RwLock::new(HashMap::new())),
             next_tid: AtomicU64::new(1),
             entity_name,
@@ -52,24 +52,38 @@ impl OSDSession {
     /// Connect to the OSD
     ///
     /// This establishes a msgr2 connection to the OSD at the given address.
-    /// Note: This is a simplified implementation that needs proper authentication.
-    pub async fn connect(&self, osd_addr: &str) -> Result<()> {
-        info!("Connecting to OSD {} at {}", self.osd_id, osd_addr);
+    pub async fn connect(&self, addr: std::net::SocketAddr) -> Result<()> {
+        info!("Connecting to OSD {} at {}", self.osd_id, addr);
 
-        // TODO: Implement proper msgr2 connection with authentication
-        // For now, we'll create a placeholder
-        // In a real implementation, this would:
-        // 1. Parse the osd_addr
-        // 2. Create a msgr2::Connection
-        // 3. Perform banner exchange
-        // 4. Perform HELLO handshake
-        // 5. Perform AUTH handshake
-        // 6. Store the connection
+        // Create connection config with default features
+        let config = msgr2::ConnectionConfig::default();
 
-        warn!("OSD connection not fully implemented yet");
-        Err(OSDClientError::Connection(
-            "OSD connection not yet implemented".into(),
-        ))
+        // Connect using msgr2 (banner exchange only)
+        let mut connection = msgr2::protocol::Connection::connect(addr, config)
+            .await
+            .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
+
+        info!(
+            "Banner exchange complete, establishing session with OSD {}",
+            self.osd_id
+        );
+
+        // Complete the full handshake (HELLO, AUTH, SESSION)
+        connection.establish_session().await.map_err(|e| {
+            OSDClientError::Connection(format!("Failed to establish session: {}", e))
+        })?;
+
+        info!("✓ Session established with OSD {}", self.osd_id);
+
+        // Store the connection
+        {
+            let mut conn_guard = self.connection.lock().await;
+            *conn_guard = Some(connection);
+        }
+
+        info!("✓ Connection stored for OSD {}", self.osd_id);
+
+        Ok(())
     }
 
     /// Submit an operation to the OSD
@@ -95,15 +109,19 @@ impl OSDSession {
             );
         }
 
-        // Send the message
-        let connection_guard = self.connection.read().await;
-        if let Some(_conn) = connection_guard.as_ref() {
-            // Encode the operation
-            let _payload = op.encode()?;
+        // Encode the operation
+        let payload = op.encode()?;
 
-            // TODO: Send via msgr2 connection
-            // In a real implementation:
-            // conn.send_message(CEPH_MSG_OSD_OP, payload, data).await?;
+        // Send the message
+        let mut connection_guard = self.connection.lock().await;
+        if let Some(conn) = connection_guard.as_mut() {
+            // Build message with payload in front section
+            let msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload);
+
+            // Send via msgr2 connection
+            conn.send_message(msg).await.map_err(|e| {
+                OSDClientError::Connection(format!("Failed to send message: {}", e))
+            })?;
 
             drop(connection_guard);
             debug!("Submitted operation tid={} to OSD {}", tid, self.osd_id);
@@ -124,33 +142,48 @@ impl OSDSession {
     pub async fn recv_task(self: Arc<Self>) {
         info!("Starting recv_task for OSD {}", self.osd_id);
 
-        // TODO: Implement proper message receive loop
-        // This is currently a placeholder that checks connection and exits
-        let has_connection = {
-            let guard = self.connection.read().await;
-            guard.is_some()
-        };
+        loop {
+            // Receive message with connection locked
+            let msg = {
+                let mut guard = self.connection.lock().await;
+                match guard.as_mut() {
+                    Some(conn) => match conn.recv_message().await {
+                        Ok(msg) => msg,
+                        Err(e) => {
+                            error!("Failed to receive message from OSD {}: {}", self.osd_id, e);
+                            break;
+                        }
+                    },
+                    None => {
+                        debug!("No connection, recv_task for OSD {} exiting", self.osd_id);
+                        return;
+                    }
+                }
+            };
 
-        if !has_connection {
-            debug!("No connection, recv_task for OSD {} not started", self.osd_id);
-            return;
+            // Handle message based on type
+            if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
+                match MOSDOpReply::decode(&msg.front) {
+                    Ok(reply) => {
+                        self.handle_reply(reply).await;
+                    }
+                    Err(e) => {
+                        error!(
+                            "Failed to decode MOSDOpReply from OSD {}: {}",
+                            self.osd_id, e
+                        );
+                    }
+                }
+            } else {
+                debug!(
+                    "Received unexpected message type {} from OSD {}",
+                    msg.msg_type(),
+                    self.osd_id
+                );
+            }
         }
 
-        // When fully implemented, this will:
-        // loop {
-        //     let msg = match conn.recv_message().await {
-        //         Ok(m) => m,
-        //         Err(e) => break,
-        //     };
-        //     if msg.header.msg_type == CEPH_MSG_OSD_OPREPLY {
-        //         match MOSDOpReply::decode(&msg.payload) {
-        //             Ok(reply) => self.handle_reply(reply).await,
-        //             Err(e) => error!("Failed to decode: {}", e),
-        //         }
-        //     }
-        // }
-
-        info!("recv_task for OSD {} stopped (not implemented)", self.osd_id);
+        info!("recv_task for OSD {} stopped", self.osd_id);
     }
 
     /// Handle an incoming MOSDOpReply
@@ -173,7 +206,7 @@ impl OSDSession {
             } else {
                 Err(OSDClientError::OSDError {
                     code: reply.result,
-                    message: format!("OSD operation failed"),
+                    message: "OSD operation failed".to_string(),
                 })
             };
 
@@ -186,7 +219,7 @@ impl OSDSession {
 
     /// Check if we're connected
     pub async fn is_connected(&self) -> bool {
-        let guard = self.connection.read().await;
+        let guard = self.connection.lock().await;
         guard.is_some()
     }
 

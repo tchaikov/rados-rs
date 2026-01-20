@@ -1,6 +1,6 @@
 //! Operation builders for type-safe operation construction
 
-use crate::types::{OSDOp, ReadResult, StatResult, WriteResult};
+use crate::types::OSDOp;
 use bytes::Bytes;
 
 /// Builder for read operations

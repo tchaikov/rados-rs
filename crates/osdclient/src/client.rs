@@ -90,20 +90,55 @@ impl OSDClient {
             self.config.client_inc,
         ));
 
-        // TODO: Connect to OSD
-        // In a real implementation:
-        // let osd_addr = self.get_osd_address(osd_id).await?;
-        // session.connect(&osd_addr).await?;
+        // Get OSD address from OSDMap
+        let osd_addr = self.get_osd_address(osd_id).await?;
 
-        // TODO: Start recv task
-        // This will be enabled once recv_task is fully implemented
-        // let session_clone = Arc::clone(&session);
-        // tokio::spawn(async move {
-        //     session_clone.recv_task().await;
-        // });
+        // Connect to OSD
+        session.connect(osd_addr).await?;
+
+        // Start recv task
+        let session_clone = Arc::clone(&session);
+        tokio::spawn(async move {
+            session_clone.recv_task().await;
+        });
 
         sessions.insert(osd_id, Arc::clone(&session));
         Ok(session)
+    }
+
+    /// Get OSD address from OSDMap
+    async fn get_osd_address(&self, osd_id: i32) -> Result<std::net::SocketAddr> {
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+
+        // Check if OSD exists
+        if osd_id < 0 || osd_id as usize >= osdmap.osd_addrs_client.len() {
+            return Err(OSDClientError::Connection(format!(
+                "OSD {} not found in OSDMap",
+                osd_id
+            )));
+        }
+
+        // Get the address vector for this OSD
+        let addrvec = &osdmap.osd_addrs_client[osd_id as usize];
+
+        // Find a v2 address (msgr2 protocol)
+        for addr in &addrvec.addrs {
+            if matches!(addr.addr_type, denc::EntityAddrType::Msgr2) {
+                // Parse the address
+                if let Some(socket_addr) = addr.to_socket_addr() {
+                    return Ok(socket_addr);
+                }
+            }
+        }
+
+        Err(OSDClientError::Connection(format!(
+            "No msgr2 address found for OSD {}",
+            osd_id
+        )))
     }
 
     /// Map an object to OSDs using CRUSH
@@ -119,7 +154,7 @@ impl OSDClient {
         let pool_info = osdmap
             .pools
             .get(&pool)
-            .ok_or_else(|| OSDClientError::PoolNotFound(pool))?;
+            .ok_or(OSDClientError::PoolNotFound(pool))?;
 
         // Create object locator
         let locator = crush::placement::ObjectLocator {
@@ -151,7 +186,7 @@ impl OSDClient {
         }
 
         // Convert to StripedPgId
-        let spgid = StripedPgId::from_pg(pg.pool as i64, pg.seed);
+        let spgid = StripedPgId::from_pg(pg.pool, pg.seed);
 
         debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
 
