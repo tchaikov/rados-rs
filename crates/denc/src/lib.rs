@@ -1,7 +1,6 @@
 pub mod denc;
 pub mod encoding_metadata;
 pub mod entity_addr;
-pub mod entity_addr_dencmut;
 pub mod error;
 pub mod features;
 pub mod monmap;
