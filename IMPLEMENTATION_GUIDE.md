@@ -14,6 +14,15 @@ This document provides detailed, practical guidance for implementing the reposit
 - Original repository code (for copying implementation)
 - Ceph source code (for reference)
 - Ceph msgr2 protocol documentation (`ceph/doc/dev/msgr2.rst`)
+- Ceph object corpus files (`ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects`)
+
+## Critical Implementation Rules
+
+1. **Tests with Implementation**: Unit tests MUST be added in the same commit as the implementation they test
+2. **All Tests Pass**: Every commit must compile and pass all tests
+3. **Corpus Validation**: Types with corpus files must pass dencoder validation in CI
+4. **No Test Removal**: Existing tests cannot be removed or modified to make them pass
+5. **Preserve Workflows**: All GitHub workflows must be preserved and functional
 
 ## General Workflow for Each Commit
 
@@ -27,19 +36,21 @@ git pull origin commit-rewrite
 git status  # Should show nothing
 ```
 
-### 2. Implementation
+### 2. Implementation AND Testing (Same Commit)
 ```bash
 # Create necessary directories
 mkdir -p crates/denc/src
 mkdir -p crates/denc/tests
 
-# Copy/create source files
+# Copy/create source files AND their tests
 # Edit files to implement just the features for this commit
+# Edit test files to add tests for this commit's implementation
+# IMPORTANT: Tests go in the SAME commit as the implementation
 ```
 
-### 3. Testing
+### 3. Validation
 ```bash
-# Run tests
+# Run tests (must all pass)
 cargo test -p <crate-name>
 
 # Verify compilation
@@ -188,7 +199,107 @@ Dependencies: None
 Tests Passing: 2/2
 ```
 
-### Commit 2: Primitive type encoding
+### Commit 2: Dencoder tool and corpus infrastructure
+
+**Goal**: Add the dencoder validation tool and corpus file infrastructure.
+
+**Critical**: This commit is essential for validating all future type implementations against Ceph corpus files.
+
+**Files to create**:
+```
+crates/dencoder/Cargo.toml              # Dencoder binary crate
+crates/dencoder/src/main.rs             # CLI tool for encode/decode
+crates/dencoder/src/corpus.rs           # Corpus file handling
+ceph-object-corpus/                     # Corpus directory (add to .gitignore or commit)
+ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/  # Corpus files
+.github/workflows/corpus-validation.yml # CI workflow for corpus validation
+```
+
+**crates/dencoder/Cargo.toml**:
+```toml
+[package]
+name = "dencoder"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+denc = { path = "../denc" }
+bytes = { workspace = true }
+clap = "4.5"  # CLI argument parsing
+```
+
+**Dencoder CLI** (in `crates/dencoder/src/main.rs`):
+```rust
+use clap::Parser;
+use std::path::PathBuf;
+
+#[derive(Parser)]
+struct Args {
+    #[arg(short, long)]
+    type_name: String,
+    
+    #[arg(short, long)]
+    corpus_file: PathBuf,
+    
+    #[arg(long)]
+    import: bool,  // Import from corpus
+    
+    #[arg(long)]
+    export: bool,  // Export to corpus
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args = Args::parse();
+    
+    // Read corpus file
+    let data = std::fs::read(&args.corpus_file)?;
+    
+    // Decode using registered type
+    // Validate encoding matches
+    
+    println!("Validation: OK");
+    Ok(())
+}
+```
+
+**CI Workflow** (`.github/workflows/corpus-validation.yml`):
+```yaml
+name: Corpus Validation
+
+on: [push, pull_request]
+
+jobs:
+  corpus-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run dencoder validation
+        run: |
+          cargo build --bin dencoder
+          # Run dencoder against all corpus files for implemented types
+          cargo run --bin dencoder -- --type-name entity_addr_t --corpus-file ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/entity_addr_t_1
+```
+
+**Commit Message**:
+```
+Phase 1.1: Dencoder tool and corpus infrastructure
+
+- Add dencoder binary crate for corpus validation
+- Add corpus file reading and processing
+- Add CLI interface for encode/decode operations
+- Add CI workflow for corpus validation
+- Set up corpus directory structure
+
+This tool will be used throughout the rewrite to validate
+all type implementations against Ceph's binary corpus files.
+
+Tests: Dencoder CLI tests added
+Dependencies: Commit 1
+Tests Passing: All tests pass
+```
+
+### Commit 3: Primitive type encoding
 
 **Goal**: Implement Denc for all primitive types.
 

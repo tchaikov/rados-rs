@@ -11,6 +11,18 @@ This document outlines the detailed plan for rewriting and restructuring the com
 3. **Testability**: Each commit should include tests for the implemented functionality
 4. **Bottom-up Construction**: Build from foundational components to high-level features
 5. **Modularity**: Separate concerns into distinct crates (denc, auth, msgr2, crush, monclient)
+6. **Test Preservation**: All unit tests, integration tests, and GitHub workflows must be preserved and pass in the rewrite
+
+## Gating Criteria
+
+**Critical Requirements** (must be met for successful rewrite):
+
+1. **Unit Tests**: All unit tests must be added alongside the corresponding implementation (same commit)
+2. **Test Passage**: All tests (unit and integration) must pass at every commit
+3. **Corpus Validation**: The `dencoder` tool must be added early (Commit 2) and used in CI to verify all types with corpus files under `ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects`
+4. **GitHub Workflows**: All existing GitHub workflows must be preserved and pass
+5. **Integration Tests**: Integration tests must be added once their dependencies are in place
+6. **No Test Removal**: No existing tests may be removed or modified to pass; all original functionality must work
 
 ## Target Branch
 
@@ -20,13 +32,19 @@ This plan creates a PR that targets the `commit-rewrite` branch, which contains 
 
 ## Commit Sequence Structure
 
-The rewrite will follow a phased approach across 5 major phases, with approximately 40-50 commits total:
+The rewrite will follow a phased approach across 5 major phases, with **51 commits total**:
 
-### Phase 1: Foundation - denc and denc-derive crates (~18 commits)
+- **Phase 1**: Foundation (denc, denc-derive) - 20 commits
+- **Phase 2**: Authentication (auth) - 4 commits
+- **Phase 3**: Messaging (msgr2) - 16 commits
+- **Phase 4**: CRUSH algorithm (crush) - 6 commits
+- **Phase 5**: Monitor client (monclient) - 5 commits
+
+### Phase 1: Foundation - denc and denc-derive crates (~20 commits)
 
 **Purpose**: Establish the encoding/decoding infrastructure that all other components depend on.
 
-#### Phase 1.1: Core Infrastructure (5 commits)
+#### Phase 1.1: Core Infrastructure (7 commits)
 
 1. **Commit 1: Project structure and denc trait definitions**
    - Create Cargo workspace
@@ -34,151 +52,186 @@ The rewrite will follow a phased approach across 5 major phases, with approximat
    - Add error types (`RadosError`)
    - Add basic trait validation tests
    - Dependencies: None
-   - Tests: 2 trait validation tests
+   - Tests: 2 trait validation tests (added with implementation)
 
-2. **Commit 2: Primitive type encoding**
+2. **Commit 2: Dencoder tool and corpus infrastructure**
+   - Add `dencoder` binary crate for encoding/decoding validation
+   - Add corpus file reading infrastructure
+   - Add corpus directory structure (`ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects`)
+   - Add initial CI workflow for corpus validation
+   - Dependencies: Commit 1
+   - Tests: Dencoder CLI tests (added with implementation)
+   - **Critical**: This tool will be used throughout to validate all type implementations against Ceph corpus files
+
+3. **Commit 3: Primitive type encoding**
    - Implement `Denc` for integer types (u8, u16, u32, u64, i8, i16, i32, i64)
    - Implement `Denc` for bool, f32, f64
    - Add `FixedSize` marker trait
-   - Dependencies: Commit 1
-   - Tests: 11 primitive encoding tests
+   - Dependencies: Commit 2
+   - Tests: 11 primitive encoding tests (added with implementation)
+   - **Corpus Validation**: Run dencoder against corpus files for primitive types in CI
 
-3. **Commit 3: Basic collection types**
+4. **Commit 4: Basic collection types**
    - Implement `Denc` for `String`
    - Implement `Denc` for `Vec<T>`
    - Implement `Denc` for `Option<T>`
-   - Dependencies: Commit 2
-   - Tests: 20 collection tests (including nested collections)
+   - Dependencies: Commit 3
+   - Tests: 20 collection tests (added with implementation, including nested collections)
+   - **Corpus Validation**: Run dencoder against corpus files in CI
 
-4. **Commit 4: Complex collection types**
+5. **Commit 5: Complex collection types**
    - Implement `Denc` for `HashMap<K, V>` and `BTreeMap<K, V>`
    - Implement `Denc` for tuples (2-12 elements)
    - Implement `Denc` for arrays `[T; N]` (N=1-32)
-   - Dependencies: Commit 3
-   - Tests: 15 complex collection tests
+   - Dependencies: Commit 4
+   - Tests: 15 complex collection tests (added with implementation)
+   - **Corpus Validation**: Run dencoder against corpus files in CI
 
-5. **Commit 5: denc-derive procedural macros**
+6. **Commit 6: denc-derive procedural macros**
    - Create `denc-derive` crate
    - Implement `#[derive(Denc)]` for structs
    - Implement `#[derive(Denc)]` for enums
    - Add attribute support (`#[denc(skip)]`, `#[denc(version)]`)
-   - Dependencies: Commits 1-4
-   - Tests: 12 derive macro tests
+   - Dependencies: Commits 1-5
+   - Tests: 12 derive macro tests (added with implementation)
+
+7. **Commit 7: GitHub Actions CI workflow enhancement**
+   - Add complete CI workflow file (`.github/workflows/ci.yml`)
+   - Add cargo build, test, clippy, fmt checks
+   - Add dencoder corpus validation job
+   - Add test result reporting
+   - Dependencies: Commits 1-6
+   - **Critical**: CI must run dencoder against all corpus files as types are added
+   - Tests: CI workflow validation
 
 #### Phase 1.2: Ceph-Specific Foundation Types (9 commits)
 
-6. **Commit 6: Time and UUID types**
+8. **Commit 8: Time and UUID types**
    - Implement `utime_t` (microsecond timestamp)
    - Implement `ceph_uuid_t`
    - Dependencies: Phase 1.1
-   - Tests: 6 time/UUID tests
+   - Tests: 6 time/UUID tests (added with implementation)
+   - **Corpus Validation**: Run dencoder against corpus files in CI
 
-7. **Commit 7: Entity naming types**
+9. **Commit 9: Entity naming types**
    - Implement `entity_name_t`
    - Implement `entity_addr_t`
    - Implement `entity_inst_t`
-   - Dependencies: Commit 6
-   - Tests: 8 entity naming tests
+   - Dependencies: Commit 8
+   - Tests: 8 entity naming tests (added with implementation)
+   - **Corpus Validation**: Run dencoder against corpus files in CI
 
-8. **Commit 8: Authentication types**
-   - Implement `AuthAuthorizer`
-   - Implement `CephXTicketBlob`
-   - Implement `CephXServiceTicket`
-   - Dependencies: Commit 7
-   - Tests: 5 auth type tests
+10. **Commit 10: Authentication types**
+    - Implement `AuthAuthorizer`
+    - Implement `CephXTicketBlob`
+    - Implement `CephXServiceTicket`
+    - Dependencies: Commit 9
+    - Tests: 5 auth type tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-9. **Commit 9: Feature set types**
-   - Implement `FeatureSet`
-   - Implement feature flags enumeration
-   - Dependencies: Commit 7
-   - Tests: 4 feature set tests
+11. **Commit 11: Feature set types**
+    - Implement `FeatureSet`
+    - Implement feature flags enumeration
+    - Dependencies: Commit 9
+    - Tests: 4 feature set tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-10. **Commit 10: Connection types**
+12. **Commit 12: Connection types**
     - Implement `ConnectionInfo`
     - Implement `PeerInfo`
-    - Dependencies: Commits 8, 9
-    - Tests: 6 connection type tests
+    - Dependencies: Commits 10, 11
+    - Tests: 6 connection type tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-11. **Commit 11: Object ID types**
+13. **Commit 13: Object ID types**
     - Implement `object_t`
     - Implement `hobject_t`
     - Implement `ghobject_t`
-    - Dependencies: Commit 6
-    - Tests: 9 object ID tests
+    - Dependencies: Commit 8
+    - Tests: 9 object ID tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-12. **Commit 12: Pool and PG types**
+14. **Commit 14: Pool and PG types**
     - Implement `pg_t` (placement group)
     - Implement `pool_t`
     - Implement `pg_pool_t` (pool configuration)
-    - Dependencies: Commit 11
-    - Tests: 7 PG/pool tests
+    - Dependencies: Commit 13
+    - Tests: 7 PG/pool tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-13. **Commit 13: CRUSH bucket types**
+15. **Commit 15: CRUSH bucket types**
     - Implement `crush_bucket`
     - Implement bucket type variants (uniform, list, tree, straw, straw2)
-    - Dependencies: Commit 12
-    - Tests: 8 bucket tests
+    - Dependencies: Commit 14
+    - Tests: 8 bucket tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-14. **Commit 14: CRUSH rule types**
+16. **Commit 16: CRUSH rule types**
     - Implement `crush_rule`
     - Implement `crush_rule_step`
-    - Dependencies: Commit 13
-    - Tests: 6 rule tests
+    - Dependencies: Commit 15
+    - Tests: 6 rule tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
 #### Phase 1.3: OSD and Map Types (4 commits)
 
-15. **Commit 15: OSD info types**
+17. **Commit 17: OSD info types**
     - Implement `osd_info_t`
     - Implement `osd_xinfo_t`
-    - Dependencies: Commit 7
-    - Tests: 5 OSD info tests
+    - Dependencies: Commit 9
+    - Tests: 5 OSD info tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-16. **Commit 16: MonMap**
+18. **Commit 18: MonMap**
     - Implement `MonMap` structure
     - Implement monitor endpoint list
-    - Dependencies: Commit 7
-    - Tests: 4 MonMap tests
+    - Dependencies: Commit 9
+    - Tests: 4 MonMap tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-17. **Commit 17: OSDMap foundation**
+19. **Commit 19: OSDMap foundation**
     - Implement `OSDMap` structure
     - Implement epoch and pool tracking
-    - Dependencies: Commits 12, 15
-    - Tests: 6 OSDMap tests
+    - Dependencies: Commits 14, 17
+    - Tests: 6 OSDMap tests (added with implementation)
+    - **Corpus Validation**: Run dencoder against corpus files in CI
 
-18. **Commit 18: Corpus comparison tests**
-    - Add binary corpus files from Ceph
-    - Add corpus comparison test framework
-    - Add tests for all implemented types
+20. **Commit 20: Comprehensive corpus validation**
+    - Add integration test suite validating all Phase 1 types
+    - Verify all corpus files decode correctly
+    - Add corpus regression tests
     - Dependencies: All Phase 1 commits
-    - Tests: 20+ corpus validation tests
+    - Tests: 20+ comprehensive corpus validation tests
+    - **Critical**: All types with corpus files must pass dencoder validation
 
 ### Phase 2: Authentication - auth crate (~4 commits)
 
 **Purpose**: Implement CephX authentication protocol.
 
-19. **Commit 19: Auth protocol constants**
+21. **Commit 21: Auth protocol constants**
     - Implement `CEPH_AUTH_*` constants
     - Implement auth mode enumerations
     - Dependencies: Phase 1
-    - Tests: 2 constant validation tests
+    - Tests: 2 constant validation tests (added with implementation)
 
-20. **Commit 20: CephX session key handling**
+22. **Commit 22: CephX session key handling**
     - Implement `CephXSessionAuthInfo`
     - Implement session key derivation
-    - Dependencies: Commit 19
-    - Tests: 5 session key tests
+    - Dependencies: Commit 21
+    - Tests: 5 session key tests (added with implementation)
 
-21. **Commit 21: CephX ticket handling**
+23. **Commit 23: CephX ticket handling**
     - Implement ticket request/response
     - Implement ticket encryption/decryption
-    - Dependencies: Commit 20
-    - Tests: 8 ticket handling tests
+    - Dependencies: Commit 22
+    - Tests: 8 ticket handling tests (added with implementation)
 
-22. **Commit 22: Auth helper functions**
+24. **Commit 24: Auth helper functions and integration tests**
     - Implement auth utility functions
     - Implement key rotation helpers
-    - Dependencies: Commit 21
-    - Tests: 6 helper function tests
+    - Add auth crate integration tests
+    - Dependencies: Commit 23
+    - Tests: 6 helper function tests + integration tests (added with implementation)
 
 ### Phase 3: Messaging - msgr2 crate (~16 commits)
 
@@ -186,181 +239,187 @@ The rewrite will follow a phased approach across 5 major phases, with approximat
 
 #### Phase 3.1: Protocol Foundation (5 commits)
 
-23. **Commit 23: Frame types and tags**
+25. **Commit 25: Frame types and tags**
     - Implement frame tag enumerations
     - Implement frame header structures
     - Dependencies: Phase 1
-    - Tests: 4 frame type tests
+    - Tests: 4 frame type tests (added with implementation)
 
-24. **Commit 24: Control frames**
+26. **Commit 26: Control frames**
     - Implement `HelloFrame`
     - Implement `AuthRequestFrame`
     - Implement `AuthDoneFrame`
-    - Dependencies: Commit 23, Phase 2
-    - Tests: 8 control frame tests
+    - Dependencies: Commit 25, Phase 2
+    - Tests: 8 control frame tests (added with implementation)
 
-25. **Commit 25: Message frames**
+27. **Commit 27: Message frames**
     - Implement `MessageFrame`
     - Implement message header and payload
-    - Dependencies: Commit 24
-    - Tests: 6 message frame tests
+    - Dependencies: Commit 26
+    - Tests: 6 message frame tests (added with implementation)
 
-26. **Commit 26: Compression support**
+28. **Commit 28: Compression support**
     - Implement compression negotiation
     - Implement zlib/lz4/snappy compression
-    - Dependencies: Commit 25
-    - Tests: 9 compression tests
+    - Dependencies: Commit 27
+    - Tests: 9 compression tests (added with implementation)
 
-27. **Commit 27: Encryption support**
+29. **Commit 29: Encryption support**
     - Implement AES-GCM encryption
     - Implement encryption negotiation
-    - Dependencies: Commit 26, Phase 2
-    - Tests: 7 encryption tests
+    - Dependencies: Commit 28, Phase 2
+    - Tests: 7 encryption tests (added with implementation)
 
 #### Phase 3.2: Connection State Machine (6 commits)
 
-28. **Commit 28: Connection states**
+30. **Commit 30: Connection states**
     - Implement connection state enumeration
     - Implement state transition logic
-    - Dependencies: Commit 27
-    - Tests: 5 state machine tests
+    - Dependencies: Commit 29
+    - Tests: 5 state machine tests (added with implementation)
 
-29. **Commit 29: Banner exchange**
+31. **Commit 31: Banner exchange**
     - Implement banner send/receive
     - Implement protocol version negotiation
-    - Dependencies: Commit 28
-    - Tests: 6 banner tests
+    - Dependencies: Commit 30
+    - Tests: 6 banner tests (added with implementation)
 
-30. **Commit 30: Authentication flow**
+32. **Commit 32: Authentication flow**
     - Implement auth request/response handling
     - Implement CephX flow integration
-    - Dependencies: Commit 29, Phase 2
-    - Tests: 10 auth flow tests
+    - Dependencies: Commit 31, Phase 2
+    - Tests: 10 auth flow tests (added with implementation)
 
-31. **Commit 31: Session establishment**
+33. **Commit 33: Session establishment**
     - Implement session reconnect logic
     - Implement session reset handling
-    - Dependencies: Commit 30
-    - Tests: 8 session tests
+    - Dependencies: Commit 32
+    - Tests: 8 session tests (added with implementation)
 
-32. **Commit 32: Keepalive handling**
+34. **Commit 34: Keepalive handling**
     - Implement keepalive frame send/receive
     - Implement timeout detection
-    - Dependencies: Commit 31
-    - Tests: 5 keepalive tests
+    - Dependencies: Commit 33
+    - Tests: 5 keepalive tests (added with implementation)
 
-33. **Commit 33: Connection error handling**
+35. **Commit 35: Connection error handling**
     - Implement error recovery
     - Implement connection retry logic
-    - Dependencies: Commit 32
-    - Tests: 7 error handling tests
+    - Dependencies: Commit 34
+    - Tests: 7 error handling tests (added with implementation)
 
 #### Phase 3.3: Message Routing (5 commits)
 
-34. **Commit 34: Message dispatcher**
+36. **Commit 36: Message dispatcher**
     - Implement message routing framework
     - Implement handler registration
-    - Dependencies: Commit 25
-    - Tests: 6 dispatcher tests
+    - Dependencies: Commit 27
+    - Tests: 6 dispatcher tests (added with implementation)
 
-35. **Commit 35: Async connection handler**
+37. **Commit 37: Async connection handler**
     - Implement tokio-based connection management
     - Implement async read/write loops
-    - Dependencies: Commits 33, 34
-    - Tests: 8 async handler tests
+    - Dependencies: Commits 35, 36
+    - Tests: 8 async handler tests (added with implementation)
 
-36. **Commit 36: Message queue**
+38. **Commit 38: Message queue**
     - Implement outbound message queue
     - Implement priority handling
-    - Dependencies: Commit 35
-    - Tests: 5 queue tests
+    - Dependencies: Commit 37
+    - Tests: 5 queue tests (added with implementation)
 
-37. **Commit 37: Messenger API**
+39. **Commit 39: Messenger API**
     - Implement `Messenger` public API
     - Implement connection pooling
-    - Dependencies: Commit 36
-    - Tests: 9 messenger API tests
+    - Dependencies: Commit 38
+    - Tests: 9 messenger API tests (added with implementation)
 
-38. **Commit 38: Integration tests**
+40. **Commit 40: msgr2 integration tests**
     - Add client/server integration tests
     - Add multi-connection tests
-    - Dependencies: Commit 37
-    - Tests: 8 integration tests
+    - Add end-to-end message flow tests
+    - Dependencies: Commit 39
+    - Tests: 8+ integration tests (added with implementation)
+    - **Critical**: All integration tests must pass
 
 ### Phase 4: CRUSH Algorithm - crush crate (~6 commits)
 
 **Purpose**: Implement CRUSH placement algorithm.
 
-39. **Commit 39: CRUSH map structure**
+41. **Commit 41: CRUSH map structure**
     - Implement `CrushMap` loading
     - Implement bucket hierarchy
-    - Dependencies: Phase 1 (commits 13-14)
-    - Tests: 5 map structure tests
+    - Dependencies: Phase 1 (commits 15-16)
+    - Tests: 5 map structure tests (added with implementation)
 
-40. **Commit 40: Weight and choose functions**
+42. **Commit 42: Weight and choose functions**
     - Implement bucket weight calculation
     - Implement choose_firstn/chooseleaf algorithms
-    - Dependencies: Commit 39
-    - Tests: 12 choose algorithm tests
+    - Dependencies: Commit 41
+    - Tests: 12 choose algorithm tests (added with implementation)
 
-41. **Commit 41: PG to OSD mapping**
+43. **Commit 43: PG to OSD mapping**
     - Implement PG hash functions
     - Implement CRUSH rule evaluation
-    - Dependencies: Commit 40
-    - Tests: 10 mapping tests
+    - Dependencies: Commit 42
+    - Tests: 10 mapping tests (added with implementation)
 
-42. **Commit 42: Straw2 bucket algorithm**
+44. **Commit 44: Straw2 bucket algorithm**
     - Implement straw2 selection
     - Implement straw2 weight updates
-    - Dependencies: Commit 41
-    - Tests: 8 straw2 tests
+    - Dependencies: Commit 43
+    - Tests: 8 straw2 tests (added with implementation)
 
-43. **Commit 43: Map update handling**
+45. **Commit 45: Map update handling**
     - Implement incremental map updates
     - Implement epoch tracking
-    - Dependencies: Commit 42
-    - Tests: 6 update tests
+    - Dependencies: Commit 44
+    - Tests: 6 update tests (added with implementation)
 
-44. **Commit 44: CRUSH test suite**
+46. **Commit 46: CRUSH integration tests**
     - Add comprehensive CRUSH tests
     - Add placement verification tests
-    - Dependencies: Commits 39-43
-    - Tests: 15 comprehensive tests
+    - Add CRUSH algorithm regression tests
+    - Dependencies: Commits 41-45
+    - Tests: 15+ comprehensive integration tests (added with implementation)
+    - **Critical**: Verify CRUSH algorithm accuracy against reference implementation
 
 ### Phase 5: Monitor Client - monclient crate (~5 commits)
 
 **Purpose**: Implement monitor client for cluster communication.
 
-45. **Commit 45: MonClient structure**
+47. **Commit 47: MonClient structure**
     - Implement `MonClient` API
     - Implement monitor connection handling
-    - Dependencies: Phase 3, Commit 16
-    - Tests: 5 MonClient tests
+    - Dependencies: Phase 3, Commit 18
+    - Tests: 5 MonClient tests (added with implementation)
 
-46. **Commit 46: Map subscription**
+48. **Commit 48: Map subscription**
     - Implement OSDMap subscription
     - Implement MonMap updates
-    - Dependencies: Commit 45, Phase 4
-    - Tests: 7 subscription tests
+    - Dependencies: Commit 47, Phase 4
+    - Tests: 7 subscription tests (added with implementation)
 
-47. **Commit 47: Command handling**
+49. **Commit 49: Command handling**
     - Implement monitor command API
     - Implement command response parsing
-    - Dependencies: Commit 46
-    - Tests: 8 command tests
+    - Dependencies: Commit 48
+    - Tests: 8 command tests (added with implementation)
 
-48. **Commit 48: Monitor failover**
+50. **Commit 50: Monitor failover**
     - Implement monitor failover logic
     - Implement connection retry
-    - Dependencies: Commit 47
-    - Tests: 6 failover tests
+    - Dependencies: Commit 49
+    - Tests: 6 failover tests (added with implementation)
 
-49. **Commit 49: End-to-end integration**
+51. **Commit 51: End-to-end integration and workflows**
     - Add complete integration test suite
-    - Add example applications
-    - Add CI/CD workflow
+    - Add example applications (client, server, utilities)
+    - Verify all existing integration tests pass
+    - Preserve all GitHub workflows from original repository
     - Dependencies: All previous commits
-    - Tests: 10+ integration tests
+    - Tests: 10+ integration tests (added with implementation)
+    - **Critical**: All unit tests, integration tests, and GitHub workflows must pass
 
 ## Dependencies Matrix
 

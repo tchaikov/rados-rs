@@ -14,21 +14,29 @@ This repository is undergoing a structured rewrite to create a clean, reviewable
 ## 🎯 Quick Overview
 
 ### What is being rewritten?
-The entire commit history of the rados-rs repository is being restructured into 49 logical, self-contained commits.
+The entire commit history of the rados-rs repository is being restructured into 51 logical, self-contained commits.
 
 ### Why?
 - **Reviewability**: Make the codebase easier to review and understand
 - **Maintainability**: Create a logical progression from simple to complex
 - **Quality**: Ensure every commit compiles and passes tests
 - **Documentation**: Provide clear commit messages and history
+- **Validation**: Use dencoder tool to verify correctness against Ceph corpus files
 
 ### How?
 Following a bottom-up, phase-based approach:
-1. **Phase 1**: Foundation (denc, denc-derive) - 18 commits
+1. **Phase 1**: Foundation (denc, denc-derive, dencoder) - 20 commits
 2. **Phase 2**: Authentication (auth) - 4 commits
 3. **Phase 3**: Messaging (msgr2) - 16 commits
 4. **Phase 4**: CRUSH algorithm (crush) - 6 commits
 5. **Phase 5**: Monitor client (monclient) - 5 commits
+
+### Key Gating Criteria
+- **Unit tests added with implementation** (same commit)
+- **Dencoder tool** added early (Commit 2) for corpus validation
+- **All tests must pass** at every commit
+- **GitHub workflows preserved** and functional
+- **Corpus validation** for all types with corpus files
 
 ## 🚀 Quick Start
 
@@ -51,11 +59,12 @@ Following a bottom-up, phase-based approach:
 
 ## 📊 Key Statistics
 
-- **Total Commits**: 49
+- **Total Commits**: 51
 - **Total Phases**: 5
-- **Estimated Time**: 31-44 hours
-- **Crates**: 7 (denc, denc-derive, auth, msgr2, crush, monclient, rados)
+- **Estimated Time**: 32-46 hours
+- **Crates**: 7 (denc, denc-derive, dencoder, auth, msgr2, crush, monclient)
 - **Expected Tests**: 300+ tests across all commits
+- **Critical Tool**: Dencoder for corpus validation (added in Commit 2)
 
 ## 🏗️ Crate Structure
 
