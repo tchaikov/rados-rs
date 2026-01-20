@@ -2,9 +2,9 @@
 
 A Rust implementation of a RADOS OSD client for performing object operations against a Ceph cluster.
 
-## Status: Foundation Complete ✅
+## Status: Core Implementation Complete ✅
 
-This crate provides a complete architectural foundation for OSD operations. The core structure, types, message encoding, and API are implemented and ready for integration testing.
+The OSD client is functionally complete with working connection management, message encoding/decoding, and full CRUD operations. Ready for integration testing against a local Ceph cluster.
 
 ## Implemented Features
 
@@ -30,8 +30,10 @@ This crate provides a complete architectural foundation for OSD operations. The 
 - `OSDSession` - Per-OSD connection and request tracking
 - Request ID generation with atomic counters
 - Pending operation tracking with HashMap
-- Background receive task framework (recv_task)
-- Connection management infrastructure
+- Background receive task (recv_task) with message decoding
+- Full msgr2 connection establishment (banner, HELLO, AUTH, SESSION)
+- Mutex-based connection management for concurrent operations
+- Automatic reply matching via transaction IDs
 
 ### Phase 4: Client API ✅
 - `OSDClient` - Main entry point for object operations
@@ -41,105 +43,46 @@ This crate provides a complete architectural foundation for OSD operations. The 
   - `write_full(pool, oid, data)` - Overwrite entire object
   - `stat(pool, oid)` - Get object statistics
   - `delete(pool, oid)` - Delete object
-- Session management with connection pooling
-- CRUSH placement integration (placeholder)
+- Session management with automatic connection creation
+- Full CRUSH placement integration via MonClient
 - Operation timeout handling with tracker
+- OSD address resolution from OSDMap
 
 ### Phase 5: Operation Builders ✅
 - Type-safe operation construction
 - `ReadOp`, `WriteOp`, `StatOp` builders
 - Clean, discoverable API
 
+### MonClient Integration ✅
+- `get_osdmap()` method exposes current OSDMap
+- OSDMap stored in MonClientState
+- Real-time CRUSH placement with pool info and CRUSH map
+- Automatic OSD address resolution from OSDMap
+
+### Message Send/Receive ✅
+- MOSDOp messages sent via msgr2 connection
+- MOSDOpReply messages received in background task
+- Automatic matching of replies to pending operations
+- Result delivery through oneshot channels
+
+## Examples
+
+### simple_write.rs ✅
+Complete example demonstrating:
+1. Connecting to monitors
+2. Subscribing to OSDMap
+3. Writing an object
+4. Reading it back
+5. Getting stats
+6. Deleting the object
+
+Run with:
+```bash
+cargo run --package osdclient --example simple_write
+```
+
 ## What Needs Completion
 
-### 1. MonClient Integration 🔧
-
-The MonClient needs to expose a method to get the current OSDMap:
-
-```rust
-// Add to crates/monclient/src/client.rs
-impl MonClient {
-    pub async fn get_osdmap(&self) -> Result<Arc<OSDMap>> {
-        let state = self.state.read().await;
-        // Return the latest decoded OSDMap from state
-        // This requires storing decoded OSDMaps in MonClientState
-    }
-}
-```
-
-**Why needed**: CRUSH placement requires pool info and CRUSH map from OSDMap
-
-### 2. OSD Connection 🔧
-
-Complete the `OSDSession::connect()` method:
-
-```rust
-// In crates/osdclient/src/session.rs
-pub async fn connect(&self, osd_addr: &str) -> Result<()> {
-    // 1. Parse osd_addr (format: "v2:IP:PORT/NONCE")
-    // 2. Create msgr2::Connection
-    // 3. Perform banner exchange
-    // 4. Perform HELLO handshake
-    // 5. Perform AUTH handshake
-    // 6. Store connection
-}
-```
-
-**Reference**: See `monclient/src/connection.rs` for msgr2 connection patterns
-
-### 3. Message Send/Receive Integration 🔧
-
-Wire up actual message transmission:
-
-```rust
-// In session.submit_op()
-conn.send_message(msgr2::message::Message::new(
-    CEPH_MSG_OSD_OP,
-    payload,
-    // data section for write payloads
-)).await?;
-
-// In session.recv_task()
-loop {
-    let msg = conn.recv_message().await?;
-    if msg.msg_type() == CEPH_MSG_OSD_OPREPLY {
-        let reply = MOSDOpReply::decode(&msg.front)?;
-        self.handle_reply(reply).await;
-    }
-}
-```
-
-### 4. Message Encoding Refinement 🔧
-
-The current implementation uses simplified v8 encoding. For production:
-
-- Add proper hobject_t encoding (currently simplified)
-- Add object_locator_t encoding with all fields
-- Add osd_reqid_t encoding
-- Handle message features flags correctly
-- Add trace/tracing support
-- Test against actual Ceph corpus files
-
-### 5. Integration Testing 📝
-
-Create tests against local Ceph cluster:
-
-```rust
-// crates/osdclient/tests/integration.rs
-#[tokio::test]
-async fn test_write_read_cycle() {
-    let mon_client = /* connect to local cluster */;
-    let osd_client = OSDClient::new(config, mon_client).await?;
-
-    let data = Bytes::from("Hello RADOS!");
-    osd_client.write_full(pool_id, "test_obj", data.clone()).await?;
-
-    let result = osd_client.read(pool_id, "test_obj", 0, data.len()).await?;
-    assert_eq!(result.data, data);
-}
-```
-
-### 6. Examples 📝
 
 Create practical examples:
 
@@ -302,3 +245,34 @@ cd ~/dev/ceph/build
 ## Acknowledgments
 
 This implementation follows the architecture outlined in the implementation plan and learns from (but does not copy) the C++ Objecter implementation in the Ceph codebase. The design prioritizes idiomatic Rust patterns with async/await, strong typing, and zero-copy where possible.
+
+### 1. Message Encoding Refinement 🔧
+
+The current implementation uses simplified v8 encoding. For production:
+
+- Add proper hobject_t encoding (currently simplified)
+- Add object_locator_t encoding with all fields
+- Add osd_reqid_t encoding
+- Handle message features flags correctly
+- Add trace/tracing support
+- Test against actual Ceph corpus files
+
+### 2. Integration Testing 📝
+
+Create tests against local Ceph cluster:
+
+```rust
+// crates/osdclient/tests/integration.rs
+#[tokio::test]
+async fn test_write_read_cycle() {
+    let mon_client = /* connect to local cluster */;
+    let osd_client = OSDClient::new(config, mon_client).await?;
+
+    let data = Bytes::from("Hello RADOS!");
+    osd_client.write_full(pool_id, "test_obj", data.clone()).await?;
+
+    let result = osd_client.read(pool_id, "test_obj", 0, data.len()).await?;
+    assert_eq!(result.data, data);
+}
+```
+

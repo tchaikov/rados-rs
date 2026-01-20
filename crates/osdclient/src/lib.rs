@@ -19,7 +19,7 @@ pub mod tracker;
 pub mod types;
 
 // Re-export commonly used types
-pub use client::OSDClient;
+pub use client::{OSDClient, OSDClientConfig};
 pub use error::OSDClientError;
 pub use types::{OSDOp, ObjectId, OpCode, ReadResult, StatResult, StripedPgId, WriteResult};
 
