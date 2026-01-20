@@ -7,6 +7,7 @@ pub mod features;
 pub mod monmap;
 pub mod osdmap;
 pub mod padding;
+pub mod pgmap_types;
 pub mod types;
 pub mod zerocopy;
 
@@ -18,6 +19,7 @@ pub use features::*;
 pub use monmap::*;
 pub use osdmap::*;
 pub use padding::*;
+pub use pgmap_types::*;
 pub use types::*;
 pub use zerocopy::*;
 

@@ -529,6 +529,27 @@ impl<K: Denc + Ord, V: Denc> Denc for BTreeMap<K, V> {
     }
 }
 
+// Tuple implementations for pairs
+impl<T1: Denc, T2: Denc> Denc for (T1, T2) {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)?;
+        self.1.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let first = T1::decode(buf, features)?;
+        let second = T2::decode(buf, features)?;
+        Ok((first, second))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let size1 = self.0.encoded_size(features)?;
+        let size2 = self.1.encoded_size(features)?;
+        Some(size1 + size2)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
