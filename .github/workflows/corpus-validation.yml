@@ -1,0 +1,51 @@
+name: Corpus Validation
+
+on: [push, pull_request]
+
+jobs:
+  corpus-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo index
+        uses: actions/cache@v3
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo build
+        uses: actions/cache@v3
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build dencoder
+        run: cargo build --bin dencoder
+      
+      - name: Test dencoder CLI
+        run: |
+          # Test list command
+          cargo run --bin dencoder -- list
+          
+          # As types are added, we'll add validation commands here
+          # For now, just verify the tool runs
+          echo "✓ Dencoder CLI is functional"
+      
+      - name: Validate corpus files (when available)
+        run: |
+          # Check if corpus directory exists
+          if [ -d "ceph-object-corpus" ]; then
+            cargo run --bin dencoder -- validate-all --corpus-dir ceph-object-corpus
+          else
+            echo "No corpus directory found (will be added as types are implemented)"
+          fi

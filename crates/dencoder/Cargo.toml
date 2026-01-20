@@ -1,0 +1,16 @@
+[package]
+name = "dencoder"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dencoder"
+path = "src/main.rs"
+
+[dependencies]
+denc = { path = "../denc" }
+bytes = { workspace = true }
+clap = { workspace = true }
