@@ -1,5 +1,6 @@
 pub mod denc;
 pub mod error;
+pub mod features;
 pub mod zerocopy;
 
 pub use denc::*;
