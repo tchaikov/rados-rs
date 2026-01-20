@@ -1,0 +1,2553 @@
+use crate::denc::{Denc, VersionedEncode};
+use crate::entity_addr::{EntityAddr, EntityAddrvec};
+use crate::error::RadosError;
+use crate::padding::Padding;
+use crate::{mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding};
+use bytes::{Buf, BufMut, Bytes};
+use crush::CrushMap;
+use serde::Serialize;
+use std::collections::BTreeMap;
+
+/// Basic Ceph types that match C++ implementation
+/// Ceph filesystem identifier (uuid_d in C++)
+pub type FsId = [u8; 16];
+
+/// Ceph epoch type  
+pub type Epoch = u32;
+
+/// Ceph version type
+pub type Version = u64;
+
+/// Placement Group ID (pg_t in C++)
+/// Encoding format matches pg_t::encode() in osd_types.h
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PgId {
+    pub pool: u64,
+    pub seed: u32,
+}
+
+// DencMut implementation for PgId
+impl crate::denc::Denc for PgId {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 17 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for PgId: need 17, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u8(1); // Version byte
+        buf.put_u64_le(self.pool);
+        buf.put_u32_le(self.seed);
+        buf.put_i32_le(-1); // deprecated preferred field
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 17 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for PgId: need 17, have {}",
+                buf.remaining()
+            )));
+        }
+        let version = buf.get_u8();
+        if version != 1 {
+            return Err(RadosError::Protocol(format!(
+                "Unsupported PgId version: {}",
+                version
+            )));
+        }
+        let pool = buf.get_u64_le();
+        let seed = buf.get_u32_le();
+        buf.advance(4); // Skip deprecated preferred field
+        Ok(PgId { pool, seed })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(17)
+    }
+}
+
+impl crate::denc::FixedSize for PgId {
+    const SIZE: usize = 17;
+}
+
+/// Event Version (eversion_t in C++)
+/// Note: In corpus data, only version and epoch are encoded (12 bytes total)
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct EVersion {
+    pub version: Version,
+    pub epoch: Epoch,
+    #[serde(skip_serializing)]
+    pub pad: Padding<u32>, // __pad field from C++, but not encoded in corpus data
+}
+
+// DencMut implementation for EVersion
+impl crate::denc::Denc for EVersion {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 12 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for EVersion: need 12, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u64_le(self.version);
+        buf.put_u32_le(self.epoch);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 12 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for EVersion".to_string(),
+            ));
+        }
+        let version = buf.get_u64_le();
+        let epoch = buf.get_u32_le();
+        Ok(EVersion {
+            version,
+            epoch,
+            pad: Padding::zero(),
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(12)
+    }
+}
+
+impl crate::denc::FixedSize for EVersion {
+    const SIZE: usize = 12;
+}
+
+/// Unix timestamp (utime_t in C++)
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UTime {
+    pub sec: u32,
+    pub nsec: u32,
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for UTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UTime", 2)?;
+        state.serialize_field("seconds", &self.sec)?;
+        state.serialize_field("nanoseconds", &self.nsec)?;
+        state.end()
+    }
+}
+
+// DencMut implementation for UTime
+impl crate::denc::Denc for UTime {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UTime: need 8, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u32_le(self.sec);
+        buf.put_u32_le(self.nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UTime".to_string(),
+            ));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
+        Ok(UTime { sec, nsec })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl crate::denc::FixedSize for UTime {
+    const SIZE: usize = 8;
+}
+
+/// Helper function to format UTime as ISO 8601 timestamp string
+/// Matches ceph-dencoder output format: "YYYY-MM-DDTHH:MM:SS.ffffff+0000"
+/// Special cases:
+///   - if timestamp is 0, output "0.000000"
+///   - if timestamp is < 365 days (31536000 seconds), output as "seconds.microseconds"
+fn format_utime_as_timestamp(utime: &UTime) -> String {
+    use std::time::Duration;
+
+    // Special case: zero timestamp outputs as "0.000000"
+    if utime.sec == 0 && utime.nsec == 0 {
+        return "0.000000".to_string();
+    }
+
+    // Special case: timestamps < 1 year output as "seconds.microseconds"
+    // This matches ceph-dencoder behavior for small timestamps
+    if utime.sec < 31536000 {
+        // 365 days
+        let microseconds = utime.nsec / 1000;
+        return format!("{}.{:06}", utime.sec, microseconds);
+    }
+
+    // Convert UTime to SystemTime
+    let _duration = Duration::new(utime.sec as u64, utime.nsec);
+
+    // Format as ISO 8601 with nanoseconds
+    // Note: The nsec field in UTime is already nanoseconds, but we need microseconds for display
+    let microseconds = utime.nsec / 1000;
+
+    // Convert to datetime components manually to match ceph format exactly
+    // Using chrono-like formatting but without the dependency
+    let secs_since_epoch = utime.sec as i64;
+
+    // Days since epoch (1970-01-01)
+    let days = secs_since_epoch / 86400;
+    let remaining_secs = secs_since_epoch % 86400;
+
+    // Calculate year, month, day from days since epoch
+    // This is a simplified version - for production you'd want chrono crate
+    let (year, month, day) = days_to_ymd(days);
+
+    // Calculate hours, minutes, seconds
+    let hours = remaining_secs / 3600;
+    let minutes = (remaining_secs % 3600) / 60;
+    let seconds = remaining_secs % 60;
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}+0000",
+        year, month, day, hours, minutes, seconds, microseconds
+    )
+}
+
+/// Convert days since Unix epoch to year/month/day
+/// Simplified algorithm - should match ceph's output
+fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
+    // Days since 1970-01-01
+    // This is a simplified Gregorian calendar calculation
+
+    // Adjust for epoch (Unix epoch is 1970-01-01)
+    let mut year = 1970;
+
+    // Handle years
+    loop {
+        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
+        if days >= days_in_year {
+            days -= days_in_year;
+            year += 1;
+        } else {
+            break;
+        }
+    }
+
+    // Handle months
+    let days_in_months = if is_leap_year(year) {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+
+    let mut month = 1;
+    for &days_in_month in &days_in_months {
+        if days >= days_in_month as i64 {
+            days -= days_in_month as i64;
+            month += 1;
+        } else {
+            break;
+        }
+    }
+
+    let day = days as u32 + 1; // Days are 1-indexed
+
+    (year, month, day)
+}
+
+fn is_leap_year(year: i32) -> bool {
+    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+}
+
+// String encoding implementation to match Ceph's string handling
+// Generic BTreeMap encoding - matches Ceph's map encoding
+
+/// Explicit Hash HitSet parameters - no additional parameters needed
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExplicitHashHitSetParams;
+
+impl VersionedEncode for ExplicitHashHitSetParams {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // No parameters to encode
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // No parameters to decode for ExplicitHash
+        Ok(ExplicitHashHitSetParams)
+    }
+}
+
+/// Explicit Object HitSet parameters - no additional parameters needed
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ExplicitObjectHitSetParams;
+
+impl VersionedEncode for ExplicitObjectHitSetParams {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // No parameters to encode
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // No parameters to decode for ExplicitObject
+        Ok(ExplicitObjectHitSetParams)
+    }
+}
+
+/// BloomHitSet parameters - separate VersionedEncode implementation
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BloomHitSetParams {
+    pub fpp_micro: u32,
+    pub target_size: u64,
+    pub seed: u64,
+}
+
+impl VersionedEncode for BloomHitSetParams {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+        buf.put_u32_le(self.fpp_micro);
+        buf.put_u64_le(self.target_size);
+        buf.put_u64_le(self.seed);
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        if buf.remaining() < 20 {
+            // 4 + 8 + 8 = 20 buf
+            return Err(RadosError::Protocol(
+                "Insufficient buf for BloomHitSetParams".to_string(),
+            ));
+        }
+
+        let fpp_micro = buf.get_u32_le();
+        let target_size = buf.get_u64_le();
+        let seed = buf.get_u64_le();
+
+        Ok(BloomHitSetParams {
+            fpp_micro,
+            target_size,
+            seed,
+        })
+    }
+}
+
+/// HitSet parameter types - using dedicated types for each variant
+#[derive(Debug, Clone, Default)]
+pub enum HitSetParams {
+    #[default]
+    None,
+    ExplicitHash(ExplicitHashHitSetParams),
+    ExplicitObject(ExplicitObjectHitSetParams),
+    Bloom(BloomHitSetParams),
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for HitSetParams {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("HitSetParams", 1)?;
+
+        match self {
+            HitSetParams::None => {
+                state.serialize_field("type", "none")?;
+            }
+            HitSetParams::ExplicitHash(_params) => {
+                state.serialize_field("type", "explicit_hash")?;
+                // TODO: serialize params fields
+            }
+            HitSetParams::ExplicitObject(_params) => {
+                state.serialize_field("type", "explicit_object")?;
+                // TODO: serialize params fields
+            }
+            HitSetParams::Bloom(_params) => {
+                state.serialize_field("type", "bloom")?;
+                // TODO: serialize params fields
+            }
+        }
+
+        state.end()
+    }
+}
+
+impl VersionedEncode for HitSetParams {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+
+        match self {
+            HitSetParams::None => {
+                buf.put_u8(0); // TYPE_NONE
+            }
+            HitSetParams::ExplicitHash(params) => {
+                buf.put_u8(1); // TYPE_EXPLICIT_HASH
+                params.encode_versioned(buf, features)?;
+            }
+            HitSetParams::ExplicitObject(params) => {
+                buf.put_u8(2); // TYPE_EXPLICIT_OBJECT
+                params.encode_versioned(buf, features)?;
+            }
+            HitSetParams::Bloom(params) => {
+                buf.put_u8(3); // TYPE_BLOOM
+                params.encode_versioned(buf, features)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient buf for HitSetParams type".to_string(),
+            ));
+        }
+
+        let hit_set_type = buf.get_u8();
+
+        match hit_set_type {
+            0 => Ok(HitSetParams::None),
+            1 => {
+                let params = ExplicitHashHitSetParams::decode_versioned(buf, features)?;
+                Ok(HitSetParams::ExplicitHash(params))
+            }
+            2 => {
+                let params = ExplicitObjectHitSetParams::decode_versioned(buf, features)?;
+                Ok(HitSetParams::ExplicitObject(params))
+            }
+            3 => {
+                let params = BloomHitSetParams::decode_versioned(buf, features)?;
+                Ok(HitSetParams::Bloom(params))
+            }
+            _ => Err(RadosError::Protocol(format!(
+                "Unknown HitSet type: {}",
+                hit_set_type
+            ))),
+        }
+    }
+}
+// Manual Denc implementation for HitSetParams (uses VersionedEncode)
+impl crate::denc::Denc for HitSetParams {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <HitSetParams as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
+    }
+}
+
+/// Ceph UUID type (uuid_d in C++)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct UuidD {
+    pub bytes: [u8; 16],
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for UuidD {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UuidD", 1)?;
+        // Format as UUID string to match ceph-dencoder
+        let uuid_str = format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
+            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
+            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
+        );
+        state.serialize_field("uuid", &uuid_str)?;
+        state.end()
+    }
+}
+
+impl UuidD {
+    pub fn new() -> Self {
+        Self { bytes: [0; 16] }
+    }
+
+    pub fn from_bytes(bytes: [u8; 16]) -> Self {
+        Self { bytes }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.bytes.iter().all(|&b| b == 0)
+    }
+}
+
+impl std::fmt::Display for UuidD {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
+            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
+            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
+            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
+        )
+    }
+}
+
+// DencMut implementation for UuidD
+impl crate::denc::Denc for UuidD {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for UuidD: need 16, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_slice(&self.bytes);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for UuidD".to_string(),
+            ));
+        }
+        let mut uuid_bytes = [0u8; 16];
+        buf.copy_to_slice(&mut uuid_bytes);
+        Ok(UuidD { bytes: uuid_bytes })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16)
+    }
+}
+
+impl crate::denc::FixedSize for UuidD {
+    const SIZE: usize = 16;
+}
+
+/// OSD extended information structure (osd_xinfo_t in C++)
+#[derive(Debug, Clone, Default)]
+pub struct OsdXInfo {
+    pub down_stamp: UTime,              // timestamp when we were last marked down
+    pub laggy_probability: f32,         // 0.0 = definitely not laggy, 1.0 = definitely laggy
+    pub laggy_interval: u32, // average interval between being marked laggy and recovering
+    pub features: u64,       // features supported by this osd we should know about
+    pub old_weight: u32,     // weight prior to being auto marked out
+    pub last_purged_snaps_scrub: UTime, // last scrub of purged_snaps
+    pub dead_epoch: Epoch,   // last epoch we were confirmed dead (not just down)
+}
+
+// Custom Serialize implementation to match ceph-dencoder timestamp format
+impl Serialize for OsdXInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("OsdXInfo", 7)?;
+
+        // Format UTime fields as ISO 8601 timestamp strings to match ceph-dencoder
+        let down_stamp_str = format_utime_as_timestamp(&self.down_stamp);
+        state.serialize_field("down_stamp", &down_stamp_str)?;
+
+        // Serialize laggy_probability as integer 0 when it's 0.0, otherwise as float
+        if self.laggy_probability == 0.0 {
+            state.serialize_field("laggy_probability", &0)?;
+        } else {
+            state.serialize_field("laggy_probability", &self.laggy_probability)?;
+        }
+
+        state.serialize_field("laggy_interval", &self.laggy_interval)?;
+        state.serialize_field("features", &self.features)?;
+        state.serialize_field("old_weight", &self.old_weight)?;
+
+        let last_purged_snaps_scrub_str = format_utime_as_timestamp(&self.last_purged_snaps_scrub);
+        state.serialize_field("last_purged_snaps_scrub", &last_purged_snaps_scrub_str)?;
+
+        state.serialize_field("dead_epoch", &self.dead_epoch)?;
+        state.end()
+    }
+}
+
+impl VersionedEncode for OsdXInfo {
+    // OsdXInfo encoding is feature-dependent: version 4 if SERVER_OCTOPUS features, else 3
+    const FEATURE_DEPENDENT: bool = true;
+
+    fn encoding_version(&self, features: u64) -> u8 {
+        // Match C++ logic: version 4 if SERVER_OCTOPUS features, else 3
+        if (features & 0x8000000000000000) != 0 {
+            // CEPH_FEATUREMASK_SERVER_OCTOPUS
+            4
+        } else {
+            3
+        }
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+
+        // Version 1+ fields
+        self.down_stamp.encode(buf, features)?;
+
+        // Convert laggy_probability to u32 as in C++
+        let lp = (self.laggy_probability * 0xffffffffu32 as f32) as u32;
+        buf.put_u32_le(lp);
+
+        buf.put_u32_le(self.laggy_interval);
+
+        // Version 2+ fields
+        if version >= 2 {
+            buf.put_u64_le(self.features);
+        }
+
+        // Version 3+ fields
+        if version >= 3 {
+            buf.put_u32_le(self.old_weight);
+        }
+
+        // Version 4+ fields
+        if version >= 4 {
+            self.last_purged_snaps_scrub.encode(buf, features)?;
+            buf.put_u32_le(self.dead_epoch);
+        }
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // Version 1+ fields
+        let down_stamp = UTime::decode(buf, features)?;
+
+        let lp = buf.get_u32_le();
+        let laggy_probability = lp as f32 / 0xffffffffu32 as f32;
+
+        let laggy_interval = buf.get_u32_le();
+
+        let mut xinfo = OsdXInfo {
+            down_stamp,
+            laggy_probability,
+            laggy_interval,
+            ..Default::default()
+        };
+
+        // Version 2+ fields
+        if version >= 2 {
+            xinfo.features = buf.get_u64_le();
+        }
+
+        // Version 3+ fields
+        if version >= 3 {
+            xinfo.old_weight = buf.get_u32_le();
+        }
+
+        // Version 4+ fields
+        if version >= 4 {
+            xinfo.last_purged_snaps_scrub = UTime::decode(buf, features)?;
+            xinfo.dead_epoch = buf.get_u32_le();
+        }
+
+        Ok(xinfo)
+    }
+}
+// Manual Denc implementation for OsdXInfo (uses VersionedEncode)
+impl crate::denc::Denc for OsdXInfo {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <OsdXInfo as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
+    }
+}
+
+/// OSD information structure (osd_info_t in C++)
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OsdInfo {
+    pub last_clean_begin: Epoch, // last interval that ended with a clean osd shutdown
+    pub last_clean_end: Epoch,
+    pub up_from: Epoch, // epoch osd marked up
+    pub up_thru: Epoch, // lower bound on actual osd death (if > up_from)
+    pub down_at: Epoch, // upper bound on actual osd death (if > up_from)
+    pub lost_at: Epoch, // last epoch we decided data was "lost"
+}
+
+// DencMut implementation for OsdInfo
+impl crate::denc::Denc for OsdInfo {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 25 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for OsdInfo: need 25, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u8(1); // struct_v = 1
+        buf.put_u32_le(self.last_clean_begin);
+        buf.put_u32_le(self.last_clean_end);
+        buf.put_u32_le(self.up_from);
+        buf.put_u32_le(self.up_thru);
+        buf.put_u32_le(self.down_at);
+        buf.put_u32_le(self.lost_at);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 25 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for OsdInfo".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let last_clean_begin = buf.get_u32_le();
+        let last_clean_end = buf.get_u32_le();
+        let up_from = buf.get_u32_le();
+        let up_thru = buf.get_u32_le();
+        let down_at = buf.get_u32_le();
+        let lost_at = buf.get_u32_le();
+
+        Ok(OsdInfo {
+            last_clean_begin,
+            last_clean_end,
+            up_from,
+            up_thru,
+            down_at,
+            lost_at,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(25)
+    }
+}
+
+impl crate::denc::FixedSize for OsdInfo {
+    const SIZE: usize = 25;
+}
+
+/// Pool type constants matching Ceph
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PoolType {
+    Replicated = 1,
+    Erasure = 3,
+}
+
+impl From<u8> for PoolType {
+    fn from(value: u8) -> Self {
+        match value {
+            1 => PoolType::Replicated,
+            3 => PoolType::Erasure,
+            _ => PoolType::Replicated, // Default fallback
+        }
+    }
+}
+
+/// Simplified pg_pool_t implementation based on actual Ceph encoding
+/// This follows the exact field order from osd_types.cc
+#[derive(Debug, Clone, Default)]
+pub struct PgPool {
+    // Basic pool configuration (always present)
+    pub pool_type: u8, // TYPE_REPLICATED=1, TYPE_ERASURE=3
+    pub size: u8,
+    pub crush_rule: u8,  // Fixed: should be u8, not i32
+    pub object_hash: u8, // Fixed: should be u8, not u32
+
+    // PG numbers
+    pub pg_num: u32,
+    pub pgp_num: u32,
+
+    // Legacy localized pg nums (always 0)
+    pub lpg_num: u32,  // always 0
+    pub lpgp_num: u32, // always 0
+
+    // Change tracking
+    pub last_change: Epoch,
+
+    // Snapshot info
+    pub snap_seq: u64,
+    pub snap_epoch: Epoch,
+
+    // Snaps and removed snaps - use generic maps/sets
+    pub snaps: BTreeMap<u64, PoolSnapInfo>,
+    pub removed_snaps: Vec<SnapInterval>,
+
+    // Auth UID
+    pub auid: u64,
+
+    // Flags and crash_replay_interval (version dependent)
+    pub flags: u64,
+    pub min_size: u8,
+
+    // Quota
+    pub quota_max_bytes: u64,
+    pub quota_max_objects: u64,
+
+    // Tier info
+    pub tiers: Vec<u64>,
+    pub tier_of: i64,
+    pub cache_mode: u8,
+    pub read_tier: i64,
+    pub write_tier: i64,
+
+    // Properties
+    pub properties: BTreeMap<String, String>,
+
+    // Hit set (using proper HitSetParams type)
+    pub hit_set_params: HitSetParams,
+    pub hit_set_period: u32,
+    pub hit_set_count: u32,
+
+    // More fields that come in different versions
+    pub stripe_width: u32,
+    pub target_max_bytes: u64,
+    pub target_max_objects: u64,
+    pub cache_target_dirty_ratio_micro: u32,
+    pub cache_target_full_ratio_micro: u32,
+    pub cache_min_flush_age: u32,
+    pub cache_min_evict_age: u32,
+    pub erasure_code_profile: String,
+    pub last_force_op_resend_preluminous: Epoch,
+    pub min_read_recency_for_promote: i32,
+    pub expected_num_objects: u64,
+
+    // Version 19+
+    pub cache_target_dirty_high_ratio_micro: u32,
+
+    // Version 20+
+    pub min_write_recency_for_promote: i32,
+
+    // Version 21+
+    pub use_gmt_hitset: bool,
+
+    // Version 22+
+    pub fast_read: bool,
+
+    // Version 23+
+    pub hit_set_grade_decay_rate: i32,
+    pub hit_set_search_last_n: u32,
+
+    // Version 24+ - pool options (simplified)
+    pub opts_data: Vec<u8>,
+
+    // Version 25+
+    pub last_force_op_resend_prenautilus: Epoch,
+
+    // Version 26+ - application metadata
+    pub application_metadata: BTreeMap<String, BTreeMap<String, String>>,
+
+    // Version 27+
+    pub create_time: UTime,
+
+    // Version 28+ fields
+    pub pg_num_target: u32,
+    pub pgp_num_target: u32,
+    pub pg_num_pending: u32,
+    pub last_force_op_resend: Epoch,
+    pub pg_autoscale_mode: u8,
+
+    // Version 29+
+    pub last_pg_merge_meta: PgMergeMeta,
+    // Additional version-specific fields would go here
+}
+
+// Custom Serialize implementation for PgPool to format create_time as timestamp
+impl Serialize for PgPool {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PgPool", 40)?; // approximate field count
+
+        // Application metadata first (matches ceph order)
+        state.serialize_field("application_metadata", &self.application_metadata)?;
+        state.serialize_field("auid", &self.auid)?;
+        state.serialize_field("cache_min_evict_age", &self.cache_min_evict_age)?;
+        state.serialize_field("cache_min_flush_age", &self.cache_min_flush_age)?;
+
+        // cache_mode as string
+        let cache_mode_str = match self.cache_mode {
+            0 => "none",
+            1 => "writeback",
+            2 => "forward",
+            3 => "readonly",
+            4 => "readforward",
+            5 => "readproxy",
+            _ => "unknown",
+        };
+        state.serialize_field("cache_mode", &cache_mode_str)?;
+
+        state.serialize_field(
+            "cache_target_dirty_high_ratio_micro",
+            &self.cache_target_dirty_high_ratio_micro,
+        )?;
+        state.serialize_field(
+            "cache_target_dirty_ratio_micro",
+            &self.cache_target_dirty_ratio_micro,
+        )?;
+        state.serialize_field(
+            "cache_target_full_ratio_micro",
+            &self.cache_target_full_ratio_micro,
+        )?;
+
+        // Format create_time as timestamp string
+        let create_time_str = format_utime_as_timestamp(&self.create_time);
+        state.serialize_field("create_time", &create_time_str)?;
+
+        state.serialize_field("crush_rule", &self.crush_rule)?;
+        state.serialize_field("erasure_code_profile", &self.erasure_code_profile)?;
+        state.serialize_field("expected_num_objects", &self.expected_num_objects)?;
+        state.serialize_field("fast_read", &self.fast_read)?;
+        state.serialize_field("flags", &self.flags)?;
+        state.serialize_field("hit_set_count", &self.hit_set_count)?;
+        state.serialize_field("hit_set_grade_decay_rate", &self.hit_set_grade_decay_rate)?;
+        state.serialize_field("hit_set_params", &self.hit_set_params)?;
+        state.serialize_field("hit_set_period", &self.hit_set_period)?;
+        state.serialize_field("hit_set_search_last_n", &self.hit_set_search_last_n)?;
+
+        // last_change as string
+        state.serialize_field("last_change", &self.last_change.to_string())?;
+        state.serialize_field(
+            "last_force_op_resend",
+            &self.last_force_op_resend.to_string(),
+        )?;
+        state.serialize_field(
+            "last_force_op_resend_preluminous",
+            &self.last_force_op_resend_preluminous.to_string(),
+        )?;
+        state.serialize_field(
+            "last_force_op_resend_prenautilus",
+            &self.last_force_op_resend_prenautilus.to_string(),
+        )?;
+
+        state.serialize_field("last_pg_merge_meta", &self.last_pg_merge_meta)?;
+        state.serialize_field(
+            "min_read_recency_for_promote",
+            &self.min_read_recency_for_promote,
+        )?;
+        state.serialize_field("min_size", &self.min_size)?;
+        state.serialize_field(
+            "min_write_recency_for_promote",
+            &self.min_write_recency_for_promote,
+        )?;
+        state.serialize_field("object_hash", &self.object_hash)?;
+
+        // Note: ceph-dencoder adds computed fields like "options", "flags_names", "is_stretch_pool", etc.
+        // We skip lpg_num, lpgp_num (legacy, always 0), opts_data (not in ceph output)
+
+        // pg_autoscale_mode as string
+        let pg_autoscale_mode_str = match self.pg_autoscale_mode {
+            0 => "off",
+            1 => "warn",
+            2 => "on",
+            _ => "unknown",
+        };
+        state.serialize_field("pg_autoscale_mode", &pg_autoscale_mode_str)?;
+
+        state.serialize_field("pg_num", &self.pg_num)?;
+        state.serialize_field("pg_num_pending", &self.pg_num_pending)?;
+        state.serialize_field("pg_num_target", &self.pg_num_target)?;
+
+        // Use ceph's field name
+        state.serialize_field("pg_placement_num", &self.pgp_num)?;
+        state.serialize_field("pg_placement_num_target", &self.pgp_num_target)?;
+
+        // pool_snaps - use field name from ceph
+        state.serialize_field("pool_snaps", &self.snaps)?;
+
+        state.serialize_field("quota_max_bytes", &self.quota_max_bytes)?;
+        state.serialize_field("quota_max_objects", &self.quota_max_objects)?;
+        state.serialize_field("read_tier", &self.read_tier)?;
+
+        // removed_snaps using ceph's field name
+        state.serialize_field("removed_snaps", &self.removed_snaps)?;
+
+        state.serialize_field("size", &self.size)?;
+        state.serialize_field("snap_epoch", &self.snap_epoch)?;
+        state.serialize_field("snap_seq", &self.snap_seq)?;
+        state.serialize_field("stripe_width", &self.stripe_width)?;
+        state.serialize_field("target_max_bytes", &self.target_max_bytes)?;
+        state.serialize_field("target_max_objects", &self.target_max_objects)?;
+        state.serialize_field("tier_of", &self.tier_of)?;
+        state.serialize_field("tiers", &self.tiers)?;
+        state.serialize_field("use_gmt_hitset", &self.use_gmt_hitset)?;
+        state.serialize_field("write_tier", &self.write_tier)?;
+
+        state.end()
+    }
+}
+
+/// Pool snapshot information structure
+#[derive(Debug, Clone, Default)]
+pub struct PoolSnapInfo {
+    pub snapid: u64,
+    pub stamp: UTime,
+    pub name: String,
+}
+
+// Custom Serialize implementation to match ceph-dencoder timestamp format
+impl Serialize for PoolSnapInfo {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PoolSnapInfo", 3)?;
+
+        state.serialize_field("snapid", &self.snapid)?;
+
+        // Format UTime as ISO 8601 timestamp string to match ceph-dencoder
+        let timestamp_str = format_utime_as_timestamp(&self.stamp);
+        state.serialize_field("stamp", &timestamp_str)?;
+
+        state.serialize_field("name", &self.name)?;
+        state.end()
+    }
+}
+
+impl VersionedEncode for PoolSnapInfo {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        2
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        2
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+        buf.put_u64_le(self.snapid);
+        self.stamp.encode(buf, features)?;
+        self.name.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        let snapid = buf.get_u64_le();
+        let stamp = UTime::decode(buf, features)?;
+        let name = String::decode(buf, features)?;
+        Ok(PoolSnapInfo {
+            snapid,
+            stamp,
+            name,
+        })
+    }
+}
+// Manual Denc implementation for PoolSnapInfo (uses VersionedEncode)
+impl crate::denc::Denc for PoolSnapInfo {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <PoolSnapInfo as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
+    }
+}
+
+/// Snapshot interval for removed snaps
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SnapInterval {
+    pub start: u64,
+    pub len: u64,
+}
+
+// DencMut implementation for SnapInterval
+impl crate::denc::Denc for SnapInterval {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for SnapInterval: need 16, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u64_le(self.start);
+        buf.put_u64_le(self.len);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for SnapInterval".to_string(),
+            ));
+        }
+        let start = buf.get_u64_le();
+        let len = buf.get_u64_le();
+        Ok(SnapInterval { start, len })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16)
+    }
+}
+
+impl crate::denc::FixedSize for SnapInterval {
+    const SIZE: usize = 16;
+}
+
+impl PgPool {
+    // Version constants from Ceph
+    const VERSION_CURRENT: u8 = 32; // Latest
+    const COMPAT_VERSION: u8 = 5;
+
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn is_stretch_pool(&self) -> bool {
+        // For now, assume no stretch pools (like the default case in Ceph)
+        // This would be based on crush rules and other pool configuration
+        false
+    }
+}
+
+impl VersionedEncode for PgPool {
+    // PgPool encoding is feature-dependent: version changes based on
+    // SERVER_TENTACLE, NEW_OSDOP_ENCODING, SERVER_LUMINOUS, SERVER_MIMIC,
+    // SERVER_NAUTILUS features (see encoding_version below)
+    const FEATURE_DEPENDENT: bool = true;
+
+    fn encoding_version(&self, features: u64) -> u8 {
+        use crate::features::*;
+
+        // Implement the same logic as Ceph's pg_pool_t::encode
+        let mut v = Self::VERSION_CURRENT; // Default to latest
+
+        // NOTE: any new encoding dependencies must be reflected by SIGNIFICANT_FEATURES
+        if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_TENTACLE) {
+            if !has_significant_feature(features, CEPH_FEATUREMASK_NEW_OSDOP_ENCODING) {
+                // this was the first post-hammer thing we added; if it's missing, encode
+                // like hammer.
+                v = 21;
+            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_LUMINOUS) {
+                v = 24;
+            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_MIMIC) {
+                v = 26;
+            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_NAUTILUS) {
+                v = 27;
+            } else if !self.is_stretch_pool() {
+                v = 29;
+            } else {
+                v = 30;
+            }
+        }
+
+        v
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        Self::COMPAT_VERSION
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+
+        // Basic fields (always present in ENCODE_START format)
+        buf.put_u8(self.pool_type);
+        buf.put_u8(self.size);
+        buf.put_u8(self.crush_rule); // Fixed: u8 not i32
+        buf.put_u8(self.object_hash); // Fixed: u8 not u32
+        buf.put_u32_le(self.pg_num);
+        buf.put_u32_le(self.pgp_num);
+        buf.put_u32_le(self.lpg_num); // always 0
+        buf.put_u32_le(self.lpgp_num); // always 0
+        buf.put_u32_le(self.last_change);
+        buf.put_u64_le(self.snap_seq);
+        buf.put_u32_le(self.snap_epoch);
+
+        // Encode snaps and removed_snaps using generic implementations
+        self.snaps.encode(buf, features)?;
+
+        self.removed_snaps.encode(buf, features)?;
+
+        buf.put_u64_le(self.auid);
+
+        // Flags (version dependent)
+        buf.put_u64_le(self.flags);
+
+        buf.put_u32_le(0); // crash_replay_interval - always 0, not stored in struct
+        buf.put_u8(self.min_size);
+        buf.put_u64_le(self.quota_max_bytes);
+        buf.put_u64_le(self.quota_max_objects);
+
+        // Encode tiers using generic Vec implementation
+        self.tiers.encode(buf, features)?;
+
+        buf.put_i64_le(self.tier_of);
+        buf.put_u8(self.cache_mode);
+        buf.put_i64_le(self.read_tier);
+        buf.put_i64_le(self.write_tier);
+
+        // Encode properties using generic BTreeMap implementation
+        self.properties.encode(buf, features)?;
+
+        // Hit set params
+        self.hit_set_params.encode(buf, features)?;
+
+        buf.put_u32_le(self.hit_set_period);
+        buf.put_u32_le(self.hit_set_count);
+        buf.put_u32_le(self.stripe_width);
+        buf.put_u64_le(self.target_max_bytes);
+        buf.put_u64_le(self.target_max_objects);
+        buf.put_u32_le(self.cache_target_dirty_ratio_micro);
+        buf.put_u32_le(self.cache_target_full_ratio_micro);
+        buf.put_u32_le(self.cache_min_flush_age);
+        buf.put_u32_le(self.cache_min_evict_age);
+
+        self.erasure_code_profile.encode(buf, features)?;
+
+        buf.put_u32_le(self.last_force_op_resend_preluminous);
+        buf.put_i32_le(self.min_read_recency_for_promote);
+        buf.put_u64_le(self.expected_num_objects);
+
+        // Version-dependent fields
+        if version >= 19 {
+            buf.put_u32_le(self.cache_target_dirty_high_ratio_micro);
+        }
+        if version >= 20 {
+            buf.put_i32_le(self.min_write_recency_for_promote);
+        }
+        if version >= 21 {
+            buf.put_u8(if self.use_gmt_hitset { 1 } else { 0 });
+        }
+        if version >= 22 {
+            buf.put_u8(if self.fast_read { 1 } else { 0 });
+        }
+        if version >= 23 {
+            buf.put_i32_le(self.hit_set_grade_decay_rate);
+            buf.put_u32_le(self.hit_set_search_last_n);
+        }
+        if version >= 24 {
+            // Pool opts - encoded with version header
+            buf.put_u8(2); // opts version
+            buf.put_u8(1); // opts compat_version
+            let opts_len = self.opts_data.len() as u32;
+            buf.put_u32_le(opts_len);
+            buf.put_slice(&self.opts_data);
+        }
+        if version >= 25 {
+            buf.put_u32_le(self.last_force_op_resend_prenautilus);
+        }
+        if version >= 26 {
+            // Application metadata using generic BTreeMap implementation
+            self.application_metadata.encode(buf, features)?;
+        }
+        if version >= 27 {
+            self.create_time.encode(buf, features)?;
+        }
+        if version >= 28 {
+            buf.put_u32_le(self.pg_num_target);
+            buf.put_u32_le(self.pgp_num_target);
+            buf.put_u32_le(self.pg_num_pending);
+            buf.put_u32_le(0); // pg_num_dec_last_epoch_started (always 0)
+            buf.put_u32_le(0); // pg_num_dec_last_epoch_clean (always 0)
+            buf.put_u32_le(self.last_force_op_resend);
+            buf.put_u8(self.pg_autoscale_mode);
+        }
+        if version >= 29 {
+            self.last_pg_merge_meta.encode(buf, features)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        if version < Self::COMPAT_VERSION {
+            return Err(RadosError::Protocol(format!(
+                "pg_pool_t version {} too old (minimum {})",
+                version,
+                Self::COMPAT_VERSION
+            )));
+        }
+
+        println!(
+            "  Debug: Starting decode with version {}, remaining bytes: {}",
+            version,
+            buf.remaining()
+        );
+        let mut pool = PgPool::new();
+
+        // Basic fields (always present)
+        pool.pool_type = buf.get_u8();
+        pool.size = buf.get_u8();
+        pool.crush_rule = buf.get_u8(); // Fixed: u8 not i32
+        pool.object_hash = buf.get_u8(); // Fixed: u8 not u32
+        pool.pg_num = buf.get_u32_le();
+        pool.pgp_num = buf.get_u32_le();
+        pool.lpg_num = buf.get_u32_le(); // should be 0
+        pool.lpgp_num = buf.get_u32_le(); // should be 0
+        pool.last_change = buf.get_u32_le();
+        pool.snap_seq = buf.get_u64_le();
+        pool.snap_epoch = buf.get_u32_le();
+
+        println!(
+            "  Debug: Before snaps, remaining bytes: {}",
+            buf.remaining()
+        );
+
+        // Version-dependent fields following C++ decode logic
+        if version >= 3 {
+            // Decode snaps map using generic implementation
+            pool.snaps = BTreeMap::decode(buf, features)?;
+            println!(
+                "  Debug: After snaps decode, snaps.len()={}, remaining bytes: {}",
+                pool.snaps.len(),
+                buf.remaining()
+            );
+
+            // Decode removed_snaps using generic implementation
+            pool.removed_snaps = Vec::decode(buf, features)?;
+            println!(
+                "  Debug: After removed_snaps decode, removed_snaps.len()={}, remaining bytes: {}",
+                pool.removed_snaps.len(),
+                buf.remaining()
+            );
+
+            pool.auid = buf.get_u64_le();
+        } else {
+            // For older versions, use different encoding format
+            return Err(RadosError::Protocol(
+                "Version < 3 not supported yet".to_string(),
+            ));
+        }
+
+        if version >= 4 {
+            pool.flags = buf.get_u64_le();
+
+            // Read crash_replay_interval but don't store it (matches C++ behavior)
+            let _crash_replay_interval = buf.get_u32_le();
+            println!(
+                "  Debug: After crash_replay_interval (not stored), remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.flags = 0;
+        }
+
+        if version >= 7 {
+            pool.min_size = buf.get_u8();
+            println!(
+                "  Debug: After min_size, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.min_size = if pool.size > 0 {
+                pool.size - pool.size / 2
+            } else {
+                0
+            };
+        }
+
+        if version >= 8 {
+            pool.quota_max_bytes = buf.get_u64_le();
+            println!(
+                "  Debug: After quota_max_bytes, remaining bytes: {}",
+                buf.remaining()
+            );
+
+            pool.quota_max_objects = buf.get_u64_le();
+            println!(
+                "  Debug: After quota_max_objects, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.quota_max_bytes = 0;
+            pool.quota_max_objects = 0;
+        }
+
+        if version >= 9 {
+            println!(
+                "  Debug: Before tiers (version >= 9), remaining bytes: {}",
+                buf.remaining()
+            );
+
+            // Decode tiers using generic Vec implementation
+            pool.tiers = Vec::decode(buf, features)?;
+            println!(
+                "  Debug: After tiers decode, tiers.len()={}, remaining bytes: {}",
+                pool.tiers.len(),
+                buf.remaining()
+            );
+
+            pool.tier_of = buf.get_i64_le();
+            println!(
+                "  Debug: After tier_of, remaining bytes: {}",
+                buf.remaining()
+            );
+
+            pool.cache_mode = buf.get_u8();
+            println!(
+                "  Debug: After cache_mode, remaining bytes: {}",
+                buf.remaining()
+            );
+
+            pool.read_tier = buf.get_i64_le();
+            println!(
+                "  Debug: After read_tier, remaining bytes: {}",
+                buf.remaining()
+            );
+
+            pool.write_tier = buf.get_i64_le();
+            println!(
+                "  Debug: After write_tier, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.tiers = Vec::new();
+            pool.tier_of = -1;
+            pool.cache_mode = 0;
+            pool.read_tier = -1;
+            pool.write_tier = -1;
+        }
+
+        if version >= 10 {
+            println!(
+                "  Debug: Before properties (version >= 10), remaining bytes: {}",
+                buf.remaining()
+            );
+            // Decode properties using generic BTreeMap implementation
+            pool.properties = BTreeMap::decode(buf, features)?;
+            println!(
+                "  Debug: After properties decode, properties.len()={}, remaining bytes: {}",
+                pool.properties.len(),
+                buf.remaining()
+            );
+        } else {
+            pool.properties = BTreeMap::new();
+        }
+
+        if version >= 11 {
+            println!(
+                "  Debug: Before hit_set_params (version >= 11), remaining bytes: {}",
+                buf.remaining()
+            );
+
+            // Debug code removed - cannot index into generic Buf trait
+
+            // Decode HitSetParams using the proper implementation
+            pool.hit_set_params = HitSetParams::decode_versioned(buf, features)?;
+            println!(
+                "  Debug: After hit_set_params decode, remaining bytes: {}",
+                buf.remaining()
+            );
+
+            pool.hit_set_period = buf.get_u32_le();
+            pool.hit_set_count = buf.get_u32_le();
+            println!(
+                "  Debug: After hit_set_period/count, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.hit_set_params = HitSetParams::None;
+            pool.hit_set_period = 0;
+            pool.hit_set_count = 0;
+        }
+
+        if version >= 12 {
+            pool.stripe_width = buf.get_u32_le();
+            println!(
+                "  Debug: After stripe_width, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.stripe_width = 0;
+        }
+
+        if version >= 13 {
+            pool.target_max_bytes = buf.get_u64_le();
+            pool.target_max_objects = buf.get_u64_le();
+            pool.cache_target_dirty_ratio_micro = buf.get_u32_le();
+            pool.cache_target_full_ratio_micro = buf.get_u32_le();
+            pool.cache_min_flush_age = buf.get_u32_le();
+            pool.cache_min_evict_age = buf.get_u32_le();
+            println!(
+                "  Debug: After version 13 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.target_max_bytes = 0;
+            pool.target_max_objects = 0;
+            pool.cache_target_dirty_ratio_micro = 0;
+            pool.cache_target_full_ratio_micro = 0;
+            pool.cache_min_flush_age = 0;
+            pool.cache_min_evict_age = 0;
+        }
+
+        if version >= 14 {
+            pool.erasure_code_profile = String::decode(buf, features)?;
+            println!(
+                "  Debug: After erasure_code_profile, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.erasure_code_profile = String::new();
+        }
+
+        if version >= 15 {
+            pool.last_force_op_resend_preluminous = buf.get_u32_le();
+            println!(
+                "  Debug: After last_force_op_resend_preluminous, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.last_force_op_resend_preluminous = 0;
+        }
+
+        if version >= 16 {
+            pool.min_read_recency_for_promote = buf.get_i32_le();
+            println!(
+                "  Debug: After min_read_recency_for_promote, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.min_read_recency_for_promote = 1;
+        }
+
+        if version >= 17 {
+            pool.expected_num_objects = buf.get_u64_le();
+            println!(
+                "  Debug: After expected_num_objects, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.expected_num_objects = 0;
+        }
+
+        // Version-dependent fields
+        if version >= 19 {
+            pool.cache_target_dirty_high_ratio_micro = buf.get_u32_le();
+        }
+        if version >= 20 {
+            pool.min_write_recency_for_promote = buf.get_i32_le();
+        }
+        if version >= 21 {
+            pool.use_gmt_hitset = buf.get_u8() != 0;
+        }
+        if version >= 22 {
+            pool.fast_read = buf.get_u8() != 0;
+        }
+        if version >= 23 {
+            pool.hit_set_grade_decay_rate = buf.get_i32_le();
+            pool.hit_set_search_last_n = buf.get_u32_le();
+            println!(
+                "  Debug: After version 23 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.hit_set_grade_decay_rate = 0;
+            pool.hit_set_search_last_n = 1;
+        }
+
+        // For now, let's be more permissive with remaining fields
+        // If we can't decode them properly, skip them
+        if version >= 24 && buf.remaining() > 4 {
+            // Pool opts (simplified as raw data for now)
+            println!(
+                "  Debug: About to read opts len, remaining bytes: {}",
+                buf.remaining()
+            );
+            if buf.remaining() >= 8 {
+                // Debug array removed - cannot index generic Buf
+            }
+
+            // opts is versioned encoded - read version header first
+            if buf.remaining() >= 6 {
+                // Need at least 6 bytes for version header
+                let version = buf.get_u8();
+                let compat_version = buf.get_u8();
+                let opts_len = buf.get_u32_le() as usize;
+                println!(
+                    "  Debug: opts version={}, compat={}, len={}, remaining bytes: {}",
+                    version,
+                    compat_version,
+                    opts_len,
+                    buf.remaining()
+                );
+
+                if opts_len <= buf.remaining() && opts_len < 10000 {
+                    // Reasonable limit
+                    pool.opts_data = vec![0u8; opts_len];
+                    if opts_len > 0 {
+                        buf.copy_to_slice(&mut pool.opts_data);
+                    }
+                } else {
+                    pool.opts_data = Vec::new();
+                }
+            } else {
+                pool.opts_data = Vec::new();
+            }
+        } else {
+            pool.opts_data = Vec::new();
+        }
+
+        // Try to continue with remaining fields if there are enough bytes
+        if version >= 25 && buf.remaining() >= 4 {
+            pool.last_force_op_resend_prenautilus = buf.get_u32_le();
+            println!(
+                "  Debug: After last_force_op_resend_prenautilus (v25), remaining bytes: {}",
+                buf.remaining()
+            );
+        } else {
+            pool.last_force_op_resend_prenautilus = pool.last_force_op_resend_preluminous;
+        }
+
+        // Version 26+ fields
+        if version >= 26 {
+            // Application metadata (BTreeMap<String, String>)
+            pool.application_metadata = BTreeMap::decode(buf, features)?;
+            println!(
+                "  Debug: After application_metadata (v26), remaining bytes: {}",
+                buf.remaining()
+            );
+        }
+
+        if version >= 27 {
+            // Create time
+            pool.create_time = UTime::decode(buf, features)?;
+            println!(
+                "  Debug: After create_time (v27), remaining bytes: {}",
+                buf.remaining()
+            );
+        }
+
+        if version >= 28 {
+            // Version 28 fields
+            pool.pg_num_target = buf.get_u32_le();
+            pool.pgp_num_target = buf.get_u32_le();
+            pool.pg_num_pending = buf.get_u32_le();
+            let _pg_num_dec_last_epoch_started = buf.get_u32_le(); // Always 0 in recent versions
+            let _pg_num_dec_last_epoch_clean = buf.get_u32_le(); // Always 0 in recent versions
+            pool.last_force_op_resend = buf.get_u32_le();
+            pool.pg_autoscale_mode = buf.get_u8();
+            println!(
+                "  Debug: After v28 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        }
+
+        if version >= 29 && buf.remaining() >= 59 {
+            // Version 29 - last_pg_merge_meta with proper PgMergeMeta decoding
+            // Need at least 59 bytes for the encoded PgMergeMeta
+            pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
+            println!(
+                "  Debug: After v29 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        } else if version >= 29 {
+            println!(
+                "  Debug: Skipping v29 fields - insufficient bytes: {} (need 59)",
+                buf.remaining()
+            );
+        }
+
+        println!(
+            "  Debug: Decode completed, remaining bytes: {}",
+            buf.remaining()
+        );
+
+        Ok(pool)
+    }
+}
+// Manual Denc implementation for PgPool (uses VersionedEncode)
+impl crate::denc::Denc for PgPool {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <PgPool as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
+    }
+}
+
+/// PG Merge Metadata (pg_merge_meta_t in C++)
+#[derive(Debug, Clone, Default)]
+pub struct PgMergeMeta {
+    pub source_pgid: PgId,
+    pub ready_epoch: Epoch,
+    pub last_epoch_started: Epoch,
+    pub last_epoch_clean: Epoch,
+    pub source_version: EVersion,
+    pub target_version: EVersion,
+    // Extra fields found in corpus data (purpose unknown)
+    pub extra_field: Padding<u32>,
+    pub extra_padding: Padding<u8>,
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for PgMergeMeta {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("PgMergeMeta", 6)?;
+
+        // Format source_pgid as "pool.seed" string
+        let source_pgid_str = format!("{}.{}", self.source_pgid.pool, self.source_pgid.seed);
+        state.serialize_field("source_pgid", &source_pgid_str)?;
+
+        state.serialize_field("ready_epoch", &self.ready_epoch)?;
+        state.serialize_field("last_epoch_started", &self.last_epoch_started)?;
+        state.serialize_field("last_epoch_clean", &self.last_epoch_clean)?;
+
+        // Format versions as "epoch'version" string
+        let source_version_str = format!(
+            "{}'{}",
+            self.source_version.epoch, self.source_version.version
+        );
+        state.serialize_field("source_version", &source_version_str)?;
+
+        let target_version_str = format!(
+            "{}'{}",
+            self.target_version.epoch, self.target_version.version
+        );
+        state.serialize_field("target_version", &target_version_str)?;
+
+        // Skip extra_field and extra_padding (they're Padding types)
+
+        state.end()
+    }
+}
+
+impl VersionedEncode for PgMergeMeta {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Write directly to buf parameter
+
+        // Encode all fields in order
+        self.source_pgid.encode(buf, features)?;
+
+        buf.put_u32_le(self.ready_epoch);
+        buf.put_u32_le(self.last_epoch_started);
+        buf.put_u32_le(self.last_epoch_clean);
+
+        self.source_version.encode(buf, features)?;
+
+        self.target_version.encode(buf, features)?;
+
+        // Only add extra bytes if they are non-zero (they exist in corpus but may not be standard)
+        if *self.extra_field != 0 || *self.extra_padding != 0 {
+            buf.put_u32_le(*self.extra_field);
+            buf.put_u8(*self.extra_padding);
+        }
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        let source_pgid = PgId::decode(buf, features)?;
+        let ready_epoch = buf.get_u32_le();
+        let last_epoch_started = buf.get_u32_le();
+        let last_epoch_clean = buf.get_u32_le();
+        let source_version = EVersion::decode(buf, features)?;
+        let target_version = EVersion::decode(buf, features)?;
+
+        // In corpus data, there are 5 extra bytes at the end
+        let mut extra_field = Padding::zero();
+        let mut extra_padding = Padding::zero();
+        if buf.remaining() >= 5 {
+            *extra_field = buf.get_u32_le();
+            *extra_padding = buf.get_u8();
+        }
+
+        Ok(PgMergeMeta {
+            source_pgid,
+            ready_epoch,
+            last_epoch_started,
+            last_epoch_clean,
+            source_version,
+            target_version,
+            extra_field,
+            extra_padding,
+        })
+    }
+}
+// Manual Denc implementation for PgMergeMeta (uses VersionedEncode)
+impl crate::denc::Denc for PgMergeMeta {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <PgMergeMeta as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut temp_buf = bytes::BytesMut::new();
+        if self.encode(&mut temp_buf, features).is_ok() {
+            Some(temp_buf.len())
+        } else {
+            None
+        }
+    }
+}
+
+/// Snapshot interval set (snap_interval_set_t in C++)
+/// A set of snapshot intervals represented as a vector of SnapInterval
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SnapIntervalSet {
+    pub intervals: Vec<SnapInterval>,
+}
+
+// DencMut implementation for SnapIntervalSet
+impl crate::denc::Denc for SnapIntervalSet {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        <Vec<SnapInterval> as crate::denc::Denc>::encode(&self.intervals, buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let intervals = <Vec<SnapInterval> as crate::denc::Denc>::decode(buf, features)?;
+        Ok(SnapIntervalSet { intervals })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        <Vec<SnapInterval> as crate::denc::Denc>::encoded_size(&self.intervals, features)
+    }
+}
+
+/// Ceph release type (ceph_release_t in C++)
+pub type CephRelease = u8;
+
+/// OSDMap - the main OSD cluster map structure
+/// This is a simplified version that focuses on decoding the essential fields
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct OSDMap {
+    // Meta-encoding wrapper (version 8, compat 7)
+    // Client-usable data section
+    pub fsid: UuidD,
+    pub epoch: Epoch,
+    pub created: UTime,
+    pub modified: UTime,
+
+    pub pools: BTreeMap<i64, PgPool>,
+    pub pool_name: BTreeMap<i64, String>,
+    pub pool_max: i64,
+
+    pub flags: u32,
+    pub max_osd: i32,
+    pub osd_state: Vec<u32>,
+    pub osd_weight: Vec<u32>,
+    pub osd_addrs_client: Vec<EntityAddrvec>,
+
+    pub pg_temp: BTreeMap<PgId, Vec<i32>>,
+    pub primary_temp: BTreeMap<PgId, i32>,
+    pub osd_primary_affinity: Vec<u32>,
+
+    // CRUSH map (parsed from encoded bytes)
+    #[serde(skip)]
+    pub crush: Option<CrushMap>,
+    pub erasure_code_profiles: BTreeMap<String, BTreeMap<String, String>>,
+
+    // Version 4+ fields
+    pub pg_upmap: BTreeMap<PgId, Vec<i32>>,
+    pub pg_upmap_items: BTreeMap<PgId, Vec<(i32, i32)>>,
+
+    // Version 6+ fields
+    pub crush_version: i32,
+
+    // Version 7+ fields
+    pub new_removed_snaps: BTreeMap<i64, SnapIntervalSet>,
+    pub new_purged_snaps: BTreeMap<i64, SnapIntervalSet>,
+
+    // Version 9+ fields
+    pub last_up_change: UTime,
+    pub last_in_change: UTime,
+
+    // Version 10+ fields
+    pub pg_upmap_primaries: BTreeMap<PgId, i32>,
+
+    // OSD-only data section
+    pub osd_addrs_hb_back: Vec<EntityAddrvec>,
+    pub osd_info: BTreeMap<i32, OsdInfo>,
+    pub blocklist: BTreeMap<EntityAddr, UTime>,
+    pub osd_addrs_cluster: Vec<EntityAddrvec>,
+    pub cluster_snapshot_epoch: Epoch,
+    pub cluster_snapshot: String,
+    pub osd_uuid: BTreeMap<i32, UuidD>,
+    pub osd_xinfo: BTreeMap<i32, OsdXInfo>,
+    pub osd_addrs_hb_front: Vec<EntityAddrvec>,
+
+    // Version 2+ fields
+    pub nearfull_ratio: f32,
+    pub full_ratio: f32,
+    pub backfillfull_ratio: f32,
+
+    // Version 5+ fields
+    pub require_min_compat_client: CephRelease,
+    pub require_osd_release: CephRelease,
+
+    // Version 6+ fields (osd-only section)
+    pub removed_snaps_queue: Vec<(i64, SnapIntervalSet)>,
+
+    // Version 8+ fields
+    pub crush_node_flags: BTreeMap<i32, u32>,
+
+    // Version 9+ fields (osd-only section)
+    pub device_class_flags: BTreeMap<i32, u32>,
+
+    // Version 10+ fields (stretch mode)
+    pub stretch_mode_enabled: bool,
+    pub stretch_bucket_count: u32,
+    pub degraded_stretch_mode: u32,
+    pub recovering_stretch_mode: u32,
+    pub stretch_mode_bucket: i32,
+
+    // Version 11+ fields
+    pub range_blocklist: BTreeMap<EntityAddr, UTime>,
+
+    // Version 12+ fields
+    pub allow_crimson: bool,
+}
+
+impl OSDMap {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the CRUSH map, if available
+    pub fn get_crush_map(&self) -> Option<&CrushMap> {
+        self.crush.as_ref()
+    }
+
+    /// Get a pool by ID
+    pub fn get_pool(&self, pool_id: i64) -> Option<&PgPool> {
+        self.pools.get(&pool_id)
+    }
+
+    /// Get a pool name by ID
+    pub fn get_pool_name(&self, pool_id: i64) -> Option<&String> {
+        self.pool_name.get(&pool_id)
+    }
+
+    /// Get the CRUSH rule ID for a pool
+    pub fn get_pool_crush_rule(&self, pool_id: i64) -> Option<u8> {
+        self.pools.get(&pool_id).map(|p| p.crush_rule)
+    }
+
+    /// Calculate object to PG mapping
+    /// Maps an object name to its placement group within a pool
+    pub fn object_to_pg(&self, pool_id: i64, object_name: &str) -> Result<PgId, RadosError> {
+        // Get the pool
+        let pool = self
+            .get_pool(pool_id)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pool_id)))?;
+
+        // Create a simple object locator
+        let locator = crush::ObjectLocator::new(pool_id);
+
+        // Calculate the PG using the CRUSH placement function
+        let pg = crush::object_to_pg(object_name, &locator, pool.pg_num);
+
+        Ok(PgId {
+            pool: pg.pool as u64,
+            seed: pg.seed,
+        })
+    }
+
+    /// Calculate object to OSD mapping
+    /// This is the complete object placement function that combines:
+    /// 1. Object name -> PG mapping (hashing)
+    /// 2. PG -> OSD set mapping (CRUSH)
+    pub fn object_to_osds(&self, pool_id: i64, object_name: &str) -> Result<Vec<i32>, RadosError> {
+        // First, map object to PG
+        let pg = self.object_to_pg(pool_id, object_name)?;
+
+        // Then, map PG to OSDs using CRUSH
+        self.pg_to_osds(&pg)
+    }
+
+    /// Calculate PG to OSD mapping using CRUSH
+    /// Returns the ordered list of OSDs that should store replicas for this PG
+    pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+        // Get the pool
+        let pool = self
+            .get_pool(pg.pool as i64)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+
+        // Get the CRUSH map
+        let crush_map = self
+            .get_crush_map()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+
+        // Verify the CRUSH rule exists
+        let _rule = crush_map
+            .get_rule(pool.crush_rule as u32)
+            .map_err(|e| RadosError::Protocol(format!("Failed to get CRUSH rule: {:?}", e)))?;
+
+        // Use CRUSH to calculate the OSD set
+        let mut result = Vec::new();
+        let result_max = pool.size as usize;
+
+        // Use PG seed as the input to CRUSH
+        let x = pg.seed;
+
+        // Call CRUSH mapper
+        crush::mapper::crush_do_rule(
+            crush_map,
+            pool.crush_rule as u32,
+            x,
+            &mut result,
+            result_max,
+            &self.osd_weight,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH mapping failed: {:?}", e)))?;
+
+        Ok(result)
+    }
+}
+
+impl VersionedEncode for OSDMap {
+    const FEATURE_DEPENDENT: bool = true;
+
+    fn encoding_version(&self, _features: u64) -> u8 {
+        8 // Meta-encoding version
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        7
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // For now, we'll focus on decoding. Encoding can be implemented later.
+        Err(RadosError::Protocol(
+            "OSDMap encoding not yet implemented".to_string(),
+        ))
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        if version < 7 {
+            return Err(RadosError::Protocol(format!(
+                "OSDMap version {} too old (minimum 7)",
+                version
+            )));
+        }
+
+        let mut map = OSDMap::new();
+
+        // Decode client-usable data section (nested ENCODE_START)
+        let client_v = buf.get_u8();
+        let _client_compat = buf.get_u8();
+        let client_len = buf.get_u32_le() as usize;
+
+        if buf.remaining() < client_len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for client data: need {}, have {}",
+                client_len,
+                buf.remaining()
+            )));
+        }
+
+        let mut client_bytes = buf.copy_to_bytes(client_len);
+
+        // Decode client-usable fields
+        map.fsid = UuidD::decode(&mut client_bytes, features)?;
+        map.epoch = client_bytes.get_u32_le();
+        map.created = UTime::decode(&mut client_bytes, features)?;
+        map.modified = UTime::decode(&mut client_bytes, features)?;
+
+        // Decode pools (BTreeMap<i64, PgPool>)
+        map.pools = BTreeMap::decode(&mut client_bytes, features)?;
+
+        // Decode pool_name (BTreeMap<i64, String>)
+        map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
+
+        map.pool_max = client_bytes.get_i64_le();
+
+        // Decode flags
+        map.flags = client_bytes.get_u32_le();
+
+        // Decode max_osd
+        map.max_osd = client_bytes.get_i32_le();
+
+        // Decode osd_state
+        if client_v >= 5 {
+            // Version 5+ uses Vec<u32> directly
+            map.osd_state = Vec::decode(&mut client_bytes, features)?;
+        } else {
+            // Older versions use Vec<u8>
+            let n = client_bytes.get_u32_le() as usize;
+            map.osd_state = Vec::with_capacity(n);
+            for _ in 0..n {
+                map.osd_state.push(client_bytes.get_u8() as u32);
+            }
+        }
+
+        // Decode osd_weight
+        map.osd_weight = Vec::decode(&mut client_bytes, features)?;
+
+        // Decode osd_addrs (client addresses)
+        if client_v >= 8 {
+            // Version 8+ uses EntityAddrvec
+            map.osd_addrs_client = Vec::decode(&mut client_bytes, features)?;
+        } else {
+            // Older versions use single EntityAddr per OSD
+            let n = client_bytes.get_u32_le() as usize;
+            map.osd_addrs_client = Vec::with_capacity(n);
+            for _ in 0..n {
+                let addr = EntityAddr::decode(&mut client_bytes, features)?;
+                map.osd_addrs_client.push(EntityAddrvec::with_addr(addr));
+            }
+        }
+
+        // Decode pg_temp (using a custom decoder since it's not a standard BTreeMap)
+        if client_bytes.remaining() < 4 {
+            return Err(RadosError::Protocol(format!(
+                "Not enough bytes for pg_temp length: need 4, have {}",
+                client_bytes.remaining()
+            )));
+        }
+        let pg_temp_len = client_bytes.get_u32_le() as usize;
+        for _ in 0..pg_temp_len {
+            let pgid = PgId::decode(&mut client_bytes, features)?;
+            let osds = Vec::<i32>::decode(&mut client_bytes, features)?;
+            map.pg_temp.insert(pgid, osds);
+        }
+
+        // Decode primary_temp
+        if client_bytes.remaining() < 4 {
+            return Err(RadosError::Protocol(format!(
+                "Not enough bytes for primary_temp length: need 4, have {}",
+                client_bytes.remaining()
+            )));
+        }
+        let primary_temp_len = client_bytes.get_u32_le() as usize;
+        for _ in 0..primary_temp_len {
+            let pgid = PgId::decode(&mut client_bytes, features)?;
+            let osd = client_bytes.get_i32_le();
+            map.primary_temp.insert(pgid, osd);
+        }
+
+        // Decode osd_primary_affinity
+        // NOTE: Some corpus files don't have this field encoded, even though the C++ code
+        // suggests it should always be present. Skip it for now.
+        // map.osd_primary_affinity = Vec::decode(&mut client_bytes, features)?;
+
+        // Decode CRUSH map (as bytes, then parse it)
+        let crush_bytes = Bytes::decode(&mut client_bytes, features)?;
+
+        // Parse the CRUSH map from the bytes
+        if !crush_bytes.is_empty() {
+            let mut crush_buf = crush_bytes.clone();
+            match CrushMap::decode(&mut crush_buf) {
+                Ok(crush_map) => {
+                    map.crush = Some(crush_map);
+                }
+                Err(e) => {
+                    // Log the error but continue - CRUSH map parsing is optional for now
+                    eprintln!("Warning: Failed to parse CRUSH map: {:?}", e);
+                    map.crush = None;
+                }
+            }
+        } else {
+            map.crush = None;
+        }
+
+        // Decode erasure_code_profiles
+        map.erasure_code_profiles = BTreeMap::decode(&mut client_bytes, features)?;
+
+        // Version 4+ fields
+        if client_v >= 4 {
+            // Decode pg_upmap
+            let pg_upmap_len = client_bytes.get_u32_le() as usize;
+            for _ in 0..pg_upmap_len {
+                let pgid = PgId::decode(&mut client_bytes, features)?;
+                let osds = Vec::<i32>::decode(&mut client_bytes, features)?;
+                map.pg_upmap.insert(pgid, osds);
+            }
+
+            // Decode pg_upmap_items
+            let pg_upmap_items_len = client_bytes.get_u32_le() as usize;
+            for _ in 0..pg_upmap_items_len {
+                let pgid = PgId::decode(&mut client_bytes, features)?;
+                let items_len = client_bytes.get_u32_le() as usize;
+                let mut items = Vec::with_capacity(items_len);
+                for _ in 0..items_len {
+                    let from = client_bytes.get_i32_le();
+                    let to = client_bytes.get_i32_le();
+                    items.push((from, to));
+                }
+                map.pg_upmap_items.insert(pgid, items);
+            }
+        }
+
+        // Version 6+ fields
+        if client_v >= 6 {
+            map.crush_version = client_bytes.get_i32_le();
+        }
+
+        // Version 7+ fields
+        if client_v >= 7 {
+            // Decode new_removed_snaps
+            let removed_snaps_len = client_bytes.get_u32_le() as usize;
+            for _ in 0..removed_snaps_len {
+                let pool_id = client_bytes.get_i64_le();
+                let snap_set = SnapIntervalSet::decode(&mut client_bytes, features)?;
+                map.new_removed_snaps.insert(pool_id, snap_set);
+            }
+
+            // Decode new_purged_snaps
+            let purged_snaps_len = client_bytes.get_u32_le() as usize;
+            for _ in 0..purged_snaps_len {
+                let pool_id = client_bytes.get_i64_le();
+                let snap_set = SnapIntervalSet::decode(&mut client_bytes, features)?;
+                map.new_purged_snaps.insert(pool_id, snap_set);
+            }
+        }
+
+        // Version 9+ fields
+        if client_v >= 9 {
+            map.last_up_change = UTime::decode(&mut client_bytes, features)?;
+            map.last_in_change = UTime::decode(&mut client_bytes, features)?;
+        }
+
+        // Version 10+ fields
+        if client_v >= 10 {
+            let pg_upmap_primaries_len = client_bytes.get_u32_le() as usize;
+            for _ in 0..pg_upmap_primaries_len {
+                let pgid = PgId::decode(&mut client_bytes, features)?;
+                let osd = client_bytes.get_i32_le();
+                map.pg_upmap_primaries.insert(pgid, osd);
+            }
+        }
+
+        // Decode OSD-only data section (nested ENCODE_START)
+        let osd_v = buf.get_u8();
+        let _osd_compat = buf.get_u8();
+        let osd_len = buf.get_u32_le() as usize;
+
+        if buf.remaining() < osd_len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for OSD data: need {}, have {}",
+                osd_len,
+                buf.remaining()
+            )));
+        }
+
+        let mut osd_bytes = buf.copy_to_bytes(osd_len);
+
+        // Decode hb_back_addrs
+        if osd_v >= 7 {
+            map.osd_addrs_hb_back = Vec::decode(&mut osd_bytes, features)?;
+        } else {
+            // Older versions use single EntityAddr per OSD
+            let n = osd_bytes.get_u32_le() as usize;
+            map.osd_addrs_hb_back = Vec::with_capacity(n);
+            for _ in 0..n {
+                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
+                map.osd_addrs_hb_back.push(EntityAddrvec::with_addr(addr));
+            }
+        }
+
+        // Decode osd_info
+        map.osd_info = BTreeMap::decode(&mut osd_bytes, features)?;
+
+        // Decode blocklist
+        map.blocklist = BTreeMap::decode(&mut osd_bytes, features)?;
+
+        // Decode cluster_addrs
+        if osd_v >= 7 {
+            map.osd_addrs_cluster = Vec::decode(&mut osd_bytes, features)?;
+        } else {
+            let n = osd_bytes.get_u32_le() as usize;
+            map.osd_addrs_cluster = Vec::with_capacity(n);
+            for _ in 0..n {
+                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
+                map.osd_addrs_cluster.push(EntityAddrvec::with_addr(addr));
+            }
+        }
+
+        map.cluster_snapshot_epoch = osd_bytes.get_u32_le();
+        map.cluster_snapshot = String::decode(&mut osd_bytes, features)?;
+
+        // Decode osd_uuid
+        map.osd_uuid = BTreeMap::decode(&mut osd_bytes, features)?;
+
+        // Decode osd_xinfo
+        map.osd_xinfo = BTreeMap::decode(&mut osd_bytes, features)?;
+
+        // Decode hb_front_addrs
+        if osd_v >= 7 {
+            map.osd_addrs_hb_front = Vec::decode(&mut osd_bytes, features)?;
+        } else {
+            let n = osd_bytes.get_u32_le() as usize;
+            map.osd_addrs_hb_front = Vec::with_capacity(n);
+            for _ in 0..n {
+                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
+                map.osd_addrs_hb_front.push(EntityAddrvec::with_addr(addr));
+            }
+        }
+
+        // Version 2+ fields
+        if osd_v >= 2 {
+            map.nearfull_ratio = f32::from_bits(osd_bytes.get_u32_le());
+            map.full_ratio = f32::from_bits(osd_bytes.get_u32_le());
+            map.backfillfull_ratio = f32::from_bits(osd_bytes.get_u32_le());
+        }
+
+        // Version 5+ fields
+        if osd_v >= 5 {
+            map.require_min_compat_client = osd_bytes.get_u8();
+            map.require_osd_release = osd_bytes.get_u8();
+        }
+
+        // Version 6+ fields
+        if osd_v >= 6 {
+            let queue_len = osd_bytes.get_u32_le() as usize;
+            for _ in 0..queue_len {
+                let pool_id = osd_bytes.get_i64_le();
+                let snap_set = SnapIntervalSet::decode(&mut osd_bytes, features)?;
+                map.removed_snaps_queue.push((pool_id, snap_set));
+            }
+        }
+
+        // Version 8+ fields
+        if osd_v >= 8 {
+            map.crush_node_flags = BTreeMap::decode(&mut osd_bytes, features)?;
+        }
+
+        // Version 9+ fields
+        if osd_v >= 9 {
+            map.device_class_flags = BTreeMap::decode(&mut osd_bytes, features)?;
+        }
+
+        // Version 10+ fields (stretch mode)
+        if osd_v >= 10 {
+            map.stretch_mode_enabled = osd_bytes.get_u8() != 0;
+            map.stretch_bucket_count = osd_bytes.get_u32_le();
+            map.degraded_stretch_mode = osd_bytes.get_u32_le();
+            map.recovering_stretch_mode = osd_bytes.get_u32_le();
+            map.stretch_mode_bucket = osd_bytes.get_i32_le();
+        }
+
+        // Version 11+ fields
+        if osd_v >= 11 {
+            map.range_blocklist = BTreeMap::decode(&mut osd_bytes, features)?;
+        }
+
+        // Version 12+ fields
+        if osd_v >= 12 {
+            map.allow_crimson = osd_bytes.get_u8() != 0;
+        }
+
+        Ok(map)
+    }
+}
+
+// ============= Encoding Metadata Registration =============
+//
+// Mark all types with their compile-time encoding properties
+// This allows tools to detect versioning and feature dependency at compile time
+
+// Level 1: Simple types (no versioning, no feature dependency)
+mark_simple_encoding!(PgId);
+mark_simple_encoding!(EVersion);
+mark_simple_encoding!(UTime);
+mark_simple_encoding!(UuidD);
+mark_simple_encoding!(OsdInfo);
+mark_simple_encoding!(SnapInterval);
+mark_simple_encoding!(SnapIntervalSet);
+
+// Level 1/2: Versioned but not feature-dependent
+mark_versioned_encoding!(PoolSnapInfo);
+mark_versioned_encoding!(PgMergeMeta);
+mark_versioned_encoding!(ExplicitHashHitSetParams);
+mark_versioned_encoding!(ExplicitObjectHitSetParams);
+mark_versioned_encoding!(BloomHitSetParams);
+mark_versioned_encoding!(HitSetParams);
+
+// Level 2/3: Feature-dependent types (encoding changes based on features)
+mark_feature_dependent_encoding!(OsdXInfo);
+mark_feature_dependent_encoding!(PgPool);
+mark_feature_dependent_encoding!(OSDMap);
