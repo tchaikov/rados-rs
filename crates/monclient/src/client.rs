@@ -88,6 +88,9 @@ struct MonClientState {
     /// Monitor map
     monmap: MonMap,
 
+    /// OSD map (latest received)
+    osdmap: Option<Arc<denc::osdmap::OSDMap>>,
+
     /// Active connection
     active_con: Option<Arc<MonConnection>>,
 
@@ -178,6 +181,7 @@ impl MonClient {
 
         let state = MonClientState {
             monmap,
+            osdmap: None,
             active_con: None,
             pending_cons: HashMap::new(),
             tried: std::collections::HashSet::new(),
@@ -567,8 +571,11 @@ impl MonClient {
                         osdmap.osd_state.len()
                     );
 
-                    // Mark subscription as received
+                    // Store the OSDMap in state
                     let mut state_guard = state.write().await;
+                    state_guard.osdmap = Some(Arc::new(osdmap.clone()));
+
+                    // Mark subscription as received
                     state_guard.subscriptions.got("osdmap", osdmap.epoch as u64);
                 }
                 Err(e) => {
@@ -724,6 +731,39 @@ impl MonClient {
     pub async fn get_fsid(&self) -> uuid::Uuid {
         let state = self.state.read().await;
         state.monmap.fsid
+    }
+
+    /// Get the current OSDMap
+    ///
+    /// Returns the latest OSDMap received from the monitors.
+    /// Returns an error if no OSDMap has been received yet.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use std::sync::Arc;
+    /// # async fn example(mon_client: Arc<monclient::MonClient>) -> monclient::Result<()> {
+    /// // Subscribe to OSDMap updates
+    /// mon_client.subscribe("osdmap", 0, 0).await?;
+    ///
+    /// // Wait a moment for the OSDMap to arrive
+    /// tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+    ///
+    /// // Get the current OSDMap
+    /// let osdmap = mon_client.get_osdmap().await?;
+    /// println!("OSDMap epoch: {}", osdmap.epoch);
+    /// println!("Number of pools: {}", osdmap.pools.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_osdmap(&self) -> Result<Arc<denc::osdmap::OSDMap>> {
+        let state = self.state.read().await;
+        state
+            .osdmap
+            .clone()
+            .ok_or(MonClientError::Other(
+                "No OSDMap available - subscribe to 'osdmap' first".to_string(),
+            ))
     }
 
     /// Get the number of monitors

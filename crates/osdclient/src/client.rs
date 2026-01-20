@@ -107,39 +107,55 @@ impl OSDClient {
     }
 
     /// Map an object to OSDs using CRUSH
-    ///
-    /// TODO: This requires MonClient.get_osdmap() method to be implemented
-    async fn object_to_osds(&self, _pool: i64, _oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
-        // Placeholder implementation
-        // When MonClient exposes get_osdmap(), this will be:
-        //
-        // let osdmap = self.mon_client.get_osdmap().await
-        //     .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-        //
-        // let pool_info = osdmap.pools.get(&pool)
-        //     .ok_or_else(|| OSDClientError::PoolNotFound(pool))?;
-        //
-        // let locator = crush::placement::ObjectLocator {
-        //     pool_id: pool,
-        //     namespace: String::new(),
-        //     key: String::new(),
-        // };
-        //
-        // let (pg, osds) = crush::placement::object_to_osds(
-        //     &osdmap.crush_map,
-        //     oid,
-        //     &locator,
-        //     pool_info.pg_num,
-        //     pool_info.crush_rule as u32,
-        //     &vec![1; osdmap.max_osd as usize],
-        //     pool_info.size as usize,
-        // ).map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
-        //
-        // Ok((StripedPgId::from_pg(pg.pool as i64, pg.seed), osds))
+    async fn object_to_osds(&self, pool: i64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
+        // Get current OSDMap from MonClient
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
-        Err(OSDClientError::Internal(
-            "MonClient.get_osdmap() not yet implemented - see TODO in client.rs".into(),
-        ))
+        // Find pool info
+        let pool_info = osdmap
+            .pools
+            .get(&pool)
+            .ok_or_else(|| OSDClientError::PoolNotFound(pool))?;
+
+        // Create object locator
+        let locator = crush::placement::ObjectLocator {
+            pool_id: pool,
+            namespace: String::new(),
+            key: None,
+        };
+
+        // Get CRUSH map
+        let crush_map = osdmap
+            .crush
+            .as_ref()
+            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
+
+        // Map object to PG and OSDs
+        let (pg, osds) = crush::placement::object_to_osds(
+            crush_map,
+            oid,
+            &locator,
+            pool_info.pg_num,
+            pool_info.crush_rule as u32,
+            &vec![1; osdmap.max_osd as usize], // All OSDs weighted equally for now
+            pool_info.size as usize,
+        )
+        .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
+
+        if osds.is_empty() {
+            return Err(OSDClientError::NoOSDs);
+        }
+
+        // Convert to StripedPgId
+        let spgid = StripedPgId::from_pg(pg.pool as i64, pg.seed);
+
+        debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
+
+        Ok((spgid, osds))
     }
 
     /// Read data from an object
@@ -171,13 +187,17 @@ impl OSDClient {
             self.config.client_inc as i32,
         );
 
-        // Get OSDMap epoch - TODO: implement MonClient.get_osdmap()
-        let osdmap_epoch = 1u32; // Placeholder
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build message
         let msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap_epoch,
+            osdmap.epoch,
             0, // flags
             object,
             spgid,
@@ -251,13 +271,17 @@ impl OSDClient {
             self.config.client_inc as i32,
         );
 
-        // Get OSDMap epoch - TODO: implement MonClient.get_osdmap()
-        let osdmap_epoch = 1u32; // Placeholder
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build message
         let msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap_epoch,
+            osdmap.epoch,
             0, // flags
             object,
             spgid,
@@ -310,13 +334,17 @@ impl OSDClient {
             self.config.client_inc as i32,
         );
 
-        // Get OSDMap epoch - TODO: implement MonClient.get_osdmap()
-        let osdmap_epoch = 1u32; // Placeholder
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build message
         let msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap_epoch,
+            osdmap.epoch,
             0, // flags
             object,
             spgid,
@@ -364,13 +392,17 @@ impl OSDClient {
             self.config.client_inc as i32,
         );
 
-        // Get OSDMap epoch - TODO: implement MonClient.get_osdmap()
-        let osdmap_epoch = 1u32; // Placeholder
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build message
         let msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap_epoch,
+            osdmap.epoch,
             0, // flags
             object,
             spgid,
@@ -435,13 +467,17 @@ impl OSDClient {
             self.config.client_inc as i32,
         );
 
-        // Get OSDMap epoch - TODO: implement MonClient.get_osdmap()
-        let osdmap_epoch = 1u32; // Placeholder
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build message
         let msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap_epoch,
+            osdmap.epoch,
             0, // flags
             object,
             spgid,
