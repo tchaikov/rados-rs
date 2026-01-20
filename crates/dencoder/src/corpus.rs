@@ -1,18 +1,21 @@
-use std::path::Path;
 use std::fs;
+use std::path::Path;
 
 /// Import a type from a corpus file and validate encoding
-pub fn import_corpus(_type_name: &str, corpus_file: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub fn import_corpus(
+    _type_name: &str,
+    corpus_file: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Read the corpus file
     let data = fs::read(corpus_file)?;
-    
+
     // TODO: Decode the type using the registry
     // For now, we just verify the file exists and can be read
     println!("  Read {} bytes from corpus file", data.len());
-    
+
     // Placeholder: In future commits, we'll add actual decoding
     // using the type registry to look up decoders
-    
+
     Ok(())
 }
 
@@ -21,7 +24,7 @@ pub fn export_corpus(type_name: &str, _output: &Path) -> Result<(), Box<dyn std:
     // TODO: Encode the type using the registry
     // For now, this is a placeholder
     println!("  Export for {} not yet implemented", type_name);
-    
+
     Ok(())
 }
 
@@ -30,9 +33,9 @@ pub fn validate_all(corpus_dir: &Path) -> Result<usize, Box<dyn std::error::Erro
     if !corpus_dir.exists() {
         return Ok(0);
     }
-    
+
     let mut count = 0;
-    
+
     // TODO: Iterate through corpus files and validate each
     // For now, just list files
     if corpus_dir.is_dir() {
@@ -44,6 +47,6 @@ pub fn validate_all(corpus_dir: &Path) -> Result<usize, Box<dyn std::error::Erro
             }
         }
     }
-    
+
     Ok(count)
 }

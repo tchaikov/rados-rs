@@ -1,8 +1,7 @@
 /// Type registry for dencoder
-/// 
+///
 /// This module maintains a registry of all types that can be encoded/decoded
 /// for corpus validation.
-
 /// List all registered types
 pub fn list_types() -> Vec<&'static str> {
     // Start with an empty list
@@ -14,16 +13,18 @@ pub fn list_types() -> Vec<&'static str> {
     ]
 }
 
+type DecoderFn = fn(&[u8]) -> Result<(), Box<dyn std::error::Error>>;
+
 /// Get decoder for a type
-/// 
+///
 /// TODO: This will be implemented as we add more types
 #[allow(dead_code)]
-pub fn get_decoder(_type_name: &str) -> Option<fn(&[u8]) -> Result<(), Box<dyn std::error::Error>>> {
+pub fn get_decoder(_type_name: &str) -> Option<DecoderFn> {
     None
 }
 
 /// Get encoder for a type
-/// 
+///
 /// TODO: This will be implemented as we add more types
 #[allow(dead_code)]
 pub fn get_encoder(_type_name: &str) -> Option<fn() -> Vec<u8>> {

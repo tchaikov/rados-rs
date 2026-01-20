@@ -10,22 +10,26 @@ macro_rules! impl_denc_for_int {
                 buf.$put(*self);
                 Ok(())
             }
-            
+
             fn decode<B: Buf>(buf: &mut B) -> io::Result<Self> {
                 if buf.remaining() < Self::SIZE {
                     return Err(io::Error::new(
                         io::ErrorKind::UnexpectedEof,
-                        format!("buffer too short: expected {} bytes, got {}", Self::SIZE, buf.remaining())
+                        format!(
+                            "buffer too short: expected {} bytes, got {}",
+                            Self::SIZE,
+                            buf.remaining()
+                        ),
                     ));
                 }
                 Ok(buf.$get())
             }
-            
+
             fn encoded_size(&self) -> Option<usize> {
                 Some(Self::SIZE)
             }
         }
-        
+
         impl FixedSize for $t {
             const SIZE: usize = $size;
         }
@@ -48,17 +52,17 @@ impl Denc for bool {
         buf.put_u8(if *self { 1 } else { 0 });
         Ok(())
     }
-    
+
     fn decode<B: Buf>(buf: &mut B) -> io::Result<Self> {
         if buf.remaining() < 1 {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "buffer too short for bool"
+                "buffer too short for bool",
             ));
         }
         Ok(buf.get_u8() != 0)
     }
-    
+
     fn encoded_size(&self) -> Option<usize> {
         Some(1)
     }
@@ -74,17 +78,17 @@ impl Denc for f32 {
         buf.put_f32_le(*self);
         Ok(())
     }
-    
+
     fn decode<B: Buf>(buf: &mut B) -> io::Result<Self> {
         if buf.remaining() < Self::SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "buffer too short for f32"
+                "buffer too short for f32",
             ));
         }
         Ok(buf.get_f32_le())
     }
-    
+
     fn encoded_size(&self) -> Option<usize> {
         Some(Self::SIZE)
     }
@@ -100,17 +104,17 @@ impl Denc for f64 {
         buf.put_f64_le(*self);
         Ok(())
     }
-    
+
     fn decode<B: Buf>(buf: &mut B) -> io::Result<Self> {
         if buf.remaining() < Self::SIZE {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                "buffer too short for f64"
+                "buffer too short for f64",
             ));
         }
         Ok(buf.get_f64_le())
     }
-    
+
     fn encoded_size(&self) -> Option<usize> {
         Some(Self::SIZE)
     }
