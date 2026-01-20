@@ -4,6 +4,7 @@ use crate::error::RadosError;
 use crate::padding::Padding;
 use crate::{mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding};
 use bytes::{Buf, BufMut, Bytes};
+use crush::CrushMap;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -2014,9 +2015,9 @@ pub struct OSDMap {
     pub primary_temp: BTreeMap<PgId, i32>,
     pub osd_primary_affinity: Vec<u32>,
 
-    // CRUSH map (encoded as raw bytes for now)
+    // CRUSH map (parsed from encoded bytes)
     #[serde(skip)]
-    pub crush: Bytes,
+    pub crush: Option<CrushMap>,
     pub erasure_code_profiles: BTreeMap<String, BTreeMap<String, String>>,
 
     // Version 4+ fields
@@ -2083,6 +2084,46 @@ pub struct OSDMap {
 impl OSDMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get the CRUSH map, if available
+    pub fn get_crush_map(&self) -> Option<&CrushMap> {
+        self.crush.as_ref()
+    }
+
+    /// Get a pool by ID
+    pub fn get_pool(&self, pool_id: i64) -> Option<&PgPool> {
+        self.pools.get(&pool_id)
+    }
+
+    /// Get a pool name by ID
+    pub fn get_pool_name(&self, pool_id: i64) -> Option<&String> {
+        self.pool_name.get(&pool_id)
+    }
+
+    /// Get the CRUSH rule ID for a pool
+    pub fn get_pool_crush_rule(&self, pool_id: i64) -> Option<u8> {
+        self.pools.get(&pool_id).map(|p| p.crush_rule)
+    }
+
+    /// Calculate PG to OSD mapping using CRUSH
+    /// This is a placeholder - full implementation requires CRUSH mapper
+    pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+        // Get the pool
+        let pool = self.get_pool(pg.pool as i64)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+
+        // Get the CRUSH map
+        let crush_map = self.get_crush_map()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+
+        // Get the CRUSH rule
+        let _rule = crush_map.get_rule(pool.crush_rule as u32)
+            .map_err(|e| RadosError::Protocol(format!("Failed to get CRUSH rule: {:?}", e)))?;
+
+        // For now, return empty vec as placeholder
+        // TODO: Implement full CRUSH mapping using crush::mapper module
+        Ok(Vec::new())
     }
 }
 
@@ -2222,8 +2263,25 @@ impl VersionedEncode for OSDMap {
         // suggests it should always be present. Skip it for now.
         // map.osd_primary_affinity = Vec::decode(&mut client_bytes, features)?;
 
-        // Decode CRUSH map (as raw bytes)
-        map.crush = Bytes::decode(&mut client_bytes, features)?;
+        // Decode CRUSH map (as bytes, then parse it)
+        let crush_bytes = Bytes::decode(&mut client_bytes, features)?;
+        
+        // Parse the CRUSH map from the bytes
+        if !crush_bytes.is_empty() {
+            let mut crush_buf = crush_bytes.clone();
+            match CrushMap::decode(&mut crush_buf) {
+                Ok(crush_map) => {
+                    map.crush = Some(crush_map);
+                }
+                Err(e) => {
+                    // Log the error but continue - CRUSH map parsing is optional for now
+                    eprintln!("Warning: Failed to parse CRUSH map: {:?}", e);
+                    map.crush = None;
+                }
+            }
+        } else {
+            map.crush = None;
+        }
 
         // Decode erasure_code_profiles
         map.erasure_code_profiles = BTreeMap::decode(&mut client_bytes, features)?;
