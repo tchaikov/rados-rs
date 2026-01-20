@@ -146,9 +146,9 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     }
 
     // Read items
-    let items_bytes = size.checked_mul(4).ok_or_else(|| {
-        CrushError::DecodeError(format!("Bucket size overflow: {}", size))
-    })?;
+    let items_bytes = size
+        .checked_mul(4)
+        .ok_or_else(|| CrushError::DecodeError(format!("Bucket size overflow: {}", size)))?;
 
     if data.remaining() < items_bytes as usize {
         return Err(CrushError::DecodeError(format!(
@@ -384,8 +384,14 @@ mod tests {
         println!("  max_buckets: {}", map.max_buckets);
         println!("  max_rules: {}", map.max_rules);
         println!("  max_devices: {}", map.max_devices);
-        println!("  buckets: {}", map.buckets.iter().filter(|b| b.is_some()).count());
-        println!("  rules: {}", map.rules.iter().filter(|r| r.is_some()).count());
+        println!(
+            "  buckets: {}",
+            map.buckets.iter().filter(|b| b.is_some()).count()
+        );
+        println!(
+            "  rules: {}",
+            map.rules.iter().filter(|r| r.is_some()).count()
+        );
 
         // Verify we decoded something reasonable
         assert!(map.max_buckets > 0);

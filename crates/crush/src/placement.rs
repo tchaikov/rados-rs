@@ -293,7 +293,7 @@ mod tests {
 
         // OSDs should be valid
         for &osd in &osds {
-            assert!(osd >= 0 && osd < 3);
+            assert!((0..3).contains(&osd));
         }
 
         // OSDs should be distinct

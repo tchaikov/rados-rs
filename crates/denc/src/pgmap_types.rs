@@ -2595,11 +2595,13 @@ mod pg_stat_support_tests {
         use crate::osdmap::{EVersion, PgId, UTime};
 
         let pg_id = PgId { pool: 1, seed: 100 };
-        let mut pg_stat = PgStat::default();
-        pg_stat.version = EVersion {
-            version: 10,
-            epoch: 5,
-            pad: crate::padding::Padding::zero(),
+        let pg_stat = PgStat {
+            version: EVersion {
+                version: 10,
+                epoch: 5,
+                pad: crate::padding::Padding::zero(),
+            },
+            ..Default::default()
         };
 
         let mut pg_map = PgMap {
