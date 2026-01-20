@@ -243,7 +243,7 @@ mod tests {
         let result = bucket_straw2_choose(&bucket, 123, 0);
         assert!(result.is_some());
         let item = result.unwrap();
-        assert!(item >= 0 && item <= 2);
+        assert!((0..=2).contains(&item));
 
         // Same input should give same output (deterministic)
         let result2 = bucket_straw2_choose(&bucket, 123, 0);
@@ -271,7 +271,7 @@ mod tests {
         let result = bucket_uniform_choose(&bucket, 123, 0);
         assert!(result.is_some());
         let item = result.unwrap();
-        assert!(item >= 0 && item <= 2);
+        assert!((0..=2).contains(&item));
     }
 
     #[test]
