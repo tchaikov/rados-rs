@@ -192,7 +192,7 @@ impl MonMap {
 
     /// Convert to denc MonMap for encoding
     fn to_denc_monmap(&self) -> denc::MonMap {
-        use denc::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo as DencMonInfo, UTime};
+        use denc::UTime;
         use std::collections::BTreeMap;
 
         // Convert fsid from Uuid to [u8; 16]
@@ -212,7 +212,7 @@ impl MonMap {
                 public_addrs.addrs.push(denc_addr);
             }
 
-            let denc_mon = DencMonInfo {
+            let denc_mon = denc::MonInfo {
                 name: mon.name.clone(),
                 public_addrs,
                 priority: mon.priority as u16,
@@ -237,13 +237,13 @@ impl MonMap {
                 sec: (self.created / 1000) as u32,
                 nsec: ((self.created % 1000) * 1_000_000) as u32,
             },
-            persistent_features: MonFeature::default(),
-            optional_features: MonFeature::default(),
+            persistent_features: denc::MonFeature::default(),
+            optional_features: denc::MonFeature::default(),
             mon_info,
             ranks,
-            min_mon_release: MonCephRelease::default(),
+            min_mon_release: denc::MonCephRelease::default(),
             removed_ranks: Vec::new(),
-            strategy: ElectionStrategy::default(),
+            strategy: denc::ElectionStrategy::default(),
             disallowed_leaders: Vec::new(),
             stretch_mode_enabled: false,
             tiebreaker_mon: String::new(),
