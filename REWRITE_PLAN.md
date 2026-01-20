@@ -96,6 +96,7 @@ The encoding/decoding layer is the foundation of the entire stack. All other cra
     - `PgMergeMeta` structure
     - Version-aware encoding
     - **Corpus validation**: Add `pg_merge_meta_t` to corpus_comparison_test.rs
+    - **Add existing tests**: `pg_merge_meta_test.rs`, `pg_merge_meta_validation.rs`
     - **Tests**: Roundtrip with corpus validation
 
 13. **Pool configuration**
@@ -123,6 +124,7 @@ The encoding/decoding layer is the foundation of the entire stack. All other cra
     - Basic OSDMap fields
     - Pool management in OSDMap
     - **Corpus validation**: Add `OSDMap` to corpus_comparison_test.rs if corpus available
+    - **Add existing tests**: `osdmap_test.rs`
     - **Tests**: OSDMap decoding from corpus
 
 17. **CRUSH map types**
@@ -134,6 +136,7 @@ The encoding/decoding layer is the foundation of the entire stack. All other cra
     - Full CrushWrapper implementation
     - CRUSH map decoding
     - **Corpus validation**: Add `CrushWrapper` to corpus_comparison_test.rs if corpus available
+    - **Add existing tests**: `osdmap_crush_integration_test.rs`, `object_placement_test.rs`
     - **Tests**: CRUSH map corpus validation
 
 ### Phase 2: Authentication - auth crate
@@ -248,6 +251,7 @@ The messenger protocol enables communication with Ceph components.
 
 37. **Message compression and encryption**
     - Per-message security options
+    - **Add existing tests**: `ceph_config.rs`, `connection_tests.rs`
     - **Tests**: Secure message handling
 
 38. **Connection pooling**
@@ -323,13 +327,36 @@ The monitor client is the final piece enabling cluster interaction.
 
 ## Validation Strategy
 
+### Quality Gates - Preserve All Existing Tests
+**CRITICAL**: All existing tests must be preserved when the rewrite is finished. They serve as quality gates ensuring correctness.
+
+**Existing test infrastructure to preserve:**
+- **Unit tests**: All `#[test]` functions in `src/` files
+- **Integration tests**:
+  - `crates/denc/tests/corpus_comparison_test.rs` - **GATEKEEPER for all dencoders**
+  - `crates/denc/tests/object_placement_test.rs`
+  - `crates/denc/tests/osdmap_crush_integration_test.rs`
+  - `crates/denc/tests/osdmap_test.rs`
+  - `crates/denc/tests/pg_merge_meta_test.rs`
+  - `crates/denc/tests/pg_merge_meta_validation.rs`
+  - `crates/msgr2/tests/ceph_config.rs`
+  - `crates/msgr2/tests/connection_tests.rs`
+- **GitHub workflows**:
+  - `.github/workflows/ci.yml` (format, clippy, unit tests, corpus-test)
+  - `.github/workflows/test-with-ceph.yml` (integration tests with real Ceph cluster)
+
+**Test addition strategy:**
+- Add tests **as early as possible** once their dependencies are ready
+- Each commit should include relevant tests for the functionality it adds
+- Don't wait until the end - tests guide implementation correctness
+
 ### Per-Commit Validation
 - Each commit must compile: `cargo build --workspace`
 - Each commit must pass linting: `cargo clippy --workspace -- -D warnings`
-- Each commit must pass tests: `cargo test --workspace`
+- Each commit must pass all tests: `cargo test --workspace --all-targets`
 - Each commit must be formatted: `cargo fmt --all --check`
 
-### Corpus Validation Requirement (CRITICAL)
+### Corpus Validation Requirement (CRITICAL GATEKEEPER)
 - **corpus_comparison_test.rs** is the gatekeeper for all dencoder implementations
 - **MANDATORY**: Every new type's dencoder MUST be verified with corpus_comparison_test.rs
 - **CONDITION**: Only applies to types that have corpus files in `ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/`
@@ -342,15 +369,21 @@ The monitor client is the final piece enabling cluster interaction.
 - **CI Enforcement**: The `corpus-test` job in GitHub Actions will fail if any type doesn't match the official Ceph corpus
 
 ### Integration Validation
-- Unit tests should accompany each implementation
-- Integration tests should be added at the end of each phase
+- Integration tests should be added as soon as their dependencies are ready
+- Example: `pg_merge_meta_test.rs` should be added when `PgMergeMeta` type is complete
+- Example: `connection_tests.rs` should be added when msgr2 connection protocol is ready
 - End-to-end tests validate the complete workflow
 
 ### CI Integration
-- All commits must pass CI checks (format, clippy, unit tests, corpus tests)
+- All commits must pass all CI checks (format, clippy, unit tests, corpus tests)
 - CI runs on every push to the rewrite branch
-- **Corpus test job**: Automatically clones ceph-object-corpus and runs corpus_comparison_test.rs
-- No commit should be merged if corpus validation fails
+- **Four CI jobs must pass**:
+  1. `fmt`: Format checking
+  2. `clippy`: Linting
+  3. `test`: Unit and integration tests
+  4. `corpus-test`: Corpus validation (gatekeeper)
+- Integration test with real Ceph (optional, may be run separately)
+- No commit should be merged if any CI check fails
 
 ## Dependencies and Risks
 
@@ -366,14 +399,47 @@ The monitor client is the final piece enabling cluster interaction.
 3. **Version compatibility**: Supporting multiple encoding versions
 4. **CRUSH algorithm complexity**: Subtle bugs in placement calculations
 
-## Post-Rewrite Tasks
+## Post-Rewrite Verification
 
-After the rewrite is complete:
-1. Update main branch with rewritten history
-2. Archive old implementation for reference
-3. Update documentation to reflect new structure
-4. Create migration guide for any external users
-5. Run full integration tests against live Ceph cluster
+After the rewrite is complete, verify that:
+
+1. **All existing tests are preserved and passing**:
+   - Run `cargo test --workspace --all-targets` - all tests must pass
+   - Verify all integration tests from `crates/*/tests/` are present
+   - Confirm corpus_comparison_test.rs validates all types with available corpus
+
+2. **All CI workflows pass**:
+   - Format check: `cargo fmt --all --check`
+   - Clippy: `cargo clippy --workspace --all-targets -- -D warnings`
+   - Unit tests: `cargo test --workspace --all-targets`
+   - Corpus test: `cd crates/denc && cargo test --test corpus_comparison_test -- --ignored`
+   - Integration test (optional): Connection tests with real Ceph cluster
+
+3. **Documentation is current**:
+   - Update main branch with rewritten history
+   - Archive old implementation for reference
+   - Update documentation to reflect new structure
+   - Create migration guide for any external users
+
+4. **Run full integration tests against live Ceph cluster** (if available)
+
+## Summary of Existing Tests to Preserve
+
+**Integration Tests** (must all be present at rewrite completion):
+- `crates/denc/tests/corpus_comparison_test.rs` - **Gatekeeper for all dencoders**
+- `crates/denc/tests/object_placement_test.rs` - Object placement logic validation
+- `crates/denc/tests/osdmap_crush_integration_test.rs` - OSDMap + CRUSH integration
+- `crates/denc/tests/osdmap_test.rs` - OSDMap parsing and validation
+- `crates/denc/tests/pg_merge_meta_test.rs` - PG merge metadata roundtrip
+- `crates/denc/tests/pg_merge_meta_validation.rs` - PG merge metadata corpus validation
+- `crates/msgr2/tests/ceph_config.rs` - Ceph configuration parsing
+- `crates/msgr2/tests/connection_tests.rs` - Connection protocol tests
+
+**Unit Tests** (all `#[test]` functions in src/ files must be preserved)
+
+**GitHub Workflows**:
+- `.github/workflows/ci.yml` - Format, clippy, tests, corpus validation
+- `.github/workflows/test-with-ceph.yml` - Integration with real Ceph cluster
 
 ## Notes
 
@@ -381,3 +447,5 @@ After the rewrite is complete:
 - Each phase should be reviewed before moving to the next
 - Maintain backward compatibility where possible
 - Document any breaking changes clearly in commit messages
+- **ALL existing tests must pass** when the rewrite is complete
+- Tests should be added **as early as possible** once dependencies are ready, not at the end
