@@ -295,6 +295,124 @@ impl FixedSize for f64 {
     const SIZE: usize = 8;
 }
 
+// ============= Variable-Size Collection Type Implementations =============
+
+// String implementation - encoded as UTF-8 bytes with length prefix
+impl Denc for String {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        // Encode length as u32
+        let len = self.len() as u32;
+        len.encode(buf, features)?;
+
+        // Copy string bytes
+        if buf.remaining_mut() < self.len() {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space: need {} bytes, have {}",
+                self.len(),
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_slice(self.as_bytes());
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let len = u32::decode(buf, features)? as usize;
+
+        if buf.remaining() < len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for String content: need {}, have {}",
+                len,
+                buf.remaining()
+            )));
+        }
+
+        let mut bytes = vec![0u8; len];
+        buf.copy_to_slice(&mut bytes);
+
+        String::from_utf8(bytes).map_err(|e| RadosError::Protocol(format!("Invalid UTF-8: {}", e)))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(4 + self.len())
+    }
+}
+
+// Vec<T> implementation - encodes length as u32 followed by elements
+impl<T: Denc> Denc for Vec<T> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        // Encode length as u32
+        let len = self.len() as u32;
+        len.encode(buf, features)?;
+
+        // Encode each element
+        for item in self {
+            item.encode(buf, features)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let len = u32::decode(buf, features)? as usize;
+        let mut vec = Vec::with_capacity(len);
+
+        for _ in 0..len {
+            vec.push(T::decode(buf, features)?);
+        }
+
+        Ok(vec)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Start with u32 length
+        let mut size = 4;
+
+        // Add size of each element
+        for item in self {
+            size += item.encoded_size(features)?;
+        }
+
+        Some(size)
+    }
+}
+
+// Option<T> implementation - encodes as bool (present) followed by value if Some
+impl<T: Denc> Denc for Option<T> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        match self {
+            Some(value) => {
+                true.encode(buf, features)?;
+                value.encode(buf, features)?;
+            }
+            None => {
+                false.encode(buf, features)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let present = bool::decode(buf, features)?;
+        if present {
+            Ok(Some(T::decode(buf, features)?))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        match self {
+            Some(value) => {
+                let value_size = value.encoded_size(features)?;
+                Some(1 + value_size)
+            }
+            None => Some(1),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -494,5 +612,181 @@ mod tests {
         assert_eq!(bool::SIZE, 1);
         assert_eq!(f32::SIZE, 4);
         assert_eq!(f64::SIZE, 8);
+    }
+
+    // ============= Collection Type Tests =============
+
+    #[test]
+    fn test_string_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let s = String::from("hello world");
+        s.encode(&mut buf, 0).unwrap();
+        // Length (4 bytes) + data (11 bytes) = 15 bytes
+        assert_eq!(buf.len(), 15);
+        let decoded = String::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn test_string_empty() {
+        let mut buf = bytes::BytesMut::new();
+        let s = String::from("");
+        s.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4); // Just the length field
+        let decoded = String::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn test_string_unicode() {
+        let mut buf = bytes::BytesMut::new();
+        let s = String::from("Hello 世界 🌍");
+        s.encode(&mut buf, 0).unwrap();
+        let decoded = String::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, s);
+    }
+
+    #[test]
+    fn test_vec_u32_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let vec = vec![1u32, 2, 3, 4, 5];
+        vec.encode(&mut buf, 0).unwrap();
+        // Length (4 bytes) + 5 * u32 (20 bytes) = 24 bytes
+        assert_eq!(buf.len(), 24);
+        let decoded = Vec::<u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_vec_empty() {
+        let mut buf = bytes::BytesMut::new();
+        let vec: Vec<u32> = vec![];
+        vec.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4); // Just the length field
+        let decoded = Vec::<u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_vec_string_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let vec = vec![
+            String::from("hello"),
+            String::from("world"),
+            String::from("test"),
+        ];
+        vec.encode(&mut buf, 0).unwrap();
+        let decoded = Vec::<String>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_nested_vec() {
+        let mut buf = bytes::BytesMut::new();
+        let vec = vec![vec![1u32, 2], vec![3, 4, 5], vec![6]];
+        vec.encode(&mut buf, 0).unwrap();
+        let decoded = Vec::<Vec<u32>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_option_some() {
+        let mut buf = bytes::BytesMut::new();
+        let opt = Some(42u32);
+        opt.encode(&mut buf, 0).unwrap();
+        // bool (1 byte) + u32 (4 bytes) = 5 bytes
+        assert_eq!(buf.len(), 5);
+        let decoded = Option::<u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, opt);
+    }
+
+    #[test]
+    fn test_option_none() {
+        let mut buf = bytes::BytesMut::new();
+        let opt: Option<u32> = None;
+        opt.encode(&mut buf, 0).unwrap();
+        // Just bool (1 byte)
+        assert_eq!(buf.len(), 1);
+        let decoded = Option::<u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, opt);
+    }
+
+    #[test]
+    fn test_option_string() {
+        let mut buf = bytes::BytesMut::new();
+        let opt = Some(String::from("test"));
+        opt.encode(&mut buf, 0).unwrap();
+        let decoded = Option::<String>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, opt);
+    }
+
+    #[test]
+    fn test_option_vec() {
+        let mut buf = bytes::BytesMut::new();
+        let opt = Some(vec![1u32, 2, 3]);
+        opt.encode(&mut buf, 0).unwrap();
+        let decoded = Option::<Vec<u32>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, opt);
+    }
+
+    #[test]
+    fn test_vec_option() {
+        let mut buf = bytes::BytesMut::new();
+        let vec = vec![Some(1u32), None, Some(3), Some(4)];
+        vec.encode(&mut buf, 0).unwrap();
+        let decoded = Vec::<Option<u32>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_complex_nested() {
+        let mut buf = bytes::BytesMut::new();
+        let data = vec![
+            Some(vec![String::from("a"), String::from("b")]),
+            None,
+            Some(vec![String::from("c")]),
+        ];
+        data.encode(&mut buf, 0).unwrap();
+        let decoded = Vec::<Option<Vec<String>>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn test_string_encoded_size() {
+        let s = String::from("test");
+        assert_eq!(s.encoded_size(0), Some(8)); // 4 + 4
+    }
+
+    #[test]
+    fn test_vec_encoded_size() {
+        let vec = vec![1u32, 2, 3];
+        assert_eq!(vec.encoded_size(0), Some(16)); // 4 + 3*4
+    }
+
+    #[test]
+    fn test_option_encoded_size() {
+        let some_val = Some(42u32);
+        assert_eq!(some_val.encoded_size(0), Some(5)); // 1 + 4
+
+        let none_val: Option<u32> = None;
+        assert_eq!(none_val.encoded_size(0), Some(1)); // 1
+    }
+
+    #[test]
+    fn test_vec_large() {
+        let mut buf = bytes::BytesMut::new();
+        let vec: Vec<u32> = (0..1000).collect();
+        vec.encode(&mut buf, 0).unwrap();
+        let decoded = Vec::<u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, vec);
+    }
+
+    #[test]
+    fn test_string_long() {
+        let mut buf = bytes::BytesMut::new();
+        let s = "a".repeat(10000);
+        s.encode(&mut buf, 0).unwrap();
+        let decoded = String::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, s);
     }
 }
