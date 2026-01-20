@@ -2003,7 +2003,7 @@ pub struct OSDMap {
 
     pub pools: BTreeMap<i64, PgPool>,
     pub pool_name: BTreeMap<i64, String>,
-    pub pool_max: i64,
+    pub pool_max: i32,
 
     pub flags: u32,
     pub max_osd: i32,
@@ -2040,13 +2040,13 @@ pub struct OSDMap {
 
     // OSD-only data section
     pub osd_addrs_hb_back: Vec<EntityAddrvec>,
-    pub osd_info: BTreeMap<i32, OsdInfo>,
+    pub osd_info: Vec<OsdInfo>,
     pub blocklist: BTreeMap<EntityAddr, UTime>,
     pub osd_addrs_cluster: Vec<EntityAddrvec>,
     pub cluster_snapshot_epoch: Epoch,
     pub cluster_snapshot: String,
-    pub osd_uuid: BTreeMap<i32, UuidD>,
-    pub osd_xinfo: BTreeMap<i32, OsdXInfo>,
+    pub osd_uuid: Vec<UuidD>,
+    pub osd_xinfo: Vec<OsdXInfo>,
     pub osd_addrs_hb_front: Vec<EntityAddrvec>,
 
     // Version 2+ fields
@@ -2243,7 +2243,7 @@ impl VersionedEncode for OSDMap {
         // Decode pool_name (BTreeMap<i64, String>)
         map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
 
-        map.pool_max = client_bytes.get_i64_le();
+        map.pool_max = client_bytes.get_i32_le();
 
         // Decode flags
         map.flags = client_bytes.get_u32_le();
@@ -2309,10 +2309,7 @@ impl VersionedEncode for OSDMap {
             map.primary_temp.insert(pgid, osd);
         }
 
-        // Decode osd_primary_affinity
-        // NOTE: Some corpus files don't have this field encoded, even though the C++ code
-        // suggests it should always be present. Skip it for now.
-        // map.osd_primary_affinity = Vec::decode(&mut client_bytes, features)?;
+        map.osd_primary_affinity = Vec::decode(&mut client_bytes, features)?;
 
         // Decode CRUSH map (as bytes, then parse it)
         let crush_bytes = Bytes::decode(&mut client_bytes, features)?;
@@ -2418,61 +2415,37 @@ impl VersionedEncode for OSDMap {
         let mut osd_bytes = buf.copy_to_bytes(osd_len);
 
         // Decode hb_back_addrs
-        if osd_v >= 7 {
-            map.osd_addrs_hb_back = Vec::decode(&mut osd_bytes, features)?;
-        } else {
-            // Older versions use single EntityAddr per OSD
-            let n = osd_bytes.get_u32_le() as usize;
-            map.osd_addrs_hb_back = Vec::with_capacity(n);
-            for _ in 0..n {
-                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
-                map.osd_addrs_hb_back.push(EntityAddrvec::with_addr(addr));
-            }
-        }
+        map.osd_addrs_hb_back = Vec::decode(&mut osd_bytes, features)?;
 
         // Decode osd_info
-        map.osd_info = BTreeMap::decode(&mut osd_bytes, features)?;
+        map.osd_info = Vec::decode(&mut osd_bytes, features)?;
 
         // Decode blocklist
         map.blocklist = BTreeMap::decode(&mut osd_bytes, features)?;
 
         // Decode cluster_addrs
-        if osd_v >= 7 {
-            map.osd_addrs_cluster = Vec::decode(&mut osd_bytes, features)?;
-        } else {
-            let n = osd_bytes.get_u32_le() as usize;
-            map.osd_addrs_cluster = Vec::with_capacity(n);
-            for _ in 0..n {
-                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
-                map.osd_addrs_cluster.push(EntityAddrvec::with_addr(addr));
-            }
-        }
+        map.osd_addrs_cluster = Vec::decode(&mut osd_bytes, features)?;
 
         map.cluster_snapshot_epoch = osd_bytes.get_u32_le();
         map.cluster_snapshot = String::decode(&mut osd_bytes, features)?;
 
         // Decode osd_uuid
-        map.osd_uuid = BTreeMap::decode(&mut osd_bytes, features)?;
+        map.osd_uuid = Vec::decode(&mut osd_bytes, features)?;
 
         // Decode osd_xinfo
-        map.osd_xinfo = BTreeMap::decode(&mut osd_bytes, features)?;
+        map.osd_xinfo = Vec::decode(&mut osd_bytes, features)?;
 
         // Decode hb_front_addrs
-        if osd_v >= 7 {
-            map.osd_addrs_hb_front = Vec::decode(&mut osd_bytes, features)?;
-        } else {
-            let n = osd_bytes.get_u32_le() as usize;
-            map.osd_addrs_hb_front = Vec::with_capacity(n);
-            for _ in 0..n {
-                let addr = EntityAddr::decode(&mut osd_bytes, features)?;
-                map.osd_addrs_hb_front.push(EntityAddrvec::with_addr(addr));
-            }
-        }
+        map.osd_addrs_hb_front = Vec::decode(&mut osd_bytes, features)?;
 
         // Version 2+ fields
         if osd_v >= 2 {
             map.nearfull_ratio = f32::from_bits(osd_bytes.get_u32_le());
             map.full_ratio = f32::from_bits(osd_bytes.get_u32_le());
+        }
+
+        // Version 3+ fields
+        if osd_v >= 3 {
             map.backfillfull_ratio = f32::from_bits(osd_bytes.get_u32_le());
         }
 
