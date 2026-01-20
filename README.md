@@ -2,6 +2,16 @@
 
 A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object Store) client library, designed to provide modern async/await access to Ceph storage clusters.
 
+## 📋 Repository Rewrite Plan
+
+This repository is undergoing a structured rewrite to improve reviewability and maintainability. See the following documents for the detailed plan:
+
+- **[COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md)** - Complete 49-commit sequence plan
+- **[DEPENDENCIES.md](./DEPENDENCIES.md)** - Dependency graph and build order
+- **[IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md)** - Practical implementation guidance
+
+The rewrite follows a bottom-up approach, building from foundational components (denc, auth) to high-level functionality (monclient, rados).
+
 ## 🚀 Features
 
 - **Async/Await Support**: Built on Tokio for high-performance async I/O
