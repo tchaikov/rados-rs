@@ -64,7 +64,7 @@ fn test_osdmap_crush_integration() {
                     println!("      Max rules: {}", crush_map.max_rules);
 
                     // Test pool access methods
-                    for (pool_id, _pool) in &osdmap.pools {
+                    for pool_id in osdmap.pools.keys() {
                         let pool_name = osdmap.get_pool_name(*pool_id);
                         let crush_rule = osdmap.get_pool_crush_rule(*pool_id);
 
