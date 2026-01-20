@@ -3,6 +3,7 @@
 //! This crate provides the core traits and implementations for encoding
 //! and decoding Ceph protocol data structures.
 
+mod collections;
 mod error;
 mod primitives;
 mod traits;
