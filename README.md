@@ -4,18 +4,20 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ## 📋 Repository Rewrite Plan
 
-This repository is undergoing a structured rewrite to improve reviewability and maintainability. 
+This repository is creating a **completely new commit history from scratch** to improve reviewability and maintainability. 
+
+**IMPORTANT**: This is NOT a git history rewrite. We are building a brand new 51-commit sequence on the `commit-rewrite` branch by copying code from `main` into a logical structure.
 
 **👉 Start here: [REWRITE_SUMMARY.md](./REWRITE_SUMMARY.md)** - Quick reference and overview
 
 ### Planning Documents
 
 - **[REWRITE_SUMMARY.md](./REWRITE_SUMMARY.md)** - Quick reference and overview (start here!)
-- **[COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md)** - Complete 49-commit sequence plan
+- **[COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md)** - Complete 51-commit sequence plan
 - **[DEPENDENCIES.md](./DEPENDENCIES.md)** - Dependency graph and build order
 - **[IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md)** - Practical implementation guidance
 
-The rewrite follows a bottom-up approach, building from foundational components (denc, auth) to high-level functionality (monclient, rados).
+The new history will be built from scratch following a bottom-up approach: foundational components (denc, auth) → high-level functionality (monclient, rados).
 
 ## 🚀 Features
 

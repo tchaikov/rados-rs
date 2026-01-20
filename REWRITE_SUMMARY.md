@@ -1,20 +1,22 @@
-# Repository Rewrite - Quick Reference
+# Repository History Recreation - Quick Reference
 
-This repository is undergoing a structured rewrite to create a clean, reviewable commit history. This document provides a quick reference to the planning documentation.
+This repository is creating a **completely new commit history from scratch** to provide a clean, reviewable structure. This document provides a quick reference to the planning documentation.
+
+**IMPORTANT**: This is NOT a git rebase/rewrite. We are building a brand new commit sequence by copying code from the original implementation into a logical structure.
 
 ## 📚 Documentation
 
 | Document | Purpose | Audience |
 |----------|---------|----------|
-| [COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md) | Complete 49-commit sequence plan | Reviewers, Project Manager |
+| [COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md) | Complete 51-commit sequence plan | Reviewers, Project Manager |
 | [DEPENDENCIES.md](./DEPENDENCIES.md) | Dependency graph and build order | Developers, Architects |
 | [IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md) | Step-by-step implementation guide | Developers |
 | This file (REWRITE_SUMMARY.md) | Quick reference and overview | Everyone |
 
 ## 🎯 Quick Overview
 
-### What is being rewritten?
-The entire commit history of the rados-rs repository is being restructured into 51 logical, self-contained commits.
+### What is being created?
+A completely new commit history with 51 logical, self-contained commits built from scratch by copying code from the original implementation.
 
 ### Why?
 - **Reviewability**: Make the codebase easier to review and understand
@@ -24,14 +26,17 @@ The entire commit history of the rados-rs repository is being restructured into 
 - **Validation**: Use dencoder tool to verify correctness against Ceph corpus files
 
 ### How?
-Following a bottom-up, phase-based approach:
+By manually creating new commits on the `commit-rewrite` branch, copying code from the `main` branch:
 1. **Phase 1**: Foundation (denc, denc-derive, dencoder) - 20 commits
 2. **Phase 2**: Authentication (auth) - 4 commits
 3. **Phase 3**: Messaging (msgr2) - 16 commits
 4. **Phase 4**: CRUSH algorithm (crush) - 6 commits
 5. **Phase 5**: Monitor client (monclient) - 5 commits
 
+**Key Approach**: Start from scratch on `commit-rewrite` branch, copy relevant code from `main` branch into logical commits. DO NOT modify the `main` branch.
+
 ### Key Gating Criteria
+- **Create from scratch**: Build new history, don't rewrite existing
 - **Unit tests added with implementation** (same commit)
 - **Dencoder tool** added early (Commit 2) for corpus validation
 - **All tests must pass** at every commit

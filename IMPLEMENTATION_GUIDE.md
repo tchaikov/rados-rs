@@ -1,6 +1,8 @@
-# Implementation Guide for Repository Rewrite
+# Implementation Guide for Creating New Repository History
 
-This document provides detailed, practical guidance for implementing the repository rewrite according to the commit sequence plan.
+This document provides detailed, practical guidance for **creating a completely new commit history from scratch** according to the commit sequence plan.
+
+**CRITICAL**: This is NOT updating or rewriting the main branch. We are creating a brand new commit sequence from the ground up by copying code into the `commit-rewrite` branch.
 
 ## Prerequisites
 
@@ -11,40 +13,50 @@ This document provides detailed, practical guidance for implementing the reposit
 - Text editor with Rust support
 
 ### Reference Materials
-- Original repository code (for copying implementation)
+- **Original repository code on main branch** (for copying implementation - DO NOT modify main branch)
 - Ceph source code (for reference)
 - Ceph msgr2 protocol documentation (`ceph/doc/dev/msgr2.rst`)
 - Ceph object corpus files (`ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects`)
 
 ## Critical Implementation Rules
 
-1. **Tests with Implementation**: Unit tests MUST be added in the same commit as the implementation they test
-2. **All Tests Pass**: Every commit must compile and pass all tests
-3. **Corpus Validation**: Types with corpus files must pass dencoder validation in CI
-4. **No Test Removal**: Existing tests cannot be removed or modified to make them pass
-5. **Preserve Workflows**: All GitHub workflows must be preserved and functional
+1. **Work ONLY on commit-rewrite branch**: Never modify the main branch
+2. **Create from scratch**: Build new commits by copying code, not by rebasing/rewriting
+3. **Tests with Implementation**: Unit tests MUST be added in the same commit as the implementation they test
+4. **All Tests Pass**: Every commit must compile and pass all tests
+5. **Corpus Validation**: Types with corpus files must pass dencoder validation in CI
+6. **No Test Removal**: Existing tests cannot be removed or modified to make them pass
+7. **Preserve Workflows**: All GitHub workflows must be preserved and functional
 
 ## General Workflow for Each Commit
 
-### 1. Setup
+### 1. Setup (Always work on commit-rewrite branch)
 ```bash
-# Create a clean working directory
+# IMPORTANT: Work on the commit-rewrite branch ONLY
 git checkout commit-rewrite
 git pull origin commit-rewrite
 
 # Ensure clean state
 git status  # Should show nothing
+
+# Keep main branch as reference (DO NOT MODIFY IT)
+# You can view files from main for copying:
+# git show main:path/to/file.rs
 ```
 
-### 2. Implementation AND Testing (Same Commit)
+### 2. Copy Code from Main Branch (DO NOT modify main)
 ```bash
-# Create necessary directories
+# Create necessary directories on commit-rewrite branch
 mkdir -p crates/denc/src
 mkdir -p crates/denc/tests
 
-# Copy/create source files AND their tests
-# Edit files to implement just the features for this commit
-# Edit test files to add tests for this commit's implementation
+# Copy source files from main branch reference
+# Example: View file from main and copy it
+git show main:crates/denc/src/lib.rs > crates/denc/src/lib.rs
+
+# OR manually copy relevant sections from the original implementation
+# Edit files to include ONLY the features for this commit
+# Add tests for this commit's implementation
 # IMPORTANT: Tests go in the SAME commit as the implementation
 ```
 
@@ -254,13 +266,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read corpus file
     let data = std::fs::read(&args.corpus_file)?;
     
-    // Decode using registered type
-    // Validate encoding matches
+    // TODO: Decode using registered type
+    // This will require a type registry that maps type names to decoders
+    // For initial implementation, hard-code support for basic types
+    // Example:
+    // match args.type_name.as_str() {
+    //     "entity_addr_t" => validate_entity_addr_t(&data)?,
+    //     _ => return Err("Unsupported type".into()),
+    // }
+    
+    // TODO: Validate encoding matches
+    // Decode from corpus, re-encode, compare bytes
     
     println!("Validation: OK");
     Ok(())
 }
 ```
+
+**Note**: This is a simplified example. The actual implementation will need a type registry system and proper decode/encode validation logic. Start with basic types and expand as more types are added.
 
 **CI Workflow** (`.github/workflows/corpus-validation.yml`):
 ```yaml
@@ -277,9 +300,13 @@ jobs:
       - name: Run dencoder validation
         run: |
           cargo build --bin dencoder
-          # Run dencoder against all corpus files for implemented types
+          # This example shows validation for one type
+          # As more types are added, extend this to validate all implemented types
+          # Consider using a script to iterate through all corpus files
           cargo run --bin dencoder -- --type-name entity_addr_t --corpus-file ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/entity_addr_t_1
 ```
+
+**Note**: The CI workflow should be expanded as types are added. Consider creating a script that automatically discovers and validates all implemented types against their corpus files.
 
 **Commit Message**:
 ```

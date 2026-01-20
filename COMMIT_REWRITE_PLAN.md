@@ -2,7 +2,9 @@
 
 ## Overview
 
-This document outlines the detailed plan for rewriting and restructuring the commit history in `tchaikov/rados-rs` to support external review and long-term maintainability. The goal is to create a clean, logical commit sequence that builds the repository from foundational components to high-level functionality.
+This document outlines the detailed plan for **creating a completely new commit history from scratch** in `tchaikov/rados-rs` to support external review and long-term maintainability. The goal is to build a clean, logical commit sequence from the ground up that represents how the repository should have been developed, building from foundational components to high-level functionality.
+
+**Important**: This is NOT a git history rewrite (like git rebase/filter-branch). Instead, we are manually recreating the entire repository by copying code from the original implementation into a new branch with a logical commit sequence.
 
 ## Objectives
 
@@ -28,7 +30,9 @@ This document outlines the detailed plan for rewriting and restructuring the com
 
 **Base Branch**: `commit-rewrite`
 
-This plan creates a PR that targets the `commit-rewrite` branch, which contains only the initial repository setup (README.md and .gitignore).
+This plan creates a PR that targets the `commit-rewrite` branch, which starts as a clean slate with only the initial repository setup (README.md and .gitignore). The new commit history will be built from scratch on top of this base, NOT by rewriting the existing main branch history.
+
+**Approach**: Manual commit creation by copying source files from the original implementation into the new branch, one logical feature at a time.
 
 ## Commit Sequence Structure
 
@@ -535,24 +539,30 @@ For each phase:
 
 ## Execution Approach
 
-1. **Manual Commit Crafting**: Each commit will be manually created by copying and editing source files incrementally
+1. **Manual Commit Creation from Scratch**: Each commit will be manually created by copying source files from the original repository and organizing them into logical, incremental commits
 2. **Incremental Testing**: Run tests after each commit to ensure compilability and correctness
-3. **No History Preservation**: Complete history rewrite, not preserving current working history
-4. **Branch Replacement**: After completion, the maintainer will handle removing the main branch and renaming
+3. **Fresh History**: Create completely new commit history from scratch; NOT a git rebase/rewrite of existing history
+4. **Copy, Don't Modify**: Copy code from the original implementation in the main branch, organizing it into the new logical structure
+5. **Branch Strategy**: After completion and validation, the `commit-rewrite` branch will become the new default branch
+
+**Key Distinction**: This is NOT `git rebase`, `git filter-branch`, or any git history manipulation. This is building a new repository structure from the ground up by selectively copying files into a new commit sequence.
 
 ## Success Criteria
 
-1. All 49 commits are created and pushed
+1. All 51 commits are created and pushed
 2. Each commit compiles successfully
 3. All tests pass (100% test success rate)
 4. Code review confirms quality
 5. Documentation is complete
 6. CI/CD pipeline is green
+7. All functionality from original repository is preserved
 
 ## Notes
 
-- This is a complete rewrite of the repository history
-- Current working history will NOT be preserved
-- The `commit-rewrite` branch will serve as the new main branch after validation
+- This creates a completely NEW commit history from scratch
+- Original main branch history will NOT be modified or preserved in the new branch
+- Code is COPIED from the original implementation into the new logical structure
+- The `commit-rewrite` branch will serve as the new default branch after validation
 - Each commit must be self-contained and independently buildable
 - Tests are mandatory for each commit
+- This is manual reconstruction, NOT automated git history manipulation
