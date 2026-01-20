@@ -1,0 +1,393 @@
+// Object placement API for CRUSH
+// High-level interface for mapping objects to OSDs
+
+use crate::error::Result;
+use crate::hash::crush_hash32;
+use crate::mapper::crush_do_rule;
+use crate::types::CrushMap;
+
+/// Object locator information
+/// Contains pool ID, namespace, and optional key override
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectLocator {
+    /// Pool ID
+    pub pool_id: i64,
+    /// Object namespace (empty string for default)
+    pub namespace: String,
+    /// Optional key override for hashing
+    pub key: Option<String>,
+}
+
+impl ObjectLocator {
+    /// Create a new object locator with just a pool ID
+    pub fn new(pool_id: i64) -> Self {
+        ObjectLocator {
+            pool_id,
+            namespace: String::new(),
+            key: None,
+        }
+    }
+
+    /// Create an object locator with pool ID and namespace
+    pub fn with_namespace(pool_id: i64, namespace: String) -> Self {
+        ObjectLocator {
+            pool_id,
+            namespace,
+            key: None,
+        }
+    }
+
+    /// Create an object locator with a key override
+    pub fn with_key(pool_id: i64, key: String) -> Self {
+        ObjectLocator {
+            pool_id,
+            namespace: String::new(),
+            key: Some(key),
+        }
+    }
+}
+
+/// Placement group identifier
+/// Combines pool ID and PG number
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PgId {
+    /// Pool ID
+    pub pool: i64,
+    /// PG seed/number within the pool
+    pub seed: u32,
+}
+
+impl PgId {
+    /// Create a new PG ID
+    pub fn new(pool: i64, seed: u32) -> Self {
+        PgId { pool, seed }
+    }
+}
+
+impl std::fmt::Display for PgId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{:x}", self.pool, self.seed)
+    }
+}
+
+/// Calculate PG ID from object name
+///
+/// This hashes the object name and maps it to a placement group
+/// within the specified pool.
+///
+/// # Arguments
+/// * `object_name` - Name of the object
+/// * `locator` - Object locator with pool and namespace info
+/// * `pg_num` - Number of PGs in the pool
+///
+/// # Returns
+/// PG ID (pool + seed)
+pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> PgId {
+    // Determine what to hash
+    let hash_key = if let Some(ref key) = locator.key {
+        key.as_str()
+    } else {
+        object_name
+    };
+
+    // If there's a namespace, include it in the hash
+    let hash_input = if locator.namespace.is_empty() {
+        hash_key.to_string()
+    } else {
+        format!("{}\n{}", locator.namespace, hash_key)
+    };
+
+    // Hash the object name to get a 32-bit value
+    let hash = crush_hash32(
+        hash_input
+            .as_bytes()
+            .iter()
+            .fold(0u32, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u32)),
+    );
+
+    // Map to PG number using modulo
+    let pg_seed = hash % pg_num;
+
+    PgId::new(locator.pool_id, pg_seed)
+}
+
+/// Map a PG to OSDs using CRUSH
+///
+/// This is the main function that uses the CRUSH algorithm to determine
+/// which OSDs should store data for a given placement group.
+///
+/// # Arguments
+/// * `crush_map` - The CRUSH map
+/// * `pg` - Placement group ID
+/// * `rule_id` - CRUSH rule to use (from pool configuration)
+/// * `osd_weights` - OSD weights (from OSDMap)
+/// * `result_max` - Maximum number of OSDs to return (typically pool size)
+///
+/// # Returns
+/// Vector of OSD IDs (first is primary)
+pub fn pg_to_osds(
+    crush_map: &CrushMap,
+    pg: PgId,
+    rule_id: u32,
+    osd_weights: &[u32],
+    result_max: usize,
+) -> Result<Vec<i32>> {
+    let mut result = Vec::new();
+
+    // Use PG seed as the input to CRUSH
+    let x = pg.seed;
+
+    // Execute the CRUSH rule
+    crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
+
+    Ok(result)
+}
+
+/// Map an object directly to OSDs
+///
+/// This is a convenience function that combines object_to_pg and pg_to_osds.
+///
+/// # Arguments
+/// * `crush_map` - The CRUSH map
+/// * `object_name` - Name of the object
+/// * `locator` - Object locator with pool info
+/// * `pg_num` - Number of PGs in the pool
+/// * `rule_id` - CRUSH rule to use
+/// * `osd_weights` - OSD weights
+/// * `result_max` - Maximum number of OSDs to return
+///
+/// # Returns
+/// Tuple of (PG ID, Vector of OSD IDs)
+pub fn object_to_osds(
+    crush_map: &CrushMap,
+    object_name: &str,
+    locator: &ObjectLocator,
+    pg_num: u32,
+    rule_id: u32,
+    osd_weights: &[u32],
+    result_max: usize,
+) -> Result<(PgId, Vec<i32>)> {
+    // First, map object to PG
+    let pg = object_to_pg(object_name, locator, pg_num);
+
+    // Then, map PG to OSDs
+    let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max)?;
+
+    Ok((pg, osds))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{
+        BucketAlgorithm, BucketData, CrushBucket, CrushRule, CrushRuleStep, RuleOp, RuleType,
+    };
+
+    #[test]
+    fn test_object_locator() {
+        let loc1 = ObjectLocator::new(1);
+        assert_eq!(loc1.pool_id, 1);
+        assert_eq!(loc1.namespace, "");
+        assert_eq!(loc1.key, None);
+
+        let loc2 = ObjectLocator::with_namespace(2, "ns1".to_string());
+        assert_eq!(loc2.pool_id, 2);
+        assert_eq!(loc2.namespace, "ns1");
+
+        let loc3 = ObjectLocator::with_key(3, "key1".to_string());
+        assert_eq!(loc3.pool_id, 3);
+        assert_eq!(loc3.key, Some("key1".to_string()));
+    }
+
+    #[test]
+    fn test_pg_id() {
+        let pg = PgId::new(1, 0x2a);
+        assert_eq!(pg.pool, 1);
+        assert_eq!(pg.seed, 0x2a);
+        assert_eq!(format!("{}", pg), "1.2a");
+    }
+
+    #[test]
+    fn test_object_to_pg() {
+        let locator = ObjectLocator::new(1);
+
+        // Same object should always map to same PG
+        let pg1 = object_to_pg("myobject", &locator, 100);
+        let pg2 = object_to_pg("myobject", &locator, 100);
+        assert_eq!(pg1, pg2);
+        assert_eq!(pg1.pool, 1);
+        assert!(pg1.seed < 100);
+
+        // Different objects should (usually) map to different PGs
+        let pg3 = object_to_pg("otherobject", &locator, 100);
+        assert_eq!(pg3.pool, 1);
+        assert!(pg3.seed < 100);
+    }
+
+    #[test]
+    fn test_object_to_pg_with_namespace() {
+        let loc1 = ObjectLocator::new(1);
+        let loc2 = ObjectLocator::with_namespace(1, "ns1".to_string());
+
+        // Same object in different namespaces should map to different PGs
+        let pg1 = object_to_pg("myobject", &loc1, 100);
+        let pg2 = object_to_pg("myobject", &loc2, 100);
+
+        // They might be the same by chance, but the hash input is different
+        assert_eq!(pg1.pool, pg2.pool);
+    }
+
+    #[test]
+    fn test_pg_to_osds() {
+        // Create a simple CRUSH map
+        let mut map = CrushMap::new();
+        map.max_devices = 3;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            weight: 0x30000,
+            size: 3,
+            items: vec![0, 1, 2],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        let rule = CrushRule {
+            rule_id: 0,
+            rule_type: RuleType::Replicated,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseLeafFirstN,
+                    arg1: 2, // Select 2 OSDs
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        };
+
+        map.rules = vec![Some(rule)];
+
+        let pg = PgId::new(1, 42);
+        let weights = vec![0x10000, 0x10000, 0x10000];
+
+        let result = pg_to_osds(&map, pg, 0, &weights, 2);
+        assert!(result.is_ok());
+
+        let osds = result.unwrap();
+        assert!(osds.len() <= 2);
+
+        // OSDs should be valid
+        for &osd in &osds {
+            assert!(osd >= 0 && osd < 3);
+        }
+
+        // OSDs should be distinct
+        if osds.len() == 2 {
+            assert_ne!(osds[0], osds[1]);
+        }
+    }
+
+    #[test]
+    fn test_object_to_osds() {
+        // Create a simple CRUSH map
+        let mut map = CrushMap::new();
+        map.max_devices = 2;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            weight: 0x20000,
+            size: 2,
+            items: vec![0, 1],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        let rule = CrushRule {
+            rule_id: 0,
+            rule_type: RuleType::Replicated,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseLeafFirstN,
+                    arg1: 1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        };
+
+        map.rules = vec![Some(rule)];
+
+        let locator = ObjectLocator::new(1);
+        let weights = vec![0x10000, 0x10000];
+
+        let result = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1);
+        assert!(result.is_ok());
+
+        let (pg, osds) = result.unwrap();
+        assert_eq!(pg.pool, 1);
+        assert!(pg.seed < 100);
+        assert_eq!(osds.len(), 1);
+        assert!(osds[0] == 0 || osds[0] == 1);
+
+        // Same object should always map to same PG and OSDs
+        let result2 = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1);
+        let (pg2, osds2) = result2.unwrap();
+        assert_eq!(pg, pg2);
+        assert_eq!(osds, osds2);
+    }
+
+    #[test]
+    fn test_pg_distribution() {
+        // Test that objects are distributed across PGs
+        let locator = ObjectLocator::new(1);
+        let pg_num = 10;
+
+        let mut pg_counts = vec![0; pg_num as usize];
+
+        // Map 100 objects and count PG distribution
+        for i in 0..100 {
+            let object_name = format!("object_{}", i);
+            let pg = object_to_pg(&object_name, &locator, pg_num);
+            pg_counts[pg.seed as usize] += 1;
+        }
+
+        // Each PG should have at least one object (with high probability)
+        let empty_pgs = pg_counts.iter().filter(|&&count| count == 0).count();
+        assert!(
+            empty_pgs < 3,
+            "Too many empty PGs: {} out of {}",
+            empty_pgs,
+            pg_num
+        );
+    }
+}
