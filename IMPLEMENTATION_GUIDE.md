@@ -98,7 +98,7 @@ crates/denc/src/error.rs            # RadosError type
 crates/denc/tests/trait_tests.rs   # Trait validation tests
 ```
 
-**Cargo.toml** (workspace root):
+**Cargo.toml** (workspace root for Commit 1):
 ```toml
 [workspace]
 members = [
@@ -117,6 +117,14 @@ license = "MIT"
 bytes = "1.5"
 thiserror = "1.0"
 ```
+
+**Note**: Additional crates will be added to the `members` array in later commits:
+- Commit 5: Add `"crates/denc-derive"`
+- Commit 19: Add `"crates/auth"`
+- Commit 23: Add `"crates/msgr2"`
+- Commit 39: Add `"crates/crush"`
+- Commit 45: Add `"crates/monclient"`
+- Later: Add `"crates/rados"` for high-level API
 
 **crates/denc/Cargo.toml**:
 ```toml
