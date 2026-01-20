@@ -204,7 +204,6 @@ impl FrameEncryptor for Aes128GcmEncryptor {
             Aes128Gcm, Nonce,
         };
 
-
         // Build nonce from base nonce + sequence number
         // Nonce structure (12 bytes):
         // - bytes 0-3: fixed field (little-endian u32)

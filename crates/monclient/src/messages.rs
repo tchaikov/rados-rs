@@ -11,6 +11,7 @@ use uuid::Uuid;
 // Message type constants (add to msgr2::message)
 pub const CEPH_MSG_MON_SUBSCRIBE: u16 = 0x000f;
 pub const CEPH_MSG_MON_SUBSCRIBE_ACK: u16 = 0x0010;
+pub const CEPH_MSG_OSD_MAP: u16 = 0x0029;
 pub const CEPH_MSG_MON_GET_VERSION: u16 = 0x0052;
 pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 0x0053;
 
@@ -290,6 +291,98 @@ impl MMonMap {
 
         let monmap_bl = Bytes::copy_from_slice(&data[..len]);
         Ok(Self { monmap_bl })
+    }
+}
+
+/// MOSDMap - OSD map message
+#[derive(Debug, Clone)]
+pub struct MOSDMap {
+    pub fsid: [u8; 16],
+    pub incremental_maps: HashMap<u32, Bytes>,
+    pub maps: HashMap<u32, Bytes>,
+    pub cluster_osdmap_trim_lower_bound: u32,
+    pub newest_map: u32,
+}
+
+impl MOSDMap {
+    pub fn decode(mut data: &[u8]) -> Result<Self> {
+        // Decode fsid (16 bytes)
+        if data.remaining() < 16 {
+            return Err(MonClientError::DecodingError("Incomplete fsid".into()));
+        }
+        let mut fsid = [0u8; 16];
+        data.copy_to_slice(&mut fsid);
+
+        // Decode incremental_maps (map<epoch_t, buffer::list>)
+        if data.remaining() < 4 {
+            return Err(MonClientError::DecodingError(
+                "Incomplete incremental_maps count".into(),
+            ));
+        }
+        let inc_count = data.get_u32_le();
+        let mut incremental_maps = HashMap::new();
+        for _ in 0..inc_count {
+            if data.remaining() < 8 {
+                return Err(MonClientError::DecodingError(
+                    "Incomplete incremental_maps entry".into(),
+                ));
+            }
+            let epoch = data.get_u32_le();
+            let len = data.get_u32_le() as usize;
+            if data.remaining() < len {
+                return Err(MonClientError::DecodingError(
+                    "Incomplete incremental_maps data".into(),
+                ));
+            }
+            let map_data = Bytes::copy_from_slice(&data[..len]);
+            data.advance(len);
+            incremental_maps.insert(epoch, map_data);
+        }
+
+        // Decode maps (map<epoch_t, buffer::list>)
+        if data.remaining() < 4 {
+            return Err(MonClientError::DecodingError(
+                "Incomplete maps count".into(),
+            ));
+        }
+        let maps_count = data.get_u32_le();
+        let mut maps = HashMap::new();
+        for _ in 0..maps_count {
+            if data.remaining() < 8 {
+                return Err(MonClientError::DecodingError(
+                    "Incomplete maps entry".into(),
+                ));
+            }
+            let epoch = data.get_u32_le();
+            let len = data.get_u32_le() as usize;
+            if data.remaining() < len {
+                return Err(MonClientError::DecodingError("Incomplete maps data".into()));
+            }
+            let map_data = Bytes::copy_from_slice(&data[..len]);
+            data.advance(len);
+            maps.insert(epoch, map_data);
+        }
+
+        // Decode cluster_osdmap_trim_lower_bound and newest_map (version >= 2)
+        let cluster_osdmap_trim_lower_bound = if data.remaining() >= 4 {
+            data.get_u32_le()
+        } else {
+            0
+        };
+
+        let newest_map = if data.remaining() >= 4 {
+            data.get_u32_le()
+        } else {
+            0
+        };
+
+        Ok(Self {
+            fsid,
+            incremental_maps,
+            maps,
+            cluster_osdmap_trim_lower_bound,
+            newest_map,
+        })
     }
 }
 

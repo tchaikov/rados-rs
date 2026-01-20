@@ -9,6 +9,7 @@ use crate::monmap::MonMap;
 use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
 use bytes::Bytes;
+use denc::denc::VersionedEncode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -313,7 +314,6 @@ impl MonClient {
         // Create actual msgr2 connection
         let mon_con = Arc::new(MonConnection::connect(socket_addr, rank, addrs).await?);
 
-
         // Test if connection is alive by trying to get a lock
         {
             let conn_arc = mon_con.connection();
@@ -478,6 +478,10 @@ impl MonClient {
                 info!("Received CEPH_MSG_MON_MAP");
                 Self::handle_monmap(state, map_events, msg).await?;
             }
+            CEPH_MSG_OSD_MAP => {
+                info!("Received CEPH_MSG_OSD_MAP");
+                Self::handle_osdmap(state, msg).await?;
+            }
             CEPH_MSG_MON_SUBSCRIBE_ACK => {
                 info!("Received CEPH_MSG_MON_SUBSCRIBE_ACK");
                 Self::handle_subscribe_ack(state, msg).await?;
@@ -527,6 +531,52 @@ impl MonClient {
         state_guard.subscriptions.got("monmap", monmap.epoch as u64);
 
         info!("✓ MonMap updated successfully");
+        Ok(())
+    }
+
+    /// Handle OSDMap message
+    async fn handle_osdmap(
+        state: &Arc<RwLock<MonClientState>>,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        info!("Handling OSDMap message ({} bytes)", msg.front.len());
+
+        // Decode MOSDMap
+        let mosdmap = MOSDMap::decode(&msg.front)?;
+        info!(
+            "Received MOSDMap: {} full maps, {} incremental maps, newest={}",
+            mosdmap.maps.len(),
+            mosdmap.incremental_maps.len(),
+            mosdmap.newest_map
+        );
+
+        // Decode the full osdmaps
+        for (epoch, osdmap_bl) in &mosdmap.maps {
+            info!(
+                "Decoding OSDMap epoch {} ({} bytes)",
+                epoch,
+                osdmap_bl.len()
+            );
+            match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
+                Ok(osdmap) => {
+                    info!(
+                        "✓ Decoded OSDMap: epoch={}, fsid={}, {} pools, {} osds",
+                        osdmap.epoch,
+                        uuid::Uuid::from_bytes(osdmap.fsid.bytes),
+                        osdmap.pools.len(),
+                        osdmap.osd_state.len()
+                    );
+
+                    // Mark subscription as received
+                    let mut state_guard = state.write().await;
+                    state_guard.subscriptions.got("osdmap", osdmap.epoch as u64);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to decode OSDMap epoch {}: {}", epoch, e);
+                }
+            }
+        }
+
         Ok(())
     }
 
