@@ -14,13 +14,40 @@ use std::collections::BTreeMap;
 use crate::osdmap::{Epoch, FsId, UTime};
 
 /// Monitor feature flags (mon_feature_t in C++)
+/// Uses versioned encoding (ENCODE_START/DECODE_START)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct MonFeature {
     pub features: u64,
 }
 
-impl Denc for MonFeature {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+// Version header constants for ENCODE_START/DECODE_START format
+// These match the encoding in VersionedEncode::encode_versioned()
+const VERSION_HEADER_VERSION_SIZE: usize = std::mem::size_of::<u8>(); // version byte
+const VERSION_HEADER_COMPAT_SIZE: usize = std::mem::size_of::<u8>(); // compat byte
+const VERSION_HEADER_LENGTH_SIZE: usize = std::mem::size_of::<u32>(); // length field
+const VERSION_HEADER_SIZE: usize =
+    VERSION_HEADER_VERSION_SIZE + VERSION_HEADER_COMPAT_SIZE + VERSION_HEADER_LENGTH_SIZE;
+
+// MonFeature content size - directly tied to the field type
+const MON_FEATURE_CONTENT_SIZE: usize = std::mem::size_of::<u64>(); // features field
+
+impl VersionedEncode for MonFeature {
+    const FEATURE_DEPENDENT: bool = false;
+
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
         if buf.remaining_mut() < 8 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient buffer space for MonFeature: need 8, have {}",
@@ -31,7 +58,12 @@ impl Denc for MonFeature {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
         if buf.remaining() < 8 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for MonFeature".to_string(),
@@ -41,14 +73,25 @@ impl Denc for MonFeature {
             features: buf.get_u64_le(),
         })
     }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
 }
 
-impl crate::denc::FixedSize for MonFeature {
-    const SIZE: usize = 8;
+// Manual Denc implementation for MonFeature (uses VersionedEncode)
+impl Denc for MonFeature {
+    const USES_VERSIONING: bool = true;
+    const FEATURE_DEPENDENT: bool = <MonFeature as VersionedEncode>::FEATURE_DEPENDENT;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // Versioned encoding: version header + content
+        Some(VERSION_HEADER_SIZE + MON_FEATURE_CONTENT_SIZE)
+    }
 }
 
 /// Ceph release version for MonMap (ceph_release_t in C++)
