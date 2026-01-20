@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/denc", "crates/denc-derive", "crates/auth", "crates/msgr2"]
+members = ["crates/denc", "crates/denc-derive", "crates/auth", "crates/msgr2", "crates/crush"]
 resolver = "2"
 
 [workspace.dependencies]
