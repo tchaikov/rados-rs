@@ -150,6 +150,151 @@ pub trait VersionedEncode: Sized {
     }
 }
 
+// ============= Primitive Type Implementations =============
+
+// Macro to implement Denc for primitive integer types
+macro_rules! impl_denc_int {
+    ($type:ty, $put_method:ident, $get_method:ident, $size:expr) => {
+        impl Denc for $type {
+            fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+                if buf.remaining_mut() < $size {
+                    return Err(RadosError::Protocol(format!(
+                        "Insufficient buffer space: need {} bytes for {}, have {}",
+                        $size,
+                        stringify!($type),
+                        buf.remaining_mut()
+                    )));
+                }
+                buf.$put_method(*self);
+                Ok(())
+            }
+
+            fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+                if buf.remaining() < $size {
+                    return Err(RadosError::Protocol(format!(
+                        "Insufficient bytes: need {} for {}, have {}",
+                        $size,
+                        stringify!($type),
+                        buf.remaining()
+                    )));
+                }
+                Ok(buf.$get_method())
+            }
+
+            fn encoded_size(&self, _features: u64) -> Option<usize> {
+                Some($size)
+            }
+        }
+
+        impl FixedSize for $type {
+            const SIZE: usize = $size;
+        }
+    };
+}
+
+impl_denc_int!(u8, put_u8, get_u8, 1);
+impl_denc_int!(u16, put_u16_le, get_u16_le, 2);
+impl_denc_int!(u32, put_u32_le, get_u32_le, 4);
+impl_denc_int!(u64, put_u64_le, get_u64_le, 8);
+impl_denc_int!(i8, put_i8, get_i8, 1);
+impl_denc_int!(i16, put_i16_le, get_i16_le, 2);
+impl_denc_int!(i32, put_i32_le, get_i32_le, 4);
+impl_denc_int!(i64, put_i64_le, get_i64_le, 8);
+
+// bool is encoded as u8 (0 or 1) in C++
+impl Denc for bool {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 1 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space: need 1 byte for bool, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_u8(if *self { 1 } else { 0 });
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for bool".to_string(),
+            ));
+        }
+        Ok(buf.get_u8() != 0)
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(1)
+    }
+}
+
+impl FixedSize for bool {
+    const SIZE: usize = 1;
+}
+
+// f32 and f64 implementations
+impl Denc for f32 {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 4 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space: need 4 bytes for f32, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_f32_le(*self);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 4 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes: need 4 for f32, have {}",
+                buf.remaining()
+            )));
+        }
+        Ok(buf.get_f32_le())
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(4)
+    }
+}
+
+impl FixedSize for f32 {
+    const SIZE: usize = 4;
+}
+
+impl Denc for f64 {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space: need 8 bytes for f64, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        buf.put_f64_le(*self);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes: need 8 for f64, have {}",
+                buf.remaining()
+            )));
+        }
+        Ok(buf.get_f64_le())
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl FixedSize for f64 {
+    const SIZE: usize = 8;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -218,5 +363,136 @@ mod tests {
         ) -> Result<Self, RadosError> {
             Ok(DummyVersioned)
         }
+    }
+
+    // ============= Primitive Type Tests =============
+
+    #[test]
+    fn test_u8_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: u8 = 42;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 1);
+        let decoded = u8::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_u16_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: u16 = 0x1234;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 2);
+        // Verify little-endian encoding
+        assert_eq!(&buf[..], &[0x34, 0x12]);
+        let decoded = u16::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_u32_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: u32 = 0x12345678;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4);
+        // Verify little-endian encoding
+        assert_eq!(&buf[..], &[0x78, 0x56, 0x34, 0x12]);
+        let decoded = u32::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_u64_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: u64 = 0x123456789ABCDEF0;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+        let decoded = u64::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_i8_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: i8 = -42;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 1);
+        let decoded = i8::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_i16_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: i16 = -1234;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 2);
+        let decoded = i16::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_i32_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: i32 = -123456;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4);
+        let decoded = i32::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_i64_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: i64 = -123456789012345;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+        let decoded = i64::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, val);
+    }
+
+    #[test]
+    fn test_bool_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        true.encode(&mut buf, 0).unwrap();
+        false.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 2);
+        assert!(bool::decode(&mut buf, 0).unwrap());
+        assert!(!bool::decode(&mut buf, 0).unwrap());
+    }
+
+    #[test]
+    fn test_f32_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: f32 = 3.14159;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4);
+        let decoded = f32::decode(&mut buf, 0).unwrap();
+        assert!((decoded - val).abs() < 0.00001);
+    }
+
+    #[test]
+    fn test_f64_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let val: f64 = 3.141592653589793;
+        val.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+        let decoded = f64::decode(&mut buf, 0).unwrap();
+        assert!((decoded - val).abs() < 0.0000000000001);
+    }
+
+    #[test]
+    fn test_fixed_size_constants() {
+        assert_eq!(u8::SIZE, 1);
+        assert_eq!(u16::SIZE, 2);
+        assert_eq!(u32::SIZE, 4);
+        assert_eq!(u64::SIZE, 8);
+        assert_eq!(i8::SIZE, 1);
+        assert_eq!(i16::SIZE, 2);
+        assert_eq!(i32::SIZE, 4);
+        assert_eq!(i64::SIZE, 8);
+        assert_eq!(bool::SIZE, 1);
+        assert_eq!(f32::SIZE, 4);
+        assert_eq!(f64::SIZE, 8);
     }
 }
