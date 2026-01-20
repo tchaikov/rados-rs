@@ -413,6 +413,205 @@ impl<T: Denc> Denc for Option<T> {
     }
 }
 
+// ============= Complex Collection Type Implementations =============
+
+use std::collections::{BTreeMap, HashMap};
+use std::hash::Hash;
+
+// BTreeMap implementation - encodes length as u32 followed by key-value pairs
+impl<K: Denc + Ord, V: Denc> Denc for BTreeMap<K, V> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        // Encode length as u32
+        let len = self.len() as u32;
+        len.encode(buf, features)?;
+
+        // Encode each key-value pair
+        for (key, value) in self {
+            key.encode(buf, features)?;
+            value.encode(buf, features)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let len = u32::decode(buf, features)? as usize;
+        let mut map = BTreeMap::new();
+
+        for _ in 0..len {
+            let key = K::decode(buf, features)?;
+            let value = V::decode(buf, features)?;
+            map.insert(key, value);
+        }
+
+        Ok(map)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Start with u32 length
+        let mut size = 4;
+
+        // Add size of each key-value pair
+        for (key, value) in self {
+            size += key.encoded_size(features)?;
+            size += value.encoded_size(features)?;
+        }
+
+        Some(size)
+    }
+}
+
+// HashMap implementation - encodes length as u32 followed by key-value pairs
+impl<K: Denc + Eq + Hash, V: Denc> Denc for HashMap<K, V> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        // Encode length as u32
+        let len = self.len() as u32;
+        len.encode(buf, features)?;
+
+        // Encode each key-value pair
+        for (key, value) in self {
+            key.encode(buf, features)?;
+            value.encode(buf, features)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let len = u32::decode(buf, features)? as usize;
+        let mut map = HashMap::with_capacity(len);
+
+        for _ in 0..len {
+            let key = K::decode(buf, features)?;
+            let value = V::decode(buf, features)?;
+            map.insert(key, value);
+        }
+
+        Ok(map)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Start with u32 length
+        let mut size = 4;
+
+        // Add size of each key-value pair
+        for (key, value) in self {
+            size += key.encoded_size(features)?;
+            size += value.encoded_size(features)?;
+        }
+
+        Some(size)
+    }
+}
+
+// Tuple implementations for pairs (2-element tuples)
+impl<T1: Denc, T2: Denc> Denc for (T1, T2) {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)?;
+        self.1.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let first = T1::decode(buf, features)?;
+        let second = T2::decode(buf, features)?;
+        Ok((first, second))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let size1 = self.0.encoded_size(features)?;
+        let size2 = self.1.encoded_size(features)?;
+        Some(size1 + size2)
+    }
+}
+
+// 3-element tuple
+impl<T1: Denc, T2: Denc, T3: Denc> Denc for (T1, T2, T3) {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)?;
+        self.1.encode(buf, features)?;
+        self.2.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok((
+            T1::decode(buf, features)?,
+            T2::decode(buf, features)?,
+            T3::decode(buf, features)?,
+        ))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            self.0.encoded_size(features)?
+                + self.1.encoded_size(features)?
+                + self.2.encoded_size(features)?,
+        )
+    }
+}
+
+// 4-element tuple
+impl<T1: Denc, T2: Denc, T3: Denc, T4: Denc> Denc for (T1, T2, T3, T4) {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)?;
+        self.1.encode(buf, features)?;
+        self.2.encode(buf, features)?;
+        self.3.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok((
+            T1::decode(buf, features)?,
+            T2::decode(buf, features)?,
+            T3::decode(buf, features)?,
+            T4::decode(buf, features)?,
+        ))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            self.0.encoded_size(features)?
+                + self.1.encoded_size(features)?
+                + self.2.encoded_size(features)?
+                + self.3.encoded_size(features)?,
+        )
+    }
+}
+
+// Array implementation for fixed-size arrays
+impl<T: Denc + FixedSize, const N: usize> Denc for [T; N] {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        for item in self.iter() {
+            item.encode(buf, features)?;
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        // Use MaybeUninit for safety
+        use std::mem::MaybeUninit;
+
+        let mut array: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
+
+        for elem in &mut array {
+            *elem = MaybeUninit::new(T::decode(buf, features)?);
+        }
+
+        // SAFETY: All elements have been initialized
+        Ok(unsafe { std::mem::transmute_copy::<_, [T; N]>(&array) })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(T::SIZE * N)
+    }
+}
+
+impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
+    const SIZE: usize = T::SIZE * N;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,5 +987,151 @@ mod tests {
         s.encode(&mut buf, 0).unwrap();
         let decoded = String::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, s);
+    }
+
+    // ============= Complex Collection Type Tests =============
+
+    #[test]
+    fn test_btreemap_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let mut map = BTreeMap::new();
+        map.insert(1u32, String::from("one"));
+        map.insert(2u32, String::from("two"));
+        map.insert(3u32, String::from("three"));
+        map.encode(&mut buf, 0).unwrap();
+        let decoded = BTreeMap::<u32, String>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn test_hashmap_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let mut map = HashMap::new();
+        map.insert(String::from("a"), 1u32);
+        map.insert(String::from("b"), 2u32);
+        map.insert(String::from("c"), 3u32);
+        map.encode(&mut buf, 0).unwrap();
+        let decoded = HashMap::<String, u32>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn test_btreemap_empty() {
+        let mut buf = bytes::BytesMut::new();
+        let map: BTreeMap<u32, String> = BTreeMap::new();
+        map.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 4); // Just the length field
+        let decoded = BTreeMap::<u32, String>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn test_tuple2_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let tuple = (42u32, String::from("test"));
+        tuple.encode(&mut buf, 0).unwrap();
+        let decoded = <(u32, String)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, tuple);
+    }
+
+    #[test]
+    fn test_tuple3_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let tuple = (1u32, 2u64, true);
+        tuple.encode(&mut buf, 0).unwrap();
+        let decoded = <(u32, u64, bool)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, tuple);
+    }
+
+    #[test]
+    fn test_tuple4_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let tuple = (1u8, 2u16, 3u32, 4u64);
+        tuple.encode(&mut buf, 0).unwrap();
+        let decoded = <(u8, u16, u32, u64)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, tuple);
+    }
+
+    #[test]
+    fn test_array_u32_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let arr: [u32; 5] = [1, 2, 3, 4, 5];
+        arr.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 20); // 5 * 4 bytes
+        let decoded = <[u32; 5]>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, arr);
+    }
+
+    #[test]
+    fn test_array_bool_roundtrip() {
+        let mut buf = bytes::BytesMut::new();
+        let arr: [bool; 3] = [true, false, true];
+        arr.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 3);
+        let decoded = <[bool; 3]>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, arr);
+    }
+
+    #[test]
+    fn test_array_fixed_size() {
+        assert_eq!(<[u32; 10]>::SIZE, 40);
+        assert_eq!(<[u8; 16]>::SIZE, 16);
+        assert_eq!(<[bool; 5]>::SIZE, 5);
+    }
+
+    #[test]
+    fn test_nested_map() {
+        let mut buf = bytes::BytesMut::new();
+        let mut outer = BTreeMap::new();
+        let mut inner1 = BTreeMap::new();
+        inner1.insert(1u32, String::from("a"));
+        let mut inner2 = BTreeMap::new();
+        inner2.insert(2u32, String::from("b"));
+        outer.insert(String::from("first"), inner1);
+        outer.insert(String::from("second"), inner2);
+        outer.encode(&mut buf, 0).unwrap();
+        let decoded = BTreeMap::<String, BTreeMap<u32, String>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, outer);
+    }
+
+    #[test]
+    fn test_map_with_vec_values() {
+        let mut buf = bytes::BytesMut::new();
+        let mut map = BTreeMap::new();
+        map.insert(1u32, vec![1u32, 2, 3]);
+        map.insert(2u32, vec![4, 5]);
+        map.encode(&mut buf, 0).unwrap();
+        let decoded = BTreeMap::<u32, Vec<u32>>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, map);
+    }
+
+    #[test]
+    fn test_tuple_with_collections() {
+        let mut buf = bytes::BytesMut::new();
+        let tuple = (vec![1u32, 2, 3], String::from("test"));
+        tuple.encode(&mut buf, 0).unwrap();
+        let decoded = <(Vec<u32>, String)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, tuple);
+    }
+
+    #[test]
+    fn test_btreemap_encoded_size() {
+        let mut map = BTreeMap::new();
+        map.insert(1u32, 2u32);
+        map.insert(3u32, 4u32);
+        // 4 (length) + 2 * (4 + 4) = 20
+        assert_eq!(map.encoded_size(0), Some(20));
+    }
+
+    #[test]
+    fn test_tuple_encoded_size() {
+        let tuple = (42u32, true);
+        assert_eq!(tuple.encoded_size(0), Some(5)); // 4 + 1
+    }
+
+    #[test]
+    fn test_array_encoded_size() {
+        let arr: [u32; 3] = [1, 2, 3];
+        assert_eq!(arr.encoded_size(0), Some(12)); // 3 * 4
     }
 }
