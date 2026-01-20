@@ -23,5 +23,8 @@ pub use pgmap_types::*;
 pub use types::*;
 pub use zerocopy::*;
 
+// Re-export CRUSH types for convenience
+pub use crush::{CrushBucket, CrushMap, CrushRule};
+
 // Re-export derive macros
 pub use denc_derive::{DencMut, ZeroCopyDecode, ZeroCopyDencode, ZeroCopyEncode};
