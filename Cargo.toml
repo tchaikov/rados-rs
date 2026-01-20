@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/denc"]
+members = ["crates/denc", "crates/denc-derive"]
 resolver = "2"
 
 [workspace.dependencies]
