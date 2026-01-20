@@ -2106,8 +2106,39 @@ impl OSDMap {
         self.pools.get(&pool_id).map(|p| p.crush_rule)
     }
 
+    /// Calculate object to PG mapping
+    /// Maps an object name to its placement group within a pool
+    pub fn object_to_pg(&self, pool_id: i64, object_name: &str) -> Result<PgId, RadosError> {
+        // Get the pool
+        let pool = self.get_pool(pool_id)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pool_id)))?;
+
+        // Create a simple object locator
+        let locator = crush::ObjectLocator::new(pool_id);
+        
+        // Calculate the PG using the CRUSH placement function
+        let pg = crush::object_to_pg(object_name, &locator, pool.pg_num);
+        
+        Ok(PgId {
+            pool: pg.pool as u64,
+            seed: pg.seed,
+        })
+    }
+
+    /// Calculate object to OSD mapping
+    /// This is the complete object placement function that combines:
+    /// 1. Object name -> PG mapping (hashing)
+    /// 2. PG -> OSD set mapping (CRUSH)
+    pub fn object_to_osds(&self, pool_id: i64, object_name: &str) -> Result<Vec<i32>, RadosError> {
+        // First, map object to PG
+        let pg = self.object_to_pg(pool_id, object_name)?;
+        
+        // Then, map PG to OSDs using CRUSH
+        self.pg_to_osds(&pg)
+    }
+
     /// Calculate PG to OSD mapping using CRUSH
-    /// This is a placeholder - full implementation requires CRUSH mapper
+    /// Returns the ordered list of OSDs that should store replicas for this PG
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         // Get the pool
         let pool = self.get_pool(pg.pool as i64)
@@ -2117,13 +2148,29 @@ impl OSDMap {
         let crush_map = self.get_crush_map()
             .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
 
-        // Get the CRUSH rule
+        // Verify the CRUSH rule exists
         let _rule = crush_map.get_rule(pool.crush_rule as u32)
             .map_err(|e| RadosError::Protocol(format!("Failed to get CRUSH rule: {:?}", e)))?;
 
-        // For now, return empty vec as placeholder
-        // TODO: Implement full CRUSH mapping using crush::mapper module
-        Ok(Vec::new())
+        // Use CRUSH to calculate the OSD set
+        let mut result = Vec::new();
+        let result_max = pool.size as usize;
+        
+        // Use PG seed as the input to CRUSH
+        let x = pg.seed;
+        
+        // Call CRUSH mapper
+        crush::mapper::crush_do_rule(
+            crush_map,
+            pool.crush_rule as u32,
+            x,
+            &mut result,
+            result_max,
+            &self.osd_weight,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH mapping failed: {:?}", e)))?;
+
+        Ok(result)
     }
 }
 
