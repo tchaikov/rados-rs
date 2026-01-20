@@ -399,7 +399,9 @@ fn list_types() {
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");
     println!("  OSDMap            - OSD cluster map [versioned, feature-dependent: multiple]");
-    println!("  mon_info_t        - Monitor information [versioned, feature-dependent: SERVER_NAUTILUS]");
+    println!(
+        "  mon_info_t        - Monitor information [versioned, feature-dependent: SERVER_NAUTILUS]"
+    );
     println!("  MonMap            - Monitor cluster map [versioned, feature-dependent: MONENC, SERVER_NAUTILUS]");
     println!();
     println!("Encoding Properties:");
