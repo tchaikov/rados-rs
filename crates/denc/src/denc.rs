@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn test_f32_roundtrip() {
         let mut buf = bytes::BytesMut::new();
-        let val: f32 = 3.14159;
+        let val: f32 = std::f32::consts::PI;
         val.encode(&mut buf, 0).unwrap();
         assert_eq!(buf.len(), 4);
         let decoded = f32::decode(&mut buf, 0).unwrap();
@@ -791,7 +791,7 @@ mod tests {
     #[test]
     fn test_f64_roundtrip() {
         let mut buf = bytes::BytesMut::new();
-        let val: f64 = 3.141592653589793;
+        let val: f64 = std::f64::consts::PI;
         val.encode(&mut buf, 0).unwrap();
         assert_eq!(buf.len(), 8);
         let decoded = f64::decode(&mut buf, 0).unwrap();

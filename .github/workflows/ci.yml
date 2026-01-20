@@ -125,3 +125,46 @@ jobs:
 
       - name: Test dencoder list_types
         run: cargo run --bin dencoder list_types
+
+  corpus-test:
+    name: Corpus Comparison Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install ceph-common
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ceph-common
+
+      - name: Clone ceph-object-corpus
+        run: |
+          git clone --depth=1 https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build dencoder
+        run: cargo build --bin dencoder
+
+      - name: Run corpus comparison test
+        run: cd crates/denc && cargo test --test corpus_comparison_test -- --ignored --nocapture

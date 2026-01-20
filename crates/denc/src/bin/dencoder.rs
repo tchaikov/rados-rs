@@ -62,6 +62,5 @@ mod tests {
     fn test_dencoder_exists() {
         // Test that the dencoder binary can be compiled
         // Actual functionality will be tested as types are added
-        assert!(true);
     }
 }
