@@ -395,10 +395,13 @@ fn test_corpus_comparison() {
         // pg_pool_t is marked as exception because ceph-dencoder adds computed/derived fields
         // not present in the binary encoding (flags_names, options, is_stretch_pool, etc.)
         ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields
-                                   // Level 4: Monitor types
-                                   // TODO: Enable when corpus files are available
-                                   // ("mon_info_t", Some(u64::MAX), false), // All features for modern encoding
-                                   // ("MonMap", Some(u64::MAX), false),     // All features for modern encoding
+        // Level 4: Monitor types
+        // mon_info_t is marked as exception because ceph-dencoder uses different field names
+        // (e.g., "addr" vs "public_addrs", "crush_location" vs "crush_loc")
+        ("mon_info_t", Some(u64::MAX), true), // Exception: ceph-dencoder uses different JSON format
+        // MonMap is marked as exception because ceph-dencoder uses different field names
+        // and structures (e.g., "mons" array vs "mon_info" map, "modified" vs "last_changed")
+        ("MonMap", Some(u64::MAX), true), // Exception: ceph-dencoder uses different JSON format
     ];
 
     let mut overall_matched = 0;
