@@ -104,15 +104,27 @@ for (pool_id, _pool) in &osdmap.pools {
 }
 ```
 
-### Object Placement (Placeholder)
+### Object Placement
 ```rust
 use denc::PgId;
 
 let pg = PgId { pool: 1, seed: 123 };
 
-// This is a placeholder - full implementation coming soon
+// Map PG to OSDs using CRUSH
 match osdmap.pg_to_osds(&pg) {
     Ok(osds) => println!("PG maps to OSDs: {:?}", osds),
+    Err(e) => eprintln!("Error: {:?}", e),
+}
+
+// Complete object placement: object name -> PG -> OSDs
+match osdmap.object_to_osds(pool_id, "my_object") {
+    Ok(osds) => println!("Object will be stored on OSDs: {:?}", osds),
+    Err(e) => eprintln!("Error: {:?}", e),
+}
+
+// Just get the PG for an object
+match osdmap.object_to_pg(pool_id, "my_object") {
+    Ok(pg) => println!("Object maps to PG: {}", pg),
     Err(e) => eprintln!("Error: {:?}", e),
 }
 ```
@@ -120,44 +132,81 @@ match osdmap.pg_to_osds(&pg) {
 ## Testing
 
 ### Integration Tests
-The integration is tested in `tests/osdmap_crush_integration_test.rs`:
-- Verifies CRUSH map parsing from corpus files
-- Tests all helper methods
-- Validates CRUSH rule access for pools
+The integration is tested in multiple test files:
+- `tests/osdmap_crush_integration_test.rs` - Verifies CRUSH map parsing and helper methods
+- `tests/object_placement_test.rs` - Tests complete object placement pipeline
+- Tests validate:
+  - CRUSH map parsing from corpus files
+  - All helper methods
+  - CRUSH rule access for pools
+  - PG to OSD mapping
+  - Object to PG mapping
+  - Complete object to OSD pipeline
+  - Deterministic mapping (same object always maps to same PG)
 
 ### Running Tests
 ```bash
 # Run all OSDMap tests
 cargo test --package denc --test osdmap_test
 cargo test --package denc --test osdmap_crush_integration_test
+cargo test --package denc --test object_placement_test
 
 # Run with output to see details
-cargo test --package denc --test osdmap_crush_integration_test -- --nocapture
+cargo test --package denc --test object_placement_test -- --nocapture
+
+# Run all denc tests
+cargo test --package denc
 ```
 
-## Future Work
+## Implementation Status
 
-### 1. Complete PG to OSD Mapping
-The `pg_to_osds()` method is currently a placeholder. Full implementation will:
-- Use the CRUSH mapper from the `crush` crate
-- Calculate the actual OSD set for a given PG
-- Handle CRUSH tunables and bucket weights
-- Support pg_upmap and other overrides
+### ✅ Completed Features
 
-### 2. Object Locator
-Implement object name to PG mapping:
-```rust
-pub fn object_to_pg(&self, pool_id: i64, object_name: &str) -> Result<PgId, RadosError>
-```
+1. **CRUSH Map Integration**
+   - Automatic parsing during OSDMap decode
+   - Error handling for malformed CRUSH data
+   - Access via `get_crush_map()`
 
-### 3. Full Object Placement
-Complete end-to-end object placement:
-```rust
-pub fn object_to_osds(&self, pool_id: i64, object_name: &str) -> Result<Vec<i32>, RadosError>
-```
+2. **Pool Access Methods**
+   - `get_pool()` - Get pool by ID
+   - `get_pool_name()` - Get pool name
+   - `get_pool_crush_rule()` - Get CRUSH rule for pool
 
-### 4. CRUSH Weight Updates
-Support for dynamic CRUSH weight updates and rebalancing calculations.
+3. **PG to OSD Mapping**
+   - Full implementation using CRUSH mapper
+   - Handles OSD weights
+   - Supports all CRUSH rule operations
+   - Returns ordered list of replica OSDs
+
+4. **Object to PG Mapping**
+   - Hashes object name to PG
+   - Respects pool pg_num
+   - Deterministic mapping
+
+5. **Complete Object Placement**
+   - End-to-end: object name -> PG -> OSDs
+   - Single method call: `object_to_osds()`
+
+## Future Enhancements
+
+### Potential Improvements
+
+1. **Advanced CRUSH Features**
+   - Support for pg_upmap overrides
+   - Support for pg_upmap_items
+   - Respect primary_temp settings
+2. **CRUSH Weight Updates**
+   - Support for dynamic CRUSH weight updates
+   - Rebalancing calculations
+
+3. **Advanced Object Locators**
+   - Support for namespace in object hashing
+   - Support for key overrides
+   - Custom hash functions
+
+4. **Performance Optimizations**
+   - Cache CRUSH mapping results
+   - Batch object placement queries
 
 ## Compatibility
 
