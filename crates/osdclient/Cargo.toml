@@ -1,0 +1,23 @@
+[package]
+name = "osdclient"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { workspace = true }
+bytes = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+
+# Internal dependencies
+msgr2 = { path = "../msgr2" }
+auth = { path = "../auth" }
+denc = { path = "../denc" }
+monclient = { path = "../monclient" }
+crush = { path = "../crush" }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tokio-test = "0.4"
