@@ -7,15 +7,44 @@ use denc::{Denc, MonMap};
 use std::fs;
 use std::path::PathBuf;
 
+/// The version of the corpus to test against
+const CORPUS_VERSION: &str = "19.2.0-404-g78ddc7f9027";
+
+/// Get the corpus directory path, trying multiple locations
+fn get_corpus_dir() -> Option<PathBuf> {
+    let possible_paths = [
+        PathBuf::from("/tmp/ceph-object-corpus"),
+        PathBuf::from(std::env::var("HOME").unwrap_or_default()).join("ceph-object-corpus"),
+        PathBuf::from(std::env::var("CORPUS_DIR").unwrap_or_default()),
+    ];
+
+    for path in &possible_paths {
+        if path.exists() {
+            let version_path = path
+                .join("archive")
+                .join(CORPUS_VERSION)
+                .join("objects")
+                .join("MonMap");
+            if version_path.exists() {
+                return Some(version_path);
+            }
+        }
+    }
+
+    None
+}
+
 #[test]
 #[ignore] // Requires corpus to be available
 fn test_monmap_corpus_decoding() {
-    let corpus_dir = PathBuf::from("/tmp/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/MonMap");
-    
-    if !corpus_dir.exists() {
-        eprintln!("Corpus not available at {:?}, skipping test", corpus_dir);
-        return;
-    }
+    let corpus_dir = match get_corpus_dir() {
+        Some(dir) => dir,
+        None => {
+            eprintln!("Corpus not available, skipping test");
+            eprintln!("Try: git clone https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus");
+            return;
+        }
+    };
     
     let files = fs::read_dir(&corpus_dir)
         .expect("Failed to read corpus directory")

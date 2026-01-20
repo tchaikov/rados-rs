@@ -77,13 +77,9 @@ impl Denc for MonFeature {
         Self::decode_versioned(buf, features)
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
-        }
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // Versioned encoding: version (1) + compat (1) + length (4) + content (8)
+        Some(1 + 1 + 4 + 8)
     }
 }
 
