@@ -326,6 +326,8 @@ pub struct AuthConnecting {
     supported_auth_methods: Vec<crate::AuthMethod>,
     /// Keyring path for CephX authentication
     keyring_path: Option<String>,
+    /// Track methods we've tried to prevent infinite loops (max 3 attempts)
+    tried_methods: Vec<crate::AuthMethod>,
 }
 
 impl AuthConnecting {
@@ -370,6 +372,7 @@ impl AuthConnecting {
                     preferred_modes,
                     supported_auth_methods,
                     keyring_path,
+                    tried_methods: Vec::new(),
                 }
             }
             crate::AuthMethod::Cephx => {
@@ -408,6 +411,7 @@ impl AuthConnecting {
                     preferred_modes,
                     supported_auth_methods,
                     keyring_path,
+                    tried_methods: Vec::new(),
                 }
             }
         }
@@ -437,6 +441,7 @@ impl AuthConnecting {
             preferred_modes,
             supported_auth_methods,
             keyring_path: keyring_path_opt,
+            tried_methods: Vec::new(),
         })
     }
 
@@ -456,7 +461,54 @@ impl AuthConnecting {
             preferred_modes,
             supported_auth_methods,
             keyring_path,
+            tried_methods: Vec::new(),
         }
+    }
+
+    /// Select auth method from server's allowed list that we also support
+    fn negotiate_auth_method(&self, allowed_methods: &[u32]) -> Result<crate::AuthMethod> {
+        let allowed: Vec<crate::AuthMethod> = allowed_methods
+            .iter()
+            .filter_map(|&m| crate::AuthMethod::try_from(m).ok())
+            .collect();
+
+        // Find first supported method that's in allowed list
+        for method in &self.supported_auth_methods {
+            if allowed.contains(method) {
+                return Ok(*method);
+            }
+        }
+
+        Err(Error::Protocol(format!(
+            "No mutually supported auth method. Client: {:?}, Server: {:?}",
+            self.supported_auth_methods, allowed
+        )))
+    }
+
+    /// Negotiate connection modes from server's allowed list
+    fn negotiate_connection_modes(&self, allowed_modes: &[u32]) -> Vec<crate::ConnectionMode> {
+        let allowed: Vec<crate::ConnectionMode> = allowed_modes
+            .iter()
+            .filter_map(|&m| crate::ConnectionMode::try_from(m).ok())
+            .collect();
+
+        let negotiated: Vec<crate::ConnectionMode> = self
+            .preferred_modes
+            .iter()
+            .filter(|&mode| allowed.contains(mode))
+            .cloned()
+            .collect();
+
+        if !negotiated.is_empty() {
+            return negotiated;
+        }
+
+        // Fallback: use server's first mode or CRC
+        allowed
+            .first()
+            .cloned()
+            .map(|m| vec![m])
+            .unwrap_or_else(|| vec![crate::ConnectionMode::Crc])
     }
 }
 
@@ -476,26 +528,98 @@ impl State for AuthConnecting {
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
             Tag::AuthBadMethod => {
-                // Parse AuthBadMethod to see what the server is saying
-                if let Some(segment) = frame.segments.first() {
-                    tracing::error!(
-                        "AuthBadMethod payload ({} bytes): {:02x?}",
-                        segment.len(),
-                        segment
-                    );
-
-                    // Try to decode the fields:
-                    // method: u32, result: i32, allowed_methods: Vec<u32>, allowed_modes: Vec<u32>
-                    if segment.len() >= 8 {
-                        let mut payload = segment.clone();
-                        let method = u32::decode(&mut payload, 0).unwrap_or(0);
-                        let result = i32::decode(&mut payload, 0).unwrap_or(0);
-                        tracing::error!("AuthBadMethod: method={}, result={}", method, result);
-                    }
+                // Parse frame
+                if frame.segments.is_empty() {
+                    return Err(Error::protocol_error("AUTH_BAD_METHOD missing payload"));
                 }
-                Ok(StateResult::Fault(
-                    "Authentication method rejected".to_string(),
-                ))
+
+                let mut payload = frame.segments[0].clone();
+                let rejected_method = u32::decode(&mut payload, 0)?;
+                let result = i32::decode(&mut payload, 0)?;
+                let allowed_methods = Vec::<u32>::decode(&mut payload, 0)?;
+                let allowed_modes = Vec::<u32>::decode(&mut payload, 0)?;
+
+                tracing::info!(
+                    "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
+                    rejected_method,
+                    result,
+                    allowed_methods,
+                    allowed_modes
+                );
+
+                // Check retry limit
+                if self.tried_methods.len() >= 3 {
+                    return Err(Error::Protocol(format!(
+                        "Auth retry limit exceeded. Tried: {:?}",
+                        self.tried_methods
+                    )));
+                }
+
+                // Record this attempt
+                let mut new_tried = self.tried_methods.clone();
+                new_tried.push(self.auth_method);
+
+                // Negotiate new method
+                let negotiated_method = self.negotiate_auth_method(&allowed_methods)?;
+
+                // Prevent duplicate attempts
+                if new_tried.contains(&negotiated_method) {
+                    return Err(Error::Protocol(format!(
+                        "Would retry with {:?} but already tried it. No working auth method.",
+                        negotiated_method
+                    )));
+                }
+
+                tracing::info!(
+                    "Negotiated auth method: {:?} (client={:?}, server={:?})",
+                    negotiated_method,
+                    self.supported_auth_methods,
+                    allowed_methods
+                );
+
+                // Negotiate connection modes
+                let negotiated_modes = self.negotiate_connection_modes(&allowed_modes);
+
+                tracing::info!("Negotiated connection modes: {:?}", negotiated_modes);
+
+                // Create new AuthConnecting state with negotiated parameters
+                let mut new_state = if negotiated_method == crate::AuthMethod::Cephx {
+                    let keyring_file = self
+                        .keyring_path
+                        .clone()
+                        .unwrap_or_else(|| "/etc/ceph/ceph.client.admin.keyring".to_string());
+
+                    Self::with_keyring_path(
+                        &keyring_file,
+                        negotiated_modes.clone(),
+                        negotiated_method,
+                        self.supported_auth_methods.clone(),
+                        self.keyring_path.clone(),
+                    )
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("Keyring load failed: {}, using fallback", e);
+                        Self::with_fallback_key(
+                            negotiated_modes.clone(),
+                            negotiated_method,
+                            self.supported_auth_methods.clone(),
+                            self.keyring_path.clone(),
+                        )
+                    })
+                } else {
+                    Self {
+                        auth_method: negotiated_method,
+                        cephx_handler: None,
+                        preferred_modes: negotiated_modes,
+                        supported_auth_methods: self.supported_auth_methods.clone(),
+                        keyring_path: self.keyring_path.clone(),
+                        tried_methods: Vec::new(),
+                    }
+                };
+
+                new_state.tried_methods = new_tried;
+
+                // Transition back to AuthConnecting (will send new AUTH_REQUEST)
+                Ok(StateResult::Transition(Box::new(new_state)))
             }
             Tag::AuthReplyMore => {
                 // Handle CephX multi-round auth

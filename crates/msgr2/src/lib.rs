@@ -320,6 +320,23 @@ impl ConnectionConfig {
             ..Default::default()
         }
     }
+
+    /// Validate configuration
+    pub fn validate(&self) -> std::result::Result<(), String> {
+        if self.supported_auth_methods.is_empty() {
+            return Err("supported_auth_methods cannot be empty".to_string());
+        }
+
+        if self.supported_auth_methods.contains(&AuthMethod::Gss) {
+            return Err("AuthMethod::Gss not yet implemented".to_string());
+        }
+
+        if self.preferred_modes.is_empty() {
+            return Err("preferred_modes cannot be empty".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

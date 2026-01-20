@@ -22,8 +22,7 @@ pub struct FrameIO {
 }
 
 impl Drop for FrameIO {
-    fn drop(&mut self) {
-    }
+    fn drop(&mut self) {}
 }
 
 impl FrameIO {
@@ -233,22 +232,14 @@ impl FrameIO {
         // Try to peek first to see if data is available
         let mut peek_buf = [0u8; 1];
         match self.stream.peek(&mut peek_buf).await {
-            Ok(n) => {
-                if n == 0 {
-                }
-            }
-            Err(e) => {
-            }
+            Ok(n) => if n == 0 {},
+            Err(_e) => {}
         }
 
-        tracing::warn!(
-            preamble_block_size
-        );
+        tracing::warn!(preamble_block_size);
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
-                tracing::warn!(
-                    preamble_block_size
-                );
+                tracing::warn!(preamble_block_size);
                 tracing::debug!("Successfully read preamble block");
             }
             Err(e) => {
@@ -504,6 +495,11 @@ impl Connection {
     /// * `addr` - The server address to connect to
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
+        // Validate config
+        if let Err(e) = config.validate() {
+            return Err(Error::Protocol(format!("Invalid config: {}", e)));
+        }
+
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
         tracing::info!("✓ TCP connection established to {}", addr);
