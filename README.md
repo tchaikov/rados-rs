@@ -4,8 +4,13 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ## 📋 Repository Rewrite Plan
 
-This repository is undergoing a structured rewrite to improve reviewability and maintainability. See the following documents for the detailed plan:
+This repository is undergoing a structured rewrite to improve reviewability and maintainability. 
 
+**👉 Start here: [REWRITE_SUMMARY.md](./REWRITE_SUMMARY.md)** - Quick reference and overview
+
+### Planning Documents
+
+- **[REWRITE_SUMMARY.md](./REWRITE_SUMMARY.md)** - Quick reference and overview (start here!)
 - **[COMMIT_REWRITE_PLAN.md](./COMMIT_REWRITE_PLAN.md)** - Complete 49-commit sequence plan
 - **[DEPENDENCIES.md](./DEPENDENCIES.md)** - Dependency graph and build order
 - **[IMPLEMENTATION_GUIDE.md](./IMPLEMENTATION_GUIDE.md)** - Practical implementation guidance
