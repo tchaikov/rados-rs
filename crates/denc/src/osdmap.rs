@@ -2239,52 +2239,22 @@ impl VersionedEncode for OSDMap {
 
         // Decode pools (BTreeMap<i64, PgPool>)
         map.pools = BTreeMap::decode(&mut client_bytes, features)?;
-        println!("  Debug OSDMap: After pools decode, remaining bytes: {}", client_bytes.remaining());
 
         // Decode pool_name (BTreeMap<i64, String>)
         map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
-        println!("  Debug OSDMap: After pool_name decode, remaining bytes: {}", client_bytes.remaining());
 
         map.pool_max = client_bytes.get_i64_le();
-        println!("  Debug OSDMap: After pool_max, remaining bytes: {}", client_bytes.remaining());
 
         // Decode flags
         map.flags = client_bytes.get_u32_le();
-        println!("  Debug OSDMap: After flags, remaining bytes: {}", client_bytes.remaining());
 
         // Decode max_osd
-        println!("  Debug OSDMap: About to decode max_osd, next 4 bytes (hex): {:02x?}", &client_bytes.chunk()[..4.min(client_bytes.remaining())]);
         map.max_osd = client_bytes.get_i32_le();
-        println!("  Debug OSDMap: client_v={}, After max_osd (value={}), remaining bytes: {}", client_v, map.max_osd, client_bytes.remaining());
 
         // Decode osd_state
         if client_v >= 5 {
-            // Version 5+ uses Vec<u32> directly
-            println!("  Debug OSDMap: About to decode osd_state (v{}), remaining bytes: {}", client_v, client_bytes.remaining());
-            // Peek at the next 32 bytes to see the full pattern
-            if client_bytes.remaining() >= 32 {
-                let peek_bytes: Vec<u8> = client_bytes.chunk()[..32].to_vec();
-                println!("  Debug OSDMap: Next 32 bytes before osd_state (hex): {:02x?}", peek_bytes);
-            }
-            
-            // TEMPORARY FIX: Read osd_state using a fixed max_osd size instead of Vec::decode
-            // This is to test if the issue is with Vec encoding
-            let expected_count = map.max_osd.max(0) as usize;
-            println!("  Debug OSDMap: Expected osd_state count based on max_osd: {}", expected_count);
-            
-            // Read the vec length from the buffer
-            let vec_len = client_bytes.get_u32_le() as usize;
-            println!("  Debug OSDMap: Read osd_state vec_len: {}", vec_len);
-            
-            // Read that many u32 values
-            map.osd_state = Vec::with_capacity(vec_len);
-            for i in 0..vec_len {
-                let val = client_bytes.get_u32_le();
-                println!("  Debug OSDMap: osd_state[{}] = {} (0x{:x})", i, val, val);
-                map.osd_state.push(val);
-            }
-            
-            println!("  Debug OSDMap: After osd_state (len={}), remaining bytes: {}", map.osd_state.len(), client_bytes.remaining());
+            // Version 5+ uses Vec<u32> directly (standard vector encoding)
+            map.osd_state = Vec::decode(&mut client_bytes, features)?;
         } else {
             // Older versions use Vec<u8>
             let n = client_bytes.get_u32_le() as usize;
@@ -2294,55 +2264,15 @@ impl VersionedEncode for OSDMap {
             }
         }
 
-        // Decode osd_weight  
-        println!("  Debug OSDMap: About to decode osd_weight, remaining bytes: {}", client_bytes.remaining());
-        // Peek at the next 16 bytes
-        if client_bytes.remaining() >= 16 {
-            let peek_bytes: Vec<u8> = client_bytes.chunk()[..16].to_vec();
-            println!("  Debug OSDMap: Next 16 bytes (hex): {:02x?}", peek_bytes);
-        }
-        
-        // TRY: osd_weight might be encoded as Vec<u32> without separate length, using osd_state.len()
-        // Read osd_state.len() number of u32 values
-        let osd_count = map.osd_state.len();
-        map.osd_weight = Vec::with_capacity(osd_count);
-        for i in 0..osd_count {
-            let weight = client_bytes.get_u32_le();
-            println!("  Debug OSDMap: osd_weight[{}] = {} (0x{:x})", i, weight, weight);
-            map.osd_weight.push(weight);
-        }
-        println!("  Debug OSDMap: After osd_weight (len={}), remaining bytes: {}", map.osd_weight.len(), client_bytes.remaining());
+        // Decode osd_weight
+        // According to C++ code: encode(osd_weight, bl) - standard vector encoding with length prefix
+        map.osd_weight = Vec::decode(&mut client_bytes, features)?;
 
         // Decode osd_addrs (client addresses)
         if client_v >= 8 {
             // Version 8+ uses EntityAddrvec
-            println!("  Debug OSDMap: About to decode osd_addrs_client (v{}), remaining bytes: {}", client_v, client_bytes.remaining());
-            
-            // Peek at next bytes to understand format
-            if client_bytes.remaining() >= 20 {
-                let peek_bytes: Vec<u8> = client_bytes.chunk()[..20].to_vec();
-                println!("  Debug OSDMap: Next 20 bytes before osd_addrs_client (hex): {:02x?}", peek_bytes);
-            }
-            
-            // Try reading as versioned-encoded Vec
-            // ENCODE_START pattern: version (u8), compat (u8), length (u32)
-            let enc_version = client_bytes.get_u8();
-            let enc_compat = client_bytes.get_u8();
-            let enc_length = client_bytes.get_u32_le() as usize;
-            println!("  Debug OSDMap: osd_addrs_client ENCODE_START: v={}, compat={}, len={}", enc_version, enc_compat, enc_length);
-            
-            if enc_length > client_bytes.remaining() {
-                return Err(RadosError::Protocol(format!(
-                    "osd_addrs_client enc_length {} exceeds remaining bytes {}",
-                    enc_length, client_bytes.remaining()
-                )));
-            }
-            
-            // Read the encoded section
-            let mut addrs_buf = client_bytes.copy_to_bytes(enc_length);
-            map.osd_addrs_client = Vec::decode(&mut addrs_buf, features)?;
-            
-            println!("  Debug OSDMap: After osd_addrs_client (len={}), remaining bytes: {}", map.osd_addrs_client.len(), client_bytes.remaining());
+            // According to C++ code: encode(osd_addrs->client_addrs, bl, features)
+            map.osd_addrs_client = Vec::decode(&mut client_bytes, features)?;
         } else {
             // Older versions use single EntityAddr per OSD
             let n = client_bytes.get_u32_le() as usize;
