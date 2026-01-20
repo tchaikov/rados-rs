@@ -20,6 +20,17 @@ pub struct MonFeature {
     pub features: u64,
 }
 
+// Version header constants for ENCODE_START/DECODE_START format
+const VERSION_HEADER_VERSION_SIZE: usize = 1; // version byte
+const VERSION_HEADER_COMPAT_SIZE: usize = 1;  // compat byte
+const VERSION_HEADER_LENGTH_SIZE: usize = 4;  // length u32
+const VERSION_HEADER_SIZE: usize = VERSION_HEADER_VERSION_SIZE 
+                                 + VERSION_HEADER_COMPAT_SIZE 
+                                 + VERSION_HEADER_LENGTH_SIZE;
+
+// MonFeature content size
+const MON_FEATURE_CONTENT_SIZE: usize = 8; // u64 features value
+
 impl VersionedEncode for MonFeature {
     const FEATURE_DEPENDENT: bool = false;
 
@@ -78,8 +89,8 @@ impl Denc for MonFeature {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Versioned encoding: version (1) + compat (1) + length (4) + content (8)
-        Some(1 + 1 + 4 + 8)
+        // Versioned encoding: version header + content
+        Some(VERSION_HEADER_SIZE + MON_FEATURE_CONTENT_SIZE)
     }
 }
 
