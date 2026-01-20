@@ -92,7 +92,6 @@ The project uses GitHub Actions for CI with three main checks:
 ### Testing
 - Unit tests should be colocated with the code they test
 - Integration tests go in the `tests/` directory
-- Use corpus files from Ceph for validation when available
 - Always include roundtrip tests for encoding/decoding
 - **Run all tests before committing**: Use `cargo test --workspace --all-targets` to ensure nothing breaks
 - Cross-validate with Ceph's C++ implementation when implementing protocol features
