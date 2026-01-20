@@ -85,7 +85,7 @@ fn test_object_placement_pipeline() {
                             match osdmap.pg_to_osds(&pg) {
                                 Ok(osds) => {
                                     println!("      -> OSDs: {:?}", osds);
-                                    
+
                                     // Verify we got the expected number of replicas (or less if cluster is small)
                                     assert!(
                                         osds.len() <= pool.size as usize,
