@@ -18,3 +18,7 @@ logs/
 
 # Test outputs
 test_results/
+
+# Corpus test files - binary test data
+test_corpus/
+crates/denc/test_corpus/

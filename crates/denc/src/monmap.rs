@@ -11,7 +11,8 @@ use serde::Serialize;
 use std::collections::BTreeMap;
 
 // Import specific types from osdmap to avoid conflicts
-use crate::osdmap::{Epoch, FsId, UTime};
+use crate::osdmap::{Epoch, FsId};
+use crate::denc::UTime;
 
 /// Monitor feature flags (mon_feature_t in C++)
 /// Uses versioned encoding (ENCODE_START/DECODE_START)

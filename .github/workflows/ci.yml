@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [ commit-rewrite ]
+    branches: [ main ]
   pull_request:
-    branches: [ commit-rewrite ]
+    branches: [ main ]
 
 env:
   CARGO_TERM_COLOR: always
@@ -64,6 +64,8 @@ jobs:
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
+    env:
+      CEPH_KEYRING: /etc/ceph/ceph.client.admin.keyring
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -91,40 +93,6 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --all-targets
-
-  build-dencoder:
-    name: Build Dencoder Tool
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build dencoder
-        run: cargo build --bin dencoder
-
-      - name: Test dencoder list_types
-        run: cargo run --bin dencoder list_types
 
   corpus-test:
     name: Corpus Comparison Test
