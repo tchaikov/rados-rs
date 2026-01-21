@@ -18,6 +18,171 @@ pub type Epoch = u32;
 /// Ceph version type
 pub type Version = u64;
 
+/// Varint encoding/decoding utilities (matching C++ denc_varint)
+fn decode_varint<B: Buf>(buf: &mut B) -> Result<u64, RadosError> {
+    if buf.remaining() < 1 {
+        return Err(RadosError::Protocol(
+            "Insufficient bytes for varint".to_string(),
+        ));
+    }
+
+    let mut byte = buf.get_u8();
+    let mut v = (byte & 0x7f) as u64;
+    let mut shift = 7;
+
+    while (byte & 0x80) != 0 {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol("Incomplete varint".to_string()));
+        }
+        byte = buf.get_u8();
+        v |= ((byte & 0x7f) as u64) << shift;
+        shift += 7;
+    }
+
+    Ok(v)
+}
+
+fn encode_varint<B: BufMut>(mut v: u64, buf: &mut B) -> Result<(), RadosError> {
+    let mut byte = (v & 0x7f) as u8;
+    v >>= 7;
+
+    while v != 0 {
+        byte |= 0x80;
+        buf.put_u8(byte);
+        byte = (v & 0x7f) as u8;
+        v >>= 7;
+    }
+    buf.put_u8(byte);
+    Ok(())
+}
+
+/// Shard ID type (shard_id_t in C++)
+/// Wraps an i8 value representing a shard identifier
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub struct ShardId(pub i8);
+
+impl ShardId {
+    pub const NO_SHARD: ShardId = ShardId(-1);
+}
+
+impl Denc for ShardId {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        buf.put_i8(self.0);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for ShardId".to_string(),
+            ));
+        }
+        Ok(ShardId(buf.get_i8()))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(1)
+    }
+}
+
+/// Shard ID Set (shard_id_set in C++)
+/// A bitset that can store up to 128 shard IDs efficiently
+/// Encoded as 2 u64 words using varint encoding
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct ShardIdSet {
+    // Two 64-bit words to represent 128 bits
+    words: [u64; 2],
+}
+
+impl ShardIdSet {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, shard_id: ShardId) {
+        let id = shard_id.0;
+        if id >= 0 {
+            let uid = id as usize;
+            if uid < 128 {
+                let word_idx = uid / 64;
+                let bit_idx = uid % 64;
+                self.words[word_idx] |= 1u64 << bit_idx;
+            }
+        }
+    }
+
+    pub fn contains(&self, shard_id: ShardId) -> bool {
+        let id = shard_id.0;
+        if id >= 0 {
+            let uid = id as usize;
+            if uid < 128 {
+                let word_idx = uid / 64;
+                let bit_idx = uid % 64;
+                return (self.words[word_idx] & (1u64 << bit_idx)) != 0;
+            }
+        }
+        false
+    }
+
+    pub fn clear(&mut self) {
+        self.words = [0, 0];
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.words[0] == 0 && self.words[1] == 0
+    }
+
+    pub fn iter(&self) -> ShardIdSetIter<'_> {
+        ShardIdSetIter {
+            set: self,
+            current: 0,
+        }
+    }
+}
+
+pub struct ShardIdSetIter<'a> {
+    set: &'a ShardIdSet,
+    current: i8,
+}
+
+impl<'a> Iterator for ShardIdSetIter<'a> {
+    type Item = ShardId;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.current >= 0 && (self.current as usize) < 128 {
+            let shard_id = ShardId(self.current);
+            self.current += 1;
+            if self.set.contains(shard_id) {
+                return Some(shard_id);
+            }
+        }
+        None
+    }
+}
+
+impl Denc for ShardIdSet {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // Encode each word using varint
+        encode_varint(self.words[0], buf)?;
+        encode_varint(self.words[1], buf)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        // Decode each word using varint
+        let word0 = decode_varint(buf)?;
+        let word1 = decode_varint(buf)?;
+        Ok(ShardIdSet {
+            words: [word0, word1],
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // Varint size is variable, so we can't determine it without encoding
+        None
+    }
+}
+
 /// Placement Group ID (pg_t in C++)
 /// Encoding format matches pg_t::encode() in osd_types.h
 #[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -965,7 +1130,15 @@ pub struct PgPool {
 
     // Version 29+
     pub last_pg_merge_meta: PgMergeMeta,
-    // Additional version-specific fields would go here
+
+    // Version 30+
+    pub peering_crush_bucket_count: u32,
+    pub peering_crush_bucket_target: u32,
+    pub peering_crush_bucket_barrier: u32,
+    pub peering_crush_mandatory_member: i32,
+
+    // Version 32+
+    pub nonprimary_shards: ShardIdSet,
 }
 
 // Custom Serialize implementation for PgPool to format create_time as timestamp
@@ -1392,6 +1565,27 @@ impl VersionedEncode for PgPool {
         if version >= 29 {
             self.last_pg_merge_meta.encode(buf, features)?;
         }
+        if version == 30 {
+            buf.put_u32_le(self.peering_crush_bucket_count);
+            buf.put_u32_le(self.peering_crush_bucket_target);
+            buf.put_u32_le(self.peering_crush_bucket_barrier);
+            buf.put_i32_le(self.peering_crush_mandatory_member);
+        }
+        if version >= 31 {
+            // Encode optional peering_crush_data (only if stretch pool)
+            if self.is_stretch_pool() {
+                buf.put_u8(1); // Some
+                buf.put_u32_le(self.peering_crush_bucket_count);
+                buf.put_u32_le(self.peering_crush_bucket_target);
+                buf.put_u32_le(self.peering_crush_bucket_barrier);
+                buf.put_i32_le(self.peering_crush_mandatory_member);
+            } else {
+                buf.put_u8(0); // None
+            }
+        }
+        if version >= 32 {
+            self.nonprimary_shards.encode(buf, features)?;
+        }
 
         Ok(())
     }
@@ -1402,6 +1596,12 @@ impl VersionedEncode for PgPool {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        println!(
+            "  Debug: Starting decode with version {}, remaining bytes: {}",
+            version,
+            buf.remaining()
+        );
+
         if version < Self::COMPAT_VERSION {
             return Err(RadosError::Protocol(format!(
                 "pg_pool_t version {} too old (minimum {})",
@@ -1420,12 +1620,12 @@ impl VersionedEncode for PgPool {
         // Basic fields (always present)
         pool.pool_type = buf.get_u8();
         pool.size = buf.get_u8();
-        pool.crush_rule = buf.get_u8(); // Fixed: u8 not i32
-        pool.object_hash = buf.get_u8(); // Fixed: u8 not u32
+        pool.crush_rule = buf.get_u8();
+        pool.object_hash = buf.get_u8();
         pool.pg_num = buf.get_u32_le();
         pool.pgp_num = buf.get_u32_le();
-        pool.lpg_num = buf.get_u32_le(); // should be 0
-        pool.lpgp_num = buf.get_u32_le(); // should be 0
+        pool.lpg_num = buf.get_u32_le();
+        pool.lpgp_num = buf.get_u32_le();
         pool.last_change = buf.get_u32_le();
         pool.snap_seq = buf.get_u64_le();
         pool.snap_epoch = buf.get_u32_le();
@@ -1775,17 +1975,55 @@ impl VersionedEncode for PgPool {
             );
         }
 
-        if version >= 29 && buf.remaining() >= 59 {
-            // Version 29 - last_pg_merge_meta with proper PgMergeMeta decoding
-            // Need at least 59 bytes for the encoded PgMergeMeta
+        if version >= 29 {
             pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
             println!(
                 "  Debug: After v29 fields, remaining bytes: {}",
                 buf.remaining()
             );
-        } else if version >= 29 {
+        }
+
+        // Version 30 fields (special handling)
+        if version == 30 {
+            pool.peering_crush_bucket_count = buf.get_u32_le();
+            pool.peering_crush_bucket_target = buf.get_u32_le();
+            pool.peering_crush_bucket_barrier = buf.get_u32_le();
+            pool.peering_crush_mandatory_member = buf.get_i32_le();
             println!(
-                "  Debug: Skipping v29 fields - insufficient bytes: {} (need 59)",
+                "  Debug: After v30 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        }
+
+        // Version 31+ fields (optional tuple)
+        if version >= 31 {
+            // Decode Option<(u32, u32, u32, i32)>
+            let peering_data: Option<(u32, u32, u32, i32)> = Option::decode(buf, features)?;
+            if let Some((count, target, barrier, mandatory)) = peering_data {
+                pool.peering_crush_bucket_count = count;
+                pool.peering_crush_bucket_target = target;
+                pool.peering_crush_bucket_barrier = barrier;
+                pool.peering_crush_mandatory_member = mandatory;
+            }
+            println!(
+                "  Debug: After v31 fields, remaining bytes: {}",
+                buf.remaining()
+            );
+        }
+
+        // Version 32+ fields
+        if version >= 32 {
+            println!(
+                "  Debug: About to decode nonprimary_shards, remaining bytes: {}",
+                buf.remaining()
+            );
+            if buf.remaining() >= 2 {
+                let peek_bytes: Vec<u8> = buf.chunk()[..buf.remaining().min(10)].to_vec();
+                println!("  Debug: Next bytes: {:02x?}", peek_bytes);
+            }
+            pool.nonprimary_shards = ShardIdSet::decode(buf, features)?;
+            println!(
+                "  Debug: After v32 fields (nonprimary_shards), remaining bytes: {}",
                 buf.remaining()
             );
         }
@@ -2236,9 +2474,14 @@ impl VersionedEncode for OSDMap {
         map.epoch = client_bytes.get_u32_le();
         map.created = UTime::decode(&mut client_bytes, features)?;
         map.modified = UTime::decode(&mut client_bytes, features)?;
+        println!(
+            "map.modified = {}",
+            format_utime_as_timestamp(&map.modified)
+        );
 
         // Decode pools (BTreeMap<i64, PgPool>)
         map.pools = BTreeMap::decode(&mut client_bytes, features)?;
+        println!("  Debug: map.pools = {:?}", map.pools);
 
         // Decode pool_name (BTreeMap<i64, String>)
         map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
