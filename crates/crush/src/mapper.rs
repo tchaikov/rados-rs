@@ -194,6 +194,14 @@ fn crush_choose_firstn(
     vary_r: u8,
     stable: u8,
 ) -> Result<()> {
+    tracing::debug!(
+        "crush_choose_firstn: bucket_id={}, numrep={}, item_type={}, recurse_to_leaf={}",
+        bucket_id,
+        numrep,
+        item_type,
+        recurse_to_leaf
+    );
+
     // If bucket_id is a device (>= 0), just return it if it's the right type
     if bucket_id >= 0 {
         if item_type == 0 && !is_out(weights, bucket_id, x) {
@@ -204,86 +212,115 @@ fn crush_choose_firstn(
 
     // Get the bucket
     let bucket = map.get_bucket(bucket_id)?;
+    tracing::debug!(
+        "Got bucket: id={}, type={}, size={}, items={:?}",
+        bucket.id,
+        bucket.bucket_type,
+        bucket.size,
+        bucket.items
+    );
 
     // For each replica we need to select
     for rep in 0..numrep {
         let mut found = false;
         let r = if stable != 0 { 0 } else { rep as u32 };
+        let mut current_bucket = bucket;
 
         // Try multiple times to find a valid item
-        for ftotal in 0..tries {
+        'tries: for ftotal in 0..tries {
             let r_prime = if vary_r != 0 { r + ftotal } else { r };
 
-            // Select an item from the bucket
-            let item = match bucket_choose(bucket, x, r_prime) {
-                Some(item) => item,
-                None => continue,
-            };
-
-            // Check if this item is already in the output (collision)
-            if out.contains(&item) {
-                continue;
-            }
-
-            // If item is a device (>= 0)
-            if item >= 0 {
-                // Check if it's the right type (0 = device)
-                if item_type == 0 {
-                    // Check if it's not out
-                    if !is_out(weights, item, x) {
-                        out.push(item);
-                        found = true;
-                        break;
+            // Inner loop for descending through bucket hierarchy
+            loop {
+                // Select an item from the current bucket
+                let item = match bucket_choose(current_bucket, x, r_prime) {
+                    Some(item) => item,
+                    None => {
+                        tracing::debug!("bucket_choose returned None for r_prime={}", r_prime);
+                        continue 'tries;
                     }
-                }
-            } else {
-                // Item is a bucket, need to recurse
-                let item_bucket = map.get_bucket(item)?;
+                };
 
-                // Check if this bucket is the right type
-                if item_bucket.bucket_type == item_type {
-                    if !recurse_to_leaf {
-                        // We want buckets, not leaves
-                        out.push(item);
-                        found = true;
-                        break;
-                    } else {
-                        // Recurse to find a leaf device
-                        let before_len = out.len();
-                        crush_choose_firstn(
-                            map, item, x, 1, // Select one device from this bucket
-                            0, // Type 0 = device
-                            out, weights, tries, true, vary_r, stable,
-                        )?;
+                tracing::debug!(
+                    "Selected item {} from bucket {} (rep={}, try={})",
+                    item,
+                    current_bucket.id,
+                    rep,
+                    ftotal
+                );
 
-                        // Check if we successfully added a device
-                        if out.len() > before_len {
-                            found = true;
-                            break;
+                // Determine item type
+                let itemtype = if item >= 0 {
+                    0 // Device
+                } else {
+                    match map.get_bucket(item) {
+                        Ok(b) => b.bucket_type,
+                        Err(_) => {
+                            tracing::debug!("Invalid bucket {}", item);
+                            continue 'tries;
                         }
                     }
-                } else if item_bucket.bucket_type < item_type {
-                    // Need to descend further
+                };
+
+                tracing::debug!("Item {} has type {}, looking for type {}", item, itemtype, item_type);
+
+                // Check if this is the type we're looking for
+                if itemtype != item_type {
+                    if item >= 0 {
+                        // Item is a device but wrong type - this shouldn't happen
+                        tracing::debug!("Device {} has wrong type", item);
+                        continue 'tries;
+                    }
+                    // Item is a bucket, descend into it
+                    current_bucket = map.get_bucket(item)?;
+                    tracing::debug!("Descending into bucket {}", item);
+                    continue; // Continue inner loop with new bucket
+                }
+
+                // Check if this item is already in the output (collision)
+                if out.contains(&item) {
+                    tracing::debug!("Item {} already in output, skipping", item);
+                    continue 'tries;
+                }
+
+                // Check if device is out
+                if item >= 0 && is_out(weights, item, x) {
+                    tracing::debug!("Device {} is out", item);
+                    continue 'tries;
+                }
+
+                // If we need to recurse to leaf (for CHOOSELEAF)
+                if recurse_to_leaf && item < 0 {
+                    // Recursively select a device from this bucket
                     let before_len = out.len();
                     crush_choose_firstn(
                         map,
                         item,
                         x,
                         1,
-                        item_type,
+                        0, // Type 0 = device
                         out,
                         weights,
                         tries,
-                        recurse_to_leaf,
+                        true,
                         vary_r,
                         stable,
                     )?;
 
                     if out.len() > before_len {
                         found = true;
-                        break;
+                        break 'tries;
+                    } else {
+                        tracing::debug!("Failed to find leaf in bucket {}", item);
+                        continue 'tries;
                     }
                 }
+
+                // Success - add this item to output
+                tracing::debug!("Found valid item {}", item);
+                out.push(item);
+                found = true;
+                break 'tries;
             }
         }
 

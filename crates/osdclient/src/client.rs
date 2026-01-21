@@ -170,13 +170,17 @@ impl OSDClient {
             .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
 
         // Map object to PG and OSDs
+        debug!(
+            "OSD weights from map (max_osd={}): {:?}",
+            osdmap.max_osd, osdmap.osd_weight
+        );
         let (pg, osds) = crush::placement::object_to_osds(
             crush_map,
             oid,
             &locator,
             pool_info.pg_num,
             pool_info.crush_rule as u32,
-            &vec![1; osdmap.max_osd as usize], // All OSDs weighted equally for now
+            &osdmap.osd_weight, // Use actual OSD weights from OSDMap (16.16 fixed-point format)
             pool_info.size as usize,
         )
         .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
