@@ -422,6 +422,10 @@ impl CephXClientHandler {
             ));
         }
         let service_id = auth_payload.get_u32_le();
+        eprintln!(
+            "DEBUG: parse_service_ticket: Parsing ticket for service_id: {} (0x{:08x})",
+            service_id, service_id
+        );
         debug!(
             "Parsing ticket for service_id: {} (0x{:08x})",
             service_id, service_id
@@ -640,9 +644,11 @@ impl CephXClientHandler {
         }
 
         let service_ticket_reply_v = auth_payload.get_u8();
+        eprintln!("DEBUG: service_ticket_reply_v: {}", service_ticket_reply_v);
         debug!("service_ticket_reply_v: {}", service_ticket_reply_v);
 
         let num_tickets = auth_payload.get_u32_le();
+        eprintln!("DEBUG: num_tickets: {}", num_tickets);
         debug!("num_tickets: {}", num_tickets);
 
         if num_tickets == 0 {
@@ -761,13 +767,76 @@ impl CephXClientHandler {
             }
         }
 
+        // Parse extra_tickets if any remain in the payload
+        eprintln!("DEBUG: After connection_secret, auth_payload.len() = {}", auth_payload.len());
+        if auth_payload.len() >= 4 {
+            let extra_tickets_len = auth_payload.get_u32_le() as usize;
+            eprintln!("DEBUG: extra_tickets blob length: {}", extra_tickets_len);
+
+            if extra_tickets_len > 0 && auth_payload.len() >= extra_tickets_len {
+                let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
+                eprintln!("DEBUG: Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
+                eprintln!("DEBUG: extra_tickets first 64 bytes: {}",
+                    extra_tickets_bl.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
+                // The extra_tickets bufferlist might contain a CephXServiceTicketReply structure
+                // Let's try parsing it as such: struct_v (u8) + num_tickets (u32) + tickets
+                if extra_tickets_bl.len() >= 5 {
+                    let extra_v = extra_tickets_bl.get_u8();
+                    let extra_num_tickets = extra_tickets_bl.get_u32_le();
+                    eprintln!("DEBUG: extra_tickets struct_v: {}, num_tickets: {}", extra_v, extra_num_tickets);
+
+                    // Extra tickets are encrypted with the AUTH session key (from first ticket)
+                    // Get the AUTH session key from ticket_handlers (clone to avoid borrow issues)
+                    let auth_session_key = ticket_handlers.first()
+                        .map(|(_, session_key, _, _, _)| session_key.clone())
+                        .ok_or_else(|| CephXError::ProtocolError("No AUTH ticket to decrypt extra tickets".into()))?;
+
+                    eprintln!("DEBUG: Using AUTH session key to decrypt extra tickets");
+
+                    // Parse each extra ticket using the AUTH session key
+                    for i in 0..extra_num_tickets {
+                        eprintln!("DEBUG: Processing extra ticket {}/{}", i + 1, extra_num_tickets);
+                        match self.parse_service_ticket(&mut extra_tickets_bl, &auth_session_key) {
+                            Ok((service_id, session_key, secret_id, ticket_blob, validity)) => {
+                                eprintln!("DEBUG: Extra ticket for service {}", service_id);
+                                ticket_handlers.push((service_id, session_key, secret_id, ticket_blob, validity));
+                            }
+                            Err(e) => {
+                                eprintln!("DEBUG: Failed to parse extra ticket {}: {:?}", i, e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create session if it doesn't exist yet
+        if self.session.is_none() {
+            debug!("Creating new session with global_id={}", global_id);
+            self.session = Some(CephXSession::new(
+                self.entity_name.clone(),
+                global_id,
+                secret_key.clone(),
+            ));
+        }
+
         // Store all service tickets in the session
         if let Some(session) = &mut self.session {
+            eprintln!(
+                "DEBUG: Storing {} ticket handlers in session",
+                ticket_handlers.len()
+            );
             debug!(
                 "Storing {} ticket handlers in session",
                 ticket_handlers.len()
             );
             for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
+                eprintln!(
+                    "DEBUG: Storing ticket for service {} (secret_id={})",
+                    service_id, secret_id
+                );
                 let handler = session.get_ticket_handler(service_id);
                 handler.update(session_key, secret_id, ticket_blob, validity);
                 debug!(
@@ -776,16 +845,146 @@ impl CephXClientHandler {
                 );
             }
         } else {
+            eprintln!("DEBUG: Warning: No session available to store ticket handlers");
             debug!("Warning: No session available to store ticket handlers");
         }
 
         Ok((Some(session_key_bytes), connection_secret_bytes))
     }
 
+    /// Decrypt the server challenge from AUTH_REPLY_MORE
+    /// Returns the server_challenge value
+    pub fn decrypt_authorize_challenge(&self, service_id: u32, encrypted_payload: &[u8]) -> Result<u64> {
+        use bytes::Buf;
+        use crate::protocol::AUTH_ENC_MAGIC;
+
+        debug!("Decrypting authorize challenge for service {}", service_id);
+        eprintln!("DEBUG: decrypt_authorize_challenge: payload length={}", encrypted_payload.len());
+
+        // Get session or return error
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
+
+        // Get ticket handler for the service
+        let handler = session.ticket_handlers.get(&service_id)
+            .ok_or_else(|| CephXError::AuthenticationFailed(format!(
+                "No ticket handler for service {}", service_id
+            )))?;
+
+        if !handler.have_key {
+            return Err(CephXError::AuthenticationFailed(format!(
+                "No session key for service {}", service_id
+            )));
+        }
+
+        // Payload format: [len:u32][encrypted_data]
+        // encrypted_data format after decryption: [struct_v:u8][magic:u64][CephXAuthorizeReply]
+        let mut buf = Bytes::copy_from_slice(encrypted_payload);
+
+        // Read length prefix
+        if buf.remaining() < 4 {
+            return Err(CephXError::ProtocolError("Challenge payload too short".into()));
+        }
+        let encrypted_len = buf.get_u32_le() as usize;
+        eprintln!("DEBUG: encrypted_len: {}", encrypted_len);
+
+        if buf.remaining() < encrypted_len {
+            return Err(CephXError::ProtocolError(format!(
+                "Insufficient data: need {} bytes, have {}",
+                encrypted_len, buf.remaining()
+            )));
+        }
+
+        // Extract encrypted data
+        let encrypted_data = buf.copy_to_bytes(encrypted_len);
+
+        // Decrypt using session key
+        let decrypted = Self::decrypt_with_key(&handler.session_key, &encrypted_data)?;
+
+        let mut dec_buf = Bytes::from(decrypted);
+
+        // Verify struct_v
+        if dec_buf.remaining() < 1 {
+            return Err(CephXError::ProtocolError("Decrypted data too short for struct_v".into()));
+        }
+        let struct_v = dec_buf.get_u8();
+        eprintln!("DEBUG: struct_v: {}", struct_v);
+
+        // Verify magic
+        if dec_buf.remaining() < 8 {
+            return Err(CephXError::ProtocolError("Decrypted data too short for magic".into()));
+        }
+        let magic = dec_buf.get_u64_le();
+        eprintln!("DEBUG: magic: 0x{:016x}", magic);
+
+        if magic != AUTH_ENC_MAGIC {
+            return Err(CephXError::ProtocolError(format!(
+                "Invalid magic in decrypted challenge: expected 0x{:016x}, got 0x{:016x}",
+                AUTH_ENC_MAGIC, magic
+            )));
+        }
+
+        // Parse CephXAuthorizeReply: [struct_v:u8][server_challenge:u64]
+        if dec_buf.remaining() < 1 {
+            return Err(CephXError::ProtocolError("No struct_v for CephXAuthorizeReply".into()));
+        }
+        let reply_struct_v = dec_buf.get_u8();
+        eprintln!("DEBUG: reply struct_v: {}", reply_struct_v);
+
+        if dec_buf.remaining() < 8 {
+            return Err(CephXError::ProtocolError("No server_challenge in reply".into()));
+        }
+        let server_challenge = dec_buf.get_u64_le();
+        eprintln!("DEBUG: Extracted server_challenge: 0x{:016x}", server_challenge);
+        debug!("Extracted server_challenge: 0x{:016x}", server_challenge);
+
+        Ok(server_challenge)
+    }
+
+    /// Decrypt data using AES-128-CBC with the given key
+    /// Ceph uses a fixed IV: "cephsageyudagreg"
+    fn decrypt_with_key(key: &CryptoKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        use aes::Aes128;
+        use cbc::cipher::{BlockDecryptMut, KeyIvInit};
+        use cbc::Decryptor;
+        use aes::cipher::generic_array::GenericArray;
+
+        // Ceph uses a fixed IV for AES-CBC encryption
+        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+
+        // Verify key length
+        if key.get_secret().len() != 16 {
+            return Err(CephXError::CryptographicError(
+                format!("Invalid key length: expected 16, got {}", key.get_secret().len())
+            ));
+        }
+
+        // Create decryptor with fixed IV - convert slices to GenericArray
+        type Aes128CbcDec = Decryptor<Aes128>;
+        let key_array = GenericArray::from_slice(key.get_secret());
+        let iv_array = GenericArray::from_slice(CEPH_AES_IV);
+        let cipher = Aes128CbcDec::new(key_array, iv_array);
+
+        // Decrypt (need to copy because decrypt_padded_mut modifies in place)
+        let mut buffer = ciphertext.to_vec();
+        let decrypted = cipher
+            .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer)
+            .map_err(|e| CephXError::DecryptionFailed(format!("CBC decryption failed: {:?}", e)))?;
+
+        Ok(decrypted.to_vec())
+    }
+
     /// Build an authorizer for a service (OSD, MDS, etc.)
     /// This is used when connecting to services after obtaining tickets from the monitor
     /// Returns the authorizer buffer to be sent to the service
-    pub fn build_authorizer(&mut self, service_id: u32, global_id: u64) -> Result<Bytes> {
+    ///
+    /// # Arguments
+    /// * `service_id` - Service type (4=OSD, 2=MDS, etc.)
+    /// * `global_id` - Client global ID
+    /// * `server_challenge` - Optional server challenge (for challenge-response)
+    pub fn build_authorizer(&mut self, service_id: u32, global_id: u64, server_challenge: Option<u64>) -> Result<Bytes> {
         use crate::protocol::{CephXAuthorizeA, CephXAuthorizeB};
         use rand::RngCore;
 
@@ -799,6 +998,27 @@ impl CephXClientHandler {
             .session
             .as_mut()
             .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
+
+        // Get global_id first (before mut borrow)
+        let actual_global_id = session.global_id;
+
+        // Debug: log all available ticket handlers
+        eprintln!("DEBUG: build_authorizer: Session has {} ticket handlers", session.ticket_handlers.len());
+        debug!("Session has {} ticket handlers", session.ticket_handlers.len());
+        for (sid, handler) in &session.ticket_handlers {
+            eprintln!(
+                "DEBUG:   Ticket handler for service {}: have_key={}, ticket_blob={}",
+                sid,
+                handler.have_key,
+                if handler.ticket_blob.is_some() { "present" } else { "absent" }
+            );
+            debug!(
+                "  Ticket handler for service {}: have_key={}, ticket_blob={}",
+                sid,
+                handler.have_key,
+                if handler.ticket_blob.is_some() { "present" } else { "absent" }
+            );
+        }
 
         // Get or create ticket handler
         let handler = session.get_ticket_handler(service_id);
@@ -821,19 +1041,36 @@ impl CephXClientHandler {
             })?
             .clone();
 
-        // Clone the session key to avoid borrow checker issues
+        // Clone the session key and secret_id to avoid borrow checker issues
         let session_key = handler.session_key.clone();
+        let secret_id = handler.secret_id;
+
+        // Debug output
+        eprintln!("DEBUG: === Rust CephX Authorizer Debug ===");
+        eprintln!("DEBUG:   global_id: {}", actual_global_id);
+        eprintln!("DEBUG:   service_id: {}", service_id);
+        eprintln!("DEBUG:   ticket.secret_id: {}", secret_id);
+        eprintln!("DEBUG:   ticket.blob.length(): {}", ticket_blob.blob.len());
+        eprintln!("DEBUG:   session_key type: {}", session_key.get_type());
+        eprintln!("DEBUG:   session_key length: {}", session_key.get_secret().len());
 
         // Build CephXAuthorizeA
-        let authorize_a = CephXAuthorizeA::new(global_id, service_id, ticket_blob);
+        let authorize_a = CephXAuthorizeA::new(actual_global_id, service_id, ticket_blob);
 
         // Generate nonce
         let mut rng = rand::thread_rng();
         let nonce = rng.next_u64();
         debug!("Generated nonce: 0x{:016x}", nonce);
 
-        // Build CephXAuthorizeB
-        let authorize_b = CephXAuthorizeB::new(nonce);
+        // Build CephXAuthorizeB - include server challenge if provided
+        let authorize_b = if let Some(challenge) = server_challenge {
+            eprintln!("DEBUG:   Building authorizer WITH server_challenge: 0x{:016x}", challenge);
+            debug!("Building authorizer with server_challenge: 0x{:016x}", challenge);
+            CephXAuthorizeB::with_challenge(nonce, challenge)
+        } else {
+            eprintln!("DEBUG:   Building authorizer WITHOUT server_challenge");
+            CephXAuthorizeB::new(nonce)
+        };
 
         // Encode authorize_a
         let mut authorizer_buf = BytesMut::new();
@@ -841,18 +1078,41 @@ impl CephXClientHandler {
             CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeA: {:?}", e))
         })?;
 
+        eprintln!("DEBUG:   nonce: 0x{:016x}", nonce);
+        eprintln!("DEBUG:   base_bl length (before encryption): {}", authorizer_buf.len());
+        eprintln!("DEBUG:   base_bl hex (first 64 bytes): {}",
+            authorizer_buf[..std::cmp::min(64, authorizer_buf.len())].iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(""));
+
         // Encode authorize_b
         let mut authorize_b_buf = BytesMut::new();
         authorize_b.encode(&mut authorize_b_buf, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeB: {:?}", e))
         })?;
 
+        eprintln!("DEBUG:   authorize_b buffer length: {}", authorize_b_buf.len());
+        eprintln!("DEBUG:   authorize_b hex: {}",
+            authorize_b_buf.iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(""));
+
         // Encrypt authorize_b with session key
         let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b_buf)?;
+
+        eprintln!("DEBUG:   encrypted_b length: {}", encrypted_b.len());
+        eprintln!("DEBUG:   encrypted_b hex: {}",
+            encrypted_b.iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(""));
 
         // Append encrypted authorize_b to the authorizer buffer
         authorizer_buf.extend_from_slice(&encrypted_b);
 
+        eprintln!("DEBUG:   final authorizer length: {}", authorizer_buf.len());
         debug!("Built authorizer: {} bytes", authorizer_buf.len());
         Ok(authorizer_buf.freeze())
     }

@@ -191,6 +191,7 @@ pub struct BannerConnecting {
     pub preferred_modes: Vec<crate::ConnectionMode>,
     pub supported_auth_methods: Vec<crate::AuthMethod>,
     pub auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    pub service_id: u32,
 }
 
 impl std::fmt::Debug for BannerConnecting {
@@ -234,6 +235,7 @@ impl State for BannerConnecting {
             self.preferred_modes.clone(),
             self.supported_auth_methods.clone(),
             self.auth_provider.clone(),
+            self.service_id,
         ))))
     }
 }
@@ -244,6 +246,7 @@ pub struct HelloConnecting {
     preferred_modes: Vec<crate::ConnectionMode>,
     supported_auth_methods: Vec<crate::AuthMethod>,
     auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    service_id: u32,
 }
 
 impl std::fmt::Debug for HelloConnecting {
@@ -265,12 +268,14 @@ impl HelloConnecting {
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
+        service_id: u32,
     ) -> Self {
         Self {
             hello_sent: false,
             preferred_modes,
             supported_auth_methods,
             auth_provider,
+            service_id,
         }
     }
 }
@@ -312,6 +317,7 @@ impl State for HelloConnecting {
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
                     self.auth_provider.clone(),
+                    self.service_id,
                 ))))
             }
             _ => Err(Error::protocol_error(&format!(
@@ -337,6 +343,7 @@ impl State for HelloConnecting {
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
                     self.auth_provider.clone(),
+                    self.service_id,
                 )),
             })
         } else {
@@ -354,6 +361,8 @@ pub struct AuthConnecting {
     supported_auth_methods: Vec<crate::AuthMethod>,
     /// Track methods we've tried to prevent infinite loops (max 3 attempts)
     tried_methods: Vec<crate::AuthMethod>,
+    /// Service ID for service-based auth (OSD=4, MDS=2, MGR=16, MON=0)
+    service_id: u32,
 }
 
 impl std::fmt::Debug for AuthConnecting {
@@ -367,6 +376,7 @@ impl std::fmt::Debug for AuthConnecting {
             .field("preferred_modes", &self.preferred_modes)
             .field("supported_auth_methods", &self.supported_auth_methods)
             .field("tried_methods", &self.tried_methods)
+            .field("service_id", &self.service_id)
             .finish()
     }
 }
@@ -385,6 +395,7 @@ impl AuthConnecting {
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
+        service_id: u32,
     ) -> Self {
         // Determine the preferred auth method (first in the list)
         let preferred_auth_method = supported_auth_methods
@@ -393,9 +404,10 @@ impl AuthConnecting {
             .unwrap_or(crate::AuthMethod::None);
 
         tracing::info!(
-            "AuthConnecting::new with auth method {:?}, has_provider={}",
+            "AuthConnecting::new with auth method {:?}, has_provider={}, service_id={}",
             preferred_auth_method,
-            auth_provider.is_some()
+            auth_provider.is_some(),
+            service_id
         );
 
         Self {
@@ -404,6 +416,7 @@ impl AuthConnecting {
             preferred_modes,
             supported_auth_methods,
             tried_methods: Vec::new(),
+            service_id,
         }
     }
 
@@ -468,6 +481,7 @@ impl State for AuthConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+        eprintln!("DEBUG: AuthConnecting received frame tag: {:?}", frame.preamble.tag);
         match frame.preamble.tag {
             Tag::AuthBadMethod => {
                 // Parse frame
@@ -481,6 +495,8 @@ impl State for AuthConnecting {
                 let allowed_methods = Vec::<u32>::decode(&mut payload, 0)?;
                 let allowed_modes = Vec::<u32>::decode(&mut payload, 0)?;
 
+                eprintln!("DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
+                    rejected_method, result, allowed_methods, allowed_modes);
                 tracing::info!(
                     "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
                     rejected_method,
@@ -531,6 +547,7 @@ impl State for AuthConnecting {
                     preferred_modes: negotiated_modes,
                     supported_auth_methods: self.supported_auth_methods.clone(),
                     tried_methods: Vec::new(),
+                    service_id: self.service_id,
                 };
 
                 new_state.tried_methods = new_tried;
@@ -542,6 +559,10 @@ impl State for AuthConnecting {
                 // Handle CephX multi-round auth
                 if let Some(provider) = &mut self.auth_provider {
                     if let Some(payload) = frame.segments.first() {
+                        eprintln!("DEBUG: AUTH_REPLY_MORE payload length: {}", payload.len());
+                        eprintln!("DEBUG: AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
+                            payload.iter().take(128).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
                         // Call auth provider to handle the response
                         // For multi-round auth, handle_auth_response processes the challenge
                         // and we need to send another request
@@ -551,7 +572,7 @@ impl State for AuthConnecting {
 
                         // Build the next auth payload (challenge response)
                         let auth_payload = provider
-                            .build_auth_payload(0, 0)
+                            .build_auth_payload(0, self.service_id)
                             .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
                         // For AuthRequestMore, we only send the auth_payload
@@ -578,6 +599,10 @@ impl State for AuthConnecting {
             Tag::AuthDone => {
                 // Parse AUTH_DONE frame to get global_id and connection mode
                 if let Some(segment) = frame.segments.first() {
+                    eprintln!("DEBUG: AUTH_DONE frame segment length: {}", segment.len());
+                    eprintln!("DEBUG: AUTH_DONE frame segment hex (first 64 bytes): {}",
+                        segment.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
                     let mut payload = segment.clone();
                     let global_id = u64::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode global_id: {:?}", e))
@@ -588,6 +613,11 @@ impl State for AuthConnecting {
                     let auth_payload = Bytes::decode(&mut payload, 0).map_err(|e| {
                         Error::protocol_error(&format!("Failed to decode auth_payload: {:?}", e))
                     })?;
+
+                    eprintln!("DEBUG: Decoded from AUTH_DONE frame:");
+                    eprintln!("DEBUG:   global_id: {}", global_id);
+                    eprintln!("DEBUG:   con_mode: {}", con_mode);
+                    eprintln!("DEBUG:   auth_payload length: {}", auth_payload.len());
 
                     tracing::info!(
                         "Authentication completed successfully - global_id: {}, connection_mode: {}",
@@ -676,7 +706,7 @@ impl State for AuthConnecting {
                     .as_mut()
                     .ok_or_else(|| Error::protocol_error("No auth provider available"))?;
                 let payload = provider
-                    .build_auth_payload(0, 0) // Initial request uses global_id=0, service_id=0
+                    .build_auth_payload(0, self.service_id) // Initial request uses global_id=0
                     .map_err(|e| Error::protocol_error(&e.to_string()))?;
                 (crate::AuthMethod::Cephx.as_u32(), payload)
             }
@@ -1510,6 +1540,8 @@ pub struct StateMachine {
     /// Connection configuration
     #[allow(dead_code)]
     config: crate::ConnectionConfig,
+    /// Preserved auth provider (kept across state transitions)
+    preserved_auth_provider: Option<Box<dyn auth::AuthProvider>>,
 }
 
 impl StateMachine {
@@ -1518,6 +1550,9 @@ impl StateMachine {
         let preferred_modes = config.preferred_modes.clone();
         let supported_auth_methods = config.supported_auth_methods.clone();
         let auth_provider = config.auth_provider.clone();
+        let service_id = config.service_id;
+        // Clone the auth provider for preservation across state transitions
+        let preserved_auth_provider = auth_provider.clone();
         Self {
             current_state: Box::new(BannerConnecting {
                 local_supported_features: 3, // MSGR2 | REVISION_1
@@ -1525,6 +1560,7 @@ impl StateMachine {
                 preferred_modes: preferred_modes.clone(),
                 supported_auth_methods,
                 auth_provider,
+                service_id,
             }),
             is_client: true,
             frame_decryptor: None,
@@ -1537,6 +1573,7 @@ impl StateMachine {
             client_addr: None,
             peer_supported_features: 0, // Will be set after banner exchange
             config,
+            preserved_auth_provider,
         }
     }
 
@@ -1602,6 +1639,7 @@ impl StateMachine {
             client_addr: None,
             peer_supported_features: 0, // Will be set after banner exchange
             config: crate::ConnectionConfig::default(),
+            preserved_auth_provider: None, // Server doesn't use auth provider
         }
     }
 
@@ -1748,6 +1786,14 @@ impl StateMachine {
         self.session_key.as_ref()
     }
 
+    /// Get a clone of the authenticated auth provider
+    ///
+    /// This returns the preserved auth provider that was stored during initialization.
+    /// The provider contains the session and service tickets obtained during authentication.
+    pub fn get_auth_provider(&self) -> Option<Box<dyn auth::AuthProvider>> {
+        self.preserved_auth_provider.clone()
+    }
+
     /// Clear pre-auth buffers (after AUTH_SIGNATURE exchange)
     pub fn clear_pre_auth_buffers(&mut self) {
         self.pre_auth_rxbuf.clear();
@@ -1757,6 +1803,23 @@ impl StateMachine {
     fn apply_result(&mut self, result: StateResult) -> Result<StateResult> {
         match result {
             StateResult::Transition(new_state) => {
+                // Before transitioning, try to preserve the auth provider from the current state
+                // This is important for AUTH_CONNECTING -> AUTH_CONNECTING_SIGN transition
+                // where the auth provider has been updated with session and tickets
+
+                // Try all state types that might have auth_provider
+                if let Some(auth_connecting) = self.current_state.as_any().downcast_ref::<AuthConnecting>() {
+                    if let Some(ref provider) = auth_connecting.auth_provider {
+                        tracing::info!("Preserving auth provider from AuthConnecting");
+                        self.preserved_auth_provider = Some(provider.clone_box());
+                    }
+                } else if let Some(hello_connecting) = self.current_state.as_any().downcast_ref::<HelloConnecting>() {
+                    if let Some(ref provider) = hello_connecting.auth_provider {
+                        tracing::info!("Preserving auth provider from HelloConnecting");
+                        self.preserved_auth_provider = Some(provider.clone_box());
+                    }
+                }
+
                 // Check if transitioning to AUTH_CONNECTING_SIGN or SESSION_CONNECTING with encryption
                 if new_state.kind() == StateKind::AuthConnectingSign {
                     // Downcast to get access to connection_secret and session_key

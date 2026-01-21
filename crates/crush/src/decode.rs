@@ -42,11 +42,6 @@ impl CrushMap {
 
         // Decode buckets
         map.buckets = Vec::with_capacity(max_buckets as usize);
-        eprintln!(
-            "DEBUG: Decoding {} buckets, remaining: {}",
-            max_buckets,
-            data.remaining()
-        );
         for i in 0..max_buckets {
             if data.remaining() < 4 {
                 return Err(CrushError::DecodeError(format!(
@@ -55,62 +50,30 @@ impl CrushMap {
                 )));
             }
             let alg = data.get_u32_le();
-            eprintln!(
-                "DEBUG: Bucket {} alg={}, remaining: {}",
-                i,
-                alg,
-                data.remaining()
-            );
             if alg == 0 {
                 map.buckets.push(None);
                 continue;
             }
 
             let bucket = decode_bucket(data, alg)?;
-            eprintln!(
-                "DEBUG: Decoded bucket {}, remaining: {}",
-                i,
-                data.remaining()
-            );
             map.buckets.push(Some(bucket));
         }
 
         // Decode rules
         map.rules = Vec::with_capacity(max_rules as usize);
-        eprintln!(
-            "DEBUG: Decoding {} rules, remaining: {}",
-            max_rules,
-            data.remaining()
-        );
         for i in 0..max_rules {
             let exists = data.get_u32_le();
-            eprintln!(
-                "DEBUG: Rule {} exists={}, remaining: {}",
-                i,
-                exists,
-                data.remaining()
-            );
             if exists == 0 {
                 map.rules.push(None);
                 continue;
             }
 
             let rule = decode_rule(data)?;
-            eprintln!("DEBUG: Decoded rule {}, remaining: {}", i, data.remaining());
             map.rules.push(Some(rule));
         }
 
         // Decode name maps
-        eprintln!(
-            "DEBUG: Decoding type_names, remaining: {}",
-            data.remaining()
-        );
         map.type_names = decode_i32_string_map(data)?;
-        eprintln!(
-            "DEBUG: Decoded {} type_names, remaining: {}",
-            map.type_names.len(),
-            data.remaining()
-        );
         let name_map = decode_i32_string_map(data)?;
         map.names = name_map;
         let rule_name_map = decode_u32_string_map(data)?;

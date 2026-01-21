@@ -62,12 +62,14 @@ impl OSDSession {
     ///
     /// This establishes a msgr2 connection to the OSD at the given address.
     pub async fn connect(&self, addr: std::net::SocketAddr) -> Result<()> {
+        eprintln!("DEBUG: Connecting to OSD {} at {}", self.osd_id, addr);
         info!("Connecting to OSD {} at {}", self.osd_id, addr);
 
         // Create connection config with authentication provider
         // Uses ServiceAuthProvider with tickets obtained from monitor authentication
+        // Service ID 4 = OSD (from Ceph ENTITY_TYPE_OSD)
         let config = if let Some(auth_provider) = &self.auth_provider {
-            msgr2::ConnectionConfig::with_auth_provider(auth_provider.clone_box())
+            msgr2::ConnectionConfig::with_auth_provider_and_service(auth_provider.clone_box(), 4)
         } else {
             msgr2::ConnectionConfig::with_no_auth()
         };

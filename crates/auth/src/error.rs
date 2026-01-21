@@ -31,6 +31,9 @@ pub enum CephXError {
 
     #[error("Time error: {0}")]
     TimeError(String),
+
+    #[error("Decryption failed: {0}")]
+    DecryptionFailed(String),
 }
 
 /// Result type for CephX operations

@@ -104,8 +104,10 @@ impl OSDClient {
 
         // Get OSD address from OSDMap
         let osd_addr = self.get_osd_address(osd_id).await?;
+        eprintln!("DEBUG: get_osd_address({}) returned: {}", osd_id, osd_addr);
 
         // Connect to OSD
+        eprintln!("DEBUG: About to call session.connect({})", osd_addr);
         session.connect(osd_addr).await?;
 
         // Start recv task

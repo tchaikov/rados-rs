@@ -590,16 +590,14 @@ impl Denc for CephXAuthorizeB {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        // struct_v = 1
-        buf.put_u8(1);
+        // struct_v = 2 (per Linux kernel implementation)
+        buf.put_u8(2);
         // nonce
         buf.put_u64_le(self.nonce);
         // have_challenge
         buf.put_u8(if self.have_challenge { 1 } else { 0 });
-        // server_challenge_plus_one (only if have_challenge)
-        if self.have_challenge {
-            buf.put_u64_le(self.server_challenge_plus_one);
-        }
+        // server_challenge_plus_one (always encode, even if 0)
+        buf.put_u64_le(self.server_challenge_plus_one);
         Ok(())
     }
 

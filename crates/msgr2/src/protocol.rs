@@ -238,7 +238,6 @@ impl FrameIO {
 
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
-                tracing::warn!(preamble_block_size);
                 tracing::debug!("Successfully read preamble block");
             }
             Err(e) => {
@@ -494,13 +493,18 @@ impl Connection {
     /// * `addr` - The server address to connect to
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
+        eprintln!("DEBUG: Connection::connect() called with addr: {}", addr);
+
         // Validate config
         if let Err(e) = config.validate() {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
+        eprintln!("DEBUG: About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
+        let peer_addr = stream.peer_addr()?;
+        eprintln!("DEBUG: ✓ TCP connection established - peer: {}, local: {}", peer_addr, stream.local_addr()?);
         tracing::info!("✓ TCP connection established to {}", addr);
 
         // Get our local address from the connection
@@ -904,5 +908,13 @@ impl Connection {
                 }
             }
         }
+    }
+
+    /// Get a clone of the authenticated auth provider
+    ///
+    /// This should be called after `establish_session()` to get an auth provider
+    /// that contains the session and service tickets obtained during authentication.
+    pub fn get_auth_provider(&self) -> Option<Box<dyn auth::AuthProvider>> {
+        self.state.state_machine.get_auth_provider()
     }
 }

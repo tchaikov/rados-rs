@@ -58,7 +58,7 @@ impl MonConnection {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
         // Create connection config with authentication
-        let (config, auth_provider) = if let Some(keyring) = keyring_path {
+        let config = if let Some(keyring) = keyring_path {
             // Load keyring and create auth provider
             let mut mon_auth =
                 auth::MonitorAuthProvider::new("client.admin".to_string()).map_err(|e| {
@@ -70,15 +70,10 @@ impl MonConnection {
                     MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
                 })?;
 
-            // Clone the provider before moving it into the config
-            let provider_clone = mon_auth.clone();
-            (
-                ConnectionConfig::with_auth_provider(Box::new(mon_auth)),
-                Some(provider_clone),
-            )
+            ConnectionConfig::with_auth_provider(Box::new(mon_auth))
         } else {
             // No keyring, use no authentication
-            (ConnectionConfig::with_no_auth(), None)
+            ConnectionConfig::with_no_auth()
         };
 
         // Connect using msgr2 (banner exchange only)
@@ -95,6 +90,26 @@ impl MonConnection {
             .map_err(MonClientError::MessageError)?;
 
         tracing::info!("✓ Session established with monitor rank {}", rank);
+
+        // Get the authenticated auth provider from the connection
+        // This provider now contains the session and service tickets
+        let auth_provider = connection.get_auth_provider().and_then(|provider| {
+            eprintln!("DEBUG: Retrieved auth provider from connection after authentication");
+            tracing::info!("Retrieved auth provider from connection after authentication");
+            // Downcast to MonitorAuthProvider
+            provider.as_any().downcast_ref::<auth::MonitorAuthProvider>().map(|mon_auth| {
+                eprintln!("DEBUG: Successfully downcast to MonitorAuthProvider");
+                tracing::info!("Successfully downcast to MonitorAuthProvider");
+                mon_auth.clone()
+            })
+        });
+
+        if auth_provider.is_none() {
+            eprintln!("DEBUG: Auth provider is None after authentication!");
+            tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
+        } else {
+            eprintln!("DEBUG: Auth provider is Some after authentication!");
+        }
 
         let mon_conn = Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -206,7 +221,9 @@ impl MonConnection {
     /// obtained during monitor authentication. Returns None if no authentication
     /// was used (no-auth cluster).
     pub fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
+        eprintln!("DEBUG: create_service_auth_provider called, auth_provider.is_some() = {}", self.auth_provider.is_some());
         self.auth_provider.as_ref().map(|mon_auth| {
+            eprintln!("DEBUG: Creating ServiceAuthProvider from MonitorAuthProvider");
             auth::ServiceAuthProvider::from_authenticated_handler(mon_auth.handler().clone())
         })
     }

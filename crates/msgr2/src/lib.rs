@@ -219,6 +219,13 @@ pub struct ConnectionConfig {
     /// Use `MonitorAuthProvider` for monitor connections (full CephX)
     /// Use `ServiceAuthProvider` for OSD/MDS/MGR connections (authorizer-based)
     pub auth_provider: Option<Box<dyn auth::AuthProvider>>,
+
+    /// Service ID for service-based authentication
+    /// - 0: Monitor (default)
+    /// - 4: OSD
+    /// - 2: MDS
+    /// - 16: MGR
+    pub service_id: u32,
 }
 
 impl Default for ConnectionConfig {
@@ -244,6 +251,7 @@ impl Default for ConnectionConfig {
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
             auth_provider: None,
+            service_id: 0, // Default to monitor
         }
     }
 }
@@ -321,9 +329,15 @@ impl ConnectionConfig {
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn with_auth_provider(provider: Box<dyn auth::AuthProvider>) -> Self {
+        Self::with_auth_provider_and_service(provider, 0) // Default to monitor
+    }
+
+    /// Create config with authentication provider and service ID
+    pub fn with_auth_provider_and_service(provider: Box<dyn auth::AuthProvider>, service_id: u32) -> Self {
         Self {
             supported_auth_methods: vec![AuthMethod::Cephx],
             auth_provider: Some(provider),
+            service_id,
             ..Default::default()
         }
     }
