@@ -262,7 +262,12 @@ fn crush_choose_firstn(
                     }
                 };
 
-                tracing::debug!("Item {} has type {}, looking for type {}", item, itemtype, item_type);
+                tracing::debug!(
+                    "Item {} has type {}, looking for type {}",
+                    item,
+                    itemtype,
+                    item_type
+                );
 
                 // Check if this is the type we're looking for
                 if itemtype != item_type {
@@ -294,17 +299,8 @@ fn crush_choose_firstn(
                     // Recursively select a device from this bucket
                     let before_len = out.len();
                     crush_choose_firstn(
-                        map,
-                        item,
-                        x,
-                        1,
-                        0, // Type 0 = device
-                        out,
-                        weights,
-                        tries,
-                        true,
-                        vary_r,
-                        stable,
+                        map, item, x, 1, 0, // Type 0 = device
+                        out, weights, tries, true, vary_r, stable,
                     )?;
 
                     if out.len() > before_len {

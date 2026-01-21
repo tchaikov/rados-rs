@@ -13,6 +13,27 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Ceph entity type constants from src/include/msgr.h
+/// These identify different types of Ceph daemons
+pub mod entity_type {
+    /// Monitor daemon
+    pub const MON: u32 = 0x01;
+    /// Metadata Server
+    pub const MDS: u32 = 0x02;
+    /// Object Storage Daemon
+    pub const OSD: u32 = 0x04;
+    /// Client (librados users, ceph-fuse, etc.)
+    pub const CLIENT: u32 = 0x08;
+    /// Manager daemon
+    pub const MGR: u32 = 0x10;
+    /// Auth service (for ticket requests)
+    pub const AUTH: u32 = 0x20;
+}
+
+/// Service ID constants for ticket handlers
+/// Used as keys in the ticket_handlers HashMap
+pub use entity_type as service_id;
+
 /// Global ID type for Ceph entities
 pub type GlobalId = u64;
 
@@ -493,6 +514,69 @@ impl CephXAuthenticator {
     }
 }
 
+/// Ticket handler for a single service
+/// Stores the service-specific session key and ticket information
+/// Corresponds to C++ `ceph_x_ticket_handler` in Linux kernel auth_x.h
+#[derive(Debug, Clone)]
+pub struct TicketHandler {
+    pub service: u32,
+    pub session_key: CryptoKey,
+    pub have_key: bool,
+    pub secret_id: u64,
+    pub ticket_blob: Option<CephXTicketBlob>,
+    pub renew_after: Option<SystemTime>,
+    pub expires: Option<SystemTime>,
+}
+
+impl TicketHandler {
+    pub fn new(service: u32) -> Self {
+        Self {
+            service,
+            session_key: CryptoKey::new(Bytes::new()),
+            have_key: false,
+            secret_id: 0,
+            ticket_blob: None,
+            renew_after: None,
+            expires: None,
+        }
+    }
+
+    pub fn update(
+        &mut self,
+        session_key: CryptoKey,
+        secret_id: u64,
+        ticket_blob: CephXTicketBlob,
+        validity: Duration,
+    ) {
+        self.session_key = session_key;
+        self.have_key = true;
+        self.secret_id = secret_id;
+        self.ticket_blob = Some(ticket_blob);
+
+        let now = SystemTime::now();
+        self.expires = Some(now + validity);
+        // Renew after half the validity period
+        self.renew_after = Some(now + validity / 2);
+    }
+
+    pub fn need_key(&self) -> bool {
+        if !self.have_key {
+            return true;
+        }
+        if let Some(renew_after) = self.renew_after {
+            return SystemTime::now() >= renew_after;
+        }
+        false
+    }
+
+    pub fn is_expired(&self) -> bool {
+        if let Some(expires) = self.expires {
+            return SystemTime::now() >= expires;
+        }
+        true
+    }
+}
+
 /// CephX session containing authentication state
 #[derive(Debug, Clone)]
 pub struct CephXSession {
@@ -501,6 +585,8 @@ pub struct CephXSession {
     pub session_key: CryptoKey,
     pub ticket: Option<CephXTicketBlob>,
     pub service_tickets: HashMap<u32, CephXTicketBlob>,
+    /// Ticket handlers for service tickets (OSD, MDS, etc.)
+    pub ticket_handlers: HashMap<u32, TicketHandler>,
 }
 
 impl CephXSession {
@@ -511,6 +597,7 @@ impl CephXSession {
             session_key,
             ticket: None,
             service_tickets: HashMap::new(),
+            ticket_handlers: HashMap::new(),
         }
     }
 
@@ -520,6 +607,22 @@ impl CephXSession {
 
     pub fn get_service_ticket(&self, service_id: u32) -> Option<&CephXTicketBlob> {
         self.service_tickets.get(&service_id)
+    }
+
+    /// Get or create a ticket handler for a service
+    pub fn get_ticket_handler(&mut self, service_id: u32) -> &mut TicketHandler {
+        self.ticket_handlers
+            .entry(service_id)
+            .or_insert_with(|| TicketHandler::new(service_id))
+    }
+
+    /// Check if we have a valid ticket for a service
+    pub fn has_valid_ticket(&self, service_id: u32) -> bool {
+        if let Some(handler) = self.ticket_handlers.get(&service_id) {
+            handler.have_key && !handler.is_expired()
+        } else {
+            false
+        }
     }
 
     pub fn create_authenticator(&self, service_id: u32) -> CephXAuthenticator {

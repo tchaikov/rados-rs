@@ -105,15 +105,22 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                             tracing::info!("  Checking for keyring at: {}", keyring_path);
 
                             if Path::new(&keyring_path).exists() {
-                                // Check if readable by trying to read it
-                                match std::fs::read(&keyring_path) {
-                                    Ok(_) => {
-                                        tracing::info!("  ✓ Keyring is available and readable");
-                                        supported_methods.push(AuthMethod::Cephx);
-                                        config.keyring_path = Some(keyring_path);
+                                // Check if readable by trying to load auth provider
+                                match auth::MonitorAuthProvider::new("client.admin".to_string()) {
+                                    Ok(mut mon_auth) => {
+                                        match mon_auth.set_secret_key_from_keyring(&keyring_path) {
+                                            Ok(_) => {
+                                                tracing::info!("  ✓ Keyring is available and readable");
+                                                supported_methods.push(AuthMethod::Cephx);
+                                                config.auth_provider = Some(Box::new(mon_auth));
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("  Keyring exists but cannot load key: {}, skipping cephx", e);
+                                            }
+                                        }
                                     }
                                     Err(e) => {
-                                        tracing::warn!("  Keyring exists but is not readable: {}, skipping cephx", e);
+                                        tracing::warn!("  Failed to create auth provider: {}, skipping cephx", e);
                                     }
                                 }
                             } else {

@@ -8,7 +8,6 @@ use crate::frames::{
     CompressionRequestFrame, Frame, FrameTrait, HelloFrame, Keepalive2AckFrame, ServerIdentFrame,
     Tag,
 };
-use auth::{AuthResult, CephXClientHandler, Keyring};
 use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use std::fmt::Debug;
@@ -185,14 +184,28 @@ pub trait State: Debug + Send {
 
 /// Connection establishment states (client-side)
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct BannerConnecting {
     pub local_supported_features: u64,
     pub local_required_features: u64,
     pub preferred_modes: Vec<crate::ConnectionMode>,
     pub supported_auth_methods: Vec<crate::AuthMethod>,
-    pub keyring_path: Option<String>,
-    pub auth_mode: Option<auth::AuthMode>,
+    pub auth_provider: Option<Box<dyn auth::AuthProvider>>,
+}
+
+impl std::fmt::Debug for BannerConnecting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BannerConnecting")
+            .field("local_supported_features", &self.local_supported_features)
+            .field("local_required_features", &self.local_required_features)
+            .field("preferred_modes", &self.preferred_modes)
+            .field("supported_auth_methods", &self.supported_auth_methods)
+            .field(
+                "auth_provider",
+                &self.auth_provider.as_ref().map(|_| "Some(...)"),
+            )
+            .finish()
+    }
 }
 
 impl State for BannerConnecting {
@@ -220,34 +233,44 @@ impl State for BannerConnecting {
         Ok(StateResult::Transition(Box::new(HelloConnecting::new(
             self.preferred_modes.clone(),
             self.supported_auth_methods.clone(),
-            self.keyring_path.clone(),
-            self.auth_mode,
+            self.auth_provider.clone(),
         ))))
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct HelloConnecting {
     hello_sent: bool,
     preferred_modes: Vec<crate::ConnectionMode>,
     supported_auth_methods: Vec<crate::AuthMethod>,
-    keyring_path: Option<String>,
-    auth_mode: Option<auth::AuthMode>,
+    auth_provider: Option<Box<dyn auth::AuthProvider>>,
+}
+
+impl std::fmt::Debug for HelloConnecting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HelloConnecting")
+            .field("hello_sent", &self.hello_sent)
+            .field("preferred_modes", &self.preferred_modes)
+            .field("supported_auth_methods", &self.supported_auth_methods)
+            .field(
+                "auth_provider",
+                &self.auth_provider.as_ref().map(|_| "Some(...)"),
+            )
+            .finish()
+    }
 }
 
 impl HelloConnecting {
     pub fn new(
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
-        keyring_path: Option<String>,
-        auth_mode: Option<auth::AuthMode>,
+        auth_provider: Option<Box<dyn auth::AuthProvider>>,
     ) -> Self {
         Self {
             hello_sent: false,
             preferred_modes,
             supported_auth_methods,
-            keyring_path,
-            auth_mode,
+            auth_provider,
         }
     }
 }
@@ -288,8 +311,7 @@ impl State for HelloConnecting {
                 Ok(StateResult::Transition(Box::new(AuthConnecting::new(
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
-                    self.keyring_path.clone(),
-                    self.auth_mode,
+                    self.auth_provider.clone(),
                 ))))
             }
             _ => Err(Error::protocol_error(&format!(
@@ -314,8 +336,7 @@ impl State for HelloConnecting {
                 next_state: Box::new(HelloConnecting::new(
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
-                    self.keyring_path.clone(),
-                    self.auth_mode,
+                    self.auth_provider.clone(),
                 )),
             })
         } else {
@@ -324,19 +345,30 @@ impl State for HelloConnecting {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone)]
 pub struct AuthConnecting {
     auth_method: crate::AuthMethod,
-    cephx_handler: Option<CephXClientHandler>,
+    auth_provider: Option<Box<dyn auth::AuthProvider>>,
     preferred_modes: Vec<crate::ConnectionMode>,
     /// Original list of supported auth methods for potential retry/negotiation
     supported_auth_methods: Vec<crate::AuthMethod>,
-    /// Keyring path for CephX authentication
-    keyring_path: Option<String>,
     /// Track methods we've tried to prevent infinite loops (max 3 attempts)
     tried_methods: Vec<crate::AuthMethod>,
-    /// Authentication mode (Mon for monitors, Authorizer for OSDs)
-    auth_mode: auth::AuthMode,
+}
+
+impl std::fmt::Debug for AuthConnecting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AuthConnecting")
+            .field("auth_method", &self.auth_method)
+            .field(
+                "auth_provider",
+                &self.auth_provider.as_ref().map(|_| "Some(...)"),
+            )
+            .field("preferred_modes", &self.preferred_modes)
+            .field("supported_auth_methods", &self.supported_auth_methods)
+            .field("tried_methods", &self.tried_methods)
+            .finish()
+    }
 }
 
 impl AuthConnecting {
@@ -345,144 +377,33 @@ impl AuthConnecting {
     /// # Arguments
     /// * `preferred_modes` - Connection modes to negotiate with server
     /// * `supported_auth_methods` - List of auth methods supported by client (in order of preference)
-    /// * `keyring_path` - Optional path to keyring file (for CephX auth)
-    /// * `auth_mode` - Optional auth mode (Mon for monitors, Authorizer for OSDs). Defaults to Authorizer if None.
+    /// * `auth_provider` - Optional authentication provider for CephX auth
     ///
     /// The client will send all supported auth methods to the server and negotiate
     /// the final method based on mutual support.
     pub fn new(
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
-        keyring_path: Option<String>,
-        auth_mode: Option<auth::AuthMode>,
+        auth_provider: Option<Box<dyn auth::AuthProvider>>,
     ) -> Self {
-        // Default to Authorizer mode (for OSDs, MDSs, etc) if not specified
-        let auth_mode = auth_mode.unwrap_or(auth::AuthMode::Authorizer);
-        tracing::info!(
-            "AuthConnecting::new called with supported_auth_methods = {:?}, keyring_path = {:?}",
-            supported_auth_methods,
-            keyring_path
-        );
-
         // Determine the preferred auth method (first in the list)
-        // The actual method will be negotiated with the server
         let preferred_auth_method = supported_auth_methods
             .first()
             .copied()
             .unwrap_or(crate::AuthMethod::None);
 
         tracing::info!(
-            "Preferred auth method: {:?}, will negotiate with server",
-            preferred_auth_method
+            "AuthConnecting::new with auth method {:?}, has_provider={}",
+            preferred_auth_method,
+            auth_provider.is_some()
         );
 
-        match preferred_auth_method {
-            crate::AuthMethod::None => {
-                tracing::info!("Using AuthMethod::None (no authentication)");
-                Self {
-                    auth_method: preferred_auth_method,
-                    cephx_handler: None,
-                    preferred_modes,
-                    supported_auth_methods,
-                    keyring_path,
-                    tried_methods: Vec::new(),
-                    auth_mode,
-                }
-            }
-            crate::AuthMethod::Cephx => {
-                tracing::info!("Using AuthMethod::Cephx authentication");
-                // Use provided keyring path or default
-                let keyring_file = keyring_path
-                    .clone()
-                    .unwrap_or_else(|| "/etc/ceph/ceph.client.admin.keyring".to_string());
-
-                Self::with_keyring_path(
-                    &keyring_file,
-                    preferred_modes.clone(),
-                    preferred_auth_method,
-                    supported_auth_methods.clone(),
-                    keyring_path.clone(),
-                    auth_mode,
-                )
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to load keyring from {}: {}", keyring_file, e);
-                    tracing::warn!("Using fallback authentication key");
-                    Self::with_fallback_key(
-                        preferred_modes,
-                        preferred_auth_method,
-                        supported_auth_methods,
-                        keyring_path,
-                        auth_mode,
-                    )
-                })
-            }
-            _ => {
-                tracing::warn!(
-                    "Unsupported auth method {:?}, falling back to None",
-                    preferred_auth_method
-                );
-                Self {
-                    auth_method: crate::AuthMethod::None,
-                    cephx_handler: None,
-                    preferred_modes,
-                    supported_auth_methods,
-                    keyring_path,
-                    tried_methods: Vec::new(),
-                    auth_mode,
-                }
-            }
-        }
-    }
-
-    pub fn with_keyring_path(
-        keyring_path: &str,
-        preferred_modes: Vec<crate::ConnectionMode>,
-        auth_method: crate::AuthMethod,
-        supported_auth_methods: Vec<crate::AuthMethod>,
-        keyring_path_opt: Option<String>,
-        auth_mode: auth::AuthMode,
-    ) -> Result<Self> {
-        let keyring = Keyring::from_file(keyring_path)
-            .map_err(|e| Error::Protocol(format!("Failed to load keyring: {}", e)))?;
-
-        let entity_name = "client.admin";
-        let crypto_key = keyring
-            .get_key(entity_name)
-            .ok_or_else(|| Error::Protocol(format!("No key found for entity: {}", entity_name)))?;
-
-        let mut handler = CephXClientHandler::new(entity_name.to_string(), auth_mode)?;
-        handler.set_secret_key(crypto_key.clone());
-
-        Ok(Self {
-            auth_method,
-            cephx_handler: Some(handler),
-            preferred_modes,
-            supported_auth_methods,
-            keyring_path: keyring_path_opt,
-            tried_methods: Vec::new(),
-            auth_mode,
-        })
-    }
-
-    fn with_fallback_key(
-        preferred_modes: Vec<crate::ConnectionMode>,
-        auth_method: crate::AuthMethod,
-        supported_auth_methods: Vec<crate::AuthMethod>,
-        keyring_path: Option<String>,
-        auth_mode: auth::AuthMode,
-    ) -> Self {
-        let mut handler = CephXClientHandler::new("client.admin".to_string(), auth_mode)
-            .expect("Failed to create CephXClientHandler");
-        let _ = handler.set_secret_key_from_base64("AQAHpMtmRCPGIxAAXvJkMZFCE6/k/x+CxU6t9Q==");
-
         Self {
-            auth_method,
-            cephx_handler: Some(handler),
+            auth_method: preferred_auth_method,
+            auth_provider,
             preferred_modes,
             supported_auth_methods,
-            keyring_path,
             tried_methods: Vec::new(),
-            auth_mode,
         }
     }
 
@@ -604,40 +525,12 @@ impl State for AuthConnecting {
                 tracing::info!("Negotiated connection modes: {:?}", negotiated_modes);
 
                 // Create new AuthConnecting state with negotiated parameters
-                let mut new_state = if negotiated_method == crate::AuthMethod::Cephx {
-                    let keyring_file = self
-                        .keyring_path
-                        .clone()
-                        .unwrap_or_else(|| "/etc/ceph/ceph.client.admin.keyring".to_string());
-
-                    Self::with_keyring_path(
-                        &keyring_file,
-                        negotiated_modes.clone(),
-                        negotiated_method,
-                        self.supported_auth_methods.clone(),
-                        self.keyring_path.clone(),
-                        self.auth_mode,
-                    )
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Keyring load failed: {}, using fallback", e);
-                        Self::with_fallback_key(
-                            negotiated_modes.clone(),
-                            negotiated_method,
-                            self.supported_auth_methods.clone(),
-                            self.keyring_path.clone(),
-                            self.auth_mode,
-                        )
-                    })
-                } else {
-                    Self {
-                        auth_method: negotiated_method,
-                        cephx_handler: None,
-                        preferred_modes: negotiated_modes,
-                        supported_auth_methods: self.supported_auth_methods.clone(),
-                        keyring_path: self.keyring_path.clone(),
-                        tried_methods: Vec::new(),
-                        auth_mode: self.auth_mode,
-                    }
+                let mut new_state = Self {
+                    auth_method: negotiated_method,
+                    auth_provider: self.auth_provider.clone(),
+                    preferred_modes: negotiated_modes,
+                    supported_auth_methods: self.supported_auth_methods.clone(),
+                    tried_methods: Vec::new(),
                 };
 
                 new_state.tried_methods = new_tried;
@@ -647,34 +540,30 @@ impl State for AuthConnecting {
             }
             Tag::AuthReplyMore => {
                 // Handle CephX multi-round auth
-                if let Some(handler) = &mut self.cephx_handler {
+                if let Some(provider) = &mut self.auth_provider {
                     if let Some(payload) = frame.segments.first() {
-                        match handler.handle_auth_response(payload.clone()) {
-                            Ok(AuthResult::Success) => {
-                                Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
-                            }
-                            Ok(AuthResult::NeedMoreData) => {
-                                // Need to send another auth request with challenge response
-                                let auth_payload = handler
-                                    .build_authenticate_request()
-                                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                        // Call auth provider to handle the response
+                        // For multi-round auth, handle_auth_response processes the challenge
+                        // and we need to send another request
+                        let _result = provider
+                            .handle_auth_response(payload.clone(), 0, 0)
+                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
-                                // For AuthRequestMore, we only send the auth_payload (no method/preferred_modes)
-                                let auth_frame = AuthRequestMoreFrame::new(auth_payload);
-                                let response_frame =
-                                    create_frame_from_trait(&auth_frame, Tag::AuthRequestMore);
+                        // Build the next auth payload (challenge response)
+                        let auth_payload = provider
+                            .build_auth_payload(0, 0)
+                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
-                                // IMPORTANT: Don't create a new AuthConnecting - we need to preserve
-                                // the CephXClientHandler state (server_challenge, session, etc.)
-                                // The state machine will stay in the current state (self)
-                                Ok(StateResult::SendFrame {
-                                    frame: response_frame,
-                                    next_state: None,
-                                })
-                            }
-                            Ok(AuthResult::Failed(msg)) => Ok(StateResult::Fault(msg)),
-                            Err(e) => Err(Error::protocol_error(&e.to_string())),
-                        }
+                        // For AuthRequestMore, we only send the auth_payload
+                        let auth_frame = AuthRequestMoreFrame::new(auth_payload);
+                        let response_frame =
+                            create_frame_from_trait(&auth_frame, Tag::AuthRequestMore);
+
+                        // Preserve auth_provider state by not creating new AuthConnecting
+                        Ok(StateResult::SendFrame {
+                            frame: response_frame,
+                            next_state: None,
+                        })
                     } else {
                         Err(Error::protocol_error(
                             "AUTH_REPLY_MORE frame missing payload",
@@ -724,13 +613,13 @@ impl State for AuthConnecting {
                         Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
                     } else {
                         // CephX authentication - extract session_key and connection_secret
-                        let handler = self
-                            .cephx_handler
+                        let provider = self
+                            .auth_provider
                             .as_mut()
-                            .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
+                            .ok_or_else(|| Error::protocol_error("No auth provider available"))?;
 
-                        let (session_key, connection_secret) = handler
-                            .handle_auth_done(auth_payload, global_id, con_mode)
+                        let (session_key, connection_secret) = provider
+                            .handle_auth_response(auth_payload, global_id, con_mode)
                             .map_err(|e| Error::protocol_error(&e.to_string()))?;
 
                         tracing::debug!("Extracted from AUTH_DONE - session_key: {:?} bytes, connection_secret: {:?} bytes",
@@ -782,12 +671,12 @@ impl State for AuthConnecting {
             }
             crate::AuthMethod::Cephx => {
                 tracing::info!("Sending AUTH_REQUEST with AuthMethod::Cephx");
-                let handler = self
-                    .cephx_handler
+                let provider = self
+                    .auth_provider
                     .as_mut()
-                    .ok_or_else(|| Error::protocol_error("No CephX handler available"))?;
-                let payload = handler
-                    .build_initial_request(0) // Initial request uses global_id=0
+                    .ok_or_else(|| Error::protocol_error("No auth provider available"))?;
+                let payload = provider
+                    .build_auth_payload(0, 0) // Initial request uses global_id=0, service_id=0
                     .map_err(|e| Error::protocol_error(&e.to_string()))?;
                 (crate::AuthMethod::Cephx.as_u32(), payload)
             }
@@ -804,12 +693,7 @@ impl State for AuthConnecting {
 
         Ok(StateResult::SendAndWait {
             frame,
-            next_state: Box::new(AuthConnecting::new(
-                self.preferred_modes.clone(),
-                self.supported_auth_methods.clone(),
-                self.keyring_path.clone(),
-                Some(self.auth_mode),
-            )),
+            next_state: Box::new(self.clone()),
         })
     }
 }
@@ -1633,15 +1517,14 @@ impl StateMachine {
     pub fn new_client(config: crate::ConnectionConfig) -> Self {
         let preferred_modes = config.preferred_modes.clone();
         let supported_auth_methods = config.supported_auth_methods.clone();
-        let keyring_path = config.keyring_path.clone();
+        let auth_provider = config.auth_provider.clone();
         Self {
             current_state: Box::new(BannerConnecting {
                 local_supported_features: 3, // MSGR2 | REVISION_1
                 local_required_features: 0,
                 preferred_modes: preferred_modes.clone(),
                 supported_auth_methods,
-                keyring_path,
-                auth_mode: config.auth_mode,
+                auth_provider,
             }),
             is_client: true,
             frame_decryptor: None,
@@ -2103,20 +1986,12 @@ mod tests {
             vec![crate::AuthMethod::None],
             "with_no_auth should set only AuthMethod::None"
         );
-        assert_eq!(
-            config.keyring_path, None,
-            "with_no_auth should have no keyring path"
+        assert!(
+            config.auth_provider.is_none(),
+            "with_no_auth should have no auth provider"
         );
 
-        // Test 3: with_cephx_auth should set only AuthMethod::Cephx
-        let config = crate::ConnectionConfig::with_cephx_auth();
-        assert_eq!(
-            config.supported_auth_methods,
-            vec![crate::AuthMethod::Cephx],
-            "with_cephx_auth should set only AuthMethod::Cephx"
-        );
-
-        // Test 4: State machine should be created successfully
+        // Test 3: State machine should be created successfully
         let config = crate::ConnectionConfig::with_no_auth();
         let sm = StateMachine::new_client(config);
         // Verify the state machine was created successfully with BannerConnecting state

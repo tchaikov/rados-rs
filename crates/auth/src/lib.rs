@@ -31,12 +31,15 @@ pub mod client;
 pub mod error;
 pub mod keyring;
 pub mod protocol;
+pub mod provider;
 pub mod types;
 
 pub use client::*;
 pub use error::*;
 pub use keyring::*;
 pub use protocol::*;
+pub use provider::*;
 pub use types::{
-    CephXAuthenticator, CephXSession, CephXTicketBlob, CryptoKey, CEPH_CRYPTO_AES, CEPH_CRYPTO_NONE,
+    entity_type, service_id, CephXAuthenticator, CephXSession, CephXTicketBlob, CryptoKey,
+    TicketHandler, CEPH_CRYPTO_AES, CEPH_CRYPTO_NONE,
 };

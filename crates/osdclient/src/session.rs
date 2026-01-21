@@ -65,16 +65,20 @@ impl OSDSession {
         info!("Connecting to OSD {} at {}", self.osd_id, addr);
 
         // Create connection config with authentication
-        let mut config = msgr2::ConnectionConfig {
-            keyring_path: self.keyring_path.clone(),
-            auth_mode: Some(auth::AuthMode::Authorizer), // OSDs use Authorizer mode
-            ..Default::default()
-        };
+        // Note: For proper OSD authentication, we should use ServiceAuthProvider with
+        // tickets obtained from monitor authentication. For now, we use MonitorAuthProvider
+        // which will work but performs full CephX authentication instead of using authorizers.
+        let config = if let Some(keyring) = &self.keyring_path {
+            let mut mon_auth = auth::MonitorAuthProvider::new("client.admin".to_string())
+                .map_err(|e| OSDClientError::Connection(e.to_string()))?;
+            mon_auth
+                .set_secret_key_from_keyring(keyring)
+                .map_err(|e| OSDClientError::Connection(e.to_string()))?;
 
-        // If we have a keyring, prefer CephX authentication
-        if config.keyring_path.is_some() {
-            config.supported_auth_methods = vec![msgr2::AuthMethod::Cephx, msgr2::AuthMethod::None];
-        }
+            msgr2::ConnectionConfig::with_auth_provider(Box::new(mon_auth))
+        } else {
+            msgr2::ConnectionConfig::with_no_auth()
+        };
 
         // Connect using msgr2 (banner exchange only)
         let mut connection = msgr2::protocol::Connection::connect(addr, config)

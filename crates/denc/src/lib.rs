@@ -18,7 +18,13 @@ pub use features::*;
 pub use monmap::*;
 pub use osdmap::*;
 pub use padding::*;
-pub use pgmap_types::*;
+// pgmap_types also defines ShardId, but we prefer osdmap's version
+// Explicitly export everything from pgmap_types except ShardId
+pub use pgmap_types::{
+    IntervalSet, ObjectStatCollection, ObjectStatSum, ObjectstorePerfStat, OsdStat,
+    OsdStatInterfaces, PgCount, PgMap, PgMapDigest, PgShard, PgStat, PoolStat, Pow2Hist,
+    StoreStatfs,
+};
 pub use types::*;
 pub use zerocopy::*;
 

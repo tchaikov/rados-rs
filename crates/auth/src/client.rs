@@ -2,7 +2,7 @@
 
 use crate::error::{CephXError, Result};
 use crate::protocol::{
-    CephXAuthenticate, CephXRequestHeader, CephXServerChallenge, AuthMode,
+    AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
 use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName};
@@ -10,6 +10,7 @@ use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
 use std::str::FromStr;
+use std::time::Duration;
 use tracing::{debug, trace};
 
 /// Authentication result from handler
@@ -24,7 +25,7 @@ pub enum AuthResult {
 }
 
 /// CephX client authentication handler
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct CephXClientHandler {
     /// Entity name (e.g., "client.admin")
     pub entity_name: EntityName,
@@ -404,6 +405,162 @@ impl CephXClientHandler {
         }
     }
 
+    /// Parse a single service ticket from the AUTH_DONE response
+    /// Returns (service_id, session_key, secret_id, ticket_blob, validity_duration)
+    fn parse_service_ticket(
+        &self,
+        auth_payload: &mut Bytes,
+        secret_key: &CryptoKey,
+    ) -> Result<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> {
+        use crate::protocol::AUTH_ENC_MAGIC;
+        use bytes::Buf;
+
+        // Read service_id
+        if auth_payload.len() < 4 {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for service_id".into(),
+            ));
+        }
+        let service_id = auth_payload.get_u32_le();
+        debug!(
+            "Parsing ticket for service_id: {} (0x{:08x})",
+            service_id, service_id
+        );
+
+        // Read service_ticket_v
+        if auth_payload.is_empty() {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for service_ticket_v".into(),
+            ));
+        }
+        let service_ticket_v = auth_payload.get_u8();
+        debug!("service_ticket_v: {}", service_ticket_v);
+
+        // Read encrypted CephXServiceTicket (length-prefixed)
+        if auth_payload.len() < 4 {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for encrypted ticket length".into(),
+            ));
+        }
+        let encrypted_len = auth_payload.get_u32_le() as usize;
+        debug!("encrypted ticket length: {}", encrypted_len);
+
+        if auth_payload.len() < encrypted_len {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for encrypted ticket".into(),
+            ));
+        }
+
+        let encrypted_ticket = auth_payload.split_to(encrypted_len);
+
+        // Decrypt the CephXServiceTicket
+        let decrypted = secret_key.decrypt(&encrypted_ticket)?;
+        let mut decrypted_data = decrypted;
+
+        // Parse decrypted data: [struct_v:u8][magic:u64][CephXServiceTicket_struct_v:u8][session_key:CryptoKey][validity:utime_t]
+        if decrypted_data.len() < 9 {
+            return Err(CephXError::ProtocolError(
+                "Decrypted ticket too short".into(),
+            ));
+        }
+
+        let _struct_v = decrypted_data.get_u8();
+        let magic = decrypted_data.get_u64_le();
+
+        if magic != AUTH_ENC_MAGIC {
+            return Err(CephXError::CryptographicError(format!(
+                "Bad magic in decrypted ticket: 0x{:016x}",
+                magic
+            )));
+        }
+
+        // CephXServiceTicket struct_v
+        if decrypted_data.is_empty() {
+            return Err(CephXError::ProtocolError(
+                "No data for CephXServiceTicket struct_v".into(),
+            ));
+        }
+        let ticket_struct_v = decrypted_data.get_u8();
+        debug!("CephXServiceTicket struct_v: {}", ticket_struct_v);
+
+        // Decode session_key
+        let session_key = CryptoKey::decode(&mut decrypted_data, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode session_key: {:?}", e))
+        })?;
+        debug!(
+            "Service {} session key type: {}, length: {}",
+            service_id,
+            session_key.get_type(),
+            session_key.len()
+        );
+
+        // Decode validity (utime_t: u32 sec + u32 nsec)
+        let validity_duration = if decrypted_data.len() >= 8 {
+            let validity_sec = decrypted_data.get_u32_le();
+            let validity_nsec = decrypted_data.get_u32_le();
+            debug!("Validity: {}s {}ns", validity_sec, validity_nsec);
+            Duration::from_secs(validity_sec as u64) + Duration::from_nanos(validity_nsec as u64)
+        } else {
+            // Default validity if not specified
+            Duration::from_secs(3600) // 1 hour
+        };
+
+        // Read ticket_enc byte
+        if auth_payload.is_empty() {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for ticket_enc".into(),
+            ));
+        }
+        let ticket_enc = auth_payload.get_u8();
+        debug!("ticket_enc: {}", ticket_enc);
+
+        // Read the ticket blob (secret_id + blob)
+        if auth_payload.len() < 4 {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for ticket blob length".into(),
+            ));
+        }
+        let ticket_blob_len = auth_payload.get_u32_le() as usize;
+        debug!("ticket_blob_len: {}", ticket_blob_len);
+
+        if auth_payload.len() < ticket_blob_len {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for ticket blob".into(),
+            ));
+        }
+        let ticket_blob_data = auth_payload.split_to(ticket_blob_len);
+
+        // Parse ticket blob: [struct_v:u8][secret_id:u64][blob_len:u32][blob:bytes]
+        let mut ticket_data = ticket_blob_data;
+        if ticket_data.len() < 13 {
+            return Err(CephXError::ProtocolError("Ticket blob too short".into()));
+        }
+        let _blob_struct_v = ticket_data.get_u8();
+        let secret_id = ticket_data.get_u64_le();
+        let blob_len = ticket_data.get_u32_le() as usize;
+
+        if ticket_data.len() < blob_len {
+            return Err(CephXError::ProtocolError(
+                "Insufficient data for ticket blob data".into(),
+            ));
+        }
+        let blob = ticket_data.split_to(blob_len);
+
+        let ticket_blob = CephXTicketBlob::new(secret_id, blob);
+        debug!(
+            "Service {} ticket: secret_id={}, blob_len={}",
+            service_id, secret_id, blob_len
+        );
+
+        Ok((
+            service_id,
+            session_key,
+            secret_id,
+            ticket_blob,
+            validity_duration,
+        ))
+    }
+
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
     /// Returns (session_key_bytes, connection_secret_bytes) if in SECURE mode
     pub fn handle_auth_done(
@@ -492,124 +649,31 @@ impl CephXClientHandler {
             return Err(CephXError::ProtocolError("No tickets in AUTH_DONE".into()));
         }
 
-        // Process the first ticket (AUTH service ticket)
-        let service_id = auth_payload.get_u32_le();
-        debug!("service_id: {} (0x{:08x})", service_id, service_id);
+        // Parse all service tickets
+        let mut first_session_key_bytes: Option<Bytes> = None;
+        let mut ticket_handlers: Vec<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> = Vec::new();
 
-        let service_ticket_v = auth_payload.get_u8();
-        debug!("service_ticket_v: {}", service_ticket_v);
+        for i in 0..num_tickets {
+            debug!("Processing ticket {}/{}", i + 1, num_tickets);
+            let (service_id, session_key, secret_id, ticket_blob, validity) =
+                self.parse_service_ticket(&mut auth_payload, secret_key)?;
 
-        // Read encrypted CephXServiceTicket (length-prefixed)
-        let encrypted_len = auth_payload.get_u32_le() as usize;
-        debug!("encrypted ticket length: {}", encrypted_len);
-
-        if auth_payload.len() < encrypted_len {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for encrypted ticket".into(),
-            ));
-        }
-
-        let encrypted_ticket = auth_payload.split_to(encrypted_len);
-        debug!(
-            "Encrypted ticket hex (first 32 bytes): {}",
-            encrypted_ticket
-                .iter()
-                .take(32)
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
-        );
-
-        // Decrypt the CephXServiceTicket using the client's secret key
-        let decrypted = secret_key.decrypt(&encrypted_ticket)?;
-        debug!("Decrypted ticket: {} bytes", decrypted.len());
-
-        // Parse decrypted data: [struct_v:u8][magic:u64][session_key:CryptoKey][validity:utime_t]
-        let mut decrypted_data = decrypted.clone();
-
-        if decrypted_data.len() < 9 {
-            return Err(CephXError::ProtocolError(
-                "Decrypted ticket too short".into(),
-            ));
-        }
-
-        let struct_v = decrypted_data.get_u8();
-        debug!("Decrypted struct_v: {}", struct_v);
-
-        let magic = decrypted_data.get_u64_le();
-        debug!(
-            "Decrypted magic: 0x{:016x} (expected: 0x{:016x})",
-            magic, AUTH_ENC_MAGIC
-        );
-
-        if magic != AUTH_ENC_MAGIC {
-            return Err(CephXError::CryptographicError(format!(
-                "Bad magic in decrypted ticket: 0x{:016x}, expected 0x{:016x}",
-                magic, AUTH_ENC_MAGIC
-            )));
-        }
-
-        // The CephXServiceTicket structure itself also starts with struct_v
-        if decrypted_data.is_empty() {
-            return Err(CephXError::ProtocolError(
-                "No data for CephXServiceTicket struct_v".into(),
-            ));
-        }
-        let ticket_struct_v = decrypted_data.get_u8();
-        debug!("CephXServiceTicket struct_v: {}", ticket_struct_v);
-
-        debug!(
-            "Remaining bytes for session_key decode: {}",
-            decrypted_data.len()
-        );
-        debug!(
-            "Remaining data hex: {}",
-            decrypted_data
-                .iter()
-                .take(64)
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
-        );
-
-        // Decode session_key (CryptoKey structure)
-        let session_key = CryptoKey::decode(&mut decrypted_data, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode session_key: {:?}", e))
-        })?;
-        debug!(
-            "Session key type: {}, length: {}",
-            session_key.get_type(),
-            session_key.len()
-        );
-
-        // Store the session_key bytes for returning
-        let session_key_bytes = session_key.get_secret().clone();
-
-        // Skip validity (utime_t: u32 sec + u32 nsec)
-        if decrypted_data.len() >= 8 {
-            let validity_sec = decrypted_data.get_u32_le();
-            let validity_nsec = decrypted_data.get_u32_le();
-            debug!("Validity: {}s {}ns", validity_sec, validity_nsec);
-        }
-
-        // Now check if there's connection_secret data after the first ticket
-        // Read ticket_enc byte
-        if auth_payload.is_empty() {
-            debug!("No more data in AUTH_DONE payload");
-            return Ok((Some(session_key_bytes), None));
-        }
-
-        let ticket_enc = auth_payload.get_u8();
-        debug!("ticket_enc: {}", ticket_enc);
-
-        // Skip the ticket blob (length-prefixed)
-        if auth_payload.len() >= 4 {
-            let ticket_blob_len = auth_payload.get_u32_le() as usize;
-            debug!("ticket_blob_len: {}", ticket_blob_len);
-            if auth_payload.len() >= ticket_blob_len {
-                auth_payload.advance(ticket_blob_len);
+            // Store the first ticket's session key for returning (this is the AUTH service)
+            if i == 0 {
+                first_session_key_bytes = Some(session_key.get_secret().clone());
             }
+
+            ticket_handlers.push((service_id, session_key, secret_id, ticket_blob, validity));
         }
+
+        let session_key_bytes = first_session_key_bytes
+            .ok_or_else(|| CephXError::ProtocolError("No session key found in tickets".into()))?;
+
+        // Get the first ticket's session key for decrypting connection_secret
+        let first_ticket_session_key = ticket_handlers
+            .first()
+            .map(|(_, sk, _, _, _)| sk)
+            .ok_or_else(|| CephXError::ProtocolError("No tickets available".into()))?;
 
         // Check for connection_secret blob (encrypted with session_key) and extra_tickets
         let mut connection_secret_bytes = None;
@@ -648,12 +712,12 @@ impl CephXClientHandler {
                         );
                         debug!(
                             "Session key for decryption - type: {}, secret length: {}",
-                            session_key.get_type(),
-                            session_key.get_secret().len()
+                            first_ticket_session_key.get_type(),
+                            first_ticket_session_key.get_secret().len()
                         );
 
                         // Decrypt connection_secret using the session_key we just extracted
-                        match session_key.decrypt(&encrypted_secret) {
+                        match first_ticket_session_key.decrypt(&encrypted_secret) {
                             Ok(mut decrypted_secret) => {
                                 // Parse: [struct_v:u8][magic:u64][connection_secret:string]
                                 if decrypted_secret.len() >= 9 {
@@ -697,12 +761,178 @@ impl CephXClientHandler {
             }
         }
 
+        // Store all service tickets in the session
+        if let Some(session) = &mut self.session {
+            debug!(
+                "Storing {} ticket handlers in session",
+                ticket_handlers.len()
+            );
+            for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
+                let handler = session.get_ticket_handler(service_id);
+                handler.update(session_key, secret_id, ticket_blob, validity);
+                debug!(
+                    "Stored ticket for service {} (secret_id={})",
+                    service_id, secret_id
+                );
+            }
+        } else {
+            debug!("Warning: No session available to store ticket handlers");
+        }
+
         Ok((Some(session_key_bytes), connection_secret_bytes))
+    }
+
+    /// Build an authorizer for a service (OSD, MDS, etc.)
+    /// This is used when connecting to services after obtaining tickets from the monitor
+    /// Returns the authorizer buffer to be sent to the service
+    pub fn build_authorizer(&mut self, service_id: u32, global_id: u64) -> Result<Bytes> {
+        use crate::protocol::{CephXAuthorizeA, CephXAuthorizeB};
+        use rand::RngCore;
+
+        debug!(
+            "Building authorizer for service_id={} (global_id={})",
+            service_id, global_id
+        );
+
+        // Get session or return error
+        let session = self
+            .session
+            .as_mut()
+            .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
+
+        // Get or create ticket handler
+        let handler = session.get_ticket_handler(service_id);
+
+        if !handler.have_key {
+            return Err(CephXError::AuthenticationFailed(format!(
+                "No ticket available for service {}",
+                service_id
+            )));
+        }
+
+        let ticket_blob = handler
+            .ticket_blob
+            .as_ref()
+            .ok_or_else(|| {
+                CephXError::AuthenticationFailed(format!(
+                    "No ticket blob for service {}",
+                    service_id
+                ))
+            })?
+            .clone();
+
+        // Clone the session key to avoid borrow checker issues
+        let session_key = handler.session_key.clone();
+
+        // Build CephXAuthorizeA
+        let authorize_a = CephXAuthorizeA::new(global_id, service_id, ticket_blob);
+
+        // Generate nonce
+        let mut rng = rand::thread_rng();
+        let nonce = rng.next_u64();
+        debug!("Generated nonce: 0x{:016x}", nonce);
+
+        // Build CephXAuthorizeB
+        let authorize_b = CephXAuthorizeB::new(nonce);
+
+        // Encode authorize_a
+        let mut authorizer_buf = BytesMut::new();
+        authorize_a.encode(&mut authorizer_buf, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeA: {:?}", e))
+        })?;
+
+        // Encode authorize_b
+        let mut authorize_b_buf = BytesMut::new();
+        authorize_b.encode(&mut authorize_b_buf, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeB: {:?}", e))
+        })?;
+
+        // Encrypt authorize_b with session key
+        let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b_buf)?;
+
+        // Append encrypted authorize_b to the authorizer buffer
+        authorizer_buf.extend_from_slice(&encrypted_b);
+
+        debug!("Built authorizer: {} bytes", authorizer_buf.len());
+        Ok(authorizer_buf.freeze())
+    }
+
+    /// Encrypt CephXAuthorizeB using the service session key
+    /// This replicates the C++ ceph_x_encrypt behavior
+    fn encrypt_authorize_b(session_key: &CryptoKey, plaintext: &[u8]) -> Result<Bytes> {
+        use aes::Aes128;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::Encryptor;
+
+        debug!("Encrypting CephXAuthorizeB ({} bytes)", plaintext.len());
+
+        // Prepare encryption envelope: [struct_v:u8][magic:u64][plaintext]
+        let mut envelope = BytesMut::new();
+        envelope.put_u8(1); // struct_v
+        envelope.put_u64_le(crate::protocol::AUTH_ENC_MAGIC);
+        envelope.extend_from_slice(plaintext);
+
+        debug!(
+            "Encryption envelope ({} bytes): {}",
+            envelope.len(),
+            hex::encode(&envelope[..32.min(envelope.len())])
+        );
+
+        // Extract AES key from session key
+        let secret_bytes = session_key.get_secret();
+
+        // Session keys from tickets are typically raw 16-byte keys
+        let key_bytes = if secret_bytes.len() == 16 {
+            secret_bytes.as_ref()
+        } else if secret_bytes.len() >= 28 {
+            // Has header, skip to actual key
+            const CRYPTO_KEY_HEADER_SIZE: usize = 12;
+            &secret_bytes[CRYPTO_KEY_HEADER_SIZE..CRYPTO_KEY_HEADER_SIZE + 16]
+        } else {
+            return Err(CephXError::CryptographicError(format!(
+                "Invalid session key length: {}",
+                secret_bytes.len()
+            )));
+        };
+
+        debug!(
+            "Using AES key (first 16 bytes): {}",
+            hex::encode(&key_bytes[..16])
+        );
+
+        // Use Ceph's IV
+        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+
+        // Encrypt with AES-128-CBC
+        type Aes128CbcEnc = Encryptor<Aes128>;
+        let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
+
+        let mut buffer = vec![0u8; envelope.len() + 16];
+        buffer[..envelope.len()].copy_from_slice(&envelope);
+
+        let ciphertext = cipher
+            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, envelope.len())
+            .map_err(|e| {
+                CephXError::CryptographicError(format!("AES encryption failed: {:?}", e))
+            })?;
+
+        // Add length prefix
+        let mut result = BytesMut::with_capacity(4 + ciphertext.len());
+        result.put_u32_le(ciphertext.len() as u32);
+        result.extend_from_slice(ciphertext);
+
+        debug!("Encrypted result: {} bytes total", result.len());
+        Ok(result.freeze())
     }
 
     /// Get the current session if authenticated
     pub fn get_session(&self) -> Option<&CephXSession> {
         self.session.as_ref()
+    }
+
+    /// Get mutable session reference
+    pub fn get_session_mut(&mut self) -> Option<&mut CephXSession> {
+        self.session.as_mut()
     }
 
     /// Reset the handler for a new authentication attempt

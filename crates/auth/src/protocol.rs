@@ -496,3 +496,180 @@ impl CephXReply {
         self.status == 0
     }
 }
+
+/// CephX Authorize A structure
+/// Corresponds to C++ `struct ceph_x_authorize_a` in auth_x_protocol.h
+///
+/// This is the first part of the authorizer sent to a service (OSD, MDS, etc.)
+/// Contains the service ticket obtained from the monitor
+#[derive(Debug, Clone)]
+pub struct CephXAuthorizeA {
+    pub global_id: u64,
+    pub service_id: u32,
+    pub ticket_blob: CephXTicketBlob,
+}
+
+impl CephXAuthorizeA {
+    pub fn new(global_id: u64, service_id: u32, ticket_blob: CephXTicketBlob) -> Self {
+        Self {
+            global_id,
+            service_id,
+            ticket_blob,
+        }
+    }
+}
+
+impl Denc for CephXAuthorizeA {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
+        // struct_v = 1
+        buf.put_u8(1);
+        // global_id
+        buf.put_u64_le(self.global_id);
+        // service_id
+        buf.put_u32_le(self.service_id);
+        // ticket_blob (includes struct_v, secret_id, blob)
+        self.ticket_blob.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 13 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for CephXAuthorizeA".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let global_id = buf.get_u64_le();
+        let service_id = buf.get_u32_le();
+        let ticket_blob = CephXTicketBlob::decode(buf, features)?;
+        Ok(Self {
+            global_id,
+            service_id,
+            ticket_blob,
+        })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(1 + 8 + 4 + self.ticket_blob.encoded_size(features)?)
+    }
+}
+
+/// CephX Authorize B structure
+/// Corresponds to C++ `struct ceph_x_authorize_b` in auth_x_protocol.h
+///
+/// This is the second part of the authorizer (encrypted with session key)
+/// Contains a nonce and optionally a server challenge response
+#[derive(Debug, Clone)]
+pub struct CephXAuthorizeB {
+    pub nonce: u64,
+    pub have_challenge: bool,
+    pub server_challenge_plus_one: u64,
+}
+
+impl CephXAuthorizeB {
+    pub fn new(nonce: u64) -> Self {
+        Self {
+            nonce,
+            have_challenge: false,
+            server_challenge_plus_one: 0,
+        }
+    }
+
+    pub fn with_challenge(nonce: u64, server_challenge: u64) -> Self {
+        Self {
+            nonce,
+            have_challenge: true,
+            server_challenge_plus_one: server_challenge.wrapping_add(1),
+        }
+    }
+}
+
+impl Denc for CephXAuthorizeB {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        // struct_v = 1
+        buf.put_u8(1);
+        // nonce
+        buf.put_u64_le(self.nonce);
+        // have_challenge
+        buf.put_u8(if self.have_challenge { 1 } else { 0 });
+        // server_challenge_plus_one (only if have_challenge)
+        if self.have_challenge {
+            buf.put_u64_le(self.server_challenge_plus_one);
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 10 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for CephXAuthorizeB".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let nonce = buf.get_u64_le();
+        let have_challenge = buf.get_u8() != 0;
+        let server_challenge_plus_one = if have_challenge {
+            if buf.remaining() < 8 {
+                return Err(RadosError::Protocol(
+                    "Insufficient bytes for server_challenge_plus_one".to_string(),
+                ));
+            }
+            buf.get_u64_le()
+        } else {
+            0
+        };
+        Ok(Self {
+            nonce,
+            have_challenge,
+            server_challenge_plus_one,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        let base_size = 1 + 8 + 1; // struct_v + nonce + have_challenge
+        let challenge_size = if self.have_challenge { 8 } else { 0 };
+        Some(base_size + challenge_size)
+    }
+}
+
+/// CephX Authorize Reply structure
+/// Corresponds to C++ `struct ceph_x_authorize_reply` in auth_x_protocol.h
+///
+/// Sent by the service back to the client after validating the authorizer
+#[derive(Debug, Clone)]
+pub struct CephXAuthorizeReply {
+    pub nonce_plus_one: u64,
+}
+
+impl Denc for CephXAuthorizeReply {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        // struct_v = 1
+        buf.put_u8(1);
+        // nonce_plus_one
+        buf.put_u64_le(self.nonce_plus_one);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 9 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for CephXAuthorizeReply".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let nonce_plus_one = buf.get_u64_le();
+        Ok(Self { nonce_plus_one })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(1 + 8) // struct_v + nonce_plus_one
+    }
+}

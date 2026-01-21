@@ -155,41 +155,37 @@ impl denc::zerocopy::Decode for FeatureSet {
 ///
 /// # Authentication
 ///
-/// The authentication methods can be configured in two ways (in order of precedence):
+/// Authentication is configured using the `auth_provider` field, which accepts
+/// an implementation of the `AuthProvider` trait:
 ///
-/// 1. **Explicitly via `supported_auth_methods` field**: Set to specific auth methods in order of preference
-/// 2. **Auto-detection**: If using `Default`, auto-detects based on keyring file existence
+/// - **`MonitorAuthProvider`**: Full CephX authentication for monitor connections
+/// - **`ServiceAuthProvider`**: Authorizer-based authentication for OSD/MDS/MGR connections
+/// - **`None`**: No authentication (for clusters with auth disabled)
 ///
-/// ## Auto-detection behavior:
-/// - Checks if `CEPH_KEYRING` environment variable is set and points to an existing file
+/// ## Auto-detection behavior (Default):
+/// - Checks if `CEPH_KEYRING` environment variable points to an existing file
 /// - Falls back to checking `/etc/ceph/ceph.client.admin.keyring`
-/// - If keyring file exists → uses `vec![AuthMethod::Cephx, AuthMethod::None]` (prefer CephX, fall back to None)
-/// - If keyring file doesn't exist → uses `vec![AuthMethod::None]` (only no-auth)
-///
-/// **Note**: Applications can check environment variables (e.g., `CEPH_AUTH_METHOD`) and
-/// explicitly set the `supported_auth_methods` field to override auto-detection.
+/// - If keyring file exists → `supported_auth_methods = [Cephx, None]`
+/// - If keyring file doesn't exist → `supported_auth_methods = [None]`
 ///
 /// # Example
 ///
 /// ```rust,no_run
-/// use msgr2::{ConnectionConfig, AuthMethod};
+/// use msgr2::ConnectionConfig;
+/// use auth::MonitorAuthProvider;
 ///
-/// // Auto-detect authentication (recommended)
-/// let config = ConnectionConfig::default();
-///
-/// // Explicitly use no authentication
+/// // No authentication (development/testing)
 /// let config = ConnectionConfig::with_no_auth();
 ///
-/// // Explicitly use CephX authentication
-/// let config = ConnectionConfig::with_cephx_auth();
+/// // CephX authentication with auth provider
+/// let mut mon_auth = MonitorAuthProvider::new("client.admin".to_string())?;
+/// mon_auth.set_secret_key_from_base64("AQA...")?;
+/// let config = ConnectionConfig::with_auth_provider(Box::new(mon_auth));
 ///
 /// // Custom: prefer CephX but fall back to no-auth
 /// let mut config = ConnectionConfig::default();
 /// config.supported_auth_methods = vec![AuthMethod::Cephx, AuthMethod::None];
-///
-/// // Custom: only no-auth, with custom keyring path
-/// let mut config = ConnectionConfig::with_no_auth();
-/// config.keyring_path = Some("/custom/path/to/keyring".to_string());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
@@ -216,35 +212,27 @@ pub struct ConnectionConfig {
     /// - vec![AuthMethod::Cephx, AuthMethod::None] - Try CephX first, fall back to None
     pub supported_auth_methods: Vec<AuthMethod>,
 
-    /// Path to the keyring file for CephX authentication
-    /// - `None`: Auto-detect (checks CEPH_KEYRING env var, then /etc/ceph/ceph.client.admin.keyring)
-    /// - `Some(path)`: Use the specified keyring file path
+    /// Authentication provider for handling CephX authentication
+    /// - `None`: Use AuthMethod::None (no authentication)
+    /// - `Some(provider)`: Use the provided authentication strategy
     ///
-    /// Only used when CephX authentication is in supported_auth_methods.
-    pub keyring_path: Option<String>,
-
-    /// Authentication mode for CephX (Authorizer for OSDs/MDSs, Mon for Monitors)
-    /// - `None`: Auto-detect (Mon for monitors, Authorizer for everything else)
-    /// - `Some(mode)`: Use the specified auth mode
-    ///
-    /// Only used when CephX authentication is in supported_auth_methods.
-    pub auth_mode: Option<auth::AuthMode>,
+    /// Use `MonitorAuthProvider` for monitor connections (full CephX)
+    /// Use `ServiceAuthProvider` for OSD/MDS/MGR connections (authorizer-based)
+    pub auth_provider: Option<Box<dyn auth::AuthProvider>>,
 }
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
         // Auto-detect keyring path from environment or use default
-        let keyring_path = std::env::var("CEPH_KEYRING").ok().or_else(|| {
-            let default_path = "/etc/ceph/ceph.client.admin.keyring";
-            if std::path::Path::new(default_path).exists() {
-                Some(default_path.to_string())
-            } else {
-                None
-            }
-        });
+        let keyring_exists = std::env::var("CEPH_KEYRING")
+            .ok()
+            .map(|p| std::path::Path::new(&p).exists())
+            .unwrap_or_else(|| {
+                std::path::Path::new("/etc/ceph/ceph.client.admin.keyring").exists()
+            });
 
         // Default: try CephX first if keyring exists, otherwise fall back to None
-        let supported_auth_methods = if keyring_path.is_some() {
+        let supported_auth_methods = if keyring_exists {
             vec![AuthMethod::Cephx, AuthMethod::None]
         } else {
             vec![AuthMethod::None]
@@ -255,8 +243,7 @@ impl Default for ConnectionConfig {
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
-            keyring_path,
-            auth_mode: None, // Auto-detect based on context
+            auth_provider: None,
         }
     }
 }
@@ -315,17 +302,37 @@ impl ConnectionConfig {
     pub fn with_no_auth() -> Self {
         Self {
             supported_auth_methods: vec![AuthMethod::None],
-            keyring_path: None,
+            auth_provider: None,
             ..Default::default()
         }
     }
 
-    /// Create config with CephX authentication
-    /// Use this to force CephX even if auto-detection would suggest otherwise
-    pub fn with_cephx_auth() -> Self {
+    /// Create config with CephX authentication using an auth provider
+    /// This is the recommended way to configure authentication
+    ///
+    /// # Example
+    /// ```no_run
+    /// use msgr2::ConnectionConfig;
+    /// use auth::MonitorAuthProvider;
+    ///
+    /// let mut mon_auth = MonitorAuthProvider::new("client.admin".to_string())?;
+    /// mon_auth.set_secret_key_from_base64("AQA...")?;
+    /// let config = ConnectionConfig::with_auth_provider(Box::new(mon_auth));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_auth_provider(provider: Box<dyn auth::AuthProvider>) -> Self {
         Self {
             supported_auth_methods: vec![AuthMethod::Cephx],
+            auth_provider: Some(provider),
             ..Default::default()
+        }
+    }
+
+    /// Set the authentication provider
+    pub fn set_auth_provider(&mut self, provider: Box<dyn auth::AuthProvider>) {
+        self.auth_provider = Some(provider);
+        if !self.supported_auth_methods.contains(&AuthMethod::Cephx) {
+            self.supported_auth_methods.insert(0, AuthMethod::Cephx);
         }
     }
 
