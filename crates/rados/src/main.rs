@@ -126,6 +126,7 @@ async fn main() -> Result<()> {
     // Create OSD client
     let osd_config = osdclient::OSDClientConfig {
         entity_name: cli.name.clone(),
+        keyring_path: Some(cli.keyring.clone()),
         ..Default::default()
     };
 

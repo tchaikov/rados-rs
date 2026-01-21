@@ -13,7 +13,40 @@ pub const CEPHX_GET_ROTATING_KEY: u16 = 0x0400;
 
 /// Authentication modes
 /// From src/auth/Auth.h
-pub const AUTH_MODE_MON: u8 = 10;
+// Auth modes for different Ceph services
+// Reference: ~/dev/ceph/src/auth/Auth.h
+/// Authentication mode for different Ceph services
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMode {
+    /// No authentication
+    None = 0,
+    /// Authorizer mode - used for OSDs, MDSs, MGRs, and other data services
+    Authorizer = 1,
+    /// Monitor mode - used specifically for monitor connections
+    Mon = 10,
+}
+
+impl AuthMode {
+    /// Convert to u8 for wire protocol
+    pub fn as_u8(self) -> u8 {
+        self as u8
+    }
+
+    /// Create from u8
+    pub fn from_u8(val: u8) -> Option<Self> {
+        match val {
+            0 => Some(AuthMode::None),
+            1 => Some(AuthMode::Authorizer),
+            10 => Some(AuthMode::Mon),
+            _ => None,
+        }
+    }
+}
+
+// Legacy constants for backwards compatibility
+pub const AUTH_MODE_NONE: u8 = AuthMode::None as u8;
+pub const AUTH_MODE_AUTHORIZER: u8 = AuthMode::Authorizer as u8;
+pub const AUTH_MODE_MON: u8 = AuthMode::Mon as u8;
 
 /// Magic value for encrypted CephX data
 /// From src/auth/cephx/CephxProtocol.h

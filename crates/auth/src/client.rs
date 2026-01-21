@@ -2,7 +2,7 @@
 
 use crate::error::{CephXError, Result};
 use crate::protocol::{
-    CephXAuthenticate, CephXRequestHeader, CephXServerChallenge, AUTH_MODE_MON,
+    CephXAuthenticate, CephXRequestHeader, CephXServerChallenge, AuthMode,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
 use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName};
@@ -36,11 +36,17 @@ pub struct CephXClientHandler {
     pub session: Option<CephXSession>,
     /// Client secret key
     secret_key: Option<CryptoKey>,
+    /// Auth mode (Authorizer for OSDs, Mon for monitors)
+    auth_mode: AuthMode,
 }
 
 impl CephXClientHandler {
     /// Create a new client handler
-    pub fn new(entity_name_str: String) -> Result<Self> {
+    ///
+    /// # Arguments
+    /// * `entity_name_str` - Entity name (e.g., "client.admin")
+    /// * `auth_mode` - Auth mode (AuthMode::Mon for monitors, AuthMode::Authorizer for OSDs)
+    pub fn new(entity_name_str: String, auth_mode: AuthMode) -> Result<Self> {
         let entity_name = EntityName::from_str(&entity_name_str)?;
         Ok(Self {
             entity_name,
@@ -48,6 +54,7 @@ impl CephXClientHandler {
             starting: true,
             session: None,
             secret_key: None,
+            auth_mode,
         })
     }
 
@@ -82,8 +89,8 @@ impl CephXClientHandler {
         // NO CephXRequestHeader, NO CephXAuthenticate
         let mut payload = BytesMut::new();
 
-        // 1. auth_mode (1 byte)
-        payload.put_u8(AUTH_MODE_MON);
+        // 1. auth_mode (1 byte) - Authorizer for OSDs, Mon for monitors
+        payload.put_u8(self.auth_mode.as_u8());
 
         // 2. entity_name (encoded string)
         self.entity_name.encode(&mut payload, 0)?;

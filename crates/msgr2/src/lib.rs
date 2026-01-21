@@ -222,6 +222,13 @@ pub struct ConnectionConfig {
     ///
     /// Only used when CephX authentication is in supported_auth_methods.
     pub keyring_path: Option<String>,
+
+    /// Authentication mode for CephX (Authorizer for OSDs/MDSs, Mon for Monitors)
+    /// - `None`: Auto-detect (Mon for monitors, Authorizer for everything else)
+    /// - `Some(mode)`: Use the specified auth mode
+    ///
+    /// Only used when CephX authentication is in supported_auth_methods.
+    pub auth_mode: Option<auth::AuthMode>,
 }
 
 impl Default for ConnectionConfig {
@@ -249,6 +256,7 @@ impl Default for ConnectionConfig {
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
             keyring_path,
+            auth_mode: None, // Auto-detect based on context
         }
     }
 }

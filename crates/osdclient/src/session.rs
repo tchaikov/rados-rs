@@ -23,6 +23,7 @@ pub struct OSDSession {
     entity_name: String,
     #[allow(dead_code)]
     client_inc: u32,
+    keyring_path: Option<String>,
 }
 
 /// Tracking information for a pending operation
@@ -35,7 +36,12 @@ pub struct PendingOp {
 
 impl OSDSession {
     /// Create a new OSD session
-    pub fn new(osd_id: i32, entity_name: String, client_inc: u32) -> Self {
+    pub fn new(
+        osd_id: i32,
+        entity_name: String,
+        client_inc: u32,
+        keyring_path: Option<String>,
+    ) -> Self {
         Self {
             osd_id,
             connection: Arc::new(Mutex::new(None)),
@@ -43,6 +49,7 @@ impl OSDSession {
             next_tid: AtomicU64::new(1),
             entity_name,
             client_inc,
+            keyring_path,
         }
     }
 
@@ -57,8 +64,17 @@ impl OSDSession {
     pub async fn connect(&self, addr: std::net::SocketAddr) -> Result<()> {
         info!("Connecting to OSD {} at {}", self.osd_id, addr);
 
-        // Create connection config with default features
-        let config = msgr2::ConnectionConfig::default();
+        // Create connection config with authentication
+        let mut config = msgr2::ConnectionConfig {
+            keyring_path: self.keyring_path.clone(),
+            auth_mode: Some(auth::AuthMode::Authorizer), // OSDs use Authorizer mode
+            ..Default::default()
+        };
+
+        // If we have a keyring, prefer CephX authentication
+        if config.keyring_path.is_some() {
+            config.supported_auth_methods = vec![msgr2::AuthMethod::Cephx, msgr2::AuthMethod::None];
+        }
 
         // Connect using msgr2 (banner exchange only)
         let mut connection = msgr2::protocol::Connection::connect(addr, config)

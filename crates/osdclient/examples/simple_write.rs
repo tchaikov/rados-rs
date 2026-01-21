@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1️⃣  Connecting to monitor...");
     let mon_config = monclient::MonClientConfig {
         entity_name: "client.admin".to_string(),
-        mon_addrs: vec!["v2:192.168.1.37:40353".to_string()],
+        mon_addrs: vec!["v2:192.168.1.37:40545".to_string()],
         keyring_path: "/home/kefu/dev/ceph/build/keyring".to_string(),
         ..Default::default()
     };
@@ -50,7 +50,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create OSD client
     println!("3️⃣  Creating OSD client...");
-    let osd_config = osdclient::OSDClientConfig::default();
+    let osd_config = osdclient::OSDClientConfig {
+        entity_name: "client.admin".to_string(),
+        keyring_path: None, // Temporarily use no-auth for OSDs until we implement authorizers
+        ..Default::default()
+    };
     let osd_client = osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client)).await?;
     println!("   ✓ OSD client created\n");
 

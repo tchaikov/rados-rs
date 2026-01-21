@@ -18,6 +18,8 @@ use crate::types::{OSDOp, ObjectId, ReadResult, StatResult, StripedPgId, WriteRe
 pub struct OSDClientConfig {
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
+    /// Path to keyring file for authentication
+    pub keyring_path: Option<String>,
     /// Operation timeout configuration
     pub tracker_config: TrackerConfig,
     /// Client incarnation number
@@ -28,6 +30,7 @@ impl Default for OSDClientConfig {
     fn default() -> Self {
         Self {
             entity_name: "client.admin".to_string(),
+            keyring_path: None,
             tracker_config: TrackerConfig::default(),
             client_inc: 1,
         }
@@ -88,6 +91,7 @@ impl OSDClient {
             osd_id,
             self.config.entity_name.clone(),
             self.config.client_inc,
+            self.config.keyring_path.clone(),
         ));
 
         // Get OSD address from OSDMap

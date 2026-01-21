@@ -57,6 +57,7 @@ impl MonConnection {
         // Create connection config with authentication
         let mut config = ConnectionConfig {
             keyring_path,
+            auth_mode: Some(auth::AuthMode::Mon), // Monitors use Mon mode
             ..Default::default()
         };
         if config.keyring_path.is_some() {

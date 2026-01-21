@@ -192,6 +192,7 @@ pub struct BannerConnecting {
     pub preferred_modes: Vec<crate::ConnectionMode>,
     pub supported_auth_methods: Vec<crate::AuthMethod>,
     pub keyring_path: Option<String>,
+    pub auth_mode: Option<auth::AuthMode>,
 }
 
 impl State for BannerConnecting {
@@ -220,6 +221,7 @@ impl State for BannerConnecting {
             self.preferred_modes.clone(),
             self.supported_auth_methods.clone(),
             self.keyring_path.clone(),
+            self.auth_mode,
         ))))
     }
 }
@@ -230,6 +232,7 @@ pub struct HelloConnecting {
     preferred_modes: Vec<crate::ConnectionMode>,
     supported_auth_methods: Vec<crate::AuthMethod>,
     keyring_path: Option<String>,
+    auth_mode: Option<auth::AuthMode>,
 }
 
 impl HelloConnecting {
@@ -237,12 +240,14 @@ impl HelloConnecting {
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
         keyring_path: Option<String>,
+        auth_mode: Option<auth::AuthMode>,
     ) -> Self {
         Self {
             hello_sent: false,
             preferred_modes,
             supported_auth_methods,
             keyring_path,
+            auth_mode,
         }
     }
 }
@@ -284,6 +289,7 @@ impl State for HelloConnecting {
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
                     self.keyring_path.clone(),
+                    self.auth_mode,
                 ))))
             }
             _ => Err(Error::protocol_error(&format!(
@@ -309,6 +315,7 @@ impl State for HelloConnecting {
                     self.preferred_modes.clone(),
                     self.supported_auth_methods.clone(),
                     self.keyring_path.clone(),
+                    self.auth_mode,
                 )),
             })
         } else {
@@ -328,6 +335,8 @@ pub struct AuthConnecting {
     keyring_path: Option<String>,
     /// Track methods we've tried to prevent infinite loops (max 3 attempts)
     tried_methods: Vec<crate::AuthMethod>,
+    /// Authentication mode (Mon for monitors, Authorizer for OSDs)
+    auth_mode: auth::AuthMode,
 }
 
 impl AuthConnecting {
@@ -337,6 +346,7 @@ impl AuthConnecting {
     /// * `preferred_modes` - Connection modes to negotiate with server
     /// * `supported_auth_methods` - List of auth methods supported by client (in order of preference)
     /// * `keyring_path` - Optional path to keyring file (for CephX auth)
+    /// * `auth_mode` - Optional auth mode (Mon for monitors, Authorizer for OSDs). Defaults to Authorizer if None.
     ///
     /// The client will send all supported auth methods to the server and negotiate
     /// the final method based on mutual support.
@@ -344,7 +354,10 @@ impl AuthConnecting {
         preferred_modes: Vec<crate::ConnectionMode>,
         supported_auth_methods: Vec<crate::AuthMethod>,
         keyring_path: Option<String>,
+        auth_mode: Option<auth::AuthMode>,
     ) -> Self {
+        // Default to Authorizer mode (for OSDs, MDSs, etc) if not specified
+        let auth_mode = auth_mode.unwrap_or(auth::AuthMode::Authorizer);
         tracing::info!(
             "AuthConnecting::new called with supported_auth_methods = {:?}, keyring_path = {:?}",
             supported_auth_methods,
@@ -373,6 +386,7 @@ impl AuthConnecting {
                     supported_auth_methods,
                     keyring_path,
                     tried_methods: Vec::new(),
+                    auth_mode,
                 }
             }
             crate::AuthMethod::Cephx => {
@@ -388,6 +402,7 @@ impl AuthConnecting {
                     preferred_auth_method,
                     supported_auth_methods.clone(),
                     keyring_path.clone(),
+                    auth_mode,
                 )
                 .unwrap_or_else(|e| {
                     tracing::warn!("Failed to load keyring from {}: {}", keyring_file, e);
@@ -397,6 +412,7 @@ impl AuthConnecting {
                         preferred_auth_method,
                         supported_auth_methods,
                         keyring_path,
+                        auth_mode,
                     )
                 })
             }
@@ -412,6 +428,7 @@ impl AuthConnecting {
                     supported_auth_methods,
                     keyring_path,
                     tried_methods: Vec::new(),
+                    auth_mode,
                 }
             }
         }
@@ -423,6 +440,7 @@ impl AuthConnecting {
         auth_method: crate::AuthMethod,
         supported_auth_methods: Vec<crate::AuthMethod>,
         keyring_path_opt: Option<String>,
+        auth_mode: auth::AuthMode,
     ) -> Result<Self> {
         let keyring = Keyring::from_file(keyring_path)
             .map_err(|e| Error::Protocol(format!("Failed to load keyring: {}", e)))?;
@@ -432,7 +450,7 @@ impl AuthConnecting {
             .get_key(entity_name)
             .ok_or_else(|| Error::Protocol(format!("No key found for entity: {}", entity_name)))?;
 
-        let mut handler = CephXClientHandler::new(entity_name.to_string())?;
+        let mut handler = CephXClientHandler::new(entity_name.to_string(), auth_mode)?;
         handler.set_secret_key(crypto_key.clone());
 
         Ok(Self {
@@ -442,6 +460,7 @@ impl AuthConnecting {
             supported_auth_methods,
             keyring_path: keyring_path_opt,
             tried_methods: Vec::new(),
+            auth_mode,
         })
     }
 
@@ -450,8 +469,9 @@ impl AuthConnecting {
         auth_method: crate::AuthMethod,
         supported_auth_methods: Vec<crate::AuthMethod>,
         keyring_path: Option<String>,
+        auth_mode: auth::AuthMode,
     ) -> Self {
-        let mut handler = CephXClientHandler::new("client.admin".to_string())
+        let mut handler = CephXClientHandler::new("client.admin".to_string(), auth_mode)
             .expect("Failed to create CephXClientHandler");
         let _ = handler.set_secret_key_from_base64("AQAHpMtmRCPGIxAAXvJkMZFCE6/k/x+CxU6t9Q==");
 
@@ -462,6 +482,7 @@ impl AuthConnecting {
             supported_auth_methods,
             keyring_path,
             tried_methods: Vec::new(),
+            auth_mode,
         }
     }
 
@@ -595,6 +616,7 @@ impl State for AuthConnecting {
                         negotiated_method,
                         self.supported_auth_methods.clone(),
                         self.keyring_path.clone(),
+                        self.auth_mode,
                     )
                     .unwrap_or_else(|e| {
                         tracing::warn!("Keyring load failed: {}, using fallback", e);
@@ -603,6 +625,7 @@ impl State for AuthConnecting {
                             negotiated_method,
                             self.supported_auth_methods.clone(),
                             self.keyring_path.clone(),
+                            self.auth_mode,
                         )
                     })
                 } else {
@@ -613,6 +636,7 @@ impl State for AuthConnecting {
                         supported_auth_methods: self.supported_auth_methods.clone(),
                         keyring_path: self.keyring_path.clone(),
                         tried_methods: Vec::new(),
+                        auth_mode: self.auth_mode,
                     }
                 };
 
@@ -784,6 +808,7 @@ impl State for AuthConnecting {
                 self.preferred_modes.clone(),
                 self.supported_auth_methods.clone(),
                 self.keyring_path.clone(),
+                Some(self.auth_mode),
             )),
         })
     }
@@ -1616,6 +1641,7 @@ impl StateMachine {
                 preferred_modes: preferred_modes.clone(),
                 supported_auth_methods,
                 keyring_path,
+                auth_mode: config.auth_mode,
             }),
             is_client: true,
             frame_decryptor: None,
