@@ -19,7 +19,9 @@ pub struct OSDSession {
     connection: Arc<Mutex<Option<msgr2::protocol::Connection>>>,
     pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
     next_tid: AtomicU64,
+    #[allow(dead_code)]
     entity_name: String,
+    #[allow(dead_code)]
     client_inc: u32,
 }
 

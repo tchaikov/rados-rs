@@ -70,7 +70,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 5. Read data back
     println!("5️⃣  Reading object...");
     let read_result = osd_client.read(pool, oid, 0, 100).await?;
-    println!("   Data: \"{}\"", String::from_utf8_lossy(&read_result.data));
+    println!(
+        "   Data: \"{}\"",
+        String::from_utf8_lossy(&read_result.data)
+    );
     println!("   Version: {}", read_result.version);
     println!("   ✓ Read complete\n");
 

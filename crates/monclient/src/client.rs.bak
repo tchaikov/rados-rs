@@ -9,7 +9,6 @@ use crate::monmap::MonMap;
 use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
 use bytes::Bytes;
-use denc::denc::VersionedEncode;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -65,7 +64,6 @@ pub struct MonClient {
     state: Arc<RwLock<MonClientState>>,
 
     /// Tokio runtime handle
-    #[allow(dead_code)]
     runtime: tokio::runtime::Handle,
 
     /// Message receive task handle
@@ -88,9 +86,6 @@ struct MonClientState {
     /// Monitor map
     monmap: MonMap,
 
-    /// OSD map (latest received)
-    osdmap: Option<Arc<denc::osdmap::OSDMap>>,
-
     /// Active connection
     active_con: Option<Arc<MonConnection>>,
 
@@ -98,7 +93,6 @@ struct MonClientState {
     pending_cons: HashMap<usize, Arc<MonConnection>>,
 
     /// Monitors we've tried (to avoid retry storms)
-    #[allow(dead_code)]
     tried: std::collections::HashSet<usize>,
 
     /// Subscription manager
@@ -117,7 +111,6 @@ struct MonClientState {
 
     /// State flags
     authenticated: bool,
-    #[allow(dead_code)]
     global_id: u64,
     hunting: bool,
     want_monmap: bool,
@@ -126,29 +119,20 @@ struct MonClientState {
 }
 
 struct MapWaiter {
-    #[allow(dead_code)]
     what: String,
-    #[allow(dead_code)]
     version: u64,
-    #[allow(dead_code)]
     tx: oneshot::Sender<()>,
 }
 
 struct CommandTracker {
-    #[allow(dead_code)]
     tid: u64,
-    #[allow(dead_code)]
     cmd: Vec<String>,
-    #[allow(dead_code)]
     result_tx: oneshot::Sender<CommandResult>,
 }
 
 struct VersionTracker {
-    #[allow(dead_code)]
     req_id: u64,
-    #[allow(dead_code)]
     what: String,
-    #[allow(dead_code)]
     result_tx: oneshot::Sender<(u64, u64)>,
 }
 
@@ -181,7 +165,6 @@ impl MonClient {
 
         let state = MonClientState {
             monmap,
-            osdmap: None,
             active_con: None,
             pending_cons: HashMap::new(),
             tried: std::collections::HashSet::new(),
@@ -315,21 +298,16 @@ impl MonClient {
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
 
-        // Get keyring path from config
-        let keyring_path = if self.config.keyring_path.is_empty() {
-            None
-        } else {
-            Some(self.config.keyring_path.clone())
-        };
-
         // Create actual msgr2 connection
-        let mon_con =
-            Arc::new(MonConnection::connect(socket_addr, rank, addrs, keyring_path).await?);
+        let mon_con = Arc::new(MonConnection::connect(socket_addr, rank, addrs).await?);
+
+        info!("✅ MonConnection created, testing if connection is alive...");
 
         // Test if connection is alive by trying to get a lock
         {
             let conn_arc = mon_con.connection();
             let _conn_test = conn_arc.lock().await;
+            info!("✅ Connection lock acquired successfully");
         }
 
         // Store as active connection
@@ -490,10 +468,6 @@ impl MonClient {
                 info!("Received CEPH_MSG_MON_MAP");
                 Self::handle_monmap(state, map_events, msg).await?;
             }
-            CEPH_MSG_OSD_MAP => {
-                info!("Received CEPH_MSG_OSD_MAP");
-                Self::handle_osdmap(state, map_events, msg).await?;
-            }
             CEPH_MSG_MON_SUBSCRIBE_ACK => {
                 info!("Received CEPH_MSG_MON_SUBSCRIBE_ACK");
                 Self::handle_subscribe_ack(state, msg).await?;
@@ -516,7 +490,7 @@ impl MonClient {
     /// Handle MonMap message
     async fn handle_monmap(
         state: &Arc<RwLock<MonClientState>>,
-        _map_events: &broadcast::Sender<MapEvent>,
+        map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
@@ -543,81 +517,6 @@ impl MonClient {
         state_guard.subscriptions.got("monmap", monmap.epoch as u64);
 
         info!("✓ MonMap updated successfully");
-        Ok(())
-    }
-
-    /// Handle OSDMap message
-    async fn handle_osdmap(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
-        info!("Handling OSDMap message ({} bytes)", msg.front.len());
-
-        // Dump the raw MOSDMap message for analysis
-        let mosdmap_dump_path = "/tmp/mosdmap-raw.bin";
-        if let Err(e) = std::fs::write(mosdmap_dump_path, &msg.front) {
-            tracing::warn!("Failed to dump MOSDMap to {}: {}", mosdmap_dump_path, e);
-        } else {
-            info!("✓ Dumped MOSDMap to {}", mosdmap_dump_path);
-        }
-
-        // Decode MOSDMap
-        let mosdmap = MOSDMap::decode(&msg.front)?;
-        info!(
-            "Received MOSDMap: {} full maps, {} incremental maps, newest={}",
-            mosdmap.maps.len(),
-            mosdmap.incremental_maps.len(),
-            mosdmap.newest_map
-        );
-
-        // Decode the full osdmaps
-        for (epoch, osdmap_bl) in &mosdmap.maps {
-            info!(
-                "Decoding OSDMap epoch {} ({} bytes)",
-                epoch,
-                osdmap_bl.len()
-            );
-
-            // Dump the raw bytes to a file for analysis
-            let dump_path = format!("/tmp/osdmap-epoch-{}.bin", epoch);
-            if let Err(e) = std::fs::write(&dump_path, osdmap_bl) {
-                tracing::warn!("Failed to dump OSDMap to {}: {}", dump_path, e);
-            } else {
-                info!("✓ Dumped OSDMap epoch {} to {}", epoch, dump_path);
-            }
-
-            match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
-                Ok(osdmap) => {
-                    info!(
-                        "✓ Decoded OSDMap: epoch={}, fsid={}, {} pools, {} osds",
-                        osdmap.epoch,
-                        uuid::Uuid::from_bytes(osdmap.fsid.bytes),
-                        osdmap.pools.len(),
-                        osdmap.osd_state.len()
-                    );
-
-                    // Store the OSDMap in state
-                    let mut state_guard = state.write().await;
-                    state_guard.osdmap = Some(Arc::new(osdmap.clone()));
-
-                    // Mark subscription as received
-                    state_guard.subscriptions.got("osdmap", osdmap.epoch as u64);
-
-                    let epoch = osdmap.epoch as u64;
-                    drop(state_guard);
-
-                    // Broadcast map event
-                    let _ = map_events.send(MapEvent::OsdMapUpdated { epoch });
-
-                    info!("✓ OSDMap stored and broadcast successfully");
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to decode OSDMap epoch {}: {}", epoch, e);
-                }
-            }
-        }
-
         Ok(())
     }
 
@@ -765,36 +664,6 @@ impl MonClient {
     pub async fn get_fsid(&self) -> uuid::Uuid {
         let state = self.state.read().await;
         state.monmap.fsid
-    }
-
-    /// Get the current OSDMap
-    ///
-    /// Returns the latest OSDMap received from the monitors.
-    /// Returns an error if no OSDMap has been received yet.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use std::sync::Arc;
-    /// # async fn example(mon_client: Arc<monclient::MonClient>) -> monclient::Result<()> {
-    /// // Subscribe to OSDMap updates
-    /// mon_client.subscribe("osdmap", 0, 0).await?;
-    ///
-    /// // Wait a moment for the OSDMap to arrive
-    /// tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    ///
-    /// // Get the current OSDMap
-    /// let osdmap = mon_client.get_osdmap().await?;
-    /// println!("OSDMap epoch: {}", osdmap.epoch);
-    /// println!("Number of pools: {}", osdmap.pools.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_osdmap(&self) -> Result<Arc<denc::osdmap::OSDMap>> {
-        let state = self.state.read().await;
-        state.osdmap.clone().ok_or(MonClientError::Other(
-            "No OSDMap available - subscribe to 'osdmap' first".to_string(),
-        ))
     }
 
     /// Get the number of monitors

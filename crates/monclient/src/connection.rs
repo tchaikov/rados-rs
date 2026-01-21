@@ -46,12 +46,19 @@ pub enum AuthState {
 
 impl MonConnection {
     /// Create a new monitor connection by connecting to the given address
-    pub async fn connect(addr: SocketAddr, rank: usize, addrs: EntityAddrVec, keyring_path: Option<String>) -> Result<Self> {
+    pub async fn connect(
+        addr: SocketAddr,
+        rank: usize,
+        addrs: EntityAddrVec,
+        keyring_path: Option<String>,
+    ) -> Result<Self> {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
         // Create connection config with authentication
-        let mut config = ConnectionConfig::default();
-        config.keyring_path = keyring_path;
+        let mut config = ConnectionConfig {
+            keyring_path,
+            ..Default::default()
+        };
         if config.keyring_path.is_some() {
             // If we have a keyring, prefer CephX authentication
             config.supported_auth_methods = vec![msgr2::AuthMethod::Cephx, msgr2::AuthMethod::None];

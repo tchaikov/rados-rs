@@ -4,7 +4,7 @@ use denc::osdmap::OSDMap;
 use std::fs;
 
 fn main() {
-    let corpus_path = "/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap/303e0d4679afb7b809fd924c7825eecd";
+    let corpus_path = "/tmp/osdmap-epoch-12.bin";
 
     let data = fs::read(corpus_path).expect("Failed to read corpus file");
     println!("Read {} bytes from corpus file", data.len());

@@ -529,26 +529,119 @@ impl<K: Denc + Ord, V: Denc> Denc for BTreeMap<K, V> {
     }
 }
 
-// Tuple implementations for pairs
-impl<T1: Denc, T2: Denc> Denc for (T1, T2) {
+// BTreeSet implementation
+impl<T: Denc + Ord> Denc for std::collections::BTreeSet<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.0.encode(buf, features)?;
-        self.1.encode(buf, features)?;
+        // Encode length as u32
+        let len = self.len() as u32;
+        Denc::encode(&len, buf, features)?;
+
+        // Encode each element
+        for item in self {
+            Denc::encode(item, buf, features)?;
+        }
+
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let first = T1::decode(buf, features)?;
-        let second = T2::decode(buf, features)?;
-        Ok((first, second))
+        let len = <u32 as Denc>::decode(buf, features)? as usize;
+        let mut set = std::collections::BTreeSet::new();
+
+        for _ in 0..len {
+            let item = <T as Denc>::decode(buf, features)?;
+            set.insert(item);
+        }
+
+        Ok(set)
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        let size1 = self.0.encoded_size(features)?;
-        let size2 = self.1.encoded_size(features)?;
-        Some(size1 + size2)
+        // Start with u32 length
+        let mut size = 4;
+
+        // Add size of each element
+        for item in self {
+            size += Denc::encoded_size(item, features)?;
+        }
+
+        Some(size)
     }
 }
+
+// Option implementation
+impl<T: Denc> Denc for Option<T> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        match self {
+            Some(value) => {
+                // Encode 1 to indicate Some
+                buf.put_u8(1);
+                value.encode(buf, features)?;
+            }
+            None => {
+                // Encode 0 to indicate None
+                buf.put_u8(0);
+            }
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let has_value = buf.get_u8();
+        if has_value != 0 {
+            let value = T::decode(buf, features)?;
+            Ok(Some(value))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        match self {
+            Some(value) => {
+                let value_size = value.encoded_size(features)?;
+                Some(1 + value_size)
+            }
+            None => Some(1),
+        }
+    }
+}
+
+// Tuple implementations - using a macro pattern like std does
+macro_rules! impl_denc_tuple {
+    ($($idx:tt => $T:ident),+) => {
+        impl<$($T: Denc),+> Denc for ($($T,)+) {
+            fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+                $(self.$idx.encode(buf, features)?;)+
+                Ok(())
+            }
+
+            fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+                Ok(($($T::decode(buf, features)?,)+))
+            }
+
+            fn encoded_size(&self, features: u64) -> Option<usize> {
+                let mut size = 0;
+                $(size += self.$idx.encoded_size(features)?;)+
+                Some(size)
+            }
+        }
+    };
+}
+
+// Implement for tuples of size 1-12 (matching std library conventions)
+impl_denc_tuple!(0 => T0);
+impl_denc_tuple!(0 => T0, 1 => T1);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6, 7 => T7);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6, 7 => T7, 8 => T8);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6, 7 => T7, 8 => T8, 9 => T9);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6, 7 => T7, 8 => T8, 9 => T9, 10 => T10);
+impl_denc_tuple!(0 => T0, 1 => T1, 2 => T2, 3 => T3, 4 => T4, 5 => T5, 6 => T6, 7 => T7, 8 => T8, 9 => T9, 10 => T10, 11 => T11);
 
 #[cfg(test)]
 mod tests {
@@ -743,5 +836,38 @@ mod tests {
 
         let decoded = <[u32; 3] as Denc>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, arr);
+    }
+
+    #[test]
+    fn test_tuple_implementations() {
+        let mut buf = BytesMut::new();
+
+        // Test 1-tuple
+        let t1 = (42u32,);
+        assert_eq!(t1.encoded_size(0), Some(4));
+        t1.encode(&mut buf, 0).unwrap();
+        let decoded1 = <(u32,)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded1, t1);
+
+        // Test 2-tuple
+        let t2 = (1u32, 2u64);
+        assert_eq!(t2.encoded_size(0), Some(12));
+        t2.encode(&mut buf, 0).unwrap();
+        let decoded2 = <(u32, u64)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded2, t2);
+
+        // Test 3-tuple
+        let t3 = (1u32, 2u64, 3u16);
+        assert_eq!(t3.encoded_size(0), Some(14));
+        t3.encode(&mut buf, 0).unwrap();
+        let decoded3 = <(u32, u64, u16)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded3, t3);
+
+        // Test 5-tuple (to verify macro works beyond original 4-tuple)
+        let t5 = (1u32, 2u64, 3u16, 4u8, 5i32);
+        assert_eq!(t5.encoded_size(0), Some(19));
+        t5.encode(&mut buf, 0).unwrap();
+        let decoded5 = <(u32, u64, u16, u8, i32)>::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded5, t5);
     }
 }

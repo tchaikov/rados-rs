@@ -22,7 +22,9 @@ pub struct FrameIO {
 }
 
 impl Drop for FrameIO {
-    fn drop(&mut self) {}
+    fn drop(&mut self) {
+        tracing::warn!("🔴 FrameIO is being dropped! TCP stream will close!");
+    }
 }
 
 impl FrameIO {
@@ -32,6 +34,7 @@ impl FrameIO {
 
     /// Create a new FrameIO from an existing TCP stream
     pub fn new(stream: TcpStream) -> Self {
+        tracing::info!("✅ FrameIO::new() - Creating new FrameIO with TcpStream");
         Self { stream }
     }
 
@@ -116,7 +119,7 @@ impl FrameIO {
             if frame.preamble.num_segments > 1 {
                 // epilogue_secure_rev1_block_t: 1 byte late_status + 15 bytes padding = 16 bytes
                 let mut epilogue = vec![FRAME_LATE_STATUS_COMPLETE];
-                epilogue.extend_from_slice(&[0u8; CRYPTO_BLOCK_SIZE - 1]);
+                epilogue.extend_from_slice(&vec![0u8; CRYPTO_BLOCK_SIZE - 1]);
                 payload_bytes.extend_from_slice(&epilogue);
 
                 tracing::info!(
@@ -126,7 +129,10 @@ impl FrameIO {
                     CRYPTO_BLOCK_SIZE
                 );
             } else {
-                tracing::info!("Secure single-segment: payload_len={}", payload_bytes.len());
+                tracing::info!(
+                    "Secure single-segment: payload_len={}",
+                    payload_bytes.len()
+                );
             }
 
             let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
@@ -167,7 +173,24 @@ impl FrameIO {
                     remaining_size
                 );
                 let encrypted_remaining = state_machine.encrypt_frame_data(remaining_data)?;
+                tracing::debug!(
+                    "RUST_DEBUG: Encrypted remaining: {} bytes → {} bytes",
+                    remaining_data.len(),
+                    encrypted_remaining.len()
+                );
+                tracing::debug!(
+                    "RUST_DEBUG: Encrypted remaining hex (first 64 bytes): {}",
+                    encrypted_remaining[..encrypted_remaining.len().min(64)]
+                        .iter()
+                        .map(|b| format!("{:02x}", b))
+                        .collect::<Vec<_>>()
+                        .join("")
+                );
                 result.extend_from_slice(&encrypted_remaining);
+                tracing::debug!(
+                    "RUST_DEBUG: After extending result, total length: {}",
+                    result.len()
+                );
             }
 
             tracing::debug!(
@@ -203,8 +226,29 @@ impl FrameIO {
             );
         }
 
+        tracing::debug!(
+            "RUST_DEBUG: About to write {} bytes to TCP stream for frame tag={:?}",
+            final_bytes.len(),
+            frame.preamble.tag
+        );
+        tracing::warn!(
+            "🔴 WRITING TO TCP: {} bytes for frame tag={:?}",
+            final_bytes.len(),
+            frame.preamble.tag
+        );
         self.stream.write_all(&final_bytes).await?;
+        tracing::warn!(
+            "🔴 TCP WRITE COMPLETE: {} bytes written successfully",
+            final_bytes.len()
+        );
+        tracing::debug!(
+            "RUST_DEBUG: Successfully wrote {} bytes to TCP stream",
+            final_bytes.len()
+        );
+        tracing::warn!("🔴 FLUSHING TCP stream...");
         self.stream.flush().await?;
+        tracing::warn!("🔴 TCP FLUSH COMPLETE");
+        tracing::debug!("RUST_DEBUG: Successfully flushed TCP stream");
         Ok(())
     }
 
@@ -231,17 +275,33 @@ impl FrameIO {
 
         // Try to peek first to see if data is available
         let mut peek_buf = [0u8; 1];
+        tracing::warn!("🔵 RECV: About to peek at TCP socket...");
         match self.stream.peek(&mut peek_buf).await {
-            Ok(n) => if n == 0 {},
-            Err(_e) => {}
+            Ok(n) => {
+                tracing::warn!("🔵 RECV: Peek successful: {} bytes available", n);
+                if n == 0 {
+                    tracing::error!("🔵 RECV: Peek returned 0 bytes - connection might be closed!");
+                }
+            }
+            Err(e) => {
+                tracing::error!("🔵 RECV: Peek failed: {:?}", e);
+            }
         }
 
+        tracing::warn!(
+            "🔵 RECV: About to read_exact {} bytes from TCP socket...",
+            preamble_block_size
+        );
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
-                tracing::warn!(preamble_block_size);
+                tracing::warn!(
+                    "🔵 RECV: Successfully read {} bytes from TCP",
+                    preamble_block_size
+                );
                 tracing::debug!("Successfully read preamble block");
             }
             Err(e) => {
+                tracing::error!("🔵 RECV: Failed to read preamble block: {:?}", e);
                 tracing::error!("Failed to read preamble block: {:?}", e);
                 return Err(e.into());
             }
@@ -256,6 +316,10 @@ impl FrameIO {
 
         // Decrypt preamble block if encrypted
         let preamble_and_inline = if has_encryption {
+            tracing::info!(
+                "📥 Decrypting preamble block: {} bytes",
+                preamble_block_buf.len()
+            );
             let decrypted = state_machine.decrypt_frame_data(&preamble_block_buf)?;
             tracing::debug!(
                 "Decrypted preamble block: {} bytes → {} bytes",
@@ -298,6 +362,17 @@ impl FrameIO {
         for i in 0..preamble.num_segments as usize {
             total_segment_size += preamble.segments[i].logical_len as usize;
         }
+
+        tracing::info!(
+            "📊 Frame info: tag={:?}, num_segments={}, segments={:?}, total_size={}",
+            preamble.tag,
+            preamble.num_segments,
+            &preamble.segments[0..preamble.num_segments as usize]
+                .iter()
+                .map(|s| s.logical_len)
+                .collect::<Vec<_>>(),
+            total_segment_size
+        );
 
         // Calculate total payload size based on encryption mode and number of segments
         const CRYPTO_BLOCK_SIZE: usize = 16;
@@ -358,6 +433,13 @@ impl FrameIO {
             total_payload_size
         };
 
+        tracing::info!(
+            "📏 Sizes: total_payload={}, remaining_needed={}, inline={}",
+            total_payload_size,
+            remaining_needed,
+            if has_encryption { Self::INLINE_SIZE } else { 0 }
+        );
+
         let full_payload = if remaining_needed > 0 {
             let mut remaining_buf = vec![0u8; remaining_needed];
             self.stream.read_exact(&mut remaining_buf).await?;
@@ -371,6 +453,10 @@ impl FrameIO {
 
             if has_encryption {
                 // Decrypt remaining data
+                tracing::info!(
+                    "📥 Decrypting remaining data: {} bytes",
+                    remaining_buf.len()
+                );
                 let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
                 tracing::debug!(
                     "Decrypted remaining: {} bytes → {} bytes",
@@ -494,13 +580,10 @@ impl Connection {
     /// * `addr` - The server address to connect to
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
-        // Validate config
-        if let Err(e) = config.validate() {
-            return Err(Error::Protocol(format!("Invalid config: {}", e)));
-        }
-
         // Establish TCP connection
+        tracing::warn!("🔵 About to call TcpStream::connect() to {}", addr);
         let mut stream = TcpStream::connect(addr).await?;
+        tracing::warn!("🔵 TcpStream::connect() returned successfully");
         tracing::info!("✓ TCP connection established to {}", addr);
 
         // Get our local address from the connection
@@ -815,6 +898,18 @@ impl Connection {
         msg.header.seq = self.state.out_seq;
         let seq = msg.seq();
 
+        tracing::warn!(
+            "🟢 send_message() called: type=0x{:04x}, seq={}",
+            msg_type,
+            seq
+        );
+        tracing::warn!(
+            "🟢 Message payload sizes: front={}, middle={}, data={}",
+            msg.front.len(),
+            msg.middle.len(),
+            msg.data.len()
+        );
+
         // Convert Message to MessageFrame
         let msg_frame = MessageFrame::new(
             msg.header.clone(),
@@ -826,8 +921,15 @@ impl Connection {
         // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message);
 
+        tracing::warn!("🟢 Created frame with {} segments", frame.segments.len());
+        for (i, seg) in frame.segments.iter().enumerate() {
+            tracing::warn!("🟢   Segment {}: {} bytes", i, seg.len());
+        }
+
         // Send the frame
+        tracing::warn!("🟢 About to call send_frame()...");
         self.state.send_frame(&frame).await?;
+        tracing::warn!("🟢 send_frame() returned successfully");
 
         tracing::debug!("Sent message: type={}, seq={}", msg_type, seq);
         Ok(())
@@ -857,8 +959,8 @@ impl Connection {
                     }
 
                     let ack_seq = u64::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
-                        payload[6], payload[7],
+                        payload[0], payload[1], payload[2], payload[3],
+                        payload[4], payload[5], payload[6], payload[7],
                     ]);
 
                     tracing::info!("✓ Received ACK frame: seq={}", ack_seq);
