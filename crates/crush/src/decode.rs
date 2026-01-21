@@ -42,6 +42,11 @@ impl CrushMap {
 
         // Decode buckets
         map.buckets = Vec::with_capacity(max_buckets as usize);
+        eprintln!(
+            "DEBUG: Decoding {} buckets, remaining: {}",
+            max_buckets,
+            data.remaining()
+        );
         for i in 0..max_buckets {
             if data.remaining() < 4 {
                 return Err(CrushError::DecodeError(format!(
@@ -50,30 +55,62 @@ impl CrushMap {
                 )));
             }
             let alg = data.get_u32_le();
+            eprintln!(
+                "DEBUG: Bucket {} alg={}, remaining: {}",
+                i,
+                alg,
+                data.remaining()
+            );
             if alg == 0 {
                 map.buckets.push(None);
                 continue;
             }
 
             let bucket = decode_bucket(data, alg)?;
+            eprintln!(
+                "DEBUG: Decoded bucket {}, remaining: {}",
+                i,
+                data.remaining()
+            );
             map.buckets.push(Some(bucket));
         }
 
         // Decode rules
         map.rules = Vec::with_capacity(max_rules as usize);
-        for _ in 0..max_rules {
+        eprintln!(
+            "DEBUG: Decoding {} rules, remaining: {}",
+            max_rules,
+            data.remaining()
+        );
+        for i in 0..max_rules {
             let exists = data.get_u32_le();
+            eprintln!(
+                "DEBUG: Rule {} exists={}, remaining: {}",
+                i,
+                exists,
+                data.remaining()
+            );
             if exists == 0 {
                 map.rules.push(None);
                 continue;
             }
 
             let rule = decode_rule(data)?;
+            eprintln!("DEBUG: Decoded rule {}, remaining: {}", i, data.remaining());
             map.rules.push(Some(rule));
         }
 
         // Decode name maps
-        map.type_names = decode_string_vec(data)?;
+        eprintln!(
+            "DEBUG: Decoding type_names, remaining: {}",
+            data.remaining()
+        );
+        map.type_names = decode_i32_string_map(data)?;
+        eprintln!(
+            "DEBUG: Decoded {} type_names, remaining: {}",
+            map.type_names.len(),
+            data.remaining()
+        );
         let name_map = decode_i32_string_map(data)?;
         map.names = name_map;
         let rule_name_map = decode_u32_string_map(data)?;
@@ -114,16 +151,16 @@ impl CrushMap {
 }
 
 fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
-    if data.remaining() < 18 {
-        // Need at least: id(4) + type(4) + alg(1) + hash(1) + weight(4) + size(4)
+    if data.remaining() < 16 {
+        // Need at least: id(4) + type(2) + alg(1) + hash(1) + weight(4) + size(4)
         return Err(CrushError::DecodeError(format!(
-            "Not enough data for bucket header: need 18, have {}",
+            "Not enough data for bucket header: need 16, have {}",
             data.remaining()
         )));
     }
 
     let id = data.get_i32_le();
-    let bucket_type = data.get_i32_le();
+    let bucket_type = data.get_u16_le();
     let alg_byte = data.get_u8();
     let _hash = data.get_u8();
     let weight = data.get_u32_le();
@@ -217,7 +254,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
 
     Ok(CrushBucket {
         id,
-        bucket_type,
+        bucket_type: bucket_type as i32,
         alg: algorithm,
         weight,
         size,
@@ -254,39 +291,6 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
         rule_type: RuleType::from(rule_type),
         steps,
     })
-}
-
-fn decode_string_vec(data: &mut Bytes) -> Result<Vec<String>> {
-    if data.remaining() < 4 {
-        return Ok(Vec::new());
-    }
-    let len = data.get_u32_le();
-    let mut vec = Vec::with_capacity(len as usize);
-
-    for _ in 0..len {
-        if data.remaining() < 4 {
-            break;
-        }
-        let str_len = data.get_u32_le();
-        if str_len > 0 {
-            if data.remaining() < str_len as usize {
-                return Err(CrushError::DecodeError(format!(
-                    "Not enough data for string: need {}, have {}",
-                    str_len,
-                    data.remaining()
-                )));
-            }
-            let mut bytes = vec![0u8; str_len as usize];
-            data.copy_to_slice(&mut bytes);
-            let s = String::from_utf8(bytes)
-                .map_err(|e| CrushError::DecodeError(format!("Invalid UTF-8: {}", e)))?;
-            vec.push(s);
-        } else {
-            vec.push(String::new());
-        }
-    }
-
-    Ok(vec)
 }
 
 fn decode_i32_string_map(data: &mut Bytes) -> Result<HashMap<i32, String>> {

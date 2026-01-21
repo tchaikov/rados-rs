@@ -167,7 +167,7 @@ pub struct CrushMap {
     /// Rules array
     pub rules: Vec<Option<CrushRule>>,
     /// Type names (type_id -> name)
-    pub type_names: Vec<String>,
+    pub type_names: std::collections::HashMap<i32, String>,
     /// Bucket/device names (id -> name)
     pub names: std::collections::HashMap<i32, String>,
     /// Rule names (rule_id -> name)
@@ -191,7 +191,7 @@ impl CrushMap {
             max_rules: 0,
             buckets: Vec::new(),
             rules: Vec::new(),
-            type_names: Vec::new(),
+            type_names: std::collections::HashMap::new(),
             names: std::collections::HashMap::new(),
             rule_names: std::collections::HashMap::new(),
             choose_local_tries: 2,
