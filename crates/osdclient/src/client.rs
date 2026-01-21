@@ -87,11 +87,19 @@ impl OSDClient {
 
         // Create new session
         info!("Creating new session for OSD {}", osd_id);
+
+        // Get service auth provider from monitor client
+        let auth_provider = self
+            .mon_client
+            .get_service_auth_provider()
+            .await
+            .map(|provider| Box::new(provider) as Box<dyn auth::AuthProvider>);
+
         let session = Arc::new(OSDSession::new(
             osd_id,
             self.config.entity_name.clone(),
             self.config.client_inc,
-            self.config.keyring_path.clone(),
+            auth_provider,
         ));
 
         // Get OSD address from OSDMap

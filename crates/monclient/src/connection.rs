@@ -23,6 +23,9 @@ pub struct MonConnection {
 
     /// Authentication state
     state: Arc<Mutex<ConnectionState>>,
+
+    /// Authentication provider (stored for creating service auth providers)
+    auth_provider: Option<auth::MonitorAuthProvider>,
 }
 
 #[derive(Debug)]
@@ -55,7 +58,7 @@ impl MonConnection {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
         // Create connection config with authentication
-        let config = if let Some(keyring) = keyring_path {
+        let (config, auth_provider) = if let Some(keyring) = keyring_path {
             // Load keyring and create auth provider
             let mut mon_auth =
                 auth::MonitorAuthProvider::new("client.admin".to_string()).map_err(|e| {
@@ -67,10 +70,15 @@ impl MonConnection {
                     MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
                 })?;
 
-            ConnectionConfig::with_auth_provider(Box::new(mon_auth))
+            // Clone the provider before moving it into the config
+            let provider_clone = mon_auth.clone();
+            (
+                ConnectionConfig::with_auth_provider(Box::new(mon_auth)),
+                Some(provider_clone),
+            )
         } else {
             // No keyring, use no authentication
-            ConnectionConfig::with_no_auth()
+            (ConnectionConfig::with_no_auth(), None)
         };
 
         // Connect using msgr2 (banner exchange only)
@@ -97,6 +105,7 @@ impl MonConnection {
                 global_id: 0,
                 has_session: true,
             })),
+            auth_provider,
         };
 
         tracing::info!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
@@ -189,6 +198,17 @@ impl MonConnection {
         tracing::debug!("Closing connection to mon.{}", self.rank);
         // TODO: Implement proper connection closing
         Ok(())
+    }
+
+    /// Create a ServiceAuthProvider for OSD/MDS/MGR connections
+    ///
+    /// This creates an authorizer-based auth provider using the service tickets
+    /// obtained during monitor authentication. Returns None if no authentication
+    /// was used (no-auth cluster).
+    pub fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
+        self.auth_provider.as_ref().map(|mon_auth| {
+            auth::ServiceAuthProvider::from_authenticated_handler(mon_auth.handler().clone())
+        })
     }
 }
 

@@ -797,6 +797,33 @@ impl MonClient {
         ))
     }
 
+    /// Get a ServiceAuthProvider for connecting to OSDs/MDSs/MGRs
+    ///
+    /// This creates an authorizer-based auth provider using the service tickets
+    /// obtained during monitor authentication. Returns None if the monitor
+    /// connection is not established or no authentication was used.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use monclient::MonClient;
+    /// # async fn example(mon_client: &MonClient) -> Result<(), Box<dyn std::error::Error>> {
+    /// // After connecting to monitor, get service auth provider for OSDs
+    /// if let Some(service_auth) = mon_client.get_service_auth_provider().await {
+    ///     // Use service_auth to connect to OSDs
+    ///     let config = msgr2::ConnectionConfig::with_auth_provider(Box::new(service_auth));
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
+        let state = self.state.read().await;
+        state
+            .active_con
+            .as_ref()
+            .and_then(|conn| conn.create_service_auth_provider())
+    }
+
     /// Get the number of monitors
     pub async fn get_mon_count(&self) -> usize {
         let state = self.state.read().await;

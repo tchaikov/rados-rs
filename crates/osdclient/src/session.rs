@@ -23,7 +23,7 @@ pub struct OSDSession {
     entity_name: String,
     #[allow(dead_code)]
     client_inc: u32,
-    keyring_path: Option<String>,
+    auth_provider: Option<Box<dyn auth::AuthProvider>>,
 }
 
 /// Tracking information for a pending operation
@@ -40,7 +40,7 @@ impl OSDSession {
         osd_id: i32,
         entity_name: String,
         client_inc: u32,
-        keyring_path: Option<String>,
+        auth_provider: Option<Box<dyn auth::AuthProvider>>,
     ) -> Self {
         Self {
             osd_id,
@@ -49,7 +49,7 @@ impl OSDSession {
             next_tid: AtomicU64::new(1),
             entity_name,
             client_inc,
-            keyring_path,
+            auth_provider,
         }
     }
 
@@ -64,18 +64,10 @@ impl OSDSession {
     pub async fn connect(&self, addr: std::net::SocketAddr) -> Result<()> {
         info!("Connecting to OSD {} at {}", self.osd_id, addr);
 
-        // Create connection config with authentication
-        // Note: For proper OSD authentication, we should use ServiceAuthProvider with
-        // tickets obtained from monitor authentication. For now, we use MonitorAuthProvider
-        // which will work but performs full CephX authentication instead of using authorizers.
-        let config = if let Some(keyring) = &self.keyring_path {
-            let mut mon_auth = auth::MonitorAuthProvider::new("client.admin".to_string())
-                .map_err(|e| OSDClientError::Connection(e.to_string()))?;
-            mon_auth
-                .set_secret_key_from_keyring(keyring)
-                .map_err(|e| OSDClientError::Connection(e.to_string()))?;
-
-            msgr2::ConnectionConfig::with_auth_provider(Box::new(mon_auth))
+        // Create connection config with authentication provider
+        // Uses ServiceAuthProvider with tickets obtained from monitor authentication
+        let config = if let Some(auth_provider) = &self.auth_provider {
+            msgr2::ConnectionConfig::with_auth_provider(auth_provider.clone_box())
         } else {
             msgr2::ConnectionConfig::with_no_auth()
         };

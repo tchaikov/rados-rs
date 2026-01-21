@@ -110,7 +110,9 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                                     Ok(mut mon_auth) => {
                                         match mon_auth.set_secret_key_from_keyring(&keyring_path) {
                                             Ok(_) => {
-                                                tracing::info!("  ✓ Keyring is available and readable");
+                                                tracing::info!(
+                                                    "  ✓ Keyring is available and readable"
+                                                );
                                                 supported_methods.push(AuthMethod::Cephx);
                                                 config.auth_provider = Some(Box::new(mon_auth));
                                             }
@@ -120,7 +122,10 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
                                         }
                                     }
                                     Err(e) => {
-                                        tracing::warn!("  Failed to create auth provider: {}, skipping cephx", e);
+                                        tracing::warn!(
+                                            "  Failed to create auth provider: {}, skipping cephx",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
