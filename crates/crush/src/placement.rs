@@ -7,15 +7,19 @@ use crate::mapper::crush_do_rule;
 use crate::types::CrushMap;
 
 /// Object locator information
-/// Contains pool ID, namespace, and optional key override
+/// Matches C++ object_locator_t from ~/dev/ceph/src/osd/osd_types.h
+/// Contains pool ID, namespace, key, and hash for object placement
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectLocator {
     /// Pool ID
     pub pool_id: i64,
+    /// Key string (if non-empty) - alternative to hash for placement
+    pub key: String,
     /// Object namespace (empty string for default)
     pub namespace: String,
-    /// Optional key override for hashing
-    pub key: Option<String>,
+    /// Hash position (if >= 0) - alternative to key for placement
+    /// Note: You specify either hash or key, not both
+    pub hash: i64,
 }
 
 impl ObjectLocator {
@@ -23,8 +27,9 @@ impl ObjectLocator {
     pub fn new(pool_id: i64) -> Self {
         ObjectLocator {
             pool_id,
+            key: String::new(),
             namespace: String::new(),
-            key: None,
+            hash: -1,
         }
     }
 
@@ -32,8 +37,9 @@ impl ObjectLocator {
     pub fn with_namespace(pool_id: i64, namespace: String) -> Self {
         ObjectLocator {
             pool_id,
+            key: String::new(),
             namespace,
-            key: None,
+            hash: -1,
         }
     }
 
@@ -41,8 +47,19 @@ impl ObjectLocator {
     pub fn with_key(pool_id: i64, key: String) -> Self {
         ObjectLocator {
             pool_id,
+            key,
             namespace: String::new(),
-            key: Some(key),
+            hash: -1,
+        }
+    }
+
+    /// Create an object locator with a hash override
+    pub fn with_hash(pool_id: i64, hash: i64) -> Self {
+        ObjectLocator {
+            pool_id,
+            key: String::new(),
+            namespace: String::new(),
+            hash,
         }
     }
 }
@@ -84,8 +101,8 @@ impl std::fmt::Display for PgId {
 /// PG ID (pool + seed)
 pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> PgId {
     // Determine what to hash
-    let hash_key = if let Some(ref key) = locator.key {
-        key.as_str()
+    let hash_key = if !locator.key.is_empty() {
+        locator.key.as_str()
     } else {
         object_name
     };
@@ -102,7 +119,7 @@ pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> 
         hash_input
             .as_bytes()
             .iter()
-            .fold(0u32, |acc, &b| acc.wrapping_mul(31).wrapping_add(b as u32)),
+            .fold(0u32, |acc: u32, &b: &u8| acc.wrapping_mul(31).wrapping_add(b as u32)),
     );
 
     // Map to PG number using modulo

@@ -98,16 +98,17 @@ impl MOSDOp {
         // 8. mtime (simplified as u64)
         buf.put_u64_le(self.mtime);
 
-        // 9. object_locator_t (simplified)
-        buf.put_i64_le(self.object.pool);
-        // namespace
-        buf.put_u32_le(self.object.namespace.len() as u32);
-        buf.put_slice(self.object.namespace.as_bytes());
-        // key
-        buf.put_u32_le(self.object.key.len() as u32);
-        buf.put_slice(self.object.key.as_bytes());
-        // hash
-        buf.put_u32_le(self.object.hash);
+        // 9. object_locator_t (using Denc encoding)
+        let locator = crush::ObjectLocator {
+            pool_id: self.object.pool,
+            key: self.object.key.clone(),
+            namespace: self.object.namespace.clone(),
+            hash: -1,
+        };
+        use denc::denc::Denc;
+        locator
+            .encode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode ObjectLocator: {}", e)))?;
 
         // 10. object name (object_t)
         buf.put_u32_le(self.object.oid.len() as u32);

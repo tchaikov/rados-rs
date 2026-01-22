@@ -171,8 +171,9 @@ impl OSDClient {
         // Create object locator
         let locator = crush::placement::ObjectLocator {
             pool_id: pool,
+            key: String::new(),
             namespace: String::new(),
-            key: None,
+            hash: -1,
         };
 
         // Get CRUSH map

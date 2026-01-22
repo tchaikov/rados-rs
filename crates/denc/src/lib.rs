@@ -9,6 +9,7 @@ pub mod padding;
 pub mod pgmap_types;
 pub mod types;
 pub mod zerocopy;
+pub mod crush_types;
 
 pub use denc::*;
 pub use encoding_metadata::*;
