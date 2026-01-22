@@ -65,12 +65,22 @@ impl MOSDOp {
         let mut buf = BytesMut::new();
 
         // V8 encoding format:
-        // 1. pgid (spg_t)
+        // 1. spgid (spg_t) - with version header (1,1)
+        // Version header: struct_v, struct_compat, len
+        buf.put_u8(1); // struct_v
+        buf.put_u8(1); // struct_compat
+        buf.put_u32_le(18); // len: 17 bytes for pgid + 1 byte for shard
+
+        // pgid encoding (with its own version byte)
+        buf.put_u8(1); // pgid version
         buf.put_i64_le(self.pgid.pool);
         buf.put_u32_le(self.pgid.seed);
+        buf.put_i32_le(-1); // preferred (always -1)
+
+        // shard
         buf.put_i8(self.pgid.shard);
 
-        // 2. hash
+        // 2. hash (raw pg hash)
         buf.put_u32_le(self.object.hash);
 
         // 3. osdmap_epoch
@@ -79,24 +89,32 @@ impl MOSDOp {
         // 4. flags
         buf.put_u32_le(self.flags);
 
-        // 5. reqid (osd_reqid_t)
-        // Simplified: encode entity name as string, inc, tid
-        let entity_bytes = self.reqid.entity_name.as_bytes();
-        buf.put_u32_le(entity_bytes.len() as u32);
-        buf.put_slice(entity_bytes);
-        buf.put_i32_le(self.reqid.inc);
-        buf.put_u64_le(self.reqid.tid);
+        // 5. reqid (osd_reqid_t) - with version header (2,2)
+        buf.put_u8(2); // struct_v
+        buf.put_u8(2); // struct_compat
+        buf.put_u32_le(21); // len: 9 bytes entity_name + 8 bytes tid + 4 bytes inc
 
-        // 6. trace (empty for now - TODO: implement proper tracing)
-        buf.put_u32_le(0); // trace version/empty marker
+        // entity_name_t: type (u8) + num (u64)
+        buf.put_u8(8); // CEPH_ENTITY_TYPE_CLIENT
+        buf.put_u64_le(0); // client num (extracted from entity_name)
+
+        // reqid fields
+        buf.put_u64_le(self.reqid.tid);
+        buf.put_i32_le(self.reqid.inc);
+
+        // 6. trace (blkin_trace_info) - 3 x u64 = 24 bytes
+        buf.put_u64_le(0); // trace_id
+        buf.put_u64_le(0); // span_id
+        buf.put_u64_le(0); // parent_span_id
 
         // --- Above decoded up front; below decoded post-dispatch ---
 
         // 7. client_inc
         buf.put_u32_le(self.client_inc);
 
-        // 8. mtime (simplified as u64)
-        buf.put_u64_le(self.mtime);
+        // 8. mtime (timespec: sec as u32, nsec as u32)
+        buf.put_u32_le(self.mtime as u32); // sec
+        buf.put_u32_le(0); // nsec
 
         // 9. object_locator_t (using Denc encoding)
         let locator = crush::ObjectLocator {
@@ -106,9 +124,18 @@ impl MOSDOp {
             hash: -1,
         };
         use denc::denc::Denc;
-        locator
-            .encode(&mut buf, 0)
-            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode ObjectLocator: {}", e)))?;
+
+        // Debug: encode to temporary buffer to see what we're encoding
+        let mut locator_buf = BytesMut::new();
+        locator.encode(&mut locator_buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode ObjectLocator: {}", e))
+        })?;
+        eprintln!(
+            "DEBUG: ObjectLocator encoded {} bytes, hex: {:02x?}",
+            locator_buf.len(),
+            &locator_buf[..locator_buf.len().min(40)]
+        );
+        buf.put_slice(&locator_buf);
 
         // 10. object name (object_t)
         buf.put_u32_le(self.object.oid.len() as u32);
@@ -117,11 +144,11 @@ impl MOSDOp {
         // 11. operations
         buf.put_u16_le(self.ops.len() as u16);
         for op in &self.ops {
-            // Encode osd_op structure
-            buf.put_u16_le(op.op.as_u16());
-            buf.put_u32_le(op.flags);
+            // Encode ceph_osd_op structure (42 bytes total)
+            buf.put_u16_le(op.op.as_u16()); // op code
+            buf.put_u32_le(op.flags); // flags
 
-            // Encode extent if present
+            // Encode extent union (28 bytes)
             if let Some(extent) = op.extent {
                 buf.put_u64_le(extent.offset);
                 buf.put_u64_le(extent.length);
@@ -135,7 +162,7 @@ impl MOSDOp {
                 buf.put_u32_le(0);
             }
 
-            // Input data length (payload goes in message data section)
+            // payload_len - data length for this op (stored separately from ops array)
             buf.put_u32_le(op.indata.len() as u32);
         }
 
@@ -157,7 +184,27 @@ impl MOSDOp {
         // 16. features (set to 0 for now)
         buf.put_u64_le(0);
 
+        eprintln!(
+            "DEBUG: Full MOSDOp message {} bytes, first 128 bytes hex: {:02x?}",
+            buf.len(),
+            &buf[..buf.len().min(128)]
+        );
+
         Ok(buf.freeze())
+    }
+
+    /// Extract operation data for message data section
+    ///
+    /// Collects all indata from operations into a single buffer for the message data section.
+    /// This follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data()
+    pub fn get_data_section(&self) -> Bytes {
+        let mut buf = BytesMut::new();
+        for op in &self.ops {
+            if !op.indata.is_empty() {
+                buf.put_slice(&op.indata);
+            }
+        }
+        buf.freeze()
     }
 }
 

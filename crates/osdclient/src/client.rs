@@ -95,28 +95,23 @@ impl OSDClient {
             .await
             .map(|provider| Box::new(provider) as Box<dyn auth::AuthProvider>);
 
-        let session = Arc::new(OSDSession::new(
+        let mut session = OSDSession::new(
             osd_id,
             self.config.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
-        ));
+        );
 
         // Get OSD address from OSDMap
         let osd_addr = self.get_osd_address(osd_id).await?;
-        eprintln!("DEBUG: get_osd_address({}) returned: {:?}", osd_id, osd_addr);
 
-        // Connect to OSD
-        eprintln!("DEBUG: About to call session.connect({:?})", osd_addr);
+        // Connect to OSD - this spawns the I/O task
         session.connect(osd_addr).await?;
 
-        // Start recv task
-        let session_clone = Arc::clone(&session);
-        tokio::spawn(async move {
-            session_clone.recv_task().await;
-        });
-
+        // Wrap in Arc and store
+        let session = Arc::new(session);
         sessions.insert(osd_id, Arc::clone(&session));
+
         Ok(session)
     }
 

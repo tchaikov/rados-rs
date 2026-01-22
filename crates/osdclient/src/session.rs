@@ -1,12 +1,19 @@
 //! OSD session management
 //!
 //! This module handles per-OSD connection and request tracking.
+//!
+//! ## Design
+//!
+//! Following the Linux kernel and Ceph C++ async messenger pattern:
+//! - `submit_op()` quickly queues messages to a channel (no blocking I/O)
+//! - A dedicated `io_task()` owns the Connection and multiplexes send/receive
+//! - No locks held during I/O operations
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
 use crate::error::{OSDClientError, Result};
@@ -16,7 +23,8 @@ use crate::types::{OpResult, RequestId};
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
     pub osd_id: i32,
-    connection: Arc<Mutex<Option<msgr2::protocol::Connection>>>,
+    // Channel for sending messages - like Linux kernel's out_queue
+    send_tx: mpsc::Sender<msgr2::message::Message>,
     pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
     next_tid: AtomicU64,
     #[allow(dead_code)]
@@ -42,9 +50,13 @@ impl OSDSession {
         client_inc: u32,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
     ) -> Self {
+        // Create channel for outgoing messages (like Linux kernel's out_queue)
+        // Buffer size of 100 messages should be plenty
+        let (send_tx, _) = mpsc::channel(100);
+
         Self {
             osd_id,
-            connection: Arc::new(Mutex::new(None)),
+            send_tx,
             pending_ops: Arc::new(RwLock::new(HashMap::new())),
             next_tid: AtomicU64::new(1),
             entity_name,
@@ -58,58 +70,120 @@ impl OSDSession {
         self.next_tid.fetch_add(1, Ordering::SeqCst)
     }
 
-    /// Connect to the OSD
+    /// Connect to the OSD and start I/O task
     ///
-    /// This establishes a msgr2 connection to the OSD at the given address.
-    pub async fn connect(&self, entity_addr: denc::EntityAddr) -> Result<()> {
+    /// This establishes a msgr2 connection to the OSD at the given address
+    /// and spawns an I/O task that owns the connection.
+    pub async fn connect(&mut self, entity_addr: denc::EntityAddr) -> Result<()> {
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
             .to_socket_addr()
             .ok_or_else(|| OSDClientError::Connection("Invalid OSD address".to_string()))?;
 
-        eprintln!("DEBUG: Connecting to OSD {} at {} (nonce={})", self.osd_id, addr, entity_addr.nonce);
-        info!("Connecting to OSD {} at {} (nonce={})", self.osd_id, addr, entity_addr.nonce);
+        info!(
+            "Connecting to OSD {} at {} (nonce={})",
+            self.osd_id, addr, entity_addr.nonce
+        );
 
         // Create connection config with authentication provider
-        // Uses ServiceAuthProvider with tickets obtained from monitor authentication
-        // Service ID 4 = OSD (from Ceph ENTITY_TYPE_OSD)
         let config = if let Some(auth_provider) = &self.auth_provider {
             msgr2::ConnectionConfig::with_auth_provider_and_service(auth_provider.clone_box(), 4)
         } else {
             msgr2::ConnectionConfig::with_no_auth()
         };
 
-        // Connect using msgr2 (banner exchange only), passing the full EntityAddr as target
-        let mut connection = msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
+        // Connect using msgr2
+        let mut connection =
+            msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
+                .await
+                .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
 
         info!(
             "Banner exchange complete, establishing session with OSD {}",
             self.osd_id
         );
 
-        // Complete the full handshake (HELLO, AUTH, SESSION)
+        // Complete the full handshake
         connection.establish_session().await.map_err(|e| {
             OSDClientError::Connection(format!("Failed to establish session: {}", e))
         })?;
 
         info!("✓ Session established with OSD {}", self.osd_id);
 
-        // Store the connection
-        {
-            let mut conn_guard = self.connection.lock().await;
-            *conn_guard = Some(connection);
-        }
+        // Create new channel for this connection
+        let (send_tx, send_rx) = mpsc::channel(100);
+        self.send_tx = send_tx;
 
-        info!("✓ Connection stored for OSD {}", self.osd_id);
+        // Spawn I/O task that owns the connection
+        // This task multiplexes send/receive using tokio::select!
+        let pending_ops = Arc::clone(&self.pending_ops);
+        let osd_id = self.osd_id;
+        tokio::spawn(async move {
+            Self::io_task(osd_id, connection, send_rx, pending_ops).await;
+        });
+
+        info!("✓ I/O task started for OSD {}", self.osd_id);
 
         Ok(())
     }
 
+    /// I/O task that owns the Connection
+    ///
+    /// This task multiplexes:
+    /// - Receiving messages from send_rx channel and sending to OSD
+    /// - Receiving messages from OSD and routing to pending ops
+    ///
+    /// Like Linux kernel's con_work() function, but using tokio::select!
+    async fn io_task(
+        osd_id: i32,
+        mut connection: msgr2::protocol::Connection,
+        mut send_rx: mpsc::Receiver<msgr2::message::Message>,
+        pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
+    ) {
+        info!("I/O task started for OSD {}", osd_id);
+
+        loop {
+            tokio::select! {
+                // Handle outgoing messages (like try_write in Linux kernel)
+                Some(msg) = send_rx.recv() => {
+                    if let Err(e) = connection.send_message(msg).await {
+                        error!("Failed to send message to OSD {}: {}", osd_id, e);
+                        break;
+                    }
+                }
+
+                // Handle incoming messages (like try_read in Linux kernel)
+                result = connection.recv_message() => {
+                    match result {
+                        Ok(msg) => {
+                            if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
+                                match MOSDOpReply::decode(&msg.front) {
+                                    Ok(reply) => {
+                                        Self::handle_reply(reply, &pending_ops).await;
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to decode MOSDOpReply: {}", e);
+                                    }
+                                }
+                            } else {
+                                warn!("Received unexpected message type: 0x{:04x}", msg.msg_type());
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to receive message from OSD {}: {}", osd_id, e);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        info!("I/O task exiting for OSD {}", osd_id);
+    }
+
     /// Submit an operation to the OSD
     ///
-    /// This sends a MOSDOp message and returns a receiver for the reply.
+    /// This queues the message for sending (non-blocking, like ceph_con_send)
     pub async fn submit_op(&self, op: MOSDOp) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
 
@@ -132,121 +206,44 @@ impl OSDSession {
 
         // Encode the operation
         let payload = op.encode()?;
+        let data = op.get_data_section();
 
-        // Send the message
-        let mut connection_guard = self.connection.lock().await;
-        if let Some(conn) = connection_guard.as_mut() {
-            // Build message with payload in front section
-            let msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload);
+        // Build message
+        let mut msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload);
+        msg.data = data;
 
-            // Send via msgr2 connection
-            conn.send_message(msg).await.map_err(|e| {
-                OSDClientError::Connection(format!("Failed to send message: {}", e))
-            })?;
+        // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
+        self.send_tx.send(msg).await.map_err(|_| {
+            OSDClientError::Connection("I/O task has exited".into())
+        })?;
 
-            drop(connection_guard);
-            debug!("Submitted operation tid={} to OSD {}", tid, self.osd_id);
-            Ok(rx)
-        } else {
-            // Remove from pending since we can't send
-            let mut pending = self.pending_ops.write().await;
-            pending.remove(&tid);
-
-            Err(OSDClientError::Connection("Not connected to OSD".into()))
-        }
+        debug!("Submitted operation tid={} to OSD {}", tid, self.osd_id);
+        Ok(rx)
     }
 
-    /// Background task for receiving replies
-    ///
-    /// This runs in a loop receiving messages from the OSD connection
-    /// and matching them to pending operations.
-    pub async fn recv_task(self: Arc<Self>) {
-        info!("Starting recv_task for OSD {}", self.osd_id);
-
-        loop {
-            // Receive message with connection locked
-            let msg = {
-                let mut guard = self.connection.lock().await;
-                match guard.as_mut() {
-                    Some(conn) => match conn.recv_message().await {
-                        Ok(msg) => msg,
-                        Err(e) => {
-                            error!("Failed to receive message from OSD {}: {}", self.osd_id, e);
-                            break;
-                        }
-                    },
-                    None => {
-                        debug!("No connection, recv_task for OSD {} exiting", self.osd_id);
-                        return;
-                    }
-                }
-            };
-
-            // Handle message based on type
-            if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
-                match MOSDOpReply::decode(&msg.front) {
-                    Ok(reply) => {
-                        self.handle_reply(reply).await;
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to decode MOSDOpReply from OSD {}: {}",
-                            self.osd_id, e
-                        );
-                    }
-                }
-            } else {
-                debug!(
-                    "Received unexpected message type {} from OSD {}",
-                    msg.msg_type(),
-                    self.osd_id
-                );
-            }
-        }
-
-        info!("recv_task for OSD {} stopped", self.osd_id);
-    }
-
-    /// Handle an incoming MOSDOpReply
-    async fn handle_reply(&self, reply: MOSDOpReply) {
+    /// Handle an operation reply
+    async fn handle_reply(
+        reply: MOSDOpReply,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+    ) {
         let tid = reply.reqid.tid;
 
-        // Find the pending operation
         let pending_op = {
-            let mut pending = self.pending_ops.write().await;
+            let mut pending = pending_ops.write().await;
             pending.remove(&tid)
         };
 
-        if let Some(op) = pending_op {
-            let elapsed = op.submitted_at.elapsed();
-            debug!("Received reply for tid={} after {:?}", tid, elapsed);
-
-            // Convert reply to result
-            let result = if reply.result == 0 {
-                Ok(reply.to_op_result())
-            } else {
-                Err(OSDClientError::OSDError {
-                    code: reply.result,
-                    message: "OSD operation failed".to_string(),
-                })
-            };
-
-            // Send result (ignore if receiver dropped)
-            let _ = op.result_tx.send(result);
+        if let Some(pending_op) = pending_op {
+            let result = reply.to_op_result();
+            let _ = pending_op.result_tx.send(Ok(result));
         } else {
-            warn!("Received reply for unknown tid={}", tid);
+            warn!("Received reply for unknown tid: {}", tid);
         }
     }
 
-    /// Check if we're connected
+    /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
-        let guard = self.connection.lock().await;
-        guard.is_some()
-    }
-
-    /// Get number of pending operations
-    pub async fn pending_count(&self) -> usize {
-        let guard = self.pending_ops.read().await;
-        guard.len()
+        // Connection is alive if the send channel is not closed
+        !self.send_tx.is_closed()
     }
 }
