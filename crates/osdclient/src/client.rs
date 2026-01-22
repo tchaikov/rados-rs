@@ -104,10 +104,10 @@ impl OSDClient {
 
         // Get OSD address from OSDMap
         let osd_addr = self.get_osd_address(osd_id).await?;
-        eprintln!("DEBUG: get_osd_address({}) returned: {}", osd_id, osd_addr);
+        eprintln!("DEBUG: get_osd_address({}) returned: {:?}", osd_id, osd_addr);
 
         // Connect to OSD
-        eprintln!("DEBUG: About to call session.connect({})", osd_addr);
+        eprintln!("DEBUG: About to call session.connect({:?})", osd_addr);
         session.connect(osd_addr).await?;
 
         // Start recv task
@@ -121,7 +121,7 @@ impl OSDClient {
     }
 
     /// Get OSD address from OSDMap
-    async fn get_osd_address(&self, osd_id: i32) -> Result<std::net::SocketAddr> {
+    async fn get_osd_address(&self, osd_id: i32) -> Result<denc::EntityAddr> {
         let osdmap = self
             .mon_client
             .get_osdmap()
@@ -142,10 +142,8 @@ impl OSDClient {
         // Find a v2 address (msgr2 protocol)
         for addr in &addrvec.addrs {
             if matches!(addr.addr_type, denc::EntityAddrType::Msgr2) {
-                // Parse the address
-                if let Some(socket_addr) = addr.to_socket_addr() {
-                    return Ok(socket_addr);
-                }
+                // Return the full EntityAddr with nonce intact
+                return Ok(addr.clone());
             }
         }
 

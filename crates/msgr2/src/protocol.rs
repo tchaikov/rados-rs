@@ -500,6 +500,82 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Connect to a Ceph server with a specific target EntityAddr
+    ///
+    /// This establishes a TCP connection and performs the msgr2 banner exchange.
+    /// Use this when connecting to an OSD where you need the exact EntityAddr (with nonce)
+    /// from the OSDMap for CLIENT_IDENT.
+    ///
+    /// # Arguments
+    /// * `addr` - The TCP socket address to connect to
+    /// * `target_entity_addr` - The full EntityAddr (with nonce) to use as target in CLIENT_IDENT
+    /// * `config` - Connection configuration (features and connection modes)
+    pub async fn connect_with_target(
+        addr: SocketAddr,
+        target_entity_addr: denc::EntityAddr,
+        config: crate::ConnectionConfig,
+    ) -> Result<Self> {
+        eprintln!("DEBUG: Connection::connect_with_target() called with addr: {}, target nonce: {}", addr, target_entity_addr.nonce);
+
+        // Validate config
+        if let Err(e) = config.validate() {
+            return Err(Error::Protocol(format!("Invalid config: {}", e)));
+        }
+
+        eprintln!("DEBUG: About to TcpStream::connect({})", addr);
+        // Establish TCP connection
+        let mut stream = TcpStream::connect(addr).await?;
+        let peer_addr = stream.peer_addr()?;
+        eprintln!("DEBUG: ✓ TCP connection established - peer: {}, local: {}", peer_addr, stream.local_addr()?);
+        tracing::info!("✓ TCP connection established to {}", addr);
+
+        // Get our local address from the connection
+        let local_addr = stream.local_addr()?;
+        tracing::debug!("Local address: {}", local_addr);
+
+        // Create state machine for client BEFORE banner exchange
+        // This is important because we need to track banner bytes in pre-auth buffers
+        let mut state_machine = StateMachine::new_client(config.clone());
+
+        // Use the provided target_entity_addr directly (preserving nonce)
+        state_machine.set_server_addr(target_entity_addr);
+
+        // Set our local client address for CLIENT_IDENT
+        let mut client_entity_addr = denc::EntityAddr::new();
+        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+        match local_addr {
+            SocketAddr::V4(v4) => {
+                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2 (native byte order)
+                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
+                data.extend_from_slice(&v4.ip().octets()); // IP address
+                data.extend_from_slice(&[0u8; 8]); // padding
+                client_entity_addr.sockaddr_data = data;
+            }
+            SocketAddr::V6(v6) => {
+                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
+                let mut data = Vec::with_capacity(28);
+                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10 (native byte order)
+                data.extend_from_slice(&v6.port().to_be_bytes());
+                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
+                data.extend_from_slice(&v6.ip().octets());
+                data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                client_entity_addr.sockaddr_data = data;
+            }
+        }
+        state_machine.set_client_addr(client_entity_addr);
+
+        tracing::info!("✓ Created client state machine");
+
+        // Perform msgr2 banner exchange and record bytes in pre-auth buffers
+        Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
+
+        let state = ConnectionState::new(stream, state_machine);
+
+        Ok(Self { state })
+    }
+
     /// Connect to a Ceph server at the given address
     ///
     /// This establishes a TCP connection and performs the msgr2 banner exchange.

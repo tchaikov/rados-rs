@@ -61,9 +61,14 @@ impl OSDSession {
     /// Connect to the OSD
     ///
     /// This establishes a msgr2 connection to the OSD at the given address.
-    pub async fn connect(&self, addr: std::net::SocketAddr) -> Result<()> {
-        eprintln!("DEBUG: Connecting to OSD {} at {}", self.osd_id, addr);
-        info!("Connecting to OSD {} at {}", self.osd_id, addr);
+    pub async fn connect(&self, entity_addr: denc::EntityAddr) -> Result<()> {
+        // Extract SocketAddr for TCP connection
+        let addr = entity_addr
+            .to_socket_addr()
+            .ok_or_else(|| OSDClientError::Connection("Invalid OSD address".to_string()))?;
+
+        eprintln!("DEBUG: Connecting to OSD {} at {} (nonce={})", self.osd_id, addr, entity_addr.nonce);
+        info!("Connecting to OSD {} at {} (nonce={})", self.osd_id, addr, entity_addr.nonce);
 
         // Create connection config with authentication provider
         // Uses ServiceAuthProvider with tickets obtained from monitor authentication
@@ -74,8 +79,8 @@ impl OSDSession {
             msgr2::ConnectionConfig::with_no_auth()
         };
 
-        // Connect using msgr2 (banner exchange only)
-        let mut connection = msgr2::protocol::Connection::connect(addr, config)
+        // Connect using msgr2 (banner exchange only), passing the full EntityAddr as target
+        let mut connection = msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
             .await
             .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
 
