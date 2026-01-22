@@ -2,14 +2,13 @@
 // High-level interface for mapping objects to OSDs
 
 use crate::error::Result;
-use crate::hash::crush_hash32;
 use crate::mapper::crush_do_rule;
 use crate::types::CrushMap;
 
 /// Object locator information
 /// Matches C++ object_locator_t from ~/dev/ceph/src/osd/osd_types.h
 /// Contains pool ID, namespace, key, and hash for object placement
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ObjectLocator {
     /// Pool ID
     pub pool_id: i64,
@@ -90,7 +89,7 @@ impl std::fmt::Display for PgId {
 /// Calculate PG ID from object name
 ///
 /// This hashes the object name and maps it to a placement group
-/// within the specified pool.
+/// within the specified pool using Ceph's rjenkins hash function.
 ///
 /// # Arguments
 /// * `object_name` - Name of the object
@@ -100,6 +99,8 @@ impl std::fmt::Display for PgId {
 /// # Returns
 /// PG ID (pool + seed)
 pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> PgId {
+    use crate::hash::ceph_str_hash_rjenkins;
+
     // Determine what to hash
     let hash_key = if !locator.key.is_empty() {
         locator.key.as_str()
@@ -114,13 +115,8 @@ pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> 
         format!("{}\n{}", locator.namespace, hash_key)
     };
 
-    // Hash the object name to get a 32-bit value
-    let hash = crush_hash32(
-        hash_input
-            .as_bytes()
-            .iter()
-            .fold(0u32, |acc: u32, &b: &u8| acc.wrapping_mul(31).wrapping_add(b as u32)),
-    );
+    // Hash the object name using Ceph's rjenkins hash
+    let hash = ceph_str_hash_rjenkins(hash_input.as_bytes());
 
     // Map to PG number using modulo
     let pg_seed = hash % pg_num;
@@ -205,7 +201,7 @@ mod tests {
         let loc1 = ObjectLocator::new(1);
         assert_eq!(loc1.pool_id, 1);
         assert_eq!(loc1.namespace, "");
-        assert_eq!(loc1.key, None);
+        assert_eq!(loc1.key, "");
 
         let loc2 = ObjectLocator::with_namespace(2, "ns1".to_string());
         assert_eq!(loc2.pool_id, 2);
@@ -213,7 +209,7 @@ mod tests {
 
         let loc3 = ObjectLocator::with_key(3, "key1".to_string());
         assert_eq!(loc3.pool_id, 3);
-        assert_eq!(loc3.key, Some("key1".to_string()));
+        assert_eq!(loc3.key, "key1");
     }
 
     #[test]

@@ -275,6 +275,31 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
             },
         }),
 
+        // object_locator_t (ObjectLocator) - Object placement information
+        // Dependencies: i64, String
+        "object_locator_t" => Some(TypeInfo {
+            decode_fn: |bytes, features| {
+                let obj = crush::ObjectLocator::decode(bytes, features)
+                    .map_err(DencoderError::DecodeError)?;
+                Ok(Box::new(obj))
+            },
+            encode_fn: |obj: &dyn SerializableType, features| {
+                let typed = obj
+                    .as_any()
+                    .downcast_ref::<crush::ObjectLocator>()
+                    .ok_or_else(|| {
+                        DencoderError::EncodeError(RadosError::Protocol(
+                            "Type mismatch".to_string(),
+                        ))
+                    })?;
+                let mut buf = bytes::BytesMut::new();
+                typed
+                    .encode(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
+            },
+        }),
+
         // pg_pool_t (PgPool) - Dependencies: UTime (L1), PoolSnapInfo (L2), SnapInterval (L1), HitSetParams (L2), PgMergeMeta (L3)
         // This is the most complex type - test LAST
         "pg_pool_t" => Some(TypeInfo {

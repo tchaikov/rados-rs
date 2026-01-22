@@ -157,9 +157,10 @@ impl OSDSession {
                     match result {
                         Ok(msg) => {
                             if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
+                                let tid = msg.tid();
                                 match MOSDOpReply::decode(&msg.front) {
                                     Ok(reply) => {
-                                        Self::handle_reply(reply, &pending_ops).await;
+                                        Self::handle_reply(tid, reply, &pending_ops).await;
                                     }
                                     Err(e) => {
                                         error!("Failed to decode MOSDOpReply: {}", e);
@@ -208,14 +209,17 @@ impl OSDSession {
         let payload = op.encode()?;
         let data = op.get_data_section();
 
-        // Build message
-        let mut msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload);
+        // Build message (use version 8 for MOSDOp - matches C++ implementation)
+        let mut msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload)
+            .with_version(8)
+            .with_tid(tid);
         msg.data = data;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
-        self.send_tx.send(msg).await.map_err(|_| {
-            OSDClientError::Connection("I/O task has exited".into())
-        })?;
+        self.send_tx
+            .send(msg)
+            .await
+            .map_err(|_| OSDClientError::Connection("I/O task has exited".into()))?;
 
         debug!("Submitted operation tid={} to OSD {}", tid, self.osd_id);
         Ok(rx)
@@ -223,11 +227,10 @@ impl OSDSession {
 
     /// Handle an operation reply
     async fn handle_reply(
+        tid: u64,
         reply: MOSDOpReply,
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
     ) {
-        let tid = reply.reqid.tid;
-
         let pending_op = {
             let mut pending = pending_ops.write().await;
             pending.remove(&tid)

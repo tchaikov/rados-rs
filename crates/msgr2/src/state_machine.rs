@@ -481,7 +481,10 @@ impl State for AuthConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!("DEBUG: AuthConnecting received frame tag: {:?}", frame.preamble.tag);
+        eprintln!(
+            "DEBUG: AuthConnecting received frame tag: {:?}",
+            frame.preamble.tag
+        );
         match frame.preamble.tag {
             Tag::AuthBadMethod => {
                 // Parse frame
@@ -495,8 +498,10 @@ impl State for AuthConnecting {
                 let allowed_methods = Vec::<u32>::decode(&mut payload, 0)?;
                 let allowed_modes = Vec::<u32>::decode(&mut payload, 0)?;
 
-                eprintln!("DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
-                    rejected_method, result, allowed_methods, allowed_modes);
+                eprintln!(
+                    "DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
+                    rejected_method, result, allowed_methods, allowed_modes
+                );
                 tracing::info!(
                     "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
                     rejected_method,
@@ -560,8 +565,15 @@ impl State for AuthConnecting {
                 if let Some(provider) = &mut self.auth_provider {
                     if let Some(payload) = frame.segments.first() {
                         eprintln!("DEBUG: AUTH_REPLY_MORE payload length: {}", payload.len());
-                        eprintln!("DEBUG: AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
-                            payload.iter().take(128).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                        eprintln!(
+                            "DEBUG: AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
+                            payload
+                                .iter()
+                                .take(128)
+                                .map(|b| format!("{:02x}", b))
+                                .collect::<Vec<_>>()
+                                .join("")
+                        );
 
                         // Call auth provider to handle the response
                         // For multi-round auth, handle_auth_response processes the challenge
@@ -600,8 +612,15 @@ impl State for AuthConnecting {
                 // Parse AUTH_DONE frame to get global_id and connection mode
                 if let Some(segment) = frame.segments.first() {
                     eprintln!("DEBUG: AUTH_DONE frame segment length: {}", segment.len());
-                    eprintln!("DEBUG: AUTH_DONE frame segment hex (first 64 bytes): {}",
-                        segment.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                    eprintln!(
+                        "DEBUG: AUTH_DONE frame segment hex (first 64 bytes): {}",
+                        segment
+                            .iter()
+                            .take(64)
+                            .map(|b| format!("{:02x}", b))
+                            .collect::<Vec<_>>()
+                            .join("")
+                    );
 
                     let mut payload = segment.clone();
                     let global_id = u64::decode(&mut payload, 0).map_err(|e| {
@@ -916,7 +935,10 @@ impl State for AuthConnectingSign {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!("DEBUG: AuthConnectingSign::handle_frame received tag: {:?}", frame.preamble.tag);
+        eprintln!(
+            "DEBUG: AuthConnectingSign::handle_frame received tag: {:?}",
+            frame.preamble.tag
+        );
         match frame.preamble.tag {
             Tag::AuthSignature => {
                 eprintln!("DEBUG: Received AUTH_SIGNATURE from server");
@@ -956,10 +978,20 @@ impl State for AuthConnectingSign {
                 }
 
                 // After verification, transition based on compression support
-                eprintln!("DEBUG: peer_supported_features = 0x{:x}", self.peer_supported_features);
-                if crate::has_msgr2_feature(self.peer_supported_features, crate::MSGR2_FEATURE_COMPRESSION) {
-                    tracing::debug!("Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING");
-                    eprintln!("DEBUG: Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING");
+                eprintln!(
+                    "DEBUG: peer_supported_features = 0x{:x}",
+                    self.peer_supported_features
+                );
+                if crate::has_msgr2_feature(
+                    self.peer_supported_features,
+                    crate::MSGR2_FEATURE_COMPRESSION,
+                ) {
+                    tracing::debug!(
+                        "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
+                    );
+                    eprintln!(
+                        "DEBUG: Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
+                    );
                     Ok(StateResult::Transition(Box::new(
                         CompressionConnecting::new_with_encryption(
                             self.connection_mode,
@@ -996,9 +1028,19 @@ impl State for AuthConnectingSign {
     fn enter(&mut self) -> Result<StateResult> {
         // Send AUTH_SIGNATURE frame with pre-computed HMAC-SHA256 signature
         eprintln!("DEBUG: AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
-        eprintln!("DEBUG:   signature length: {} bytes", self.our_signature.len());
-        eprintln!("DEBUG:   signature hex (first 32 bytes): {}",
-            self.our_signature.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+        eprintln!(
+            "DEBUG:   signature length: {} bytes",
+            self.our_signature.len()
+        );
+        eprintln!(
+            "DEBUG:   signature hex (first 32 bytes): {}",
+            self.our_signature
+                .iter()
+                .take(32)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join("")
+        );
 
         let auth_sig_frame = AuthSignatureFrame::new(self.our_signature.clone());
         let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature);
@@ -1111,7 +1153,10 @@ impl State for SessionConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!("DEBUG: SessionConnecting::handle_frame received tag: {:?}", frame.preamble.tag);
+        eprintln!(
+            "DEBUG: SessionConnecting::handle_frame received tag: {:?}",
+            frame.preamble.tag
+        );
         match frame.preamble.tag {
             Tag::ServerIdent => {
                 // Parse SERVER_IDENT frame
@@ -1260,7 +1305,10 @@ impl State for SessionConnecting {
         eprintln!("DEBUG: SessionConnecting::enter() called");
         eprintln!("DEBUG:   our_global_id={}", self.our_global_id);
         eprintln!("DEBUG:   connection_mode={}", self.connection_mode);
-        eprintln!("DEBUG:   has_connection_secret={}", self.connection_secret.is_some());
+        eprintln!(
+            "DEBUG:   has_connection_secret={}",
+            self.connection_secret.is_some()
+        );
         // Send CLIENT_IDENT frame with proper values
         // Use our real client address from the connection
         // Note: EntityAddrvec now includes marker byte (0x02) in encoding
@@ -1311,7 +1359,10 @@ impl State for SessionConnecting {
         );
         let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
 
-        eprintln!("DEBUG: Created CLIENT_IDENT frame, {} segments", frame.segments.len());
+        eprintln!(
+            "DEBUG: Created CLIENT_IDENT frame, {} segments",
+            frame.segments.len()
+        );
         eprintln!("DEBUG: CLIENT_IDENT values:");
         eprintln!("DEBUG:   addrs: {:?}", addrs);
         eprintln!("DEBUG:   target_addr: {:?}", target_addr);
@@ -1750,10 +1801,16 @@ impl StateMachine {
 
     /// Decrypt frame data if in SECURE mode
     pub fn decrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
-        eprintln!("DEBUG: decrypt_frame_data called, has_decryptor={}, data_len={}",
-            self.frame_decryptor.is_some(), data.len());
+        eprintln!(
+            "DEBUG: decrypt_frame_data called, has_decryptor={}, data_len={}",
+            self.frame_decryptor.is_some(),
+            data.len()
+        );
         if let Some(decryptor) = &mut self.frame_decryptor {
-            eprintln!("DEBUG: Attempting AES-GCM decryption of {} bytes", data.len());
+            eprintln!(
+                "DEBUG: Attempting AES-GCM decryption of {} bytes",
+                data.len()
+            );
             let result = decryptor
                 .decrypt(data)
                 .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)));
@@ -1863,12 +1920,18 @@ impl StateMachine {
                 // where the auth provider has been updated with session and tickets
 
                 // Try all state types that might have auth_provider
-                if let Some(auth_connecting) = self.current_state.as_any().downcast_ref::<AuthConnecting>() {
+                if let Some(auth_connecting) =
+                    self.current_state.as_any().downcast_ref::<AuthConnecting>()
+                {
                     if let Some(ref provider) = auth_connecting.auth_provider {
                         tracing::info!("Preserving auth provider from AuthConnecting");
                         self.preserved_auth_provider = Some(provider.clone_box());
                     }
-                } else if let Some(hello_connecting) = self.current_state.as_any().downcast_ref::<HelloConnecting>() {
+                } else if let Some(hello_connecting) = self
+                    .current_state
+                    .as_any()
+                    .downcast_ref::<HelloConnecting>()
+                {
                     if let Some(ref provider) = hello_connecting.auth_provider {
                         tracing::info!("Preserving auth provider from HelloConnecting");
                         self.preserved_auth_provider = Some(provider.clone_box());

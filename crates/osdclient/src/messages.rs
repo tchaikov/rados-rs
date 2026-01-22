@@ -219,19 +219,36 @@ pub struct MOSDOpReply {
     pub version: u64,
     pub user_version: u64,
     pub ops: Vec<OpReply>,
-    pub reqid: RequestId,
 }
 
 impl MOSDOpReply {
     /// Decode the message from bytes (v8 format)
     ///
-    /// This implements a simplified v8 decoding format for MOSDOpReply.
+    /// This implements v8 decoding format for MOSDOpReply.
+    /// Reference: ~/dev/ceph/src/messages/MOSDOpReply.h lines 199-230
     pub fn decode(mut data: &[u8]) -> Result<Self> {
         if data.remaining() < 16 {
             return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
         }
 
-        // 1. object (hobject_t) - simplified
+        // According to MOSDOpReply.h line 200, the encoding is:
+        // encode(oid, payload);
+        // encode(pgid, payload);
+        // encode(flags, payload);
+        // encode(result, payload);
+        // encode(bad_replay_version, payload);
+        // encode(osdmap_epoch, payload);
+        // encode(num_ops, payload);
+        // for each op: encode(ops[i].op, payload);
+        // encode(retry_attempt, payload);
+        // for each op: encode(ops[i].rval, payload);
+        // encode(replay_version, payload);
+        // encode(user_version, payload);
+        // encode(do_redirect, payload);
+        // if do_redirect: encode(redirect, payload);
+        // encode_trace(payload, features);
+
+        // 1. oid (object_t) - just the name as a string
         let oid_len = data.get_u32_le() as usize;
         if data.remaining() < oid_len {
             return Err(OSDClientError::Decoding("Incomplete object name".into()));
@@ -241,86 +258,115 @@ impl MOSDOpReply {
             .map_err(|e| OSDClientError::Decoding(format!("Invalid UTF-8: {}", e)))?;
         data.advance(oid_len);
 
-        let pool = data.get_i64_le();
-        let hash = data.get_u32_le();
-        let snap = data.get_u64_le();
-
-        // namespace and key (simplified - assume empty for now)
-        let namespace = String::new();
-        let key = String::new();
-
-        let object = ObjectId {
-            pool,
-            oid,
-            snap,
-            hash,
-            namespace,
-            key,
-        };
-
-        // 2. pgid (spg_t)
+        // 2. pgid (pg_t) - has version byte + pool (int64_t) + seed (uint32_t) + preferred (int32_t)
+        // Reference: ~/dev/linux/include/linux/ceph/osdmap.h ceph_decode_pgid()
+        let pg_version = data.get_u8();
+        if pg_version > 1 {
+            return Err(OSDClientError::Decoding(format!(
+                "Unknown pg_t version: {}",
+                pg_version
+            )));
+        }
         let pg_pool = data.get_i64_le();
         let pg_seed = data.get_u32_le();
-        let pg_shard = data.get_i8();
+        let _pg_preferred = data.get_i32_le(); // deprecated
+
         let pgid = StripedPgId {
             pool: pg_pool,
             seed: pg_seed,
-            shard: pg_shard,
+            shard: -1, // Not in pg_t, only in spg_t
         };
 
-        // 3. flags
-        let flags = data.get_u32_le();
+        // 3. flags (int64_t)
+        let flags = data.get_i64_le() as u32;
 
-        // 4. result
+        // 4. result (errorcode32_t = int32_t)
         let result = data.get_i32_le();
 
-        // 5. epoch
+        // 5. bad_replay_version (eversion_t = epoch + version)
+        let _bad_replay_epoch = data.get_u32_le();
+        let _bad_replay_version = data.get_u64_le();
+
+        // 6. osdmap_epoch (epoch_t = u32)
         let epoch = data.get_u32_le();
 
-        // 6. version
-        let version = data.get_u64_le();
+        // 7. num_ops (u32)
+        let num_ops = data.get_u32_le() as usize;
 
-        // 7. user_version
-        let user_version = data.get_u64_le();
+        // 8. For each op: osd_op structure
+        // osd_op is defined in rados.h and has a fixed size
+        // struct ceph_osd_op {
+        //   __le16 op;           /* CEPH_OSD_OP_* */
+        //   __le32 flags;        /* CEPH_OSD_OP_FLAG_* */
+        //   union {
+        //     ... various 32-byte unions ...
+        //   } __attribute__ ((packed));
+        //   __le32 payload_len;
+        // } __attribute__ ((packed));
+        // Total size: 2 + 4 + 32 + 4 = 42 bytes (not 48!)
 
-        // 8. reqid
-        let entity_len = data.get_u32_le() as usize;
-        if data.remaining() < entity_len {
-            return Err(OSDClientError::Decoding("Incomplete entity name".into()));
-        }
-        let entity_bytes = &data[..entity_len];
-        let entity_name = String::from_utf8(entity_bytes.to_vec())
-            .map_err(|e| OSDClientError::Decoding(format!("Invalid UTF-8: {}", e)))?;
-        data.advance(entity_len);
-
-        let inc = data.get_i32_le();
-        let tid = data.get_u64_le();
-        let reqid = RequestId {
-            entity_name,
-            tid,
-            inc,
-        };
-
-        // 9. operations
-        let num_ops = data.get_u16_le() as usize;
-        let mut ops = Vec::with_capacity(num_ops);
-
-        for _ in 0..num_ops {
-            let return_code = data.get_i32_le();
-            let outdata_len = data.get_u32_le() as usize;
-
-            if data.remaining() < outdata_len {
-                return Err(OSDClientError::Decoding("Incomplete outdata".into()));
+        for i in 0..num_ops {
+            if data.remaining() < 44 {
+                return Err(OSDClientError::Decoding(format!(
+                    "Incomplete osd_op {}: need 44 bytes, have {}",
+                    i,
+                    data.remaining()
+                )));
             }
+            // Skip the osd_op structure (44 bytes based on ceph_osd_op)
+            data.advance(44);
+        }
 
-            let outdata = Bytes::copy_from_slice(&data[..outdata_len]);
-            data.advance(outdata_len);
+        // 9. retry_attempt (int32_t)
+        let _retry_attempt = data.get_i32_le();
+
+        // 10. For each op: rval (int32_t)
+        let mut ops = Vec::with_capacity(num_ops);
+        for i in 0..num_ops {
+            if data.remaining() < 4 {
+                return Err(OSDClientError::Decoding(format!(
+                    "Incomplete rval {}: need 4 bytes, have {}",
+                    i,
+                    data.remaining()
+                )));
+            }
+            let return_code = data.get_i32_le();
 
             ops.push(OpReply {
                 return_code,
-                outdata,
+                outdata: Bytes::new(), // Will be filled from data section
             });
         }
+
+        // 11. replay_version (eversion_t)
+        let _replay_epoch = data.get_u32_le();
+        let version = data.get_u64_le();
+
+        // 12. user_version (version_t = u64)
+        let user_version = data.get_u64_le();
+
+        // 13. do_redirect (bool)
+        let do_redirect = data.get_u8() != 0;
+
+        // 14. If do_redirect: redirect structure (skip for now)
+        if do_redirect {
+            // FIXME: properly decode request_redirect_t
+            return Err(OSDClientError::Decoding(
+                "Redirect not supported yet".into(),
+            ));
+        }
+
+        // 15. trace (skip for now)
+        // FIXME: decode trace if needed
+
+        let object = ObjectId {
+            pool: pg_pool,
+            oid,
+            snap: 0,
+            hash: 0,
+            namespace: String::new(),
+            key: String::new(),
+        };
 
         Ok(Self {
             object,
@@ -331,7 +377,6 @@ impl MOSDOpReply {
             version,
             user_version,
             ops,
-            reqid,
         })
     }
 

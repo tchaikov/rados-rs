@@ -961,7 +961,10 @@ impl Connection {
         // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message);
 
-        eprintln!("DEBUG: Created frame with {} segments", frame.segments.len());
+        eprintln!(
+            "DEBUG: Created frame with {} segments",
+            frame.segments.len()
+        );
         for (i, seg) in frame.segments.iter().enumerate() {
             eprintln!("DEBUG:   Segment {}: {} bytes", i, seg.len());
         }

@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1️⃣  Connecting to monitor...");
     let mon_config = monclient::MonClientConfig {
         entity_name: "client.admin".to_string(),
-        mon_addrs: vec!["v2:192.168.1.37:40545".to_string()],
+        mon_addrs: vec!["v2:192.168.1.37:40603".to_string()],
         keyring_path: "/home/kefu/dev/ceph/build/keyring".to_string(),
         ..Default::default()
     };
@@ -60,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 4. Write data
     println!("4️⃣  Writing object...");
-    let pool = 1; // Usually pool 1 is the default data pool
+    let pool = 2; // Pool 2 is the 'test' pool in local cluster
     let oid = "example_object";
     let data = Bytes::from("Hello RADOS!");
 

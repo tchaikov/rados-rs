@@ -49,16 +49,13 @@ impl ObjectId {
         }
     }
 
-    /// Calculate the hash for CRUSH placement
-    /// This is a simplified version - in production we'd use Ceph's hash function
+    /// Calculate the hash for CRUSH placement using Ceph's rjenkins hash
     pub fn calculate_hash(&mut self) {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use crush::hash::ceph_str_hash_rjenkins;
 
-        let mut hasher = DefaultHasher::new();
-        self.oid.hash(&mut hasher);
-        self.namespace.hash(&mut hasher);
-        self.hash = hasher.finish() as u32;
+        // Hash the object name using Ceph's rjenkins hash function
+        // This matches the behavior of ceph_str_hash_rjenkins() in Ceph
+        self.hash = ceph_str_hash_rjenkins(self.oid.as_bytes());
     }
 }
 

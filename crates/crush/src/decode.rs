@@ -61,7 +61,7 @@ impl CrushMap {
 
         // Decode rules
         map.rules = Vec::with_capacity(max_rules as usize);
-        for i in 0..max_rules {
+        for _i in 0..max_rules {
             let exists = data.get_u32_le();
             if exists == 0 {
                 map.rules.push(None);

@@ -56,6 +56,11 @@ impl Message {
         self
     }
 
+    pub fn with_version(mut self, version: u16) -> Self {
+        self.header.version = version;
+        self
+    }
+
     pub fn encode(&self, dst: &mut BytesMut) -> Result<()> {
         // Calculate total message size
         let front_len = self.front.len() as u32;

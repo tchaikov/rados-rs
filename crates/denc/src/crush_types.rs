@@ -57,36 +57,42 @@ impl VersionedEncode for crush::ObjectLocator {
         struct_v: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // We only support v2+ for now
-        if struct_v < 2 {
-            return Err(RadosError::Protocol(format!(
-                "ObjectLocator: unsupported old version {}",
-                struct_v
-            )));
-        }
+        // Decode pool and preferred fields (format changed in v2)
+        let pool_id = if struct_v < 2 {
+            // Old format: int32_t pool, int16_t preferred
+            let op = i32::decode(buf, features)?;
+            let _pref = i16::decode(buf, features)?;
+            op as i64
+        } else {
+            // New format: int64_t pool, int32_t preferred
+            let pool = i64::decode(buf, features)?;
+            let _preferred = i32::decode(buf, features)?;
+            pool
+        };
 
-        // Decode pool_id
-        let pool_id = i64::decode(buf, features)?;
-
-        // Decode and ignore preferred field
-        let _preferred = i32::decode(buf, features)?;
-
-        // Decode key
+        // Decode key (present in all versions)
         let key = String::decode(buf, features)?;
 
-        // Decode namespace (if v >= 5)
+        // Decode namespace (added in v5)
         let namespace = if struct_v >= 5 {
             String::decode(buf, features)?
         } else {
             String::new()
         };
 
-        // Decode hash (if v >= 6)
+        // Decode hash (added in v6)
         let hash = if struct_v >= 6 {
             i64::decode(buf, features)?
         } else {
             -1
         };
+
+        // Verify that nobody's corrupted the locator (hash == -1 OR key is empty)
+        if hash != -1 && !key.is_empty() {
+            return Err(RadosError::Protocol(
+                "ObjectLocator: cannot have both hash and key set".into(),
+            ));
+        }
 
         Ok(Self {
             pool_id,

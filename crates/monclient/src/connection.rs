@@ -97,11 +97,14 @@ impl MonConnection {
             eprintln!("DEBUG: Retrieved auth provider from connection after authentication");
             tracing::info!("Retrieved auth provider from connection after authentication");
             // Downcast to MonitorAuthProvider
-            provider.as_any().downcast_ref::<auth::MonitorAuthProvider>().map(|mon_auth| {
-                eprintln!("DEBUG: Successfully downcast to MonitorAuthProvider");
-                tracing::info!("Successfully downcast to MonitorAuthProvider");
-                mon_auth.clone()
-            })
+            provider
+                .as_any()
+                .downcast_ref::<auth::MonitorAuthProvider>()
+                .map(|mon_auth| {
+                    eprintln!("DEBUG: Successfully downcast to MonitorAuthProvider");
+                    tracing::info!("Successfully downcast to MonitorAuthProvider");
+                    mon_auth.clone()
+                })
         });
 
         if auth_provider.is_none() {
@@ -221,7 +224,10 @@ impl MonConnection {
     /// obtained during monitor authentication. Returns None if no authentication
     /// was used (no-auth cluster).
     pub fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
-        eprintln!("DEBUG: create_service_auth_provider called, auth_provider.is_some() = {}", self.auth_provider.is_some());
+        eprintln!(
+            "DEBUG: create_service_auth_provider called, auth_provider.is_some() = {}",
+            self.auth_provider.is_some()
+        );
         self.auth_provider.as_ref().map(|mon_auth| {
             eprintln!("DEBUG: Creating ServiceAuthProvider from MonitorAuthProvider");
             auth::ServiceAuthProvider::from_authenticated_handler(mon_auth.handler().clone())

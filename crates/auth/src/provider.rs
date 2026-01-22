@@ -205,7 +205,12 @@ impl ServiceAuthProvider {
                 );
             }
         }
-        Self { handler, authorizer_sent: false, server_challenge: None, service_id: None }
+        Self {
+            handler,
+            authorizer_sent: false,
+            server_challenge: None,
+            service_id: None,
+        }
     }
 
     /// Get the underlying CephX handler
@@ -235,7 +240,9 @@ impl AuthProvider for ServiceAuthProvider {
         self.service_id = Some(service_id);
 
         // Build authorizer from existing tickets, including server_challenge if we have it
-        let result = self.handler.build_authorizer(service_id, global_id, self.server_challenge);
+        let result = self
+            .handler
+            .build_authorizer(service_id, global_id, self.server_challenge);
         if let Err(ref e) = result {
             eprintln!("DEBUG: build_authorizer failed: {:?}", e);
         } else {
@@ -256,11 +263,20 @@ impl AuthProvider for ServiceAuthProvider {
         eprintln!("DEBUG:   payload length: {}", payload.len());
         eprintln!("DEBUG:   global_id: {}", global_id);
         eprintln!("DEBUG:   con_mode: {} (0=CRC, 1=SECURE)", con_mode);
-        eprintln!("DEBUG:   payload hex (first 64 bytes): {}",
-            payload.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+        eprintln!(
+            "DEBUG:   payload hex (first 64 bytes): {}",
+            payload
+                .iter()
+                .take(64)
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join("")
+        );
 
-        debug!("ServiceAuthProvider::handle_auth_response: payload={} bytes",
-            payload.len());
+        debug!(
+            "ServiceAuthProvider::handle_auth_response: payload={} bytes",
+            payload.len()
+        );
 
         // For authorizer-based auth, the first AUTH_REPLY_MORE contains an encrypted
         // CephXAuthorizeReply with server_challenge. We need to decrypt it and
@@ -277,10 +293,19 @@ impl AuthProvider for ServiceAuthProvider {
             })?;
 
             // Decrypt and extract server_challenge
-            match self.handler.decrypt_authorize_challenge(service_id, &payload) {
+            match self
+                .handler
+                .decrypt_authorize_challenge(service_id, &payload)
+            {
                 Ok(server_challenge) => {
-                    eprintln!("DEBUG: Successfully extracted server_challenge: 0x{:016x}", server_challenge);
-                    debug!("Successfully extracted server_challenge: 0x{:016x}", server_challenge);
+                    eprintln!(
+                        "DEBUG: Successfully extracted server_challenge: 0x{:016x}",
+                        server_challenge
+                    );
+                    debug!(
+                        "Successfully extracted server_challenge: 0x{:016x}",
+                        server_challenge
+                    );
 
                     // Store the challenge for the next authorizer
                     self.server_challenge = Some(server_challenge);
@@ -297,25 +322,38 @@ impl AuthProvider for ServiceAuthProvider {
             }
         }
 
-        info!("AUTH_DONE received for OSD: global_id={}, con_mode={}", global_id, con_mode);
+        info!(
+            "AUTH_DONE received for OSD: global_id={}, con_mode={}",
+            global_id, con_mode
+        );
 
         // Get the session key for this service from the ticket handler
         let session_key = if let Some(session) = self.handler.get_session() {
             // Get the OSD ticket handler (service_id = 4)
-            session.ticket_handlers.get(&4)
+            session
+                .ticket_handlers
+                .get(&4)
                 .map(|handler| handler.session_key.clone())
         } else {
             None
         };
 
-        eprintln!("DEBUG: Returning session_key: {} bytes",
-            session_key.as_ref().map(|k| k.get_secret().len()).unwrap_or(0));
+        eprintln!(
+            "DEBUG: Returning session_key: {} bytes",
+            session_key
+                .as_ref()
+                .map(|k| k.get_secret().len())
+                .unwrap_or(0)
+        );
 
         // For SECURE mode (con_mode >= 1), extract connection_secret from AUTH_DONE payload
         // For authorizer-based auth (OSDs), AUTH_DONE contains encrypted CephXAuthorizeReply
         // The reply contains: struct_v (u8) + nonce_plus_one (u64) + connection_secret (u32 len + bytes)
         let connection_secret = if con_mode >= 1 && !payload.is_empty() {
-            eprintln!("DEBUG: Extracting connection_secret from AUTH_DONE payload (con_mode={})", con_mode);
+            eprintln!(
+                "DEBUG: Extracting connection_secret from AUTH_DONE payload (con_mode={})",
+                con_mode
+            );
 
             // Decrypt the AUTH_DONE payload using the service's session key
             // The payload is encrypted with the session key we got from the ticket
@@ -328,14 +366,30 @@ impl AuthProvider for ServiceAuthProvider {
                 if buf.remaining() >= encrypted_len {
                     let encrypted_data = buf.copy_to_bytes(encrypted_len);
 
-                    eprintln!("DEBUG: Decrypting AUTH_DONE: encrypted_len={}", encrypted_len);
+                    eprintln!(
+                        "DEBUG: Decrypting AUTH_DONE: encrypted_len={}",
+                        encrypted_len
+                    );
 
                     // Decrypt using the session key (AES-CBC with fixed IV)
-                    match crate::client::CephXClientHandler::decrypt_with_key(sess_key, &encrypted_data) {
+                    match crate::client::CephXClientHandler::decrypt_with_key(
+                        sess_key,
+                        &encrypted_data,
+                    ) {
                         Ok(decrypted) => {
-                            eprintln!("DEBUG: Successfully decrypted AUTH_DONE: {} bytes", decrypted.len());
-                            eprintln!("DEBUG: Decrypted hex (first 64 bytes): {}",
-                                decrypted.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                            eprintln!(
+                                "DEBUG: Successfully decrypted AUTH_DONE: {} bytes",
+                                decrypted.len()
+                            );
+                            eprintln!(
+                                "DEBUG: Decrypted hex (first 64 bytes): {}",
+                                decrypted
+                                    .iter()
+                                    .take(64)
+                                    .map(|b| format!("{:02x}", b))
+                                    .collect::<Vec<_>>()
+                                    .join("")
+                            );
 
                             // The decrypted data contains:
                             // 1. ceph_x_encrypt_header (9 bytes):
@@ -355,7 +409,10 @@ impl AuthProvider for ServiceAuthProvider {
                                 // Skip encryption header (struct_v + magic)
                                 let enc_struct_v = dec_buf.get_u8();
                                 let magic = dec_buf.get_u64_le();
-                                eprintln!("DEBUG: Encryption header: struct_v={}, magic=0x{:016x}", enc_struct_v, magic);
+                                eprintln!(
+                                    "DEBUG: Encryption header: struct_v={}, magic=0x{:016x}",
+                                    enc_struct_v, magic
+                                );
 
                                 // Validate magic number (CEPHX_ENC_MAGIC = 0xff009cad8826aa55)
                                 const CEPHX_ENC_MAGIC: u64 = 0xff009cad8826aa55;
@@ -369,7 +426,8 @@ impl AuthProvider for ServiceAuthProvider {
                                 }
 
                                 // Now parse the actual CephXAuthorizeReply
-                                if dec_buf.remaining() < 9 {  // struct_v (1) + nonce_plus_one (8)
+                                if dec_buf.remaining() < 9 {
+                                    // struct_v (1) + nonce_plus_one (8)
                                     eprintln!("DEBUG: Not enough bytes for CephXAuthorizeReply");
                                     None
                                 } else {
@@ -382,13 +440,30 @@ impl AuthProvider for ServiceAuthProvider {
                                     // Some servers might still include it
                                     if dec_buf.remaining() >= 4 {
                                         let con_secret_len = dec_buf.get_u32_le() as usize;
-                                        eprintln!("DEBUG: connection_secret length: {} (struct_v={})", con_secret_len, struct_v);
+                                        eprintln!(
+                                            "DEBUG: connection_secret length: {} (struct_v={})",
+                                            con_secret_len, struct_v
+                                        );
 
-                                        if con_secret_len > 0 && con_secret_len <= 256 && dec_buf.remaining() >= con_secret_len {
-                                            let connection_secret_bytes = dec_buf.copy_to_bytes(con_secret_len);
-                                            eprintln!("DEBUG: Extracted connection_secret: {} bytes", connection_secret_bytes.len());
-                                            eprintln!("DEBUG: Connection_secret hex: {}",
-                                                connection_secret_bytes.iter().take(64).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+                                        if con_secret_len > 0
+                                            && con_secret_len <= 256
+                                            && dec_buf.remaining() >= con_secret_len
+                                        {
+                                            let connection_secret_bytes =
+                                                dec_buf.copy_to_bytes(con_secret_len);
+                                            eprintln!(
+                                                "DEBUG: Extracted connection_secret: {} bytes",
+                                                connection_secret_bytes.len()
+                                            );
+                                            eprintln!(
+                                                "DEBUG: Connection_secret hex: {}",
+                                                connection_secret_bytes
+                                                    .iter()
+                                                    .take(64)
+                                                    .map(|b| format!("{:02x}", b))
+                                                    .collect::<Vec<_>>()
+                                                    .join("")
+                                            );
 
                                             Some(connection_secret_bytes)
                                         } else {
@@ -416,16 +491,25 @@ impl AuthProvider for ServiceAuthProvider {
                 None
             }
         } else {
-            eprintln!("DEBUG: Skipping connection_secret extraction (con_mode={}, payload empty={})", con_mode, payload.is_empty());
+            eprintln!(
+                "DEBUG: Skipping connection_secret extraction (con_mode={}, payload empty={})",
+                con_mode,
+                payload.is_empty()
+            );
             None
         };
 
-        eprintln!("DEBUG: Returning connection_secret: {} bytes",
-            connection_secret.as_ref().map(|c| c.len()).unwrap_or(0));
+        eprintln!(
+            "DEBUG: Returning connection_secret: {} bytes",
+            connection_secret.as_ref().map(|c| c.len()).unwrap_or(0)
+        );
 
         // Return the session key so AUTH_SIGNATURE can be computed
         // Also return connection_secret for SECURE mode
-        Ok((session_key.map(|k| bytes::Bytes::copy_from_slice(k.get_secret())), connection_secret))
+        Ok((
+            session_key.map(|k| bytes::Bytes::copy_from_slice(k.get_secret())),
+            connection_secret,
+        ))
     }
 
     fn has_valid_ticket(&self, service_id: u32) -> bool {

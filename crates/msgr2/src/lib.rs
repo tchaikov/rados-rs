@@ -333,7 +333,10 @@ impl ConnectionConfig {
     }
 
     /// Create config with authentication provider and service ID
-    pub fn with_auth_provider_and_service(provider: Box<dyn auth::AuthProvider>, service_id: u32) -> Self {
+    pub fn with_auth_provider_and_service(
+        provider: Box<dyn auth::AuthProvider>,
+        service_id: u32,
+    ) -> Self {
         Self {
             supported_auth_methods: vec![AuthMethod::Cephx],
             auth_provider: Some(provider),
