@@ -945,7 +945,7 @@ impl CephXClientHandler {
 
     /// Decrypt data using AES-128-CBC with the given key
     /// Ceph uses a fixed IV: "cephsageyudagreg"
-    fn decrypt_with_key(key: &CryptoKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
+    pub fn decrypt_with_key(key: &CryptoKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
         use aes::Aes128;
         use cbc::cipher::{BlockDecryptMut, KeyIvInit};
         use cbc::Decryptor;

@@ -1735,10 +1735,19 @@ impl StateMachine {
 
     /// Decrypt frame data if in SECURE mode
     pub fn decrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
+        eprintln!("DEBUG: decrypt_frame_data called, has_decryptor={}, data_len={}",
+            self.frame_decryptor.is_some(), data.len());
         if let Some(decryptor) = &mut self.frame_decryptor {
-            decryptor
+            eprintln!("DEBUG: Attempting AES-GCM decryption of {} bytes", data.len());
+            let result = decryptor
                 .decrypt(data)
-                .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)))
+                .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)));
+            if let Err(ref e) = result {
+                eprintln!("DEBUG: Decryption FAILED: {:?}", e);
+            } else {
+                eprintln!("DEBUG: Decryption SUCCESS");
+            }
+            result
         } else {
             // No encryption, return as-is
             Ok(Bytes::copy_from_slice(data))

@@ -239,6 +239,10 @@ impl FrameIO {
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
                 tracing::debug!("Successfully read preamble block");
+                eprintln!("DEBUG: recv_frame read {} bytes, has_encryption={}, first 32 bytes: {}",
+                    preamble_block_buf.len(),
+                    has_encryption,
+                    preamble_block_buf.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
             }
             Err(e) => {
                 tracing::error!("Failed to read preamble block: {:?}", e);
@@ -284,6 +288,8 @@ impl FrameIO {
             .collect::<Vec<_>>()
             .join("");
         tracing::debug!("Raw preamble hex: {}", preamble_hex);
+        eprintln!("DEBUG: Decoded preamble: tag={:?} (raw=0x{:02x}), num_segments={}",
+            preamble.tag, preamble_bytes[0], preamble.num_segments);
         tracing::debug!(
             "Preamble: tag={:?} (raw={}), num_segments={}, segments={:?}",
             preamble.tag,
