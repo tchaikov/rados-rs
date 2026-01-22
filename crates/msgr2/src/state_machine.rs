@@ -675,6 +675,7 @@ impl State for AuthConnecting {
                                 global_id,
                                 denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
                                 denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
+                                0, // Placeholder, will be replaced with actual peer_supported_features
                             ),
                         )))
                     }
@@ -745,6 +746,8 @@ pub struct AuthConnectingSign {
     pub server_addr: denc::EntityAddr,
     /// Our own client address
     pub client_addr: denc::EntityAddr,
+    /// Peer supported features (to check for compression support)
+    pub peer_supported_features: u64,
 }
 
 /// Compression Connecting state - negotiate compression after AUTH_SIGNATURE
@@ -883,6 +886,7 @@ impl AuthConnectingSign {
         global_id: u64,
         server_addr: denc::EntityAddr,
         client_addr: denc::EntityAddr,
+        peer_supported_features: u64,
     ) -> Self {
         Self {
             connection_mode,
@@ -893,6 +897,7 @@ impl AuthConnectingSign {
             global_id,
             server_addr,
             client_addr,
+            peer_supported_features,
         }
     }
 }
@@ -911,8 +916,10 @@ impl State for AuthConnectingSign {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+        eprintln!("DEBUG: AuthConnectingSign::handle_frame received tag: {:?}", frame.preamble.tag);
         match frame.preamble.tag {
             Tag::AuthSignature => {
+                eprintln!("DEBUG: Received AUTH_SIGNATURE from server");
                 // Verify server's AUTH_SIGNATURE
                 if let Some(ref expected_sig) = self.expected_server_signature {
                     // Extract server's signature from frame payload
@@ -948,18 +955,36 @@ impl State for AuthConnectingSign {
                     );
                 }
 
-                // After verification, transition to COMPRESSION_CONNECTING for compression negotiation
-                tracing::debug!("Transitioning to COMPRESSION_CONNECTING");
-                Ok(StateResult::Transition(Box::new(
-                    CompressionConnecting::new_with_encryption(
-                        self.connection_mode,
-                        self.session_key.clone(),
-                        self.connection_secret.clone(),
-                        self.global_id,
-                        self.server_addr.clone(),
-                        self.client_addr.clone(),
-                    ),
-                )))
+                // After verification, transition based on compression support
+                eprintln!("DEBUG: peer_supported_features = 0x{:x}", self.peer_supported_features);
+                if crate::has_msgr2_feature(self.peer_supported_features, crate::MSGR2_FEATURE_COMPRESSION) {
+                    tracing::debug!("Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING");
+                    eprintln!("DEBUG: Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING");
+                    Ok(StateResult::Transition(Box::new(
+                        CompressionConnecting::new_with_encryption(
+                            self.connection_mode,
+                            self.session_key.clone(),
+                            self.connection_secret.clone(),
+                            self.global_id,
+                            self.server_addr.clone(),
+                            self.client_addr.clone(),
+                        ),
+                    )))
+                } else {
+                    tracing::debug!("Peer does not support COMPRESSION, transitioning directly to SESSION_CONNECTING");
+                    eprintln!("DEBUG: Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
+                    Ok(StateResult::Transition(Box::new(
+                        SessionConnecting::new_with_encryption(
+                            self.connection_mode,
+                            self.session_key.clone(),
+                            self.connection_secret.clone(),
+                            None, // No expected signature needed anymore
+                            self.global_id,
+                            self.server_addr.clone(),
+                            self.client_addr.clone(),
+                        ),
+                    )))
+                }
             }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in AUTH_CONNECTING_SIGN state",
@@ -970,6 +995,11 @@ impl State for AuthConnectingSign {
 
     fn enter(&mut self) -> Result<StateResult> {
         // Send AUTH_SIGNATURE frame with pre-computed HMAC-SHA256 signature
+        eprintln!("DEBUG: AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
+        eprintln!("DEBUG:   signature length: {} bytes", self.our_signature.len());
+        eprintln!("DEBUG:   signature hex (first 32 bytes): {}",
+            self.our_signature.iter().take(32).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+
         let auth_sig_frame = AuthSignatureFrame::new(self.our_signature.clone());
         let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature);
 
@@ -989,6 +1019,7 @@ impl State for AuthConnectingSign {
                 self.global_id,
                 self.server_addr.clone(),
                 self.client_addr.clone(),
+                self.peer_supported_features,
             )),
         })
     }
@@ -1929,6 +1960,7 @@ impl StateMachine {
                         global_id,
                         server_addr,
                         client_addr,
+                        self.peer_supported_features,
                     ));
 
                     self.current_state = new_state_with_sig;
