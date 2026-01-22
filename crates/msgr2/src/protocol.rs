@@ -203,8 +203,15 @@ impl FrameIO {
             );
         }
 
+        eprintln!("DEBUG: About to write_all {} bytes for frame tag={:?}", final_bytes.len(), frame.preamble.tag);
+        if frame.preamble.tag == Tag::ClientIdent {
+            eprintln!("DEBUG: CLIENT_IDENT hex (first 128 bytes): {}",
+                final_bytes.iter().take(128).map(|b| format!("{:02x}", b)).collect::<Vec<_>>().join(""));
+        }
         self.stream.write_all(&final_bytes).await?;
+        eprintln!("DEBUG: write_all succeeded, flushing...");
         self.stream.flush().await?;
+        eprintln!("DEBUG: flush succeeded for tag={:?}", frame.preamble.tag);
         Ok(())
     }
 
@@ -214,7 +221,9 @@ impl FrameIO {
     /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
     /// - Reads remaining encrypted payload if needed
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
+        eprintln!("DEBUG: recv_frame called");
         let has_encryption = state_machine.has_encryption();
+        eprintln!("DEBUG: recv_frame: has_encryption={}", has_encryption);
 
         // Read preamble block
         let preamble_block_size = if has_encryption {

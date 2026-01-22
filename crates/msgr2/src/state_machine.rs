@@ -1111,6 +1111,7 @@ impl State for SessionConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+        eprintln!("DEBUG: SessionConnecting::handle_frame received tag: {:?}", frame.preamble.tag);
         match frame.preamble.tag {
             Tag::ServerIdent => {
                 // Parse SERVER_IDENT frame
@@ -1256,6 +1257,10 @@ impl State for SessionConnecting {
     }
 
     fn enter(&mut self) -> Result<StateResult> {
+        eprintln!("DEBUG: SessionConnecting::enter() called");
+        eprintln!("DEBUG:   our_global_id={}", self.our_global_id);
+        eprintln!("DEBUG:   connection_mode={}", self.connection_mode);
+        eprintln!("DEBUG:   has_connection_secret={}", self.connection_secret.is_some());
         // Send CLIENT_IDENT frame with proper values
         // Use our real client address from the connection
         // Note: EntityAddrvec now includes marker byte (0x02) in encoding
@@ -1306,6 +1311,16 @@ impl State for SessionConnecting {
         );
         let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
 
+        eprintln!("DEBUG: Created CLIENT_IDENT frame, {} segments", frame.segments.len());
+        eprintln!("DEBUG: CLIENT_IDENT values:");
+        eprintln!("DEBUG:   addrs: {:?}", addrs);
+        eprintln!("DEBUG:   target_addr: {:?}", target_addr);
+        eprintln!("DEBUG:   gid: {}", gid);
+        eprintln!("DEBUG:   global_seq: {}", 0);
+        eprintln!("DEBUG:   features_supported: 0x{:x}", features_supported);
+        eprintln!("DEBUG:   features_required: 0x{:x}", features_required);
+        eprintln!("DEBUG:   flags: 0x{:x}", flags);
+        eprintln!("DEBUG:   cookie: {}", cookie);
         // Log the exact bytes we're encoding for CLIENT_IDENT
         if !frame.segments.is_empty() {
             let payload_bytes = &frame.segments[0];
