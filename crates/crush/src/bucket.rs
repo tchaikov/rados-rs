@@ -66,27 +66,19 @@ fn crush_ln(xin: u32) -> u64 {
 /// Generate exponential distribution for Straw2
 /// Uses inversion method: -ln(U) / lambda where U is uniform random
 fn generate_exponential_distribution(_hash_type: u32, x: u32, y: i32, z: u32, weight: u32) -> i64 {
-    let hash_full = crush_hash32_3(x, y as u32, z);
-    let mut u = hash_full;
+    let mut u = crush_hash32_3(x, y as u32, z);
     u &= 0xffff;
-
-    eprintln!("RUST_CRUSH:     gen_exp_dist: x={}, y={}, z={}, weight=0x{:x}", x, y, z, weight);
-    eprintln!("RUST_CRUSH:       hash_full=0x{:x}, u=0x{:x}", hash_full, u);
 
     // Natural log lookup maps [0,0xffff] to [0, 0xffffffffffff]
     // corresponding to real numbers [-11.090355, 0]
     let ln = crush_ln(u) as i64 - 0x1000000000000i64;
-
-    eprintln!("RUST_CRUSH:       ln=0x{:x} ({})", ln as u64, ln);
 
     // Divide by 16.16 fixed-point weight
     // ln is negative, so larger weight means larger (less negative) draw
     if weight == 0 {
         i64::MIN
     } else {
-        let draw = ln / weight as i64;
-        eprintln!("RUST_CRUSH:       draw={}", draw);
-        draw
+        ln / weight as i64
     }
 }
 
