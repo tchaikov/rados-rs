@@ -111,7 +111,7 @@ impl MOSDOp {
         buf.put_u32_le(self.osdmap_epoch);
 
         // 4. flags
-        buf.put_u32_le(self.flags);
+        buf.put_i64_le(self.flags as i64);
 
         // 5. reqid (osd_reqid_t) - with version header (2,2)
         buf.put_u8(2); // struct_v
@@ -294,8 +294,8 @@ impl MOSDOpReply {
             shard: -1, // Not in pg_t, only in spg_t
         };
 
-        // 3. flags (u32)
-        let flags = front.get_u32_le();
+        // 3. flags (i64)
+        let flags = front.get_i64_le() as u32;
 
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
