@@ -143,6 +143,8 @@ pub struct CrushBucket {
     pub bucket_type: i32,
     /// Selection algorithm
     pub alg: BucketAlgorithm,
+    /// Hash function type (CRUSH_HASH_RJENKINS1 = 0)
+    pub hash: u8,
     /// Total weight (16.16 fixed-point)
     pub weight: u32,
     /// Number of items

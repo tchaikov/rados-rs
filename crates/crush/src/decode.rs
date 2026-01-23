@@ -125,7 +125,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     let id = data.get_i32_le();
     let bucket_type = data.get_u16_le();
     let alg_byte = data.get_u8();
-    let _hash = data.get_u8();
+    let hash = data.get_u8();
     let weight = data.get_u32_le();
     let size = data.get_u32_le();
 
@@ -219,6 +219,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
         id,
         bucket_type: bucket_type as i32,
         alg: algorithm,
+        hash,
         weight,
         size,
         items,

@@ -66,19 +66,27 @@ fn crush_ln(xin: u32) -> u64 {
 /// Generate exponential distribution for Straw2
 /// Uses inversion method: -ln(U) / lambda where U is uniform random
 fn generate_exponential_distribution(_hash_type: u32, x: u32, y: i32, z: u32, weight: u32) -> i64 {
-    let mut u = crush_hash32_3(x, y as u32, z);
+    let hash_full = crush_hash32_3(x, y as u32, z);
+    let mut u = hash_full;
     u &= 0xffff;
+
+    eprintln!("RUST_CRUSH:     gen_exp_dist: x={}, y={}, z={}, weight=0x{:x}", x, y, z, weight);
+    eprintln!("RUST_CRUSH:       hash_full=0x{:x}, u=0x{:x}", hash_full, u);
 
     // Natural log lookup maps [0,0xffff] to [0, 0xffffffffffff]
     // corresponding to real numbers [-11.090355, 0]
     let ln = crush_ln(u) as i64 - 0x1000000000000i64;
+
+    eprintln!("RUST_CRUSH:       ln=0x{:x} ({})", ln as u64, ln);
 
     // Divide by 16.16 fixed-point weight
     // ln is negative, so larger weight means larger (less negative) draw
     if weight == 0 {
         i64::MIN
     } else {
-        ln / weight as i64
+        let draw = ln / weight as i64;
+        eprintln!("RUST_CRUSH:       draw={}", draw);
+        draw
     }
 }
 
@@ -99,8 +107,8 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
 
     for (i, &weight) in weights.iter().enumerate().take(bucket.size as usize) {
         let draw = if weight > 0 {
-            // Hash type is typically 1 (RJENKINS1)
-            generate_exponential_distribution(1, x, bucket.items[i], r, weight)
+            // Use the hash type from the bucket
+            generate_exponential_distribution(bucket.hash as u32, x, bucket.items[i], r, weight)
         } else {
             i64::MIN
         };
@@ -241,6 +249,7 @@ mod tests {
             id: -1,
             bucket_type: 1,
             alg: BucketAlgorithm::Straw2,
+            hash: 0, // CRUSH_HASH_RJENKINS1
             weight: 0x20000, // 2.0 in 16.16 fixed point
             size: 3,
             items: vec![0, 1, 2],
@@ -270,6 +279,7 @@ mod tests {
             id: -1,
             bucket_type: 1,
             alg: BucketAlgorithm::Uniform,
+            hash: 0, // CRUSH_HASH_RJENKINS1
             weight: 0x30000,
             size: 3,
             items: vec![0, 1, 2],
@@ -290,6 +300,7 @@ mod tests {
             id: -1,
             bucket_type: 1,
             alg: BucketAlgorithm::Straw2,
+            hash: 0, // CRUSH_HASH_RJENKINS1
             weight: 0x20000,
             size: 2,
             items: vec![0, 1],

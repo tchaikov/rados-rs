@@ -374,6 +374,7 @@ mod tests {
             id: -1,
             bucket_type: 1, // Type 1 = host
             alg: BucketAlgorithm::Straw2,
+            hash: 0, // CRUSH_HASH_RJENKINS1
             weight: 0x20000,
             size: 2,
             items: vec![0, 1],
@@ -429,6 +430,7 @@ mod tests {
             id: -1,
             bucket_type: 1,
             alg: BucketAlgorithm::Straw2,
+            hash: 0, // CRUSH_HASH_RJENKINS1
             weight: 0x30000,
             size: 3,
             items: vec![0, 1, 2],
