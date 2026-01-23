@@ -185,6 +185,7 @@ pub fn pg_to_osds(
 ///
 /// # Returns
 /// Tuple of (PG ID, Vector of OSD IDs)
+#[allow(clippy::too_many_arguments)]
 pub fn object_to_osds(
     crush_map: &CrushMap,
     object_name: &str,

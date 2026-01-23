@@ -4,7 +4,7 @@
 //! inspects the encoded bytes to understand why certain lengths fail.
 
 use osdclient::messages::MOSDOp;
-use osdclient::types::{ObjectId, OSDOp, RequestId, StripedPgId};
+use osdclient::types::{OSDOp, ObjectId, RequestId, StripedPgId};
 
 #[test]
 fn test_encoding_different_name_lengths() {

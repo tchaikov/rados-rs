@@ -512,7 +512,7 @@ impl CephXClientHandler {
         // Check if session key is CEPH_CRYPTO_NONE (type 0, length 0)
         // This indicates a dummy/placeholder ticket with no actual ticket blob
         // This can happen for extra tickets that are not fully populated
-        if session_key.get_type() == 0 && session_key.len() == 0 {
+        if session_key.get_type() == 0 && session_key.is_empty() {
             debug!(
                 "Service {} has CEPH_CRYPTO_NONE session key, skipping ticket blob parsing",
                 service_id
