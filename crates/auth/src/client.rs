@@ -509,6 +509,24 @@ impl CephXClientHandler {
             Duration::from_secs(3600) // 1 hour
         };
 
+        // Check if session key is CEPH_CRYPTO_NONE (type 0, length 0)
+        // This indicates a dummy/placeholder ticket with no actual ticket blob
+        // This can happen for extra tickets that are not fully populated
+        if session_key.get_type() == 0 && session_key.len() == 0 {
+            debug!(
+                "Service {} has CEPH_CRYPTO_NONE session key, skipping ticket blob parsing",
+                service_id
+            );
+            // Return a minimal ticket with empty blob
+            return Ok((
+                service_id,
+                session_key,
+                0, // secret_id
+                CephXTicketBlob::new(0, Bytes::new()),
+                validity_duration,
+            ));
+        }
+
         // Read ticket_enc byte
         if auth_payload.is_empty() {
             return Err(CephXError::ProtocolError(
@@ -817,14 +835,8 @@ impl CephXClientHandler {
 
                     // Parse each extra ticket using the AUTH session key
                     for i in 0..extra_num_tickets {
-                        eprintln!(
-                            "DEBUG: Processing extra ticket {}/{}",
-                            i + 1,
-                            extra_num_tickets
-                        );
                         match self.parse_service_ticket(&mut extra_tickets_bl, &auth_session_key) {
                             Ok((service_id, session_key, secret_id, ticket_blob, validity)) => {
-                                eprintln!("DEBUG: Extra ticket for service {}", service_id);
                                 ticket_handlers.push((
                                     service_id,
                                     session_key,
@@ -834,7 +846,14 @@ impl CephXClientHandler {
                                 ));
                             }
                             Err(e) => {
-                                eprintln!("DEBUG: Failed to parse extra ticket {}: {:?}", i, e);
+                                // It's normal for the server to indicate more tickets than actually present
+                                // Just log and break when we run out of data
+                                debug!(
+                                    "Finished parsing extra tickets at {}/{}: {:?}",
+                                    i + 1,
+                                    extra_num_tickets,
+                                    e
+                                );
                                 break;
                             }
                         }

@@ -29,7 +29,7 @@ pub struct OSDClientConfig {
 impl Default for OSDClientConfig {
     fn default() -> Self {
         Self {
-            entity_name: "client.admin".to_string(),
+            entity_name: String::new(), // Must be provided by caller
             keyring_path: None,
             tracker_config: TrackerConfig::default(),
             client_inc: 0, // Match Linux kernel: always 0

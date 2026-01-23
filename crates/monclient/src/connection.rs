@@ -53,6 +53,7 @@ impl MonConnection {
         addr: SocketAddr,
         rank: usize,
         addrs: EntityAddrVec,
+        entity_name: String,
         keyring_path: Option<String>,
     ) -> Result<Self> {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
@@ -61,7 +62,7 @@ impl MonConnection {
         let config = if let Some(keyring) = keyring_path {
             // Load keyring and create auth provider
             let mut mon_auth =
-                auth::MonitorAuthProvider::new("client.admin".to_string()).map_err(|e| {
+                auth::MonitorAuthProvider::new(entity_name.clone()).map_err(|e| {
                     MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
                 })?;
             mon_auth

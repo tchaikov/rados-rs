@@ -43,9 +43,9 @@ pub struct MonClientConfig {
 impl Default for MonClientConfig {
     fn default() -> Self {
         Self {
-            entity_name: "client.admin".to_string(),
+            entity_name: String::new(), // Must be provided by caller
             mon_addrs: Vec::new(),
-            keyring_path: "/etc/ceph/ceph.client.admin.keyring".to_string(),
+            keyring_path: String::new(), // Must be provided by caller
             connect_timeout: Duration::from_secs(30),
             command_timeout: Duration::from_secs(60),
             hunt_interval: Duration::from_secs(3),
@@ -323,8 +323,16 @@ impl MonClient {
         };
 
         // Create actual msgr2 connection
-        let mon_con =
-            Arc::new(MonConnection::connect(socket_addr, rank, addrs, keyring_path).await?);
+        let mon_con = Arc::new(
+            MonConnection::connect(
+                socket_addr,
+                rank,
+                addrs,
+                self.config.entity_name.clone(),
+                keyring_path,
+            )
+            .await?,
+        );
 
         // Test if connection is alive by trying to get a lock
         {
