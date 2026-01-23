@@ -5,6 +5,7 @@
 
 // Core modules that work
 pub mod banner;
+pub mod ceph_message;
 pub mod crypto;
 pub mod error;
 pub mod frames;
