@@ -354,14 +354,7 @@ impl OSDClient {
 
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-
-        // TODO: TEMPORARY WORKAROUND - CRUSH returns [0,1,2] but Ceph expects [1,0,2] for this PG
-        // Need to investigate why CRUSH ordering differs from Ceph's
-        let primary_osd = if !osds.is_empty() && osds.contains(&1) {
-            1
-        } else {
-            osds[0]
-        };
+        let primary_osd = osds[0];
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -560,12 +553,25 @@ impl OSDClient {
         }
 
         // Parse stat data from outdata
-        // TODO: Proper parsing of stat structure
-        // For now, return simplified result
-        Ok(StatResult {
-            size: 0, // Would be parsed from outdata
-            mtime: std::time::SystemTime::now(),
-        })
+        // Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
+        use bytes::Buf;
+        let mut data = &stat_op.outdata[..];
+
+        if data.remaining() < 16 {
+            return Err(OSDClientError::Decoding(format!(
+                "Incomplete stat data: expected 16 bytes, got {}",
+                data.remaining()
+            )));
+        }
+
+        let size = data.get_u64_le();
+        let tv_sec = data.get_u32_le();
+        let tv_nsec = data.get_u32_le();
+
+        // Convert to SystemTime
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::new(tv_sec as u64, tv_nsec);
+
+        Ok(StatResult { size, mtime })
     }
 
     /// Delete an object

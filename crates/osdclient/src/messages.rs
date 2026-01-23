@@ -5,6 +5,7 @@
 use crate::error::{OSDClientError, Result};
 use crate::types::{OSDOp, ObjectId, OpReply, OpResult, RequestId, StripedPgId};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use tracing::debug;
 
 /// Message type for MOSDOp (Client to OSD)
 pub const CEPH_MSG_OSD_OP: u16 = 42;
@@ -228,6 +229,7 @@ pub struct MOSDOpReply {
     pub epoch: u32,
     pub version: u64,
     pub user_version: u64,
+    pub retry_attempt: i32,
     pub ops: Vec<OpReply>,
 }
 
@@ -236,8 +238,12 @@ impl MOSDOpReply {
     ///
     /// This implements v8 decoding format for MOSDOpReply.
     /// Reference: ~/dev/ceph/src/messages/MOSDOpReply.h lines 199-230
-    pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 16 {
+    ///
+    /// # Arguments
+    /// * `front` - The front (payload) section of the message
+    /// * `data` - The data section of the message (contains operation output data)
+    pub fn decode(mut front: &[u8], data: &[u8]) -> Result<Self> {
+        if front.remaining() < 16 {
             return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
         }
 
@@ -259,27 +265,28 @@ impl MOSDOpReply {
         // encode_trace(payload, features);
 
         // 1. oid (object_t) - just the name as a string
-        let oid_len = data.get_u32_le() as usize;
-        if data.remaining() < oid_len {
+        let oid_len = front.get_u32_le() as usize;
+        if front.remaining() < oid_len {
             return Err(OSDClientError::Decoding("Incomplete object name".into()));
         }
-        let oid_bytes = &data[..oid_len];
+        let oid_bytes = &front[..oid_len];
         let oid = String::from_utf8(oid_bytes.to_vec())
             .map_err(|e| OSDClientError::Decoding(format!("Invalid UTF-8: {}", e)))?;
-        data.advance(oid_len);
+        front.advance(oid_len);
 
         // 2. pgid (pg_t) - has version byte + pool (int64_t) + seed (uint32_t) + preferred (int32_t)
         // Reference: ~/dev/linux/include/linux/ceph/osdmap.h ceph_decode_pgid()
-        let pg_version = data.get_u8();
+        let pg_version = front.get_u8();
         if pg_version > 1 {
             return Err(OSDClientError::Decoding(format!(
                 "Unknown pg_t version: {}",
                 pg_version
             )));
         }
-        let pg_pool = data.get_i64_le();
-        let pg_seed = data.get_u32_le();
-        let _pg_preferred = data.get_i32_le(); // deprecated
+        let pg_pool = front.get_i64_le();
+        let pg_seed = front.get_u32_le();
+        // preferred field is deprecated and always -1 (kept for wire protocol compatibility)
+        let _pg_preferred = front.get_i32_le();
 
         let pgid = StripedPgId {
             pool: pg_pool,
@@ -288,20 +295,23 @@ impl MOSDOpReply {
         };
 
         // 3. flags (int64_t)
-        let flags = data.get_i64_le() as u32;
+        let flags = front.get_i64_le() as u32;
 
         // 4. result (errorcode32_t = int32_t)
-        let result = data.get_i32_le();
+        let result = front.get_i32_le();
 
         // 5. bad_replay_version (eversion_t = epoch + version)
-        let _bad_replay_epoch = data.get_u32_le();
-        let _bad_replay_version = data.get_u64_le();
+        // This is for backwards compatibility with old clients.
+        // Modern clients should use replay_version (our 'version' field) and user_version instead.
+        // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
+        let _bad_replay_epoch = front.get_u32_le();
+        let _bad_replay_version = front.get_u64_le();
 
         // 6. osdmap_epoch (epoch_t = u32)
-        let epoch = data.get_u32_le();
+        let epoch = front.get_u32_le();
 
         // 7. num_ops (u32)
-        let num_ops = data.get_u32_le() as usize;
+        let num_ops = front.get_u32_le() as usize;
 
         // 8. For each op: osd_op structure
         // osd_op is defined in rados.h and has a fixed size
@@ -316,59 +326,120 @@ impl MOSDOpReply {
         // Total size: 2 + 4 + 28 + 4 = 38 bytes
         // Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
 
+        // Parse osd_op structures to get payload lengths
+        let mut payload_lens = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
-            if data.remaining() < 38 {
+            if front.remaining() < 38 {
                 return Err(OSDClientError::Decoding(format!(
                     "Incomplete osd_op {}: need 38 bytes, have {}",
                     i,
-                    data.remaining()
+                    front.remaining()
                 )));
             }
-            // Skip the osd_op structure (38 bytes based on ceph_osd_op)
-            data.advance(38);
+            // Skip to payload_len field (at offset 34)
+            front.advance(34);
+            let payload_len = front.get_u32_le();
+            payload_lens.push(payload_len as usize);
         }
 
         // 9. retry_attempt (int32_t)
-        let _retry_attempt = data.get_i32_le();
+        // Used to validate that the reply matches the request attempt
+        // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
+        let retry_attempt = front.get_i32_le();
 
         // 10. For each op: rval (int32_t)
         let mut ops = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
-            if data.remaining() < 4 {
+            if front.remaining() < 4 {
                 return Err(OSDClientError::Decoding(format!(
                     "Incomplete rval {}: need 4 bytes, have {}",
                     i,
-                    data.remaining()
+                    front.remaining()
                 )));
             }
-            let return_code = data.get_i32_le();
+            let return_code = front.get_i32_le();
 
             ops.push(OpReply {
                 return_code,
-                outdata: Bytes::new(), // Will be filled from data section
+                outdata: Bytes::new(), // Will be filled from data section below
             });
         }
 
-        // 11. replay_version (eversion_t)
-        let _replay_epoch = data.get_u32_le();
-        let version = data.get_u64_le();
+        // 11. replay_version (eversion_t = epoch + version)
+        // The epoch part is not currently used since we track OSDMap epoch separately
+        let _replay_epoch = front.get_u32_le();
+        let version = front.get_u64_le();
 
         // 12. user_version (version_t = u64)
-        let user_version = data.get_u64_le();
+        let user_version = front.get_u64_le();
 
         // 13. do_redirect (bool)
-        let do_redirect = data.get_u8() != 0;
+        let do_redirect = front.get_u8() != 0;
 
-        // 14. If do_redirect: redirect structure (skip for now)
+        // 14. If do_redirect: redirect structure
         if do_redirect {
-            // FIXME: properly decode request_redirect_t
-            return Err(OSDClientError::Decoding(
-                "Redirect not supported yet".into(),
-            ));
+            // request_redirect_t encoding (v1):
+            // - struct_v (u8), struct_compat (u8), len (u32)
+            // - object_locator_t (redirect_locator)
+            // - string (redirect_object)
+            // - u32 (legacy field, always 0)
+
+            if front.remaining() < 6 {
+                return Err(OSDClientError::Decoding(
+                    "Incomplete redirect header".into(),
+                ));
+            }
+
+            // Version fields from ENCODE_START macro
+            // TODO: In production, should validate struct_v is compatible
+            let _struct_v = front.get_u8();
+            let _struct_compat = front.get_u8();
+            let redirect_len = front.get_u32_le();
+
+            if front.remaining() < redirect_len as usize {
+                return Err(OSDClientError::Decoding(format!(
+                    "Incomplete redirect data: expected {} bytes, got {}",
+                    redirect_len,
+                    front.remaining()
+                )));
+            }
+
+            // Skip the redirect data for now - we don't handle redirects yet
+            // In the future, we could parse and follow the redirect
+            front.advance(redirect_len as usize);
+
+            debug!("Received redirect response (not following redirect)");
         }
 
-        // 15. trace (skip for now)
-        // FIXME: decode trace if needed
+        // 15. trace (blkin_trace_info: 3 x i64)
+        // The trace is used for distributed tracing (Zipkin/Jaeger)
+        // These fields could be exposed in the future for observability/debugging
+        // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
+        if front.remaining() >= 24 {
+            let _trace_id = front.get_i64_le();
+            let _span_id = front.get_i64_le();
+            let _parent_span_id = front.get_i64_le();
+        }
+
+        // 16. Distribute data section to operations
+        // The data section contains concatenated output data for all operations
+        let mut data_offset = 0;
+        for (i, op) in ops.iter_mut().enumerate() {
+            let len = payload_lens[i];
+            if len > 0 {
+                if data_offset + len > data.len() {
+                    return Err(OSDClientError::Decoding(format!(
+                        "Insufficient data for op {}: need {} bytes at offset {}, have {} total",
+                        i,
+                        len,
+                        data_offset,
+                        data.len()
+                    )));
+                }
+                op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
+                data_offset += len;
+            }
+        }
 
         let object = ObjectId {
             pool: pg_pool,
@@ -387,6 +458,7 @@ impl MOSDOpReply {
             epoch,
             version,
             user_version,
+            retry_attempt,
             ops,
         })
     }

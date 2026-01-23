@@ -447,6 +447,9 @@ impl FrameIO {
                 } else {
                     offset += segment_len;
                 }
+            } else {
+                // Empty segment - still add it to maintain segment indices
+                segments.push(Bytes::new());
             }
         }
 

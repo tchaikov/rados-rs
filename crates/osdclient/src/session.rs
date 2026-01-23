@@ -40,6 +40,9 @@ pub struct PendingOp {
     pub reqid: RequestId,
     pub result_tx: oneshot::Sender<Result<OpResult>>,
     pub submitted_at: Instant,
+    /// Number of times this operation has been attempted
+    /// Used to validate retry_attempt in replies
+    pub attempts: i32,
 }
 
 impl OSDSession {
@@ -158,7 +161,7 @@ impl OSDSession {
                         Ok(msg) => {
                             if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
                                 let tid = msg.tid();
-                                match MOSDOpReply::decode(&msg.front) {
+                                match MOSDOpReply::decode(&msg.front, &msg.data) {
                                     Ok(reply) => {
                                         Self::handle_reply(tid, reply, &pending_ops).await;
                                     }
@@ -201,6 +204,7 @@ impl OSDSession {
                     reqid: op.reqid.clone(),
                     result_tx: tx,
                     submitted_at: Instant::now(),
+                    attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
                 },
             );
         }
@@ -237,6 +241,23 @@ impl OSDSession {
         };
 
         if let Some(pending_op) = pending_op {
+            // Validate retry_attempt matches our attempt count
+            // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
+            if reply.retry_attempt >= 0 {
+                // retry_attempt is 0-based, but our attempts counter is 1-based
+                // So retry_attempt should equal (attempts - 1)
+                if reply.retry_attempt != pending_op.attempts - 1 {
+                    warn!(
+                        "Ignoring stale reply for tid {}: retry_attempt {} != expected {} (attempts={})",
+                        tid, reply.retry_attempt, pending_op.attempts - 1, pending_op.attempts
+                    );
+                    return;
+                }
+            } else {
+                // Old server that doesn't support retry_attempt
+                warn!("Received reply without retry_attempt for tid {}", tid);
+            }
+
             let result = reply.to_op_result();
             let _ = pending_op.result_tx.send(Ok(result));
         } else {
