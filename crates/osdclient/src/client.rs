@@ -260,14 +260,7 @@ impl OSDClient {
 
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-        // TODO: TEMPORARY HACK - Use OSD 1 instead of osds[0] to test
-        // The CRUSH calculation returns [0,1,2] but Ceph expects [1,0,2]
-        let primary_osd = if !osds.is_empty() && osds.contains(&1) {
-            info!("TEMPORARY: Overriding primary OSD from {} to 1 for testing", osds[0]);
-            1
-        } else {
-            osds[0]
-        };
+        let primary_osd = osds[0];
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -430,14 +423,7 @@ impl OSDClient {
 
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-        // TODO: TEMPORARY HACK - Use OSD 1 instead of osds[0] to test
-        // The CRUSH calculation returns [0,1,2] but Ceph expects [1,0,2]
-        let primary_osd = if !osds.is_empty() && osds.contains(&1) {
-            info!("TEMPORARY: Overriding primary OSD from {} to 1 for testing", osds[0]);
-            1
-        } else {
-            osds[0]
-        };
+        let primary_osd = osds[0];
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -503,14 +489,7 @@ impl OSDClient {
 
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-        // TODO: TEMPORARY HACK - Use OSD 1 instead of osds[0] to test
-        // The CRUSH calculation returns [0,1,2] but Ceph expects [1,0,2]
-        let primary_osd = if !osds.is_empty() && osds.contains(&1) {
-            info!("TEMPORARY: Overriding primary OSD from {} to 1 for testing", osds[0]);
-            1
-        } else {
-            osds[0]
-        };
+        let primary_osd = osds[0];
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -586,14 +565,7 @@ impl OSDClient {
 
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-        // TODO: TEMPORARY HACK - Use OSD 1 instead of osds[0] to test
-        // The CRUSH calculation returns [0,1,2] but Ceph expects [1,0,2]
-        let primary_osd = if !osds.is_empty() && osds.contains(&1) {
-            info!("TEMPORARY: Overriding primary OSD from {} to 1 for testing", osds[0]);
-            1
-        } else {
-            osds[0]
-        };
+        let primary_osd = osds[0];
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
