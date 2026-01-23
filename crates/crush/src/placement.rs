@@ -154,9 +154,10 @@ pub fn pg_to_osds(
     // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps()
     let x = if hashpspool {
         // Hash PG seed with pool ID to avoid PG overlap between pools
-        // Use CRUSH_HASH_RJENKINS1 = 1
-        use crate::hash::crush_hash32_3;
-        crush_hash32_3(1, pg.seed, pg.pool as u32)
+        // Ceph uses: crush_hash32_2(CRUSH_HASH_RJENKINS1, pg.seed, pool_id)
+        // Our Rust hash functions are already specialized to rjenkins1
+        use crate::hash::crush_hash32_2;
+        crush_hash32_2(pg.seed, pg.pool as u32)
     } else {
         // Legacy: just use PG seed directly
         pg.seed
