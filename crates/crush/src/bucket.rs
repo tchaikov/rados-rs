@@ -91,8 +91,10 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         _ => return None,
     };
 
-    eprintln!("RUST_CRUSH: bucket_straw2_choose: bucket_id={}, x={}, r={}, size={}",
-             bucket.id, x, r, bucket.size);
+    eprintln!(
+        "RUST_CRUSH: bucket_straw2_choose: bucket_id={}, x={}, r={}, size={}",
+        bucket.id, x, r, bucket.size
+    );
 
     let mut high = 0usize;
     let mut high_draw = i64::MIN;
@@ -105,9 +107,18 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
             i64::MIN
         };
 
-        eprintln!("RUST_CRUSH:   item[{}]: id={}, weight=0x{:x}, draw={}{}",
-                 i, bucket.items[i], weight, draw,
-                 if i == 0 || draw > high_draw { " <- NEW HIGH" } else { "" });
+        eprintln!(
+            "RUST_CRUSH:   item[{}]: id={}, weight=0x{:x}, draw={}{}",
+            i,
+            bucket.items[i],
+            weight,
+            draw,
+            if i == 0 || draw > high_draw {
+                " <- NEW HIGH"
+            } else {
+                ""
+            }
+        );
 
         if i == 0 || draw > high_draw {
             high = i;
@@ -115,8 +126,10 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         }
     }
 
-    eprintln!("RUST_CRUSH: bucket_straw2_choose: SELECTED index={}, item_id={}",
-             high, bucket.items[high]);
+    eprintln!(
+        "RUST_CRUSH: bucket_straw2_choose: SELECTED index={}, item_id={}",
+        high, bucket.items[high]
+    );
 
     Some(bucket.items[high])
 }
@@ -241,7 +254,7 @@ mod tests {
             id: -1,
             bucket_type: 1,
             alg: BucketAlgorithm::Straw2,
-            hash: 0, // CRUSH_HASH_RJENKINS1
+            hash: 0,         // CRUSH_HASH_RJENKINS1
             weight: 0x20000, // 2.0 in 16.16 fixed point
             size: 3,
             items: vec![0, 1, 2],

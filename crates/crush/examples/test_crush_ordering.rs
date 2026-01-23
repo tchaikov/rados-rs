@@ -2,7 +2,7 @@
 // Run with: cargo run --example test_crush_ordering
 
 use bytes::Bytes;
-use crush::{CrushMap, PgId, pg_to_osds};
+use crush::{pg_to_osds, CrushMap, PgId};
 use std::fs;
 
 fn main() {
@@ -11,8 +11,7 @@ fn main() {
 
     // Decode it
     let mut bytes = Bytes::from(crushmap_data);
-    let crush_map = CrushMap::decode(&mut bytes)
-        .expect("Failed to decode crushmap");
+    let crush_map = CrushMap::decode(&mut bytes).expect("Failed to decode crushmap");
 
     // Test PG 2.a (pool 2, seed 10)
     let pg = PgId::new(2, 10);
@@ -24,18 +23,18 @@ fn main() {
     // Debug: compute the x value that will be passed to CRUSH
     use crush::hash::crush_hash32_2;
     let x = crush_hash32_2(pg.seed, pg.pool as u32);
-    println!("DEBUG: pg.seed={}, pg.pool={}, x={} (0x{:x})",
-             pg.seed, pg.pool, x, x);
+    println!(
+        "DEBUG: pg.seed={}, pg.pool={}, x={} (0x{:x})",
+        pg.seed, pg.pool, x, x
+    );
 
     // Use rule 0, size 3, with hashpspool enabled
     let result = pg_to_osds(
-        &crush_map,
-        pg,
-        0,  // rule_id
-        &weights,
-        3,  // result_max (pool size)
-        true,  // hashpspool
-    ).expect("Failed to map PG to OSDs");
+        &crush_map, pg, 0, // rule_id
+        &weights, 3,    // result_max (pool size)
+        true, // hashpspool
+    )
+    .expect("Failed to map PG to OSDs");
 
     println!("PG {} maps to OSDs: {:?}", pg, result);
     println!("Expected: [1, 0, 2]");

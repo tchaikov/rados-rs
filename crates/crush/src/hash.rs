@@ -311,7 +311,10 @@ mod tests {
         // Test that matches Ceph's implementation
         // PG 2.a: seed=10, pool=2
         let hash = crush_hash32_2(10, 2);
-        assert_eq!(hash, 1838530675, "Hash should match Ceph's rjenkins1 implementation");
+        assert_eq!(
+            hash, 1838530675,
+            "Hash should match Ceph's rjenkins1 implementation"
+        );
     }
 
     #[test]

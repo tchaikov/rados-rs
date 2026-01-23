@@ -214,7 +214,10 @@ impl OSDClient {
 
         // 1. Check pg_upmap (complete acting set override)
         if let Some(upmap_osds) = osdmap.pg_upmap.get(&pgid) {
-            info!("Using pg_upmap override for PG {:?}: {:?}", pgid, upmap_osds);
+            info!(
+                "Using pg_upmap override for PG {:?}: {:?}",
+                pgid, upmap_osds
+            );
             osds = upmap_osds.clone();
         }
 
@@ -226,7 +229,10 @@ impl OSDClient {
 
         // 3. Check pg_upmap_items (fine-grained OSD replacements)
         if let Some(upmap_items) = osdmap.pg_upmap_items.get(&pgid) {
-            info!("Applying pg_upmap_items to PG {:?}: {:?}", pgid, upmap_items);
+            info!(
+                "Applying pg_upmap_items to PG {:?}: {:?}",
+                pgid, upmap_items
+            );
             for &(from_osd, to_osd) in upmap_items {
                 if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
                     osds[pos] = to_osd;
@@ -236,7 +242,10 @@ impl OSDClient {
 
         // 4. Check pg_upmap_primaries (primary OSD override)
         if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(&pgid) {
-            info!("Using pg_upmap_primaries override for PG {:?}: primary={}", pgid, primary_osd);
+            info!(
+                "Using pg_upmap_primaries override for PG {:?}: primary={}",
+                pgid, primary_osd
+            );
             // Move the primary to front if it's in the set
             if let Some(pos) = osds.iter().position(|&osd| osd == primary_osd) {
                 osds.swap(0, pos);
