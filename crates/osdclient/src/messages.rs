@@ -5,6 +5,8 @@
 use crate::error::{OSDClientError, Result};
 use crate::types::{OSDOp, ObjectId, OpReply, OpResult, RequestId, StripedPgId};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use denc::denc::Denc;
+use denc::osdmap::EVersion;
 use tracing::debug;
 
 /// Message type for MOSDOp (Client to OSD)
@@ -300,13 +302,13 @@ impl MOSDOpReply {
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
 
-        // 5. bad_replay_version (eversion_t = version + epoch)
+        // 5. bad_replay_version (eversion_t)
         // This is for backwards compatibility with old clients.
         // Modern clients should use replay_version (our 'version' field) and user_version instead.
         // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
-        // Note: eversion_t encodes as version (u64) then epoch (u32), total 12 bytes
-        let _bad_replay_version = front.get_u64_le();
-        let _bad_replay_epoch = front.get_u32_le();
+        let _bad_replay_version = EVersion::decode(&mut front, 0).map_err(|e| {
+            OSDClientError::Decoding(format!("Failed to decode bad_replay_version: {}", e))
+        })?;
 
         // 6. osdmap_epoch (epoch_t = u32)
         let epoch = front.get_u32_le();
@@ -366,11 +368,12 @@ impl MOSDOpReply {
             });
         }
 
-        // 11. replay_version (eversion_t = version + epoch)
+        // 11. replay_version (eversion_t)
         // The epoch part is not currently used since we track OSDMap epoch separately
-        // Note: eversion_t encodes as version (u64) then epoch (u32), total 12 bytes
-        let version = front.get_u64_le();
-        let _replay_epoch = front.get_u32_le();
+        let replay_version = EVersion::decode(&mut front, 0).map_err(|e| {
+            OSDClientError::Decoding(format!("Failed to decode replay_version: {}", e))
+        })?;
+        let version = replay_version.version;
 
         // 12. user_version (version_t = u64)
         let user_version = front.get_u64_le();
