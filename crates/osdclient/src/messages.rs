@@ -20,7 +20,7 @@ pub const CEPH_MSG_OSD_OPREPLY: u16 = 43;
 pub struct MOSDOp {
     pub client_inc: u32,
     pub osdmap_epoch: u32,
-    pub flags: u32,
+    pub flags: i64,
     pub mtime: u64, // Simplified: using u64 instead of UTime for now
     pub retry_attempt: i32,
     pub object: ObjectId,
@@ -37,7 +37,7 @@ impl MOSDOp {
     pub fn new(
         client_inc: u32,
         osdmap_epoch: u32,
-        flags: u32,
+        flags: i64,
         object: ObjectId,
         pgid: StripedPgId,
         ops: Vec<OSDOp>,
@@ -63,7 +63,7 @@ impl MOSDOp {
     ///
     /// This determines the READ/WRITE flags based on the operation types,
     /// matching the behavior of the Linux kernel and librados.
-    pub fn calculate_flags(ops: &[OSDOp]) -> u32 {
+    pub fn calculate_flags(ops: &[OSDOp]) -> i64 {
         use crate::types::flags::*;
 
         let mut flags = CEPH_OSD_FLAG_ACK; // Always want acknowledgment
@@ -79,7 +79,7 @@ impl MOSDOp {
             flags |= CEPH_OSD_FLAG_WRITE;
         }
 
-        flags
+        flags as i64
     }
 
     /// Encode the message to bytes (v8 format)
@@ -113,7 +113,7 @@ impl MOSDOp {
         buf.put_u32_le(self.osdmap_epoch);
 
         // 4. flags
-        buf.put_u32_le(self.flags);
+        buf.put_i64_le(self.flags);
 
         // 5. reqid (osd_reqid_t) - with version header (2,2)
         buf.put_u8(2); // struct_v
@@ -226,7 +226,7 @@ impl MOSDOp {
 pub struct MOSDOpReply {
     pub object: ObjectId,
     pub pgid: StripedPgId,
-    pub flags: u32,
+    pub flags: i64,
     pub result: i32,
     pub epoch: u32,
     pub version: u64,
@@ -297,7 +297,7 @@ impl MOSDOpReply {
         };
 
         // 3. flags (int64_t)
-        let flags = front.get_i64_le() as u32;
+        let flags = front.get_i64_le();
 
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
