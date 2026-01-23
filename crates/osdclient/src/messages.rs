@@ -300,12 +300,13 @@ impl MOSDOpReply {
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
 
-        // 5. bad_replay_version (eversion_t = epoch + version)
+        // 5. bad_replay_version (eversion_t = version + epoch)
         // This is for backwards compatibility with old clients.
         // Modern clients should use replay_version (our 'version' field) and user_version instead.
         // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
-        let _bad_replay_epoch = front.get_u32_le();
+        // Note: eversion_t encodes as version (u64) then epoch (u32), total 12 bytes
         let _bad_replay_version = front.get_u64_le();
+        let _bad_replay_epoch = front.get_u32_le();
 
         // 6. osdmap_epoch (epoch_t = u32)
         let epoch = front.get_u32_le();
@@ -365,10 +366,11 @@ impl MOSDOpReply {
             });
         }
 
-        // 11. replay_version (eversion_t = epoch + version)
+        // 11. replay_version (eversion_t = version + epoch)
         // The epoch part is not currently used since we track OSDMap epoch separately
-        let _replay_epoch = front.get_u32_le();
+        // Note: eversion_t encodes as version (u64) then epoch (u32), total 12 bytes
         let version = front.get_u64_le();
+        let _replay_epoch = front.get_u32_le();
 
         // 12. user_version (version_t = u64)
         let user_version = front.get_u64_le();
@@ -471,5 +473,93 @@ impl MOSDOpReply {
             user_version: self.user_version,
             ops: self.ops,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test that eversion_t decoding reads version before epoch
+    /// This verifies the fix for the delete operations bug where version numbers
+    /// were being read as multiples of 2^32 due to incorrect byte order.
+    #[test]
+    fn test_eversion_decoding_order() {
+        // Create a minimal MOSDOpReply message with known version values
+        // Format: oid + pgid + flags + result + bad_replay_version + epoch + num_ops + ...
+
+        let mut front = BytesMut::new();
+
+        // 1. oid (object_t) - empty string
+        front.put_u32_le(0); // oid length = 0
+
+        // 2. pgid (pg_t) - version + pool + seed + preferred
+        front.put_u8(1); // pg version
+        front.put_i64_le(1); // pool
+        front.put_u32_le(0x12345678); // seed
+        front.put_i32_le(-1); // preferred
+
+        // 3. flags (i64)
+        front.put_i64_le(0);
+
+        // 4. result (i32)
+        front.put_i32_le(0);
+
+        // 5. bad_replay_version (eversion_t = version u64 + epoch u32)
+        // Set version to a distinctive value that's NOT a multiple of 2^32
+        let test_bad_version: u64 = 12345;
+        let test_bad_epoch: u32 = 67890;
+        front.put_u64_le(test_bad_version);
+        front.put_u32_le(test_bad_epoch);
+
+        // 6. osdmap_epoch (u32)
+        front.put_u32_le(100);
+
+        // 7. num_ops (u32)
+        front.put_u32_le(0); // No operations
+
+        // 9. retry_attempt (i32)
+        front.put_i32_le(0);
+
+        // 11. replay_version (eversion_t = version u64 + epoch u32)
+        // This is the version we actually use in OpResult
+        let test_version: u64 = 54321;
+        let test_epoch: u32 = 98765;
+        front.put_u64_le(test_version);
+        front.put_u32_le(test_epoch);
+
+        // 12. user_version (u64)
+        let test_user_version: u64 = 11111;
+        front.put_u64_le(test_user_version);
+
+        // 13. do_redirect (bool)
+        front.put_u8(0); // false
+
+        // 15. trace (3 x i64)
+        front.put_i64_le(0);
+        front.put_i64_le(0);
+        front.put_i64_le(0);
+
+        let data = &[];
+        let reply = MOSDOpReply::decode(&front, data).expect("decode should succeed");
+
+        // Verify version is decoded correctly and NOT shifted by 32 bits
+        assert_eq!(
+            reply.version, test_version,
+            "Version should be {}, not shifted by 32 bits",
+            test_version
+        );
+        assert_eq!(
+            reply.user_version, test_user_version,
+            "User version should be {}",
+            test_user_version
+        );
+
+        // Verify version is NOT a multiple of 2^32 (which was the symptom of the bug)
+        assert_ne!(
+            reply.version % (1u64 << 32),
+            0,
+            "Version should NOT be a multiple of 2^32 (bug symptom)"
+        );
     }
 }
