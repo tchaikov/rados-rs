@@ -226,9 +226,15 @@ fn crush_choose_firstn(
         let r = if stable != 0 { 0 } else { rep as u32 };
         let mut current_bucket = bucket;
 
+        eprintln!("RUST_CRUSH: === crush_choose_firstn rep={} START ===", rep);
+        eprintln!("RUST_CRUSH:   bucket_id={}, x={}, numrep={}, item_type={}", bucket_id, x, numrep, item_type);
+
         // Try multiple times to find a valid item
         'tries: for ftotal in 0..tries {
             let r_prime = if vary_r != 0 { r + ftotal } else { r };
+
+            eprintln!("RUST_CRUSH:   rep={}: r_prime = r({}) + ftotal({}) = {}, vary_r={}",
+                     rep, r, ftotal, r_prime, vary_r);
 
             // Inner loop for descending through bucket hierarchy
             loop {
@@ -314,6 +320,8 @@ fn crush_choose_firstn(
 
                 // Success - add this item to output
                 tracing::debug!("Found valid item {}", item);
+                eprintln!("RUST_CRUSH: crush_choose_firstn: rep={}, item={} SELECTED",
+                         rep, item);
                 out.push(item);
                 found = true;
                 break 'tries;

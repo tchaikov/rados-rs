@@ -182,6 +182,12 @@ impl OSDClient {
             "OSD weights from map (max_osd={}): {:?}",
             osdmap.max_osd, osdmap.osd_weight
         );
+
+        // Check if pool has hashpspool flag (modern pools)
+        // FLAG_HASHPSPOOL = 1<<0 = 1 (from ~/dev/ceph/src/osd/osd_types.h)
+        const FLAG_HASHPSPOOL: u64 = 1;
+        let hashpspool = (pool_info.flags & FLAG_HASHPSPOOL) != 0;
+
         let (pg, mut osds) = crush::placement::object_to_osds(
             crush_map,
             oid,
@@ -190,6 +196,7 @@ impl OSDClient {
             pool_info.crush_rule as u32,
             &osdmap.osd_weight, // Use actual OSD weights from OSDMap (16.16 fixed-point format)
             pool_info.size as usize,
+            hashpspool,
         )
         .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
 

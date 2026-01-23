@@ -20,15 +20,18 @@ pub fn bucket_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
 }
 
 /// Compute 2^44*log2(input+1) using lookup tables
-/// This is a fast approximation of natural logarithm for CRUSH
+/// This is the correct implementation matching Ceph's crush_ln
+/// Reference: ~/dev/ceph/src/crush/mapper.c lines 246-288
 fn crush_ln(xin: u32) -> u64 {
+    use crate::crush_ln_table::{LL_TBL, RH_LH_TBL};
+
     let mut x = xin;
     x = x.wrapping_add(1);
 
     // Normalize input
     let mut iexpon = 15i32;
 
-    // Figure out number of bits we need to shift
+    // Figure out number of bits we need to shift and do it in one step
     if (x & 0x18000) == 0 {
         let bits = (x & 0x1FFFF).leading_zeros() as i32 - 16;
         x <<= bits;
@@ -37,27 +40,24 @@ fn crush_ln(xin: u32) -> u64 {
 
     let index1 = ((x >> 8) << 1) as usize;
 
-    // Use simplified lookup - in production, these would be precomputed tables
-    // For now, use a simple approximation
-    let rh = if index1 > 256 {
-        0x100000000u64 / (index1 - 256) as u64
-    } else {
-        0xFFFFFFFFFFFFu64
-    };
-
-    let lh = ((index1 as u64).saturating_sub(256)) << 40;
+    // RH ~ 2^56/index1 (from RH_LH_tbl)
+    let rh = RH_LH_TBL[index1 - 256] as u64;
+    // LH ~ 2^48 * log2(index1/256)
+    let lh = RH_LH_TBL[index1 + 1 - 256] as u64;
 
     // RH*x ~ 2^48 * (2^15 + xf), xf<2^8
-    let xl64 = (x as u64).wrapping_mul(rh) >> 48;
+    let mut xl64 = (x as u64).wrapping_mul(rh);
+    xl64 >>= 48;
 
     let mut result = iexpon as u64;
     result <<= 12 + 32;
 
     let index2 = (xl64 & 0xff) as usize;
-    // Simplified LL calculation
-    let ll = (index2 as u64) << 40;
+    // LL ~ 2^48*log2(1.0+index2/2^15)
+    let ll = LL_TBL[index2] as u64;
 
-    let lh = lh.wrapping_add(ll) >> (48 - 12 - 32);
+    let lh = lh.wrapping_add(ll);
+    let lh = lh >> (48 - 12 - 32);
     result = result.wrapping_add(lh);
 
     result
@@ -91,6 +91,9 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         _ => return None,
     };
 
+    eprintln!("RUST_CRUSH: bucket_straw2_choose: bucket_id={}, x={}, r={}, size={}",
+             bucket.id, x, r, bucket.size);
+
     let mut high = 0usize;
     let mut high_draw = i64::MIN;
 
@@ -102,11 +105,18 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
             i64::MIN
         };
 
+        eprintln!("RUST_CRUSH:   item[{}]: id={}, weight=0x{:x}, draw={}{}",
+                 i, bucket.items[i], weight, draw,
+                 if i == 0 || draw > high_draw { " <- NEW HIGH" } else { "" });
+
         if i == 0 || draw > high_draw {
             high = i;
             high_draw = draw;
         }
     }
+
+    eprintln!("RUST_CRUSH: bucket_straw2_choose: SELECTED index={}, item_id={}",
+             high, bucket.items[high]);
 
     Some(bucket.items[high])
 }

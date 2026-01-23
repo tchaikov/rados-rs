@@ -135,6 +135,7 @@ pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> 
 /// * `rule_id` - CRUSH rule to use (from pool configuration)
 /// * `osd_weights` - OSD weights (from OSDMap)
 /// * `result_max` - Maximum number of OSDs to return (typically pool size)
+/// * `hashpspool` - Whether the pool has hashpspool flag (modern pools)
 ///
 /// # Returns
 /// Vector of OSD IDs (first is primary)
@@ -144,11 +145,22 @@ pub fn pg_to_osds(
     rule_id: u32,
     osd_weights: &[u32],
     result_max: usize,
+    hashpspool: bool,
 ) -> Result<Vec<i32>> {
     let mut result = Vec::new();
 
-    // Use PG seed as the input to CRUSH
-    let x = pg.seed;
+    // Calculate placement seed (PS) for CRUSH
+    // When hashpspool flag is set (modern pools), hash the PG seed with pool ID
+    // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps()
+    let x = if hashpspool {
+        // Hash PG seed with pool ID to avoid PG overlap between pools
+        // Use CRUSH_HASH_RJENKINS1 = 1
+        use crate::hash::crush_hash32_3;
+        crush_hash32_3(1, pg.seed, pg.pool as u32)
+    } else {
+        // Legacy: just use PG seed directly
+        pg.seed
+    };
 
     // Execute the CRUSH rule
     crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
@@ -168,6 +180,7 @@ pub fn pg_to_osds(
 /// * `rule_id` - CRUSH rule to use
 /// * `osd_weights` - OSD weights
 /// * `result_max` - Maximum number of OSDs to return
+/// * `hashpspool` - Whether the pool has hashpspool flag
 ///
 /// # Returns
 /// Tuple of (PG ID, Vector of OSD IDs)
@@ -179,12 +192,13 @@ pub fn object_to_osds(
     rule_id: u32,
     osd_weights: &[u32],
     result_max: usize,
+    hashpspool: bool,
 ) -> Result<(PgId, Vec<i32>)> {
     // First, map object to PG
     let pg = object_to_pg(object_name, locator, pg_num);
 
     // Then, map PG to OSDs
-    let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max)?;
+    let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max, hashpspool)?;
 
     Ok((pg, osds))
 }
@@ -298,7 +312,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         let weights = vec![0x10000, 0x10000, 0x10000];
 
-        let result = pg_to_osds(&map, pg, 0, &weights, 2);
+        let result = pg_to_osds(&map, pg, 0, &weights, 2, true);
         assert!(result.is_ok());
 
         let osds = result.unwrap();
@@ -363,7 +377,7 @@ mod tests {
         let locator = ObjectLocator::new(1);
         let weights = vec![0x10000, 0x10000];
 
-        let result = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1);
+        let result = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1, true);
         assert!(result.is_ok());
 
         let (pg, osds) = result.unwrap();
@@ -373,7 +387,7 @@ mod tests {
         assert!(osds[0] == 0 || osds[0] == 1);
 
         // Same object should always map to same PG and OSDs
-        let result2 = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1);
+        let result2 = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1, true);
         let (pg2, osds2) = result2.unwrap();
         assert_eq!(pg, pg2);
         assert_eq!(osds, osds2);

@@ -1,4 +1,5 @@
 pub mod bucket;
+pub mod crush_ln_table;
 pub mod decode;
 pub mod error;
 pub mod hash;
