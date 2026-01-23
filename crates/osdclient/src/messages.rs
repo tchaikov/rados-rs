@@ -56,6 +56,29 @@ impl MOSDOp {
         }
     }
 
+    /// Calculate appropriate flags for the operations
+    ///
+    /// This determines the READ/WRITE flags based on the operation types,
+    /// matching the behavior of the Linux kernel and librados.
+    pub fn calculate_flags(ops: &[OSDOp]) -> u32 {
+        use crate::types::flags::*;
+
+        let mut flags = CEPH_OSD_FLAG_ACK; // Always want acknowledgment
+
+        // Check if we have any read or write operations
+        let has_read = ops.iter().any(|op| op.op.is_read());
+        let has_write = ops.iter().any(|op| op.op.is_write());
+
+        if has_read {
+            flags |= CEPH_OSD_FLAG_READ;
+        }
+        if has_write {
+            flags |= CEPH_OSD_FLAG_WRITE;
+        }
+
+        flags
+    }
+
     /// Encode the message to bytes (v8 format)
     ///
     /// This implements a simplified v8 encoding format for MOSDOp.
@@ -125,17 +148,9 @@ impl MOSDOp {
         };
         use denc::denc::Denc;
 
-        // Debug: encode to temporary buffer to see what we're encoding
-        let mut locator_buf = BytesMut::new();
-        locator.encode(&mut locator_buf, 0).map_err(|e| {
+        locator.encode(&mut buf, 0).map_err(|e| {
             OSDClientError::Encoding(format!("Failed to encode ObjectLocator: {}", e))
         })?;
-        eprintln!(
-            "DEBUG: ObjectLocator encoded {} bytes, hex: {:02x?}",
-            locator_buf.len(),
-            &locator_buf[..locator_buf.len().min(40)]
-        );
-        buf.put_slice(&locator_buf);
 
         // 10. object name (object_t)
         buf.put_u32_le(self.object.oid.len() as u32);
@@ -144,7 +159,8 @@ impl MOSDOp {
         // 11. operations
         buf.put_u16_le(self.ops.len() as u16);
         for op in &self.ops {
-            // Encode ceph_osd_op structure (42 bytes total)
+            // Encode ceph_osd_op structure (38 bytes total)
+            // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len) = 38
             buf.put_u16_le(op.op.as_u16()); // op code
             buf.put_u32_le(op.flags); // flags
 
@@ -183,12 +199,6 @@ impl MOSDOp {
 
         // 16. features (set to 0 for now)
         buf.put_u64_le(0);
-
-        eprintln!(
-            "DEBUG: Full MOSDOp message {} bytes, first 128 bytes hex: {:02x?}",
-            buf.len(),
-            &buf[..buf.len().min(128)]
-        );
 
         Ok(buf.freeze())
     }
@@ -299,22 +309,23 @@ impl MOSDOpReply {
         //   __le16 op;           /* CEPH_OSD_OP_* */
         //   __le32 flags;        /* CEPH_OSD_OP_FLAG_* */
         //   union {
-        //     ... various 32-byte unions ...
+        //     ... various 28-byte unions ...
         //   } __attribute__ ((packed));
         //   __le32 payload_len;
         // } __attribute__ ((packed));
-        // Total size: 2 + 4 + 32 + 4 = 42 bytes (not 48!)
+        // Total size: 2 + 4 + 28 + 4 = 38 bytes
+        // Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
 
         for i in 0..num_ops {
-            if data.remaining() < 44 {
+            if data.remaining() < 38 {
                 return Err(OSDClientError::Decoding(format!(
-                    "Incomplete osd_op {}: need 44 bytes, have {}",
+                    "Incomplete osd_op {}: need 38 bytes, have {}",
                     i,
                     data.remaining()
                 )));
             }
-            // Skip the osd_op structure (44 bytes based on ceph_osd_op)
-            data.advance(44);
+            // Skip the osd_op structure (38 bytes based on ceph_osd_op)
+            data.advance(38);
         }
 
         // 9. retry_attempt (int32_t)

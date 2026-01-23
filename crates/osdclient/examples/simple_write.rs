@@ -29,7 +29,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("1️⃣  Connecting to monitor...");
     let mon_config = monclient::MonClientConfig {
         entity_name: "client.admin".to_string(),
-        mon_addrs: vec!["v2:192.168.1.37:40603".to_string()],
+        mon_addrs: vec!["v2:192.168.1.37:40864".to_string()],
         keyring_path: "/home/kefu/dev/ceph/build/keyring".to_string(),
         ..Default::default()
     };

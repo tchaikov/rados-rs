@@ -20,9 +20,11 @@ pub struct ObjectId {
     pub key: String,
 }
 
-/// Special snapshot ID values
-pub const SNAP_HEAD: u64 = u64::MAX;
-pub const SNAP_DIR: u64 = u64::MAX - 1;
+/// Special snapshot ID values (from Ceph's rados.h)
+/// CEPH_SNAPDIR: reserved for hidden .snap dir
+pub const SNAP_DIR: u64 = u64::MAX; // -1 in two's complement
+/// CEPH_NOSNAP: "head", "live" revision (normal object)
+pub const SNAP_HEAD: u64 = u64::MAX - 1; // -2 in two's complement
 
 impl ObjectId {
     /// Create a new ObjectId for the current version of an object
@@ -105,33 +107,92 @@ impl RequestId {
     }
 }
 
+/// OSD request flags (from Ceph's rados.h)
+pub mod flags {
+    /// Want (or is) "ack" acknowledgment
+    pub const CEPH_OSD_FLAG_ACK: u32 = 0x0001;
+    /// Want (or is) "ondisk" acknowledgment
+    pub const CEPH_OSD_FLAG_ONDISK: u32 = 0x0004;
+    /// Op may read
+    pub const CEPH_OSD_FLAG_READ: u32 = 0x0010;
+    /// Op may write
+    pub const CEPH_OSD_FLAG_WRITE: u32 = 0x0020;
+}
+
+// OSD operation modes (from Ceph's rados.h)
+const CEPH_OSD_OP_MODE_RD: u16 = 0x1000; // Read mode
+const CEPH_OSD_OP_MODE_WR: u16 = 0x2000; // Write mode
+#[allow(dead_code)]
+const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode
+
+// OSD operation types (from Ceph's rados.h)
+const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
+const CEPH_OSD_OP_TYPE_ATTR: u16 = 0x0300; // Attribute operations
+
+/// Helper macro to construct operation codes using Ceph's encoding scheme
+/// Matches __CEPH_OSD_OP(mode, type, nr) macro from rados.h
+macro_rules! osd_op {
+    (RD, DATA, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_DATA | $nr
+    };
+    (WR, DATA, $nr:expr) => {
+        CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_DATA | $nr
+    };
+    (RMW, DATA, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_DATA | $nr
+    };
+    (RD, ATTR, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_ATTR | $nr
+    };
+    (WR, ATTR, $nr:expr) => {
+        CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_ATTR | $nr
+    };
+}
+
 /// OSD operation codes
+///
+/// These values are calculated using Ceph's macro system to compose:
+/// - MODE (read/write/rmw) - bits 12-15
+/// - TYPE (data/attr/exec/pg) - bits 8-11
+/// - Operation number - bits 0-7
+///
+/// This matches the C++ __CEPH_OSD_OP macro from include/rados.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum OpCode {
-    /// Read operation
-    Read = 1,
-    /// Write operation
-    Write = 2,
-    /// Truncate operation
-    Truncate = 3,
-    /// Stat operation
-    Stat = 4,
-    /// Delete operation
-    Delete = 8,
-    /// Get extended attribute
-    GetXattr = 9,
-    /// Set extended attribute
-    SetXattr = 10,
-    /// Write full object
-    WriteFull = 17,
-    /// Create object
-    Create = 21,
+    /// Read operation: __CEPH_OSD_OP(RD, DATA, 1)
+    Read = osd_op!(RD, DATA, 1),
+    /// Stat operation: __CEPH_OSD_OP(RD, DATA, 2)
+    Stat = osd_op!(RD, DATA, 2),
+    /// Write operation: __CEPH_OSD_OP(WR, DATA, 1)
+    Write = osd_op!(WR, DATA, 1),
+    /// Write full object: __CEPH_OSD_OP(WR, DATA, 2)
+    WriteFull = osd_op!(WR, DATA, 2),
+    /// Truncate operation: __CEPH_OSD_OP(WR, DATA, 3)
+    Truncate = osd_op!(WR, DATA, 3),
+    /// Delete operation: __CEPH_OSD_OP(WR, DATA, 5)
+    Delete = osd_op!(WR, DATA, 5),
+    /// Create object: __CEPH_OSD_OP(WR, DATA, 13)
+    Create = osd_op!(WR, DATA, 13),
+    /// Get extended attribute: __CEPH_OSD_OP(RD, ATTR, 1)
+    GetXattr = osd_op!(RD, ATTR, 1),
+    /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
+    SetXattr = osd_op!(WR, ATTR, 1),
 }
 
 impl OpCode {
     pub fn as_u16(self) -> u16 {
         self as u16
+    }
+
+    /// Check if this operation is a read operation
+    pub fn is_read(self) -> bool {
+        (self as u16) & CEPH_OSD_OP_MODE_RD != 0
+    }
+
+    /// Check if this operation is a write operation
+    pub fn is_write(self) -> bool {
+        (self as u16) & CEPH_OSD_OP_MODE_WR != 0
     }
 }
 
