@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("3️⃣  Creating OSD client...");
     let osd_config = osdclient::OSDClientConfig {
         entity_name: "client.admin".to_string(),
-        keyring_path: None, // Temporarily use no-auth for OSDs until we implement authorizers
+        keyring_path: Some("/home/kefu/dev/ceph/build/keyring".to_string()),
         ..Default::default()
     };
     let osd_client = osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client)).await?;
