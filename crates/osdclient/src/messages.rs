@@ -294,8 +294,8 @@ impl MOSDOpReply {
             shard: -1, // Not in pg_t, only in spg_t
         };
 
-        // 3. flags (int64_t)
-        let flags = front.get_i64_le() as u32;
+        // 3. flags (u32)
+        let flags = front.get_u32_le();
 
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
