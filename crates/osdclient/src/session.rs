@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::error::{OSDClientError, Result};
 use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId};
+use msgr2::ceph_message::{CephMessage, CrcFlags};
 
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
@@ -161,6 +162,9 @@ impl OSDSession {
                         Ok(msg) => {
                             if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
                                 let tid = msg.tid();
+
+                                // Use the unified CephMessage framework for decoding
+                                // Note: msgr2::Message doesn't include header/footer, so we decode directly
                                 match MOSDOpReply::decode(&msg.front, &msg.data) {
                                     Ok(reply) => {
                                         Self::handle_reply(tid, reply, &pending_ops).await;
@@ -209,15 +213,18 @@ impl OSDSession {
             );
         }
 
-        // Encode the operation
-        let payload = op.encode()?;
-        let data = op.get_data_section();
+        // Encode the operation using the unified CephMessage framework
+        let ceph_msg = CephMessage::from_payload(&op, 0, CrcFlags::ALL)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
 
-        // Build message (use version 8 for MOSDOp - matches C++ implementation)
-        let mut msg = msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, payload)
-            .with_version(8)
-            .with_tid(tid);
-        msg.data = data;
+        // Convert CephMessage to msgr2::Message for sending
+        // The msgr2::Message is used by the protocol layer for framing
+        // Note: We don't need the full encoded message here, just the front and data sections
+        let mut msg =
+            msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
+                .with_version(8)
+                .with_tid(tid);
+        msg.data = ceph_msg.data;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         self.send_tx
