@@ -14,7 +14,7 @@ use crate::tracker::{Tracker, TrackerConfig};
 use crate::types::{OSDOp, ObjectId, ReadResult, StatResult, StripedPgId, WriteResult};
 
 /// Configuration for OSD client
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OSDClientConfig {
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
@@ -24,17 +24,6 @@ pub struct OSDClientConfig {
     pub tracker_config: TrackerConfig,
     /// Client incarnation number
     pub client_inc: u32,
-}
-
-impl Default for OSDClientConfig {
-    fn default() -> Self {
-        Self {
-            entity_name: String::new(), // Must be provided by caller
-            keyring_path: None,
-            tracker_config: TrackerConfig::default(),
-            client_inc: 0, // Match Linux kernel: always 0
-        }
-    }
 }
 
 /// Main OSD client for performing object operations

@@ -5,7 +5,6 @@
 /// IMPORTANT: This is the rjenkins1 hash from Ceph, which uses the
 /// old crush_hashmix macro. It's different from Bob Jenkins' later
 /// lookup3.c hash function.
-
 /// Hash seed used by Ceph's CRUSH
 const CRUSH_HASH_SEED: u32 = 1315423911;
 
