@@ -35,6 +35,7 @@
 //! }
 //! ```
 
+pub mod ceph_message_impl;
 pub mod client;
 pub mod connection;
 pub mod error;

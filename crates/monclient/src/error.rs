@@ -39,8 +39,8 @@ pub enum MonClientError {
     #[error("Message error: {0}")]
     MessageError(#[from] msgr2::error::Error),
 
-    #[error("Encoding error: {0}")]
-    EncodingError(String),
+    #[error("Encoding error")]
+    EncodingError,
 
     #[error("Decoding error: {0}")]
     DecodingError(String),

@@ -172,7 +172,7 @@ impl MonMap {
         let mut buf = BytesMut::new();
         denc_monmap
             .encode(&mut buf, u64::MAX)
-            .map_err(|e| MonClientError::EncodingError(e.to_string()))?;
+            .map_err(|e| MonClientError::DecodingError(e.to_string()))?;
 
         Ok(buf.freeze())
     }

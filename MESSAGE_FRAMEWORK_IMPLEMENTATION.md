@@ -212,12 +212,6 @@ println!("Result: {}", reply.result);
 
 ## Additional Improvements
 
-### ObjectLocator Encoding Fix
-- Changed from version 6 to version 5 (Linux kernel compatibility)
-- Removed hash field encoding (not in v5)
-- Fixed compat_version to 4 (minimum for namespace support)
-- **Impact:** Ensures compatibility with Linux kernel ceph client
-
 ### Code Quality
 - Replaced `.len() == 0` with `.is_empty()` (clippy)
 - Simplified Default implementations using derive macro

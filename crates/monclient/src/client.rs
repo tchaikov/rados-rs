@@ -10,6 +10,7 @@ use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
 use bytes::Bytes;
 use denc::denc::VersionedEncode;
+use msgr2::ceph_message::{CephMessage, CrcFlags};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -403,11 +404,9 @@ impl MonClient {
         state.subscriptions.renewed();
         drop(state);
 
-        // Encode and send
-        let payload = msg.encode()?;
-        let mut message = msgr2::message::Message::new(CEPH_MSG_MON_SUBSCRIBE, payload);
-
-        // Set message version (MMonSubscribe HEAD_VERSION = 3, COMPAT_VERSION = 1)
+        // Use unified CephMessage framework
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
+        let mut message = msgr2::message::Message::new(CEPH_MSG_MON_SUBSCRIBE, ceph_msg.front);
         message.header.version = 3;
         message.header.compat_version = 1;
 
@@ -693,10 +692,10 @@ impl MonClient {
 
         drop(state);
 
-        // Send request
+        // Use unified CephMessage framework
         let msg = MMonGetVersion::new(req_id, what.to_string());
-        let payload = msg.encode()?;
-        let message = msgr2::message::Message::new(CEPH_MSG_MON_GET_VERSION, payload);
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
+        let message = msgr2::message::Message::new(CEPH_MSG_MON_GET_VERSION, ceph_msg.front);
 
         active_con.send_message(message).await?;
 
@@ -741,10 +740,11 @@ impl MonClient {
 
         drop(state);
 
-        // Send command
+        // Use unified CephMessage framework
         let msg = MMonCommand::new(tid, cmd, inbl);
-        let payload = msg.encode()?;
-        let message = msgr2::message::Message::new(msgr2::message::CEPH_MSG_MON_COMMAND, payload);
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
+        let message =
+            msgr2::message::Message::new(msgr2::message::CEPH_MSG_MON_COMMAND, ceph_msg.front);
 
         active_con.send_message(message).await?;
 
