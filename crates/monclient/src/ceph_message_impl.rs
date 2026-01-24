@@ -241,13 +241,13 @@ mod tests {
         // Verify message structure
         assert_eq!(msg.header.msg_type, CEPH_MSG_MON_SUBSCRIBE);
         assert_eq!(msg.header.version, MMON_SUBSCRIBE_VERSION);
-        assert!(msg.front.len() > 0);
+        assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0);
 
         // Encode to bytes
         let encoded = msg.encode().unwrap();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
     }
 
     #[test]
@@ -260,6 +260,6 @@ mod tests {
         // Verify message structure
         assert_eq!(msg.header.msg_type, CEPH_MSG_MON_GET_VERSION);
         assert_eq!(msg.header.version, MMON_GET_VERSION_VERSION);
-        assert!(msg.front.len() > 0);
+        assert!(!msg.front.is_empty());
     }
 }

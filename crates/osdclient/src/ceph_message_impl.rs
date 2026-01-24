@@ -118,13 +118,13 @@ mod tests {
         // Verify message structure
         assert_eq!(msg.header.msg_type, CEPH_MSG_OSD_OP);
         assert_eq!(msg.header.version, MOSDOP_VERSION);
-        assert!(msg.front.len() > 0);
+        assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0); // No data for read operation
 
         // Encode to bytes
         let encoded = msg.encode().unwrap();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
     }
 
     #[test]

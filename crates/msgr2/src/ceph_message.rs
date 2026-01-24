@@ -558,7 +558,7 @@ mod tests {
 
         // Encode to bytes
         let encoded = msg.encode().unwrap();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
     }
 
     #[test]
@@ -574,7 +574,7 @@ mod tests {
 
         // Encode to bytes
         let encoded = msg.encode().unwrap();
-        assert!(encoded.len() > 0);
+        assert!(!encoded.is_empty());
     }
 
     #[test]
@@ -586,7 +586,7 @@ mod tests {
 
         assert_eq!(msg.header.msg_type, CEPH_MSG_AUTH);
         assert_eq!(msg.header.version, 1);
-        assert!(msg.front.len() > 0);
+        assert!(!msg.front.is_empty());
 
         // Decode and verify
         let decoded: MAuth = msg.decode_payload().unwrap();
@@ -603,7 +603,7 @@ mod tests {
 
         assert_eq!(msg.header.msg_type, CEPH_MSG_AUTH_REPLY);
         assert_eq!(msg.header.version, 1);
-        assert!(msg.front.len() > 0);
+        assert!(!msg.front.is_empty());
 
         // Decode and verify
         let decoded: MAuthReply = msg.decode_payload().unwrap();
