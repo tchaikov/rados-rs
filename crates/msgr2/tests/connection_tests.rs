@@ -37,8 +37,6 @@
 //! - Use the available authentication methods from ceph.conf
 //!
 
-mod ceph_config;
-
 use msgr2::protocol::Connection;
 use msgr2::{AuthMethod, ConnectionConfig};
 use std::net::SocketAddr;
@@ -80,24 +78,39 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
         return config;
     }
 
-    // Parse ceph.conf
-    match ceph_config::parse_ceph_conf(Path::new(&ceph_conf_path)) {
+    // Parse ceph.conf using cephconfig crate
+    match cephconfig::CephConfig::from_file(&ceph_conf_path) {
         Ok(ceph_config) => {
             tracing::info!("✓ Successfully parsed ceph.conf");
 
-            // Get auth_client_required setting
-            if let Some(auth_methods_str) = ceph_config::get_auth_client_required(&ceph_config) {
-                tracing::info!("  auth_client_required = {:?}", auth_methods_str);
+            // Get auth_client_required setting from global section
+            let auth_methods_str = ceph_config
+                .get_with_fallback(&["global", "client"], "auth client required")
+                .or_else(|| {
+                    ceph_config.get_with_fallback(&["global", "client"], "auth_client_required")
+                });
+
+            if let Some(auth_str) = auth_methods_str {
+                // Parse auth methods (comma, semicolon, space separated)
+                let auth_methods: Vec<String> = auth_str
+                    .split(&[',', ';', ' ', '\t'][..])
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_lowercase())
+                    .collect();
+
+                tracing::info!("  auth_client_required = {:?}", auth_methods);
 
                 // Convert string auth methods to AuthMethod enum
                 let mut supported_methods = Vec::new();
 
-                for method in auth_methods_str {
+                for method in auth_methods {
                     match method.as_str() {
                         "cephx" => {
-                            // Check if keyring is available
+                            // Try to get keyring path from config or environment
                             let keyring_path = std::env::var("CEPH_KEYRING")
                                 .or_else(|_| std::env::var("CEPH_CLIENT_KEYRING"))
+                                .or_else(|_| ceph_config.keyring())
                                 .unwrap_or_else(|_| {
                                     "/etc/ceph/ceph.client.admin.keyring".to_string()
                                 });

@@ -96,7 +96,7 @@ jobs:
           cd crates/msgr2
           cargo build --verbose
 
-      - name: Run Ceph Integration Tests
+      - name: Run msgr2 Connection Tests
         run: |
           cd crates/msgr2
           cargo test --test connection_tests --verbose -- --ignored --test-threads=1 --nocapture
@@ -106,4 +106,20 @@ jobs:
           CEPH_MON_ADDR: 127.0.0.1:6789
           RUST_BACKTRACE: full
           RUST_LOG: debug
+
+      - name: Run RADOS Operations Tests
+        run: |
+          cd crates/osdclient
+          cargo test --test rados_operations --verbose -- --ignored --test-threads=1 --nocapture
+        env:
+          CEPH_CONF: /tmp/rados-rs/ceph.conf
+          CEPH_TEST_POOL: test-pool
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd docker
+          docker compose -f docker-compose.ceph.yml down -v
 

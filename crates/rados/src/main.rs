@@ -6,6 +6,7 @@ use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -17,13 +18,24 @@ struct Cli {
     #[arg(short, long)]
     pool: String,
 
+    /// Ceph configuration file path
+    #[arg(
+        short = 'c',
+        long,
+        env = "CEPH_CONF",
+        default_value = "/etc/ceph/ceph.conf"
+    )]
+    conf: String,
+
     /// Monitor addresses (comma-separated, e.g., "v2:127.0.0.1:3300")
+    /// If not specified, will be read from ceph.conf
     #[arg(long, env = "MON_HOST")]
     mon_host: Option<String>,
 
     /// Keyring path
-    #[arg(long, default_value = "/etc/ceph/keyring")]
-    keyring: String,
+    /// If not specified, will be read from ceph.conf
+    #[arg(long)]
+    keyring: Option<String>,
 
     /// Entity name
     #[arg(long, default_value = "client.admin")]
@@ -81,20 +93,49 @@ async fn main() -> Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    // Get monitor address
-    let mon_addrs = cli.mon_host.ok_or_else(|| {
-        anyhow!("Monitor address not specified. Use --mon-host or set CEPH_MON_ADDR")
-    })?;
+    // Parse ceph.conf if it exists
+    let ceph_config = if Path::new(&cli.conf).exists() {
+        debug!("Loading configuration from: {}", cli.conf);
+        Some(cephconfig::CephConfig::from_file(&cli.conf).context("Failed to parse ceph.conf")?)
+    } else {
+        debug!("Configuration file not found: {}", cli.conf);
+        None
+    };
 
-    let mon_addrs: Vec<String> = mon_addrs.split(',').map(|s| s.trim().to_string()).collect();
+    // Get monitor addresses (CLI arg > ceph.conf)
+    let mon_addrs = if let Some(mon_host) = cli.mon_host {
+        mon_host.split(',').map(|s| s.trim().to_string()).collect()
+    } else if let Some(ref config) = ceph_config {
+        config
+            .mon_addrs()
+            .context("Failed to get monitor addresses from ceph.conf")?
+    } else {
+        return Err(anyhow!(
+            "Monitor address not specified. Use --mon-host or provide a valid ceph.conf"
+        ));
+    };
 
     info!("Connecting to monitors: {:?}", mon_addrs);
+
+    // Get keyring path (CLI arg > ceph.conf > default)
+    let keyring_path = if let Some(keyring) = cli.keyring {
+        keyring
+    } else if let Some(ref config) = ceph_config {
+        config.keyring().unwrap_or_else(|_| {
+            debug!("Keyring not found in ceph.conf, using default");
+            "/etc/ceph/keyring".to_string()
+        })
+    } else {
+        "/etc/ceph/keyring".to_string()
+    };
+
+    debug!("Using keyring: {}", keyring_path);
 
     // Create MonClient
     let mon_config = monclient::MonClientConfig {
         entity_name: cli.name.clone(),
         mon_addrs,
-        keyring_path: cli.keyring.clone(),
+        keyring_path: keyring_path.clone(),
         ..Default::default()
     };
 
@@ -132,7 +173,7 @@ async fn main() -> Result<()> {
 
     let osd_config = osdclient::OSDClientConfig {
         entity_name: cli.name.clone(),
-        keyring_path: Some(cli.keyring.clone()),
+        keyring_path: Some(keyring_path.clone()),
         client_inc,
         ..Default::default()
     };
