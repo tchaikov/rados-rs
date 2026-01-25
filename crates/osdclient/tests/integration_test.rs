@@ -1,10 +1,15 @@
 //! Integration tests for OSDClient
 //!
 //! These tests require a running Ceph cluster.
-//! Set CEPH_MON_ADDR environment variable to the monitor address.
+//!
+//! Configuration can be provided in two ways:
+//! 1. Via environment variables (legacy):
+//!    CEPH_MON_ADDR=v2:127.0.0.1:3300 CEPH_KEYRING=/path/to/keyring cargo test
+//! 2. Via ceph.conf file (recommended):
+//!    CEPH_CONF=/path/to/ceph.conf cargo test
 //!
 //! Example:
-//!   CEPH_MON_ADDR=v2:127.0.0.1:3300 cargo test --package osdclient --test integration_test
+//!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test
 
 use bytes::Bytes;
 use std::env;
@@ -21,6 +26,15 @@ struct TestConfig {
 
 impl TestConfig {
     fn from_env() -> Self {
+        // Try to load from ceph.conf first
+        if let Ok(conf_path) = env::var("CEPH_CONF") {
+            if let Ok(config) = Self::from_ceph_conf(&conf_path) {
+                return config;
+            }
+            eprintln!("Warning: Failed to parse CEPH_CONF, falling back to environment variables");
+        }
+
+        // Fall back to environment variables
         let mon_addr =
             env::var("CEPH_MON_ADDR").expect("CEPH_MON_ADDR must be set for integration tests");
 
@@ -41,6 +55,32 @@ impl TestConfig {
             entity_name,
             pool_id,
         }
+    }
+
+    fn from_ceph_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        let config = cephconfig::CephConfig::from_file(path)?;
+
+        // Get monitor addresses (prefer v2)
+        let mon_addrs = config.mon_addrs()?;
+
+        // Get keyring path
+        let keyring_path = config.keyring()?;
+
+        // Get entity name (defaults to client.admin)
+        let entity_name = config.entity_name();
+
+        // Pool ID still comes from environment variable
+        let pool_id = env::var("CEPH_POOL_ID")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse()
+            .unwrap_or(1);
+
+        Ok(Self {
+            mon_addrs,
+            keyring_path,
+            entity_name,
+            pool_id,
+        })
     }
 }
 
