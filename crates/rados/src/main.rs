@@ -123,10 +123,17 @@ async fn main() -> Result<()> {
 
     debug!("OSDMap received");
 
-    // Create OSD client
+    // Create OSD client with unique client_inc for this invocation
+    // Use current timestamp to ensure uniqueness across CLI invocations
+    let client_inc = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as u32;
+
     let osd_config = osdclient::OSDClientConfig {
         entity_name: cli.name.clone(),
         keyring_path: Some(cli.keyring.clone()),
+        client_inc,
         ..Default::default()
     };
 
