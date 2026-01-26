@@ -41,6 +41,10 @@ pub struct MonClientConfig {
 
     /// Hunt interval (time between connection attempts)
     pub hunt_interval: Duration,
+
+    /// Number of monitors to try connecting to in parallel during hunt
+    /// (0 means try all available monitors)
+    pub hunt_parallel: usize,
 }
 
 impl Default for MonClientConfig {
@@ -52,6 +56,7 @@ impl Default for MonClientConfig {
             connect_timeout: Duration::from_secs(30),
             command_timeout: Duration::from_secs(60),
             hunt_interval: Duration::from_secs(3),
+            hunt_parallel: 3, // Try 3 monitors in parallel by default
         }
     }
 }
@@ -76,6 +81,19 @@ pub struct MonClient {
 
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
+}
+
+impl Clone for MonClient {
+    fn clone(&self) -> Self {
+        Self {
+            config: self.config.clone(),
+            entity_name: self.entity_name.clone(),
+            state: Arc::clone(&self.state),
+            runtime: self.runtime.clone(),
+            recv_task: Arc::clone(&self.recv_task),
+            map_events: self.map_events.clone(),
+        }
+    }
 }
 
 /// Events for map updates
@@ -324,18 +342,98 @@ impl MonClient {
         info!("Starting monitor hunt");
 
         let state = self.state.read().await;
-        let ranks = state.monmap.get_all_ranks();
+        let monmap = state.monmap.clone();
+        let hunt_parallel = self.config.hunt_parallel;
         drop(state);
 
-        // Try connecting to monitors
-        // TODO: Implement weighted random selection
-        // TODO: Try multiple monitors in parallel
-        // For now, just try the first one
+        // Get monitors grouped by priority (lowest priority first)
+        let priority_groups = monmap.get_monitors_by_priority();
 
-        if let Some(&rank) = ranks.first() {
-            self.connect_to_mon(rank).await?;
-        } else {
+        if priority_groups.is_empty() {
             return Err(MonClientError::MonitorUnavailable);
+        }
+
+        // Try the lowest priority group first
+        let ranks = &priority_groups[0];
+
+        if ranks.is_empty() {
+            return Err(MonClientError::MonitorUnavailable);
+        }
+
+        // Shuffle ranks based on weights
+        let mut selected_ranks = ranks.clone();
+        if selected_ranks.len() > 1 {
+            // Check if all weights are zero
+            let weights: Vec<u16> = selected_ranks
+                .iter()
+                .map(|&rank| monmap.get_weight(rank))
+                .collect();
+
+            let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+
+            if total_weight == 0 {
+                // All weights are zero, use uniform random selection
+                use rand::seq::SliceRandom;
+                let mut rng = rand::thread_rng();
+                selected_ranks.shuffle(&mut rng);
+            } else {
+                // Use weighted random selection
+                use rand::distributions::WeightedIndex;
+                use rand::prelude::*;
+                let mut rng = rand::thread_rng();
+
+                // Shuffle with weights (Fisher-Yates with weighted selection)
+                let mut shuffled = Vec::new();
+                let mut remaining_ranks = selected_ranks.clone();
+                let mut remaining_weights = weights.clone();
+
+                while !remaining_ranks.is_empty() {
+                    let dist = WeightedIndex::new(&remaining_weights).map_err(|e| {
+                        MonClientError::InvalidMonMap(format!("Invalid weights: {}", e))
+                    })?;
+                    let idx = dist.sample(&mut rng);
+                    shuffled.push(remaining_ranks.remove(idx));
+                    remaining_weights.remove(idx);
+                }
+
+                selected_ranks = shuffled;
+            }
+        }
+
+        // Determine how many monitors to try in parallel
+        let n = if hunt_parallel == 0 || hunt_parallel > selected_ranks.len() {
+            selected_ranks.len()
+        } else {
+            hunt_parallel
+        };
+
+        // Try connecting to n monitors in parallel
+        if n == 1 {
+            // Simple case: try one monitor
+            self.connect_to_mon(selected_ranks[0]).await?;
+        } else {
+            // Parallel case: try multiple monitors, first one to succeed wins
+            use futures::future::select_ok;
+
+            let futures: Vec<_> = selected_ranks
+                .iter()
+                .take(n)
+                .map(|&rank| {
+                    let client = self.clone();
+                    Box::pin(async move { client.connect_to_mon(rank).await })
+                })
+                .collect();
+
+            // Wait for the first successful connection
+            match select_ok(futures).await {
+                Ok((_, _)) => {
+                    // First connection succeeded
+                    info!("Successfully connected to a monitor");
+                }
+                Err(e) => {
+                    return Err(e);
+                }
+            }
         }
 
         Ok(())
@@ -387,7 +485,8 @@ impl MonClient {
         let mut state = self.state.write().await;
         state.active_con = Some(mon_con);
         state.hunting = false;
-        state.authenticated = true; // TODO: Implement proper auth
+        // Authentication was completed during MonConnection::connect() -> establish_session()
+        state.authenticated = true;
         drop(state);
 
         info!("Successfully connected to mon.{}", rank);

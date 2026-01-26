@@ -147,6 +147,29 @@ impl MonMap {
         (0..self.monitors.len()).collect()
     }
 
+    /// Get monitors grouped by priority (lowest priority first)
+    /// Returns monitors with the same priority grouped together
+    pub fn get_monitors_by_priority(&self) -> Vec<Vec<usize>> {
+        use std::collections::BTreeMap;
+
+        // Group monitors by priority
+        let mut priority_groups: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+        for mon in &self.monitors {
+            priority_groups
+                .entry(mon.priority)
+                .or_default()
+                .push(mon.rank);
+        }
+
+        // Return groups in priority order (lowest priority first)
+        priority_groups.into_values().collect()
+    }
+
+    /// Get the weight of a monitor by rank
+    pub fn get_weight(&self, rank: usize) -> u16 {
+        self.monitors.get(rank).map(|m| m.weight).unwrap_or(0)
+    }
+
     /// Rebuild internal indices after deserialization
     pub fn rebuild_indices(&mut self) {
         self.name_to_rank.clear();

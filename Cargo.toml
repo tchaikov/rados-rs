@@ -16,3 +16,4 @@ serde = { version = "1.0", features = ["derive"] }
 base64 = "0.21"
 hmac = "0.12"
 sha2 = "0.10"
+futures = "0.3"
