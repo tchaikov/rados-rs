@@ -24,3 +24,5 @@ hex = "0.4.3"
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tokio-test = "0.4"
+cephconfig = { path = "../cephconfig" }
+rand = { workspace = true }

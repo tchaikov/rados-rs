@@ -8,12 +8,13 @@ use msgr2::protocol::Connection as Msgr2Connection;
 use msgr2::ConnectionConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{broadcast, mpsc, Mutex};
 
 /// Monitor connection state
 pub struct MonConnection {
-    /// Underlying msgr2 connection (needs interior mutability for send/recv)
-    connection: Arc<Mutex<Msgr2Connection>>,
+    /// Underlying msgr2 connection (not used, kept for API compatibility)
+    #[allow(dead_code)]
+    connection: Arc<Mutex<Option<Msgr2Connection>>>,
 
     /// Monitor rank
     rank: usize,
@@ -26,6 +27,12 @@ pub struct MonConnection {
 
     /// Authentication provider (stored for creating service auth providers)
     auth_provider: Option<auth::MonitorAuthProvider>,
+
+    /// Channel for sending messages (to avoid deadlock with receive loop)
+    send_tx: mpsc::UnboundedSender<msgr2::message::Message>,
+
+    /// Channel for receiving messages
+    recv_rx: Arc<Mutex<broadcast::Receiver<msgr2::message::Message>>>,
 }
 
 #[derive(Debug)]
@@ -115,8 +122,47 @@ impl MonConnection {
             eprintln!("DEBUG: Auth provider is Some after authentication!");
         }
 
+        // Create channels for sending and receiving messages (to avoid deadlock)
+        let (send_tx, mut send_rx) = mpsc::unbounded_channel::<msgr2::message::Message>();
+        let (recv_tx, recv_rx) = broadcast::channel::<msgr2::message::Message>(100);
+
+        let mut connection_for_task = connection;
+
+        // Spawn a unified task to handle both sending and receiving
+        // This avoids deadlock by ensuring only one task accesses the connection
+        tokio::spawn(async move {
+            tracing::info!("Send/Receive task started");
+            loop {
+                tokio::select! {
+                    // Handle outgoing messages
+                    Some(msg) = send_rx.recv() => {
+                        tracing::info!("Send/Recv task: Sending message");
+                        if let Err(e) = connection_for_task.send_message(msg).await {
+                            tracing::error!("Failed to send message: {}", e);
+                            break;
+                        }
+                        tracing::info!("Send/Recv task: Message sent successfully");
+                    }
+                    // Handle incoming messages
+                    result = connection_for_task.recv_message() => {
+                        match result {
+                            Ok(msg) => {
+                                tracing::info!("Send/Recv task: Received message, broadcasting");
+                                let _ = recv_tx.send(msg);
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to receive message: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+            tracing::debug!("Send/Receive task terminated");
+        });
+
         let mon_conn = Self {
-            connection: Arc::new(Mutex::new(connection)),
+            connection: Arc::new(Mutex::new(None)), // Not used anymore
             rank,
             addrs,
             state: Arc::new(Mutex::new(ConnectionState {
@@ -125,6 +171,8 @@ impl MonConnection {
                 has_session: true,
             })),
             auth_provider,
+            send_tx,
+            recv_rx: Arc::new(Mutex::new(recv_rx)),
         };
 
         tracing::info!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
@@ -143,7 +191,8 @@ impl MonConnection {
     }
 
     /// Get a reference to the underlying msgr2 connection
-    pub fn connection(&self) -> Arc<Mutex<Msgr2Connection>> {
+    /// Note: This returns None now since the connection is managed by a background task
+    pub fn connection(&self) -> Arc<Mutex<Option<Msgr2Connection>>> {
         Arc::clone(&self.connection)
     }
 
@@ -185,25 +234,31 @@ impl MonConnection {
 
     /// Send a message to the monitor
     pub async fn send_message(&self, msg: msgr2::message::Message) -> Result<()> {
-        tracing::debug!(
-            "Sending message type {} to mon.{}",
-            msg.msg_type(),
+        // Copy fields from packed struct to avoid alignment issues
+        let msg_type = msg.msg_type();
+        let tid = msg.header.tid;
+        tracing::info!(
+            "MonConnection::send_message: Sending message type 0x{:04x} (tid={}) to mon.{}",
+            msg_type,
+            tid,
             self.rank
         );
-        let mut conn = self.connection.lock().await;
-        conn.send_message(msg)
-            .await
-            .map_err(MonClientError::MessageError)?;
+        self.send_tx
+            .send(msg)
+            .map_err(|_| MonClientError::Other("Send channel closed".into()))?;
+        tracing::info!("MonConnection::send_message: Message queued for sending");
         Ok(())
     }
 
     /// Receive a message from the monitor
+    /// Note: This should only be called by the message receive loop
     pub async fn receive_message(&self) -> Result<msgr2::message::Message> {
-        let mut conn = self.connection.lock().await;
-        let msg = conn
-            .recv_message()
+        // Receive from the broadcast channel (sent by the unified send/recv task)
+        let mut rx = self.recv_rx.lock().await;
+        let msg = rx
+            .recv()
             .await
-            .map_err(MonClientError::MessageError)?;
+            .map_err(|e| MonClientError::Other(format!("Receive channel error: {}", e)))?;
         tracing::debug!(
             "Received message type {} from mon.{}",
             msg.msg_type(),

@@ -944,13 +944,17 @@ impl Connection {
         msg.header.seq = self.state.out_seq;
         let seq = msg.seq();
 
+        let version = msg.header.version;
+        let compat_version = msg.header.compat_version;
         eprintln!(
-            "DEBUG: send_message() type=0x{:04x}, seq={}, front={}, middle={}, data={}",
+            "DEBUG: send_message() type=0x{:04x}, seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
             msg_type,
             seq,
             msg.front.len(),
             msg.middle.len(),
-            msg.data.len()
+            msg.data.len(),
+            version,
+            compat_version
         );
 
         // Convert Message to MessageFrame

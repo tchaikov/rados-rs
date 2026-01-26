@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use denc::{OSDMap, VersionedEncode};
+use denc::{OSDMap, OSDMapIncremental, VersionedEncode};
 use std::fs;
 use std::path::PathBuf;
 
@@ -112,4 +112,53 @@ fn test_all_osdmap_corpus_files() {
         success_count > 0,
         "At least one corpus file should decode successfully"
     );
+}
+
+#[test]
+fn test_osdmap_incremental_with_old_pools() {
+    // Test with corpus file that has old_pools populated
+    // File 7f73c6135ad5af1bcdd620e2097b9b94 has:
+    // - epoch: 347
+    // - 18 new pools
+    // - 5 old pools: [127, 146, 147, 160, 162]
+    let corpus_path = PathBuf::from(env!("HOME"))
+        .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap::Incremental/7f73c6135ad5af1bcdd620e2097b9b94");
+
+    if !corpus_path.exists() {
+        eprintln!("Corpus file not found: {:?}", corpus_path);
+        eprintln!("Skipping test");
+        return;
+    }
+
+    // Read the corpus file
+    let data = fs::read(&corpus_path).expect("Failed to read corpus file");
+    let mut bytes = Bytes::from(data);
+
+    println!("Corpus file size: {} bytes", bytes.len());
+    println!("First 32 bytes: {:02x?}", &bytes[..32.min(bytes.len())]);
+
+    // Decode the OSDMapIncremental
+    match OSDMapIncremental::decode_versioned(&mut bytes, 0) {
+        Ok(inc) => {
+            println!("Successfully decoded OSDMapIncremental!");
+            println!("  Epoch: {}", inc.epoch);
+            println!("  FSID: {:?}", inc.fsid);
+            println!("  New pools: {}", inc.new_pools.len());
+            println!("  Old pools: {} = {:?}", inc.old_pools.len(), inc.old_pools);
+            println!("  Remaining bytes: {}", bytes.len());
+
+            // Verify against expected values from C++ dencoder output
+            assert_eq!(inc.epoch, 347, "Epoch should be 347");
+            assert_eq!(inc.new_pools.len(), 18, "Should have 18 new pools");
+            assert_eq!(inc.old_pools.len(), 5, "Should have 5 old pools");
+            assert_eq!(
+                inc.old_pools,
+                vec![127, 146, 147, 160, 162],
+                "Old pools should be [127, 146, 147, 160, 162]"
+            );
+        }
+        Err(e) => {
+            panic!("Failed to decode OSDMapIncremental: {:?}", e);
+        }
+    }
 }

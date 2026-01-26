@@ -6,10 +6,12 @@ use crate::connection::MonConnection;
 use crate::error::{MonClientError, Result};
 use crate::messages::*;
 use crate::monmap::MonMap;
+use crate::paxos_service_message::PaxosServiceMessage;
 use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
 use bytes::Bytes;
 use denc::denc::VersionedEncode;
+use denc::UuidD;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -17,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 /// Monitor client configuration
 #[derive(Debug, Clone)]
@@ -109,6 +111,10 @@ struct MonClientState {
     commands: HashMap<u64, CommandTracker>,
     last_command_tid: u64,
 
+    /// Pool operation tracking
+    pool_ops: HashMap<u64, PoolOpTracker>,
+    last_poolop_tid: u64,
+
     /// Version request tracking
     version_requests: HashMap<u64, VersionTracker>,
     last_version_req_id: u64,
@@ -142,6 +148,40 @@ struct CommandTracker {
     cmd: Vec<String>,
     #[allow(dead_code)]
     result_tx: oneshot::Sender<CommandResult>,
+}
+
+/// Pool operation result
+#[derive(Debug, Clone)]
+pub struct PoolOpResult {
+    /// Reply code (0 = success, negative = error)
+    pub reply_code: i32,
+    /// Epoch
+    pub epoch: u32,
+    /// Response data
+    pub response_data: Bytes,
+}
+
+impl PoolOpResult {
+    pub fn new(reply_code: i32, epoch: u32, response_data: Bytes) -> Self {
+        Self {
+            reply_code,
+            epoch,
+            response_data,
+        }
+    }
+
+    pub fn is_success(&self) -> bool {
+        self.reply_code == 0
+    }
+}
+
+struct PoolOpTracker {
+    #[allow(dead_code)]
+    tid: u64,
+    #[allow(dead_code)]
+    pool_name: String,
+    #[allow(dead_code)]
+    result_tx: oneshot::Sender<PoolOpResult>,
 }
 
 struct VersionTracker {
@@ -189,6 +229,8 @@ impl MonClient {
             subscriptions: MonSub::new(),
             commands: HashMap::new(),
             last_command_tid: 0,
+            pool_ops: HashMap::new(),
+            last_poolop_tid: 0,
             version_requests: HashMap::new(),
             last_version_req_id: 0,
             map_waiters: HashMap::new(),
@@ -233,9 +275,12 @@ impl MonClient {
         // Start hunting process (connects to monitor)
         self.start_hunting().await?;
 
-        // Send initial subscriptions (monmap)
+        // Send initial subscriptions (monmap and osdmap)
         info!("Subscribing to monmap...");
         self.subscribe("monmap", 0, 0).await?;
+
+        info!("Subscribing to osdmap...");
+        self.subscribe("osdmap", 0, 0).await?;
 
         info!("MonClient initialized successfully");
         Ok(())
@@ -335,11 +380,8 @@ impl MonClient {
             .await?,
         );
 
-        // Test if connection is alive by trying to get a lock
-        {
-            let conn_arc = mon_con.connection();
-            let _conn_test = conn_arc.lock().await;
-        }
+        // Note: Connection is now managed by a background task, no need to test it
+        // The task was already spawned in MonConnection::connect()
 
         // Store as active connection
         let mut state = self.state.write().await;
@@ -406,13 +448,50 @@ impl MonClient {
 
         // Use unified CephMessage framework
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let mut message = msgr2::message::Message::new(CEPH_MSG_MON_SUBSCRIBE, ceph_msg.front);
-        message.header.version = 3;
-        message.header.compat_version = 1;
+        let message = msgr2::message::Message::from_ceph_message(ceph_msg);
 
         active_con.send_message(message).await?;
 
         debug!("Sent subscriptions");
+        Ok(())
+    }
+
+    /// Helper to renew a subscription from within spawned tasks
+    /// This doesn't require &self, so it can be called from the message loop
+    async fn renew_subscription(
+        state_arc: &Arc<RwLock<MonClientState>>,
+        what: &str,
+        epoch: u64,
+    ) -> Result<()> {
+        let mut state = state_arc.write().await;
+
+        // Update subscription
+        state.subscriptions.want(what, epoch, 0);
+
+        let active_con = match state.active_con.as_ref() {
+            Some(con) => con.clone(),
+            None => {
+                tracing::warn!("Cannot renew subscription: not connected");
+                return Ok(()); // Don't fail, just skip
+            }
+        };
+
+        // Build subscription message
+        let mut msg = MMonSubscribe::new();
+        for (what, item) in state.subscriptions.get_subs() {
+            msg.add(what.clone(), *item);
+        }
+
+        state.subscriptions.renewed();
+        drop(state);
+
+        // Send subscription message
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
+        let message = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+        active_con.send_message(message).await?;
+
+        debug!("Renewed subscription for {} at epoch {}", what, epoch);
         Ok(())
     }
 
@@ -492,7 +571,15 @@ impl MonClient {
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        match msg.msg_type() {
+        let msg_type = msg.msg_type();
+        debug!(
+            "Dispatching message type: 0x{:04x} ({}), front.len()={}",
+            msg_type,
+            msg_type,
+            msg.front.len()
+        );
+
+        match msg_type {
             msgr2::message::CEPH_MSG_MON_MAP => {
                 info!("Received CEPH_MSG_MON_MAP");
                 Self::handle_monmap(state, map_events, msg).await?;
@@ -510,11 +597,24 @@ impl MonClient {
                 Self::handle_version_reply(state, msg).await?;
             }
             msgr2::message::CEPH_MSG_MON_COMMAND_ACK => {
-                debug!("Received CEPH_MSG_MON_COMMAND_ACK");
+                debug!(
+                    "Received CEPH_MSG_MON_COMMAND_ACK (0x{:04x})",
+                    msgr2::message::CEPH_MSG_MON_COMMAND_ACK
+                );
                 Self::handle_command_ack(state, msg).await?;
             }
+            msgr2::message::CEPH_MSG_POOLOP_REPLY => {
+                debug!(
+                    "Received CEPH_MSG_POOLOP_REPLY (0x{:04x})",
+                    msgr2::message::CEPH_MSG_POOLOP_REPLY
+                );
+                Self::handle_poolop_reply(state, msg).await?;
+            }
             _ => {
-                debug!("Received unknown message type: {}", msg.msg_type());
+                debug!(
+                    "Received unknown message type: 0x{:04x} ({})",
+                    msg_type, msg_type
+                );
             }
         }
         Ok(())
@@ -618,9 +718,104 @@ impl MonClient {
                     let _ = map_events.send(MapEvent::OsdMapUpdated { epoch });
 
                     info!("✓ OSDMap stored and broadcast successfully");
+
+                    // IMPORTANT: Renew subscription to tell monitor we're ready for more updates
+                    // This is critical - without this, the monitor won't send us further updates!
+                    // We subscribe to the NEXT epoch (current + 1) since we've already processed the current one
+                    if let Err(e) = Self::renew_subscription(state, "osdmap", epoch + 1).await {
+                        tracing::warn!("Failed to renew osdmap subscription: {}", e);
+                    }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to decode OSDMap epoch {}: {}", epoch, e);
+                }
+            }
+        }
+
+        // Process incremental OSDMaps
+        for (epoch, inc_bl) in &mosdmap.incremental_maps {
+            info!(
+                "Decoding incremental OSDMap epoch {} ({} bytes)",
+                epoch,
+                inc_bl.len()
+            );
+
+            match denc::osdmap::OSDMapIncremental::decode_versioned(&mut inc_bl.as_ref(), 0) {
+                Ok(inc_map) => {
+                    // Log version info for debugging
+                    debug!(
+                        "OSDMapIncremental encoding version info: epoch={}",
+                        inc_map.epoch
+                    );
+
+                    info!(
+                        "✓ Decoded incremental OSDMap: epoch={}, fsid={}, {} new pools, {} old pools",
+                        inc_map.epoch,
+                        uuid::Uuid::from_bytes(inc_map.fsid.bytes),
+                        inc_map.new_pools.len(),
+                        inc_map.old_pools.len()
+                    );
+
+                    // Debug: Log pool changes in detail
+                    if !inc_map.new_pools.is_empty() {
+                        for pool_id in inc_map.new_pools.keys() {
+                            info!("  New pool ID: {}", pool_id);
+                        }
+                    }
+                    if !inc_map.old_pools.is_empty() {
+                        info!("  Old pools being removed: {:?}", inc_map.old_pools);
+                    }
+                    if !inc_map.new_pool_names.is_empty() {
+                        for (pool_id, name) in &inc_map.new_pool_names {
+                            info!("  New pool name: {} = {}", pool_id, name);
+                        }
+                    }
+
+                    // Apply incremental to existing map or create new map
+                    let mut state_guard = state.write().await;
+
+                    if let Some(current_map) = &state_guard.osdmap {
+                        // Apply incremental to current map
+                        let mut updated_map = (**current_map).clone();
+                        if let Err(e) = inc_map.apply_to(&mut updated_map) {
+                            tracing::warn!(
+                                "Failed to apply incremental OSDMap epoch {}: {}",
+                                epoch,
+                                e
+                            );
+                            drop(state_guard);
+                            continue;
+                        }
+
+                        state_guard.osdmap = Some(Arc::new(updated_map));
+                        state_guard.subscriptions.got("osdmap", *epoch as u64);
+
+                        let epoch_u64 = *epoch as u64;
+                        drop(state_guard);
+
+                        // Broadcast map event
+                        let _ = map_events.send(MapEvent::OsdMapUpdated { epoch: epoch_u64 });
+
+                        info!("✓ Incremental OSDMap applied and broadcast successfully");
+
+                        // IMPORTANT: Renew subscription to tell monitor we're ready for more updates
+                        // We subscribe to the NEXT epoch (current + 1) since we've already processed the current one
+                        if let Err(e) =
+                            Self::renew_subscription(state, "osdmap", epoch_u64 + 1).await
+                        {
+                            tracing::warn!("Failed to renew osdmap subscription: {}", e);
+                        }
+                    } else {
+                        // No base map yet, skip this incremental
+                        tracing::warn!(
+                            "Cannot apply incremental OSDMap epoch {}: no base map available",
+                            epoch
+                        );
+                        drop(state_guard);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to decode incremental OSDMap epoch {}: {}", epoch, e);
                 }
             }
         }
@@ -644,19 +839,151 @@ impl MonClient {
 
     /// Handle version reply
     async fn handle_version_reply(
-        _state: &Arc<RwLock<MonClientState>>,
-        _msg: msgr2::message::Message,
+        state: &Arc<RwLock<MonClientState>>,
+        msg: msgr2::message::Message,
     ) -> Result<()> {
-        // TODO: Implement version reply handling
+        // Decode the version reply message from the front payload
+        let reply = MMonGetVersionReply::decode(&msg.front)?;
+
+        // Get the transaction ID from the message payload (not header in this case)
+        let tid = reply.tid;
+
+        debug!(
+            "Received version reply: tid={}, version={}, oldest_version={}",
+            tid, reply.version, reply.oldest_version
+        );
+
+        // Find and complete the pending version request
+        let mut state_guard = state.write().await;
+        if let Some(tracker) = state_guard.version_requests.remove(&tid) {
+            drop(state_guard); // Release lock before sending
+            let _ = tracker
+                .result_tx
+                .send((reply.version, reply.oldest_version));
+        } else {
+            debug!(
+                "Received version reply for tid {} but no pending request found",
+                tid
+            );
+        }
+
         Ok(())
     }
 
     /// Handle command ack
     async fn handle_command_ack(
-        _state: &Arc<RwLock<MonClientState>>,
-        _msg: msgr2::message::Message,
+        state: &Arc<RwLock<MonClientState>>,
+        msg: msgr2::message::Message,
     ) -> Result<()> {
-        // TODO: Implement command ack handling
+        // Decode the command ack message from the front payload
+        let ack = MMonCommandAck::decode(&msg.front)?;
+
+        // Get the transaction ID from the message header
+        let tid = msg.header.tid;
+
+        debug!(
+            "Received command ack: tid={}, r={}, rs={}",
+            tid, ack.r, ack.rs
+        );
+
+        // Find and complete the pending command by matching tid
+        let mut state_guard = state.write().await;
+        if let Some(tracker) = state_guard.commands.remove(&tid) {
+            drop(state_guard); // Release lock before sending
+                               // The command output is in the data field, not the rs field
+                               // Use rs only if data is empty (for error messages)
+            let outs = if !msg.data.is_empty() {
+                String::from_utf8_lossy(&msg.data).to_string()
+            } else {
+                ack.rs
+            };
+            let result = CommandResult::new(ack.r, outs, msg.data);
+            let _ = tracker.result_tx.send(result);
+        } else {
+            debug!(
+                "Received command ack for tid {} but no pending command found",
+                tid
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Handle pool operation reply
+    async fn handle_poolop_reply(
+        state: &Arc<RwLock<MonClientState>>,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        // Decode the pool operation reply message from the front payload
+        let reply = MPoolOpReply::decode(&msg.front)?;
+
+        // Get the transaction ID from the message header
+        let tid = msg.header.tid;
+
+        debug!(
+            "Received pool op reply: tid={}, reply_code={}, epoch={}",
+            tid, reply.reply_code, reply.epoch
+        );
+
+        info!(
+            "Pool op reply details: tid={}, reply_code={}, target epoch={}",
+            tid, reply.reply_code, reply.epoch
+        );
+
+        // Check if we need to wait for OSDMap update
+        let reply_epoch = reply.epoch;
+        let current_epoch = {
+            let state_guard = state.read().await;
+            state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0)
+        };
+
+        // If reply epoch is newer than our current OSDMap, wait for update
+        if reply_epoch > current_epoch {
+            info!(
+                "Pool op reply epoch {} is newer than current OSDMap epoch {}, waiting for update...",
+                reply_epoch, current_epoch
+            );
+
+            // Wait for OSDMap to be updated (with timeout)
+            let max_wait = std::time::Duration::from_secs(30);
+            let start = std::time::Instant::now();
+
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+                let state_guard = state.read().await;
+                let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
+                drop(state_guard);
+
+                if current >= reply_epoch {
+                    info!("✓ OSDMap updated to epoch {}", current);
+                    break;
+                }
+
+                if start.elapsed() > max_wait {
+                    warn!(
+                        "Timeout waiting for OSDMap epoch {} (current: {})",
+                        reply_epoch, current
+                    );
+                    break;
+                }
+            }
+        }
+
+        // Find and complete the pending pool operation by matching tid
+        let mut state_guard = state.write().await;
+        if let Some(tracker) = state_guard.pool_ops.remove(&tid) {
+            drop(state_guard); // Release lock before sending
+            let result =
+                PoolOpResult::new(reply.reply_code as i32, reply.epoch, reply.response_data);
+            let _ = tracker.result_tx.send(result);
+        } else {
+            debug!(
+                "Received pool op reply for tid {} but no pending pool operation found",
+                tid
+            );
+        }
+
         Ok(())
     }
 
@@ -695,7 +1022,10 @@ impl MonClient {
         // Use unified CephMessage framework
         let msg = MMonGetVersion::new(req_id, what.to_string());
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let message = msgr2::message::Message::new(CEPH_MSG_MON_GET_VERSION, ceph_msg.front);
+        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+        // Set the transaction ID in the message header to match the payload
+        message.header.tid = req_id;
 
         active_con.send_message(message).await?;
 
@@ -705,11 +1035,83 @@ impl MonClient {
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))?;
 
+        // If we're getting osdmap version, wait for the actual map to be received
+        if what == "osdmap" {
+            let target_version = result.0;
+            let start = tokio::time::Instant::now();
+            let timeout = tokio::time::Duration::from_secs(2);
+
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+                let state = self.state.read().await;
+                if let Some(osdmap) = &state.osdmap {
+                    let current_epoch = osdmap.epoch as u64;
+                    if current_epoch >= target_version {
+                        info!(
+                            "OSDMap updated to epoch {} (target: {})",
+                            current_epoch, target_version
+                        );
+                        drop(state);
+                        break;
+                    }
+                    info!(
+                        "Waiting for OSDMap: current epoch={}, target={}",
+                        current_epoch, target_version
+                    );
+                }
+                drop(state);
+
+                if start.elapsed() > timeout {
+                    return Err(MonClientError::Other(format!(
+                        "Timeout waiting for OSDMap to reach version {}",
+                        target_version
+                    )));
+                }
+            }
+        }
+
         Ok(result)
     }
 
     /// Send a command to the monitor cluster
-    pub async fn send_command(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
+    ///
+    /// This is the low-level interface for sending commands to monitors.
+    /// It accepts a vector of command strings (in JSON format) and an optional input buffer,
+    /// and returns a result containing both string output and binary output.
+    ///
+    /// # Arguments
+    /// * `cmd` - Vector of command strings (usually JSON-formatted commands)
+    /// * `inbl` - Input buffer (optional binary data to send with the command)
+    ///
+    /// # Returns
+    /// * `Ok(CommandResult)` containing:
+    ///   - `retval`: Return code (0 = success, negative = error)
+    ///   - `outs`: String output from the command
+    ///   - `outbl`: Binary output from the command
+    /// * `Err(MonClientError)` if the operation failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use monclient::MonClient;
+    /// # use bytes::Bytes;
+    /// # async fn example(client: &MonClient) {
+    /// // List pools
+    /// let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
+    /// let result = client.invoke(cmd, Bytes::new()).await.unwrap();
+    /// println!("Pools: {}", result.outs);
+    ///
+    /// // Create pool with specific pg_num
+    /// let cmd = vec![r#"{"prefix": "osd pool create", "pool": "mypool", "pg_num": 128}"#.to_string()];
+    /// let result = client.invoke(cmd, Bytes::new()).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn invoke(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
+        self.send_command(cmd, inbl).await
+    }
+
+    /// Send a command to the monitor cluster (internal implementation)
+    async fn send_command(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
         let (tx, rx) = oneshot::channel();
 
         let mut state = self.state.write().await;
@@ -740,11 +1142,77 @@ impl MonClient {
 
         drop(state);
 
+        // Create MMonCommand with cluster fsid
+        let fsid = self.get_fsid().await;
+        tracing::info!(
+            "send_command: Sending command (tid={}): {:?} with fsid: {}",
+            tid,
+            cmd,
+            fsid
+        );
+        let msg = MMonCommand::new(tid, cmd, inbl, fsid);
+
         // Use unified CephMessage framework
-        let msg = MMonCommand::new(tid, cmd, inbl);
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let message =
-            msgr2::message::Message::new(msgr2::message::CEPH_MSG_MON_COMMAND, ceph_msg.front);
+        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+        // Set the transaction ID in the message header
+        message.header.tid = tid;
+
+        tracing::info!(
+            "send_command: About to send command message with tid={}",
+            tid
+        );
+        active_con.send_message(message).await?;
+        tracing::info!("send_command: Command message sent successfully, waiting for response");
+
+        // Wait for response with timeout
+        let result = tokio::time::timeout(self.config.command_timeout, rx)
+            .await
+            .map_err(|_| MonClientError::Timeout)?
+            .map_err(|_| MonClientError::Other("Channel closed".into()))?;
+
+        Ok(result)
+    }
+
+    /// Send a pool operation to the monitor cluster
+    async fn send_poolop(&self, pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
+        let (tx, rx) = oneshot::channel();
+
+        let mut state = self.state.write().await;
+
+        if !state.initialized {
+            return Err(MonClientError::NotInitialized);
+        }
+
+        let active_con = state
+            .active_con
+            .as_ref()
+            .ok_or(MonClientError::NotConnected)?
+            .clone();
+
+        // Allocate pool operation ID
+        state.last_poolop_tid += 1;
+        let tid = state.last_poolop_tid;
+
+        // Track pool operation
+        state.pool_ops.insert(
+            tid,
+            PoolOpTracker {
+                tid,
+                pool_name: pool_name.clone(),
+                result_tx: tx,
+            },
+        );
+
+        drop(state);
+
+        // Use unified CephMessage framework
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
+        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+        // Set the transaction ID in the message header
+        message.header.tid = tid;
 
         active_con.send_message(message).await?;
 
@@ -770,9 +1238,9 @@ impl MonClient {
     }
 
     /// Get the cluster FSID
-    pub async fn get_fsid(&self) -> uuid::Uuid {
+    pub async fn get_fsid(&self) -> UuidD {
         let state = self.state.read().await;
-        state.monmap.fsid
+        UuidD::from_bytes(*state.monmap.fsid.as_bytes())
     }
 
     /// Get the current OSDMap
@@ -899,6 +1367,200 @@ impl MonClient {
     /// Subscribe to map events
     pub fn subscribe_events(&self) -> broadcast::Receiver<MapEvent> {
         self.map_events.subscribe()
+    }
+
+    /// Create a new pool
+    ///
+    /// This is a simplified interface for pool creation using MPoolOp messages.
+    /// For advanced pool creation with custom parameters (pg_num, pgp_num, pool_type, etc.),
+    /// use the `invoke()` method with a mon_command instead.
+    ///
+    /// # Arguments
+    /// * `pool_name` - Name of the pool to create
+    /// * `crush_rule` - Optional CRUSH rule ID (uses cluster default if None)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the pool was created successfully
+    /// * `Err(MonClientError)` if the operation failed
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use monclient::MonClient;
+    /// # async fn example(client: &MonClient) {
+    /// // Create pool with default settings
+    /// client.create_pool("mypool", None).await.unwrap();
+    ///
+    /// // Create pool with specific crush rule
+    /// client.create_pool("mypool", Some(1)).await.unwrap();
+    ///
+    /// // For more control (e.g., pg_num), use invoke():
+    /// let cmd = vec![r#"{"prefix": "osd pool create", "pool": "mypool", "pg_num": 128}"#.to_string()];
+    /// client.invoke(cmd, bytes::Bytes::new()).await.unwrap();
+    /// # }
+    /// ```
+    pub async fn create_pool(&self, pool_name: &str, crush_rule: Option<i16>) -> Result<()> {
+        // Use MPoolOp message (official librados approach)
+        let fsid = self.get_fsid().await;
+
+        // For pool creation, pool_id is 0 (pool doesn't exist yet)
+        let msg = MPoolOp::create_pool(fsid.bytes, pool_name.to_string(), crush_rule);
+
+        let result = self.send_poolop(pool_name.to_string(), msg).await?;
+
+        if result.is_success() {
+            Ok(())
+        } else {
+            Err(MonClientError::CommandFailed {
+                code: result.reply_code,
+                message: format!("Pool operation failed with code {}", result.reply_code),
+            })
+        }
+    }
+
+    /// Delete a pool using MPoolOp protocol
+    ///
+    /// This operation uses the MPoolOp binary message protocol to delete a pool,
+    /// matching the official librados implementation.
+    ///
+    /// # Arguments
+    /// * `pool_name` - Name of the pool to delete
+    /// * `confirm` - Must be set to true to confirm deletion (safety check)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the pool was deleted successfully
+    /// * `Err(MonClientError)` if the operation failed
+    ///
+    /// # Safety
+    /// This operation is destructive and will delete all data in the pool.
+    /// The `confirm` parameter must be explicitly set to `true`.
+    pub async fn delete_pool(&self, pool_name: &str, confirm: bool) -> Result<()> {
+        if !confirm {
+            return Err(MonClientError::Other(
+                "Pool deletion requires explicit confirmation".into(),
+            ));
+        }
+
+        // Get fsid
+        let fsid = self.get_fsid().await;
+
+        // Look up pool ID from OSDMap
+        let state = self.state.read().await;
+        let osdmap = state
+            .osdmap
+            .as_ref()
+            .ok_or_else(|| MonClientError::Other("OSD map not available yet".into()))?;
+
+        let pool_id = osdmap
+            .pool_name
+            .iter()
+            .find(|(_, name)| name.as_str() == pool_name)
+            .map(|(id, _)| *id as u32)
+            .ok_or_else(|| MonClientError::Other(format!("Pool '{}' not found", pool_name)))?;
+
+        info!("Deleting pool '{}' with ID {}", pool_name, pool_id);
+
+        drop(state);
+
+        // Create and send MPoolOp delete message
+        let msg = MPoolOp::delete_pool(fsid.bytes, pool_id, pool_name.to_string());
+        let result = self.send_poolop(pool_name.to_string(), msg).await?;
+
+        if result.is_success() {
+            Ok(())
+        } else {
+            Err(MonClientError::CommandFailed {
+                code: result.reply_code,
+                message: format!("Pool operation failed with code {}", result.reply_code),
+            })
+        }
+    }
+
+    /// List all pools
+    ///
+    /// # Returns
+    /// * `Ok(Vec<String>)` - List of pool names
+    /// * `Err(MonClientError)` if the operation failed
+    pub async fn list_pools(&self) -> Result<Vec<String>> {
+        // Read from local cached OSDMap like C++ does, not from monitor
+        let state = self.state.read().await;
+        let osdmap = state
+            .osdmap
+            .as_ref()
+            .ok_or_else(|| MonClientError::Other("OSD map not available yet".into()))?;
+
+        // Iterate over pools (the authoritative source) and look up names
+        // This matches C++ librados: for (auto p : o.get_pools()) v.push_back(o.get_pool_name(p.first))
+        let mut pools: Vec<String> = osdmap
+            .pools
+            .keys()
+            .filter_map(|pool_id| osdmap.pool_name.get(pool_id).cloned())
+            .collect();
+
+        // Sort for consistent ordering
+        pools.sort();
+
+        Ok(pools)
+    }
+
+    /// List all pools by sending a command to the monitor
+    ///
+    /// This queries the monitor directly rather than using the cached OSDMap.
+    /// Prefer using list_pools() which reads from the local cache for consistency.
+    ///
+    /// # Returns
+    /// * `Ok(Vec<String>)` - List of pool names
+    /// * `Err(MonClientError)` if the operation failed
+    pub async fn list_pools_from_monitor(&self) -> Result<Vec<String>> {
+        tracing::info!("list_pools: Creating command");
+        // Commands must be JSON formatted: {"prefix": "command"}
+        let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
+
+        tracing::info!("list_pools: Calling send_command with cmd={:?}", cmd);
+        let result = self.send_command(cmd, Bytes::new()).await?;
+        tracing::info!("list_pools: Received result from send_command");
+
+        if result.is_success() {
+            // Parse the output - pool names are separated by newlines
+            let pools: Vec<String> = result
+                .outs
+                .lines()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            Ok(pools)
+        } else {
+            Err(MonClientError::CommandFailed {
+                code: result.retval,
+                message: result.outs,
+            })
+        }
+    }
+
+    /// Get pool statistics
+    ///
+    /// # Arguments
+    /// * `pool_name` - Name of the pool
+    ///
+    /// # Returns
+    /// * `Ok(String)` - JSON-formatted pool statistics
+    /// * `Err(MonClientError)` if the operation failed
+    pub async fn get_pool_stats(&self, pool_name: &str) -> Result<String> {
+        // Commands must be JSON formatted: {"prefix": "command", "pool_name": "name"}
+        let cmd = vec![format!(
+            r#"{{"prefix": "osd pool stats", "pool_name": "{}"}}"#,
+            pool_name
+        )];
+
+        let result = self.send_command(cmd, Bytes::new()).await?;
+
+        if result.is_success() {
+            Ok(result.outs)
+        } else {
+            Err(MonClientError::CommandFailed {
+                code: result.retval,
+                message: result.outs,
+            })
+        }
     }
 }
 

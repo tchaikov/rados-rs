@@ -41,6 +41,7 @@ pub mod connection;
 pub mod error;
 pub mod messages;
 pub mod monmap;
+pub mod paxos_service_message;
 pub mod subscription;
 pub mod types;
 

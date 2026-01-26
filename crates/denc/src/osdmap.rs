@@ -2228,6 +2228,498 @@ impl crate::denc::Denc for SnapIntervalSet {
 /// Ceph release type (ceph_release_t in C++)
 pub type CephRelease = u8;
 
+/// Incremental OSDMap update (OSDMap::Incremental in C++)
+/// Represents a diff from epoch-1 to epoch
+#[derive(Debug, Clone, Serialize, Default)]
+pub struct OSDMapIncremental {
+    /// Feature bits used for encoding
+    pub encode_features: u64,
+
+    /// Filesystem UUID
+    pub fsid: UuidD,
+
+    /// New epoch (this is a diff from epoch-1 to epoch)
+    pub epoch: Epoch,
+
+    /// Modification timestamp
+    pub modified: UTime,
+
+    /// New pool max (incremented on each pool create)
+    pub new_pool_max: i64,
+
+    /// New flags
+    pub new_flags: i32,
+
+    /// Full map (if this is a full update instead of incremental)
+    pub fullmap: Bytes,
+
+    /// CRUSH map update
+    pub crush: Bytes,
+
+    // Incremental changes
+    pub new_max_osd: i32,
+    pub new_pools: BTreeMap<i64, PgPool>,
+    pub new_pool_names: BTreeMap<i64, String>,
+    pub old_pools: Vec<i64>,
+
+    pub new_up_client: BTreeMap<i32, EntityAddrvec>,
+    pub new_state: BTreeMap<i32, u32>,
+    pub new_weight: BTreeMap<i32, u32>,
+    pub new_pg_temp: BTreeMap<PgId, Vec<i32>>,
+    pub new_primary_temp: BTreeMap<PgId, i32>,
+    pub new_primary_affinity: BTreeMap<i32, u32>,
+
+    pub new_erasure_code_profiles: BTreeMap<String, BTreeMap<String, String>>,
+    pub old_erasure_code_profiles: Vec<String>,
+
+    pub new_pg_upmap: BTreeMap<PgId, Vec<i32>>,
+    pub old_pg_upmap: Vec<PgId>,
+    pub new_pg_upmap_items: BTreeMap<PgId, Vec<(i32, i32)>>,
+    pub old_pg_upmap_items: Vec<PgId>,
+
+    pub new_removed_snaps: BTreeMap<i64, SnapIntervalSet>,
+    pub new_purged_snaps: BTreeMap<i64, SnapIntervalSet>,
+
+    pub new_last_up_change: UTime,
+    pub new_last_in_change: UTime,
+
+    pub new_pg_upmap_primary: BTreeMap<PgId, i32>,
+    pub old_pg_upmap_primary: Vec<PgId>,
+
+    // Extended OSD-only data
+    pub new_hb_back_up: BTreeMap<i32, EntityAddrvec>,
+    pub new_up_thru: BTreeMap<i32, Epoch>,
+    pub new_last_clean_interval: BTreeMap<i32, (Epoch, Epoch)>,
+    pub new_lost: BTreeMap<i32, Epoch>,
+    pub new_blocklist: BTreeMap<EntityAddr, UTime>,
+    pub old_blocklist: Vec<EntityAddr>,
+    pub new_up_cluster: BTreeMap<i32, EntityAddrvec>,
+    pub cluster_snapshot: String,
+    pub new_uuid: BTreeMap<i32, UuidD>,
+    pub new_xinfo: BTreeMap<i32, OsdXInfo>,
+    pub new_hb_front_up: BTreeMap<i32, EntityAddrvec>,
+
+    pub new_nearfull_ratio: f32,
+    pub new_full_ratio: f32,
+    pub new_backfillfull_ratio: f32,
+
+    pub new_require_min_compat_client: CephRelease,
+    pub new_require_osd_release: CephRelease,
+
+    pub new_crush_node_flags: BTreeMap<i32, u32>,
+    pub new_device_class_flags: BTreeMap<i32, u32>,
+
+    pub change_stretch_mode: bool,
+    pub new_stretch_bucket_count: u32,
+    pub new_degraded_stretch_mode: u32,
+    pub new_recovering_stretch_mode: u32,
+    pub new_stretch_mode_bucket: i32,
+    pub stretch_mode_enabled: bool,
+
+    pub new_range_blocklist: BTreeMap<EntityAddr, UTime>,
+    pub old_range_blocklist: Vec<EntityAddr>,
+
+    pub mutate_allow_crimson: u8,
+
+    // CRC fields
+    pub have_crc: bool,
+    pub full_crc: u32,
+    pub inc_crc: u32,
+}
+
+impl OSDMapIncremental {
+    pub fn new(epoch: Epoch) -> Self {
+        Self {
+            epoch,
+            new_pool_max: -1,
+            new_flags: -1,
+            new_max_osd: -1,
+            new_nearfull_ratio: -1.0,
+            new_full_ratio: -1.0,
+            new_backfillfull_ratio: -1.0,
+            new_require_min_compat_client: 0xff, // Unknown
+            new_require_osd_release: 0xff,       // Unknown,
+            ..Default::default()
+        }
+    }
+
+    /// Apply this incremental update to an OSDMap
+    pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
+        // Update epoch
+        base.epoch = self.epoch;
+        base.modified = self.modified.clone();
+
+        // Update pool max
+        if self.new_pool_max >= 0 {
+            base.pool_max = self.new_pool_max as i32;
+        }
+
+        // Update flags
+        if self.new_flags >= 0 {
+            base.flags = self.new_flags as u32;
+        }
+
+        // Update max_osd
+        if self.new_max_osd >= 0 {
+            base.max_osd = self.new_max_osd;
+            // Resize vectors if needed
+            if base.max_osd as usize > base.osd_state.len() {
+                base.osd_state.resize(base.max_osd as usize, 0);
+                base.osd_weight.resize(base.max_osd as usize, 0);
+            }
+        }
+
+        // Apply pool changes
+        for pool_id in &self.old_pools {
+            base.pools.remove(pool_id);
+            base.pool_name.remove(pool_id);
+        }
+
+        for (pool_id, pool) in &self.new_pools {
+            base.pools.insert(*pool_id, pool.clone());
+        }
+
+        for (pool_id, name) in &self.new_pool_names {
+            base.pool_name.insert(*pool_id, name.clone());
+        }
+
+        // Apply OSD state changes
+        for (osd, addrvec) in &self.new_up_client {
+            let idx = *osd as usize;
+            if idx >= base.osd_addrs_client.len() {
+                base.osd_addrs_client
+                    .resize(idx + 1, EntityAddrvec::default());
+            }
+            base.osd_addrs_client[idx] = addrvec.clone();
+        }
+
+        for (osd, state) in &self.new_state {
+            let idx = *osd as usize;
+            if idx < base.osd_state.len() {
+                base.osd_state[idx] ^= state; // XOR the state
+            }
+        }
+
+        for (osd, weight) in &self.new_weight {
+            let idx = *osd as usize;
+            if idx < base.osd_weight.len() {
+                base.osd_weight[idx] = *weight;
+            }
+        }
+
+        // Apply pg_temp changes
+        for (pgid, osds) in &self.new_pg_temp {
+            if osds.is_empty() {
+                base.pg_temp.remove(pgid);
+            } else {
+                base.pg_temp.insert(pgid.clone(), osds.clone());
+            }
+        }
+
+        // Apply primary_temp changes
+        for (pgid, osd) in &self.new_primary_temp {
+            if *osd == -1 {
+                base.primary_temp.remove(pgid);
+            } else {
+                base.primary_temp.insert(pgid.clone(), *osd);
+            }
+        }
+
+        // Update timestamps
+        if self.new_last_up_change.sec != 0 {
+            base.last_up_change = self.new_last_up_change.clone();
+        }
+
+        if self.new_last_in_change.sec != 0 {
+            base.last_in_change = self.new_last_in_change.clone();
+        }
+
+        Ok(())
+    }
+}
+
+impl VersionedEncode for OSDMapIncremental {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        8 // Current version
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        7 // Minimum compatible version
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Not implemented yet
+        Err(RadosError::Protocol(
+            "OSDMapIncremental encoding not implemented".into(),
+        ))
+    }
+
+    fn decode_content<B: Buf>(
+        _buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // Not used - we override decode_versioned for nested versioning
+        Err(RadosError::Protocol(
+            "Use decode_versioned for OSDMapIncremental".into(),
+        ))
+    }
+
+    fn decode_versioned<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        use bytes::Bytes;
+
+        // Outer wrapper (version 8, legacy compat 7)
+        if buf.remaining() < 6 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for version header".into(),
+            ));
+        }
+
+        let struct_v = buf.get_u8();
+        let _struct_compat = buf.get_u8();
+        let struct_len = buf.get_u32_le() as usize;
+
+        if buf.remaining() < struct_len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes: need {}, have {}",
+                struct_len,
+                buf.remaining()
+            )));
+        }
+
+        if struct_v < 7 {
+            return Err(RadosError::Protocol(
+                "Legacy incremental encoding (v<7) not supported".into(),
+            ));
+        }
+
+        // Extract outer content into Bytes
+        let outer_bytes = buf.copy_to_bytes(struct_len);
+        let mut outer_cursor = &outer_bytes[..];
+        let mut inc = OSDMapIncremental::new(0);
+
+        // Client-usable data section (version 9)
+        {
+            if outer_cursor.remaining() < 6 {
+                return Err(RadosError::Protocol(
+                    "Insufficient bytes for client section header".into(),
+                ));
+            }
+
+            let client_v = outer_cursor.get_u8();
+            let _client_compat = outer_cursor.get_u8();
+            let client_len = outer_cursor.get_u32_le() as usize;
+
+            if outer_cursor.remaining() < client_len {
+                return Err(RadosError::Protocol(format!(
+                    "Insufficient bytes for client section: need {}, have {}",
+                    client_len,
+                    outer_cursor.remaining()
+                )));
+            }
+
+            // Extract client section bytes
+            let client_bytes = outer_cursor.copy_to_bytes(client_len);
+            let mut client_cursor = &client_bytes[..];
+
+            inc.fsid = UuidD::decode(&mut client_cursor, features)?;
+            inc.epoch = Epoch::decode(&mut client_cursor, features)?;
+            inc.modified = UTime::decode(&mut client_cursor, features)?;
+            inc.new_pool_max = i64::decode(&mut client_cursor, features)?;
+            inc.new_flags = i32::decode(&mut client_cursor, features)?;
+            inc.fullmap = Bytes::decode(&mut client_cursor, features)?;
+            inc.crush = Bytes::decode(&mut client_cursor, features)?;
+
+            inc.new_max_osd = i32::decode(&mut client_cursor, features)?;
+            inc.new_pools = BTreeMap::decode(&mut client_cursor, features)?;
+
+            // Handle new_pool_names based on version
+            if client_v == 5 {
+                // Version 5: manual decode
+                let count = u32::decode(&mut client_cursor, features)? as usize;
+                for _ in 0..count {
+                    let pool_id = i64::decode(&mut client_cursor, features)?;
+                    let pool_name = String::decode(&mut client_cursor, features)?;
+                    inc.new_pool_names.insert(pool_id, pool_name);
+                }
+            } else if client_v >= 6 {
+                // Version 6+: standard decode
+                inc.new_pool_names = BTreeMap::decode(&mut client_cursor, features)?;
+            }
+
+            // Handle old_pools based on version
+            if client_v < 6 {
+                // Version < 6: manual decode
+                let count = u32::decode(&mut client_cursor, features)? as usize;
+                for _ in 0..count {
+                    let pool_id = i64::decode(&mut client_cursor, features)?;
+                    inc.old_pools.push(pool_id);
+                }
+            } else {
+                // Version 6+: standard decode
+                inc.old_pools = Vec::decode(&mut client_cursor, features)?;
+            }
+
+            inc.new_up_client = BTreeMap::decode(&mut client_cursor, features)?;
+
+            if client_v >= 5 {
+                inc.new_state = BTreeMap::decode(&mut client_cursor, features)?;
+            } else {
+                // Convert old u8 state format to u32
+                let old_state: BTreeMap<i32, u8> = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.new_state = old_state.into_iter().map(|(k, v)| (k, v as u32)).collect();
+            }
+
+            inc.new_weight = BTreeMap::decode(&mut client_cursor, features)?;
+            inc.new_pg_temp = BTreeMap::decode(&mut client_cursor, features)?;
+            inc.new_primary_temp = BTreeMap::decode(&mut client_cursor, features)?;
+
+            if client_v >= 2 {
+                inc.new_primary_affinity = BTreeMap::decode(&mut client_cursor, features)?;
+            }
+
+            if client_v >= 3 {
+                inc.new_erasure_code_profiles = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.old_erasure_code_profiles = Vec::decode(&mut client_cursor, features)?;
+            }
+
+            if client_v >= 4 {
+                inc.new_pg_upmap = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.old_pg_upmap = Vec::decode(&mut client_cursor, features)?;
+                inc.new_pg_upmap_items = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.old_pg_upmap_items = Vec::decode(&mut client_cursor, features)?;
+            }
+
+            if client_v >= 6 {
+                inc.new_removed_snaps = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.new_purged_snaps = BTreeMap::decode(&mut client_cursor, features)?;
+            }
+
+            if client_v >= 8 {
+                inc.new_last_up_change = UTime::decode(&mut client_cursor, features)?;
+                inc.new_last_in_change = UTime::decode(&mut client_cursor, features)?;
+            }
+
+            if client_v >= 9 {
+                inc.new_pg_upmap_primary = BTreeMap::decode(&mut client_cursor, features)?;
+                inc.old_pg_upmap_primary = Vec::decode(&mut client_cursor, features)?;
+            }
+
+            // DECODE_FINISH: Forward compatibility - remaining bytes are ignored
+        }
+
+        // Extended OSD-only data section (version 12)
+        {
+            if outer_cursor.remaining() < 6 {
+                return Err(RadosError::Protocol(
+                    "Insufficient bytes for OSD section header".into(),
+                ));
+            }
+
+            let osd_v = outer_cursor.get_u8();
+            let _osd_compat = outer_cursor.get_u8();
+            let osd_len = outer_cursor.get_u32_le() as usize;
+
+            if outer_cursor.remaining() < osd_len {
+                return Err(RadosError::Protocol(format!(
+                    "Insufficient bytes for OSD section: need {}, have {}",
+                    osd_len,
+                    outer_cursor.remaining()
+                )));
+            }
+
+            // Extract OSD section bytes
+            let osd_bytes = outer_cursor.copy_to_bytes(osd_len);
+            let mut osd_cursor = &osd_bytes[..];
+
+            inc.new_hb_back_up = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_up_thru = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_last_clean_interval = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_lost = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_blocklist = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.old_blocklist = Vec::decode(&mut osd_cursor, features)?;
+            inc.new_up_cluster = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.cluster_snapshot = String::decode(&mut osd_cursor, features)?;
+            inc.new_uuid = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_xinfo = BTreeMap::decode(&mut osd_cursor, features)?;
+            inc.new_hb_front_up = BTreeMap::decode(&mut osd_cursor, features)?;
+
+            if osd_v >= 2 {
+                inc.encode_features = u64::decode(&mut osd_cursor, features)?;
+            } else {
+                inc.encode_features = 0;
+            }
+
+            if osd_v >= 3 {
+                inc.new_nearfull_ratio = f32::from_bits(osd_cursor.get_u32_le());
+                inc.new_full_ratio = f32::from_bits(osd_cursor.get_u32_le());
+            }
+
+            if osd_v >= 4 {
+                inc.new_backfillfull_ratio = f32::from_bits(osd_cursor.get_u32_le());
+            }
+
+            if osd_v >= 6 {
+                inc.new_require_min_compat_client = u8::decode(&mut osd_cursor, features)?;
+                inc.new_require_osd_release = u8::decode(&mut osd_cursor, features)?;
+            }
+
+            if osd_v >= 8 {
+                inc.new_crush_node_flags = BTreeMap::decode(&mut osd_cursor, features)?;
+            }
+
+            if osd_v >= 9 {
+                inc.new_device_class_flags = BTreeMap::decode(&mut osd_cursor, features)?;
+            }
+
+            if osd_v >= 10 {
+                inc.change_stretch_mode = bool::decode(&mut osd_cursor, features)?;
+                inc.new_stretch_bucket_count = u32::decode(&mut osd_cursor, features)?;
+                inc.new_degraded_stretch_mode = u32::decode(&mut osd_cursor, features)?;
+                inc.new_recovering_stretch_mode = u32::decode(&mut osd_cursor, features)?;
+                inc.new_stretch_mode_bucket = i32::decode(&mut osd_cursor, features)?;
+                inc.stretch_mode_enabled = bool::decode(&mut osd_cursor, features)?;
+            }
+
+            if osd_v >= 11 {
+                inc.new_range_blocklist = BTreeMap::decode(&mut osd_cursor, features)?;
+                inc.old_range_blocklist = Vec::decode(&mut osd_cursor, features)?;
+            }
+
+            if osd_v >= 12 {
+                inc.mutate_allow_crimson = u8::decode(&mut osd_cursor, features)?;
+            }
+
+            // DECODE_FINISH: Forward compatibility - remaining bytes are ignored
+        }
+
+        // CRC validation (version 8+)
+        if struct_v >= 8 && outer_cursor.remaining() >= 8 {
+            inc.have_crc = true;
+            inc.inc_crc = u32::decode(&mut outer_cursor, features)?;
+            inc.full_crc = u32::decode(&mut outer_cursor, features)?;
+            // TODO: Validate CRC if needed
+        }
+
+        // DECODE_FINISH: Forward compatibility - remaining bytes are ignored
+
+        Ok(inc)
+    }
+
+    fn encode_versioned<B: BufMut>(&self, _buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // Not implemented yet
+        Err(RadosError::Protocol(
+            "OSDMapIncremental encoding not implemented".into(),
+        ))
+    }
+}
+
 /// OSDMap - the main OSD cluster map structure
 /// This is a simplified version that focuses on decoding the essential fields
 #[derive(Debug, Clone, Default, Serialize)]

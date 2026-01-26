@@ -5,10 +5,12 @@ use std::fmt;
 
 pub const CEPH_MSG_PING: u16 = 0x0001;
 pub const CEPH_MSG_PING_ACK: u16 = 0x0002;
+pub const CEPH_MSG_MON_MAP: u16 = 0x0004;
 pub const CEPH_MSG_OSD_MAP: u16 = 0x0041;
-pub const CEPH_MSG_MON_MAP: u16 = 0x0042;
-pub const CEPH_MSG_MON_COMMAND: u16 = 0x0050;
-pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 0x0051;
+pub const CEPH_MSG_MON_COMMAND: u16 = 50;
+pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 51;
+pub const CEPH_MSG_POOLOP_REPLY: u16 = 48;
+pub const CEPH_MSG_POOLOP: u16 = 49;
 pub const CEPH_MSG_AUTH: u16 = 0x0011;
 pub const CEPH_MSG_AUTH_REPLY: u16 = 0x0012;
 
@@ -54,6 +56,23 @@ impl Message {
     pub fn with_priority(mut self, priority: u16) -> Self {
         self.header.priority = priority;
         self
+    }
+
+    /// Create a Message from a CephMessage
+    pub fn from_ceph_message(ceph_msg: crate::ceph_message::CephMessage) -> Self {
+        let mut header = MsgHeader::new_default(ceph_msg.header.msg_type, ceph_msg.header.priority);
+        header.tid = ceph_msg.header.tid;
+        header.version = ceph_msg.header.version; // Message version, not protocol version
+        header.compat_version = ceph_msg.header.compat_version;
+        header.data_off = ceph_msg.header.data_off;
+
+        Self {
+            header,
+            front: ceph_msg.front,
+            middle: ceph_msg.middle,
+            data: ceph_msg.data,
+            footer: None,
+        }
     }
 
     pub fn with_version(mut self, version: u16) -> Self {

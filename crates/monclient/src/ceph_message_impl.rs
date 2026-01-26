@@ -4,6 +4,7 @@
 //! for monitor protocol messages.
 
 use crate::messages::*;
+use crate::paxos_service_message::PaxosServiceMessage;
 use bytes::Bytes;
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 
@@ -186,7 +187,7 @@ impl CephMessagePayload for MMonCommand {
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        self.encode().map_err(|_e| msgr2::Error::Serialization)
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
     }
 
     fn decode_payload(
@@ -195,7 +196,7 @@ impl CephMessagePayload for MMonCommand {
         _middle: &[u8],
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode(front)
+        PaxosServiceMessage::decode(front)
             .map_err(|_e| msgr2::Error::Deserialization("MMonCommand decode failed".into()))
     }
 }
@@ -210,7 +211,7 @@ impl CephMessagePayload for MMonCommandAck {
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        self.encode().map_err(|_e| msgr2::Error::Serialization)
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
     }
 
     fn decode_payload(
@@ -219,8 +220,62 @@ impl CephMessagePayload for MMonCommandAck {
         _middle: &[u8],
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode(front)
+        PaxosServiceMessage::decode(front)
             .map_err(|_e| msgr2::Error::Deserialization("MMonCommandAck decode failed".into()))
+    }
+}
+
+/// MPoolOp message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
+const MPOOL_OP_VERSION: u16 = 4;
+
+/// MPoolOpReply message version
+const MPOOL_OP_REPLY_VERSION: u16 = 1;
+
+impl CephMessagePayload for MPoolOp {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_POOLOP
+    }
+
+    fn msg_version() -> u16 {
+        MPOOL_OP_VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MPoolOp decode failed".into()))
+    }
+}
+
+impl CephMessagePayload for MPoolOpReply {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_POOLOP_REPLY
+    }
+
+    fn msg_version() -> u16 {
+        MPOOL_OP_REPLY_VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MPoolOpReply decode failed".into()))
     }
 }
 
