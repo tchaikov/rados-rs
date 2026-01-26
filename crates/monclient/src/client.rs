@@ -661,162 +661,221 @@ impl MonClient {
     ) -> Result<()> {
         info!("Handling OSDMap message ({} bytes)", msg.front.len());
 
-        // Dump the raw MOSDMap message for analysis
-        let mosdmap_dump_path = "/tmp/mosdmap-raw.bin";
-        if let Err(e) = std::fs::write(mosdmap_dump_path, &msg.front) {
-            tracing::warn!("Failed to dump MOSDMap to {}: {}", mosdmap_dump_path, e);
-        } else {
-            info!("✓ Dumped MOSDMap to {}", mosdmap_dump_path);
-        }
-
         // Decode MOSDMap
         let mosdmap = MOSDMap::decode(&msg.front)?;
         info!(
-            "Received MOSDMap: {} full maps, {} incremental maps, newest={}",
+            "Received MOSDMap: epochs [{}..{}], {} full maps, {} incremental maps",
+            mosdmap.get_first(),
+            mosdmap.get_last(),
             mosdmap.maps.len(),
-            mosdmap.incremental_maps.len(),
-            mosdmap.newest_map
+            mosdmap.incremental_maps.len()
         );
 
-        // Decode the full osdmaps
-        for (epoch, osdmap_bl) in &mosdmap.maps {
-            info!(
-                "Decoding OSDMap epoch {} ({} bytes)",
-                epoch,
-                osdmap_bl.len()
-            );
-
-            // Dump the raw bytes to a file for analysis
-            let dump_path = format!("/tmp/osdmap-epoch-{}.bin", epoch);
-            if let Err(e) = std::fs::write(&dump_path, osdmap_bl) {
-                tracing::warn!("Failed to dump OSDMap to {}: {}", dump_path, e);
-            } else {
-                info!("✓ Dumped OSDMap epoch {} to {}", epoch, dump_path);
-            }
-
-            match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
-                Ok(osdmap) => {
-                    info!(
-                        "✓ Decoded OSDMap: epoch={}, fsid={}, {} pools, {} osds",
-                        osdmap.epoch,
-                        uuid::Uuid::from_bytes(osdmap.fsid.bytes),
-                        osdmap.pools.len(),
-                        osdmap.osd_state.len()
-                    );
-
-                    // Store the OSDMap in state
-                    let mut state_guard = state.write().await;
-                    state_guard.osdmap = Some(Arc::new(osdmap.clone()));
-
-                    // Mark subscription as received
-                    state_guard.subscriptions.got("osdmap", osdmap.epoch as u64);
-
-                    let epoch = osdmap.epoch as u64;
-                    drop(state_guard);
-
-                    // Broadcast map event
-                    let _ = map_events.send(MapEvent::OsdMapUpdated { epoch });
-
-                    info!("✓ OSDMap stored and broadcast successfully");
-
-                    // IMPORTANT: Renew subscription to tell monitor we're ready for more updates
-                    // This is critical - without this, the monitor won't send us further updates!
-                    // We subscribe to the NEXT epoch (current + 1) since we've already processed the current one
-                    if let Err(e) = Self::renew_subscription(state, "osdmap", epoch + 1).await {
-                        tracing::warn!("Failed to renew osdmap subscription: {}", e);
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to decode OSDMap epoch {}: {}", epoch, e);
-                }
+        // 1. Validate FSID
+        {
+            let state_guard = state.read().await;
+            let cluster_fsid = state_guard.monmap.fsid.as_bytes();
+            if &mosdmap.fsid != cluster_fsid {
+                tracing::warn!(
+                    "Ignoring OSDMap with wrong fsid {} != {}",
+                    uuid::Uuid::from_bytes(mosdmap.fsid),
+                    state_guard.monmap.fsid
+                );
+                return Ok(());
             }
         }
 
-        // Process incremental OSDMaps
-        for (epoch, inc_bl) in &mosdmap.incremental_maps {
+        // 2. Check if we've already processed these epochs
+        let mut state_guard = state.write().await;
+        let current_epoch = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
+
+        if mosdmap.get_last() <= current_epoch {
             info!(
-                "Decoding incremental OSDMap epoch {} ({} bytes)",
-                epoch,
-                inc_bl.len()
+                "Ignoring OSDMap epochs [{}..{}] <= current epoch {}",
+                mosdmap.get_first(),
+                mosdmap.get_last(),
+                current_epoch
             );
+            return Ok(());
+        }
 
-            match denc::osdmap::OSDMapIncremental::decode_versioned(&mut inc_bl.as_ref(), 0) {
-                Ok(inc_map) => {
-                    // Log version info for debugging
-                    debug!(
-                        "OSDMapIncremental encoding version info: epoch={}",
-                        inc_map.epoch
-                    );
+        info!(
+            "Processing OSDMap epochs [{}..{}] > current epoch {}",
+            mosdmap.get_first(),
+            mosdmap.get_last(),
+            current_epoch
+        );
 
-                    info!(
-                        "✓ Decoded incremental OSDMap: epoch={}, fsid={}, {} new pools, {} old pools",
-                        inc_map.epoch,
-                        uuid::Uuid::from_bytes(inc_map.fsid.bytes),
-                        inc_map.new_pools.len(),
-                        inc_map.old_pools.len()
-                    );
+        // 3. Process epochs sequentially
+        if current_epoch > 0 {
+            // We have a current map, apply updates sequentially
+            for e in (current_epoch + 1)..=mosdmap.get_last() {
+                let current_map_epoch = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
 
-                    // Debug: Log pool changes in detail
-                    if !inc_map.new_pools.is_empty() {
-                        for pool_id in inc_map.new_pools.keys() {
-                            info!("  New pool ID: {}", pool_id);
-                        }
-                    }
-                    if !inc_map.old_pools.is_empty() {
-                        info!("  Old pools being removed: {:?}", inc_map.old_pools);
-                    }
-                    if !inc_map.new_pool_names.is_empty() {
-                        for (pool_id, name) in &inc_map.new_pool_names {
-                            info!("  New pool name: {} = {}", pool_id, name);
-                        }
-                    }
+                if current_map_epoch == e - 1 && mosdmap.incremental_maps.contains_key(&e) {
+                    // Apply incremental
+                    info!("Applying incremental OSDMap for epoch {}", e);
+                    let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
 
-                    // Apply incremental to existing map or create new map
-                    let mut state_guard = state.write().await;
-
-                    if let Some(current_map) = &state_guard.osdmap {
-                        // Apply incremental to current map
-                        let mut updated_map = (**current_map).clone();
-                        if let Err(e) = inc_map.apply_to(&mut updated_map) {
-                            tracing::warn!(
-                                "Failed to apply incremental OSDMap epoch {}: {}",
-                                epoch,
-                                e
+                    match denc::osdmap::OSDMapIncremental::decode_versioned(&mut inc_bl.as_ref(), 0)
+                    {
+                        Ok(inc_map) => {
+                            info!(
+                                "✓ Decoded incremental: epoch={}, {} new pools, {} old pools",
+                                inc_map.epoch,
+                                inc_map.new_pools.len(),
+                                inc_map.old_pools.len()
                             );
-                            drop(state_guard);
-                            continue;
+
+                            if let Some(current_map) = &state_guard.osdmap {
+                                let mut updated_map = (**current_map).clone();
+                                if let Err(err) = inc_map.apply_to(&mut updated_map) {
+                                    tracing::warn!(
+                                        "Failed to apply incremental epoch {}: {}",
+                                        e,
+                                        err
+                                    );
+                                    break;
+                                }
+
+                                state_guard.osdmap = Some(Arc::new(updated_map));
+                                info!("✓ Applied incremental OSDMap epoch {}", e);
+
+                                // Broadcast map event
+                                let _ =
+                                    map_events.send(MapEvent::OsdMapUpdated { epoch: e as u64 });
+                            }
                         }
+                        Err(err) => {
+                            tracing::warn!("Failed to decode incremental epoch {}: {}", e, err);
+                            break;
+                        }
+                    }
+                } else if mosdmap.maps.contains_key(&e) {
+                    // Apply full map
+                    info!("Applying full OSDMap for epoch {}", e);
+                    let osdmap_bl = mosdmap.maps.get(&e).unwrap();
 
-                        state_guard.osdmap = Some(Arc::new(updated_map));
-                        state_guard.subscriptions.got("osdmap", *epoch as u64);
+                    match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
+                        Ok(osdmap) => {
+                            info!(
+                                "✓ Decoded full OSDMap: epoch={}, {} pools, {} osds",
+                                osdmap.epoch,
+                                osdmap.pools.len(),
+                                osdmap.osd_state.len()
+                            );
 
-                        let epoch_u64 = *epoch as u64;
+                            state_guard.osdmap = Some(Arc::new(osdmap));
+                            info!("✓ Applied full OSDMap epoch {}", e);
+
+                            // Broadcast map event
+                            let _ = map_events.send(MapEvent::OsdMapUpdated { epoch: e as u64 });
+                        }
+                        Err(err) => {
+                            tracing::warn!("Failed to decode full OSDMap epoch {}: {}", e, err);
+                            break;
+                        }
+                    }
+                } else {
+                    // Missing epoch
+                    if e >= mosdmap.cluster_osdmap_trim_lower_bound {
+                        info!(
+                            "Missing epoch {} (>= trim lower bound {}), requesting map",
+                            e, mosdmap.cluster_osdmap_trim_lower_bound
+                        );
+                        // Request the missing map by subscribing to it
                         drop(state_guard);
+                        if let Err(err) = Self::renew_subscription(state, "osdmap", e as u64).await
+                        {
+                            tracing::warn!("Failed to request missing epoch {}: {}", e, err);
+                        }
+                        return Ok(());
+                    } else {
+                        // Epoch has been trimmed, skip to trim lower bound
+                        info!(
+                            "Missing epoch {} has been trimmed (< {}), skipping to trim lower bound",
+                            e, mosdmap.cluster_osdmap_trim_lower_bound
+                        );
+                        // This will cause us to request the trimmed epoch in the next iteration
+                        // We need to break here and let the monitor send us a newer map
+                        drop(state_guard);
+                        if let Err(err) = Self::renew_subscription(
+                            state,
+                            "osdmap",
+                            mosdmap.cluster_osdmap_trim_lower_bound as u64,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                "Failed to request epoch {}: {}",
+                                mosdmap.cluster_osdmap_trim_lower_bound,
+                                err
+                            );
+                        }
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            // First map - we need a full map
+            info!("Processing first OSDMap (no current map)");
+            if let Some(osdmap_bl) = mosdmap.maps.get(&mosdmap.get_last()) {
+                match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
+                    Ok(osdmap) => {
+                        info!(
+                            "✓ Decoded first OSDMap: epoch={}, {} pools, {} osds",
+                            osdmap.epoch,
+                            osdmap.pools.len(),
+                            osdmap.osd_state.len()
+                        );
+
+                        state_guard.osdmap = Some(Arc::new(osdmap.clone()));
+                        info!("✓ Stored first OSDMap epoch {}", osdmap.epoch);
 
                         // Broadcast map event
-                        let _ = map_events.send(MapEvent::OsdMapUpdated { epoch: epoch_u64 });
-
-                        info!("✓ Incremental OSDMap applied and broadcast successfully");
-
-                        // IMPORTANT: Renew subscription to tell monitor we're ready for more updates
-                        // We subscribe to the NEXT epoch (current + 1) since we've already processed the current one
-                        if let Err(e) =
-                            Self::renew_subscription(state, "osdmap", epoch_u64 + 1).await
-                        {
-                            tracing::warn!("Failed to renew osdmap subscription: {}", e);
-                        }
-                    } else {
-                        // No base map yet, skip this incremental
+                        let _ = map_events.send(MapEvent::OsdMapUpdated {
+                            epoch: osdmap.epoch as u64,
+                        });
+                    }
+                    Err(err) => {
                         tracing::warn!(
-                            "Cannot apply incremental OSDMap epoch {}: no base map available",
-                            epoch
+                            "Failed to decode first OSDMap epoch {}: {}",
+                            mosdmap.get_last(),
+                            err
                         );
+                        // Request full map
                         drop(state_guard);
+                        if let Err(err) = Self::renew_subscription(state, "osdmap", 0).await {
+                            tracing::warn!("Failed to request full OSDMap: {}", err);
+                        }
+                        return Ok(());
                     }
                 }
-                Err(e) => {
-                    tracing::warn!("Failed to decode incremental OSDMap epoch {}: {}", epoch, e);
+            } else {
+                info!("No full map in message, requesting full OSDMap");
+                // Request full map
+                drop(state_guard);
+                if let Err(err) = Self::renew_subscription(state, "osdmap", 0).await {
+                    tracing::warn!("Failed to request full OSDMap: {}", err);
                 }
+                return Ok(());
+            }
+        }
+
+        // 4. Mark subscription as received and renew
+        if let Some(osdmap) = &state_guard.osdmap {
+            let final_epoch = osdmap.epoch;
+            state_guard.subscriptions.got("osdmap", final_epoch as u64);
+
+            drop(state_guard);
+
+            info!("✓ Processed OSDMap up to epoch {}", final_epoch);
+
+            // Renew subscription for next epoch
+            if let Err(err) =
+                Self::renew_subscription(state, "osdmap", final_epoch as u64 + 1).await
+            {
+                tracing::warn!("Failed to renew osdmap subscription: {}", err);
             }
         }
 

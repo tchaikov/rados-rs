@@ -403,6 +403,31 @@ impl MOSDMap {
             newest_map,
         })
     }
+
+    /// Get the first (oldest) epoch in this message
+    pub fn get_first(&self) -> u32 {
+        let mut first = u32::MAX;
+        for &epoch in self.incremental_maps.keys() {
+            if epoch < first {
+                first = epoch;
+            }
+        }
+        for &epoch in self.maps.keys() {
+            if epoch < first {
+                first = epoch;
+            }
+        }
+        if first == u32::MAX {
+            0
+        } else {
+            first
+        }
+    }
+
+    /// Get the last (newest) epoch in this message
+    pub fn get_last(&self) -> u32 {
+        self.newest_map
+    }
 }
 
 /// MMonCommand - Execute command on monitor
