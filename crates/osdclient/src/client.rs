@@ -11,7 +11,9 @@ use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
 use crate::session::OSDSession;
 use crate::tracker::{Tracker, TrackerConfig};
-use crate::types::{OSDOp, ObjectId, ReadResult, StatResult, StripedPgId, WriteResult};
+use crate::types::{
+    ListObjectEntry, ListResult, OSDOp, ObjectId, ReadResult, StatResult, StripedPgId, WriteResult,
+};
 
 /// Configuration for OSD client
 #[derive(Debug, Clone, Default)]
@@ -625,6 +627,185 @@ impl OSDClient {
         }
 
         Ok(())
+    }
+
+    /// List objects in a pool
+    ///
+    /// Lists objects in the specified pool, optionally starting from a cursor.
+    /// Returns a list of objects and an optional continuation cursor for pagination.
+    ///
+    /// # Arguments
+    /// * `pool` - Pool ID to list objects from
+    /// * `cursor` - Optional cursor for pagination (None for first page)
+    /// * `max_entries` - Maximum number of entries to return
+    pub async fn list(
+        &self,
+        pool: i64,
+        cursor: Option<String>,
+        max_entries: u64,
+    ) -> Result<ListResult> {
+        debug!(
+            "list pool={} cursor={:?} max_entries={}",
+            pool, cursor, max_entries
+        );
+
+        // For listing, we use a special object name (empty string)
+        // and rely on the PGLS operation
+        let oid = "";
+
+        // Map to OSDs
+        let (spgid, osds) = self.object_to_osds(pool, oid).await?;
+        let primary_osd = osds[0];
+
+        // Get session
+        let session = self.get_or_create_session(primary_osd).await?;
+
+        // Create object ID
+        let object = ObjectId::new(pool, oid);
+        // For PGLS operations, don't calculate hash from object name
+        // The hash should match the PG we're querying
+        // object.calculate_hash();
+
+        // Get OSDMap epoch for start_epoch parameter
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+
+        // Parse cursor (default to 0 for start)
+        let cursor_value = cursor
+            .as_ref()
+            .and_then(|s| s.parse::<u64>().ok())
+            .unwrap_or(0);
+
+        // Create pgls operation
+        let ops = vec![OSDOp::pgls(max_entries, cursor_value, osdmap.epoch)];
+
+        // Build request ID
+        let tid = session.next_tid();
+        let reqid = crate::types::RequestId::new(
+            &self.config.entity_name,
+            tid,
+            self.config.client_inc as i32,
+        );
+
+        // Build message
+        let flags = MOSDOp::calculate_flags(&ops);
+        let msg = MOSDOp::new(
+            self.config.client_inc,
+            osdmap.epoch,
+            flags,
+            object,
+            spgid,
+            ops,
+            reqid,
+        );
+
+        // Submit operation
+        let result_rx = session.submit_op(msg).await?;
+
+        // Wait for result with timeout
+        let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
+            .await
+            .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
+            .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "List operation failed".into(),
+            });
+        }
+
+        // Parse the pg_nls_response from outdata
+        if result.ops.is_empty() {
+            return Err(OSDClientError::Internal(
+                "No operation reply in list response".into(),
+            ));
+        }
+
+        let outdata = &result.ops[0].outdata;
+
+        // Decode pg_nls_response_t
+        // Format: handle (u64) + count (u32) + entries
+        use bytes::Buf;
+
+        if outdata.len() < 12 {
+            return Err(OSDClientError::Internal("List response too short".into()));
+        }
+
+        let mut buf = outdata.as_ref();
+
+        // Read handle (cursor for next iteration)
+        let handle = buf.get_u64_le();
+
+        // Read entry count
+        let count = buf.get_u32_le();
+
+        // Parse entries
+        let mut entries = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            // Each entry: namespace (string), oid (string), locator (string)
+            // String format: length (u32) + bytes
+
+            // namespace
+            if buf.remaining() < 4 {
+                return Err(OSDClientError::Internal(
+                    "Incomplete entry in list response".into(),
+                ));
+            }
+            let nspace_len = buf.get_u32_le() as usize;
+            if buf.remaining() < nspace_len {
+                return Err(OSDClientError::Internal(
+                    "Incomplete namespace in list response".into(),
+                ));
+            }
+            let nspace = String::from_utf8(buf.copy_to_bytes(nspace_len).to_vec())
+                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in namespace".into()))?;
+
+            // oid
+            if buf.remaining() < 4 {
+                return Err(OSDClientError::Internal(
+                    "Incomplete entry in list response".into(),
+                ));
+            }
+            let oid_len = buf.get_u32_le() as usize;
+            if buf.remaining() < oid_len {
+                return Err(OSDClientError::Internal(
+                    "Incomplete oid in list response".into(),
+                ));
+            }
+            let oid = String::from_utf8(buf.copy_to_bytes(oid_len).to_vec())
+                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in oid".into()))?;
+
+            // locator
+            if buf.remaining() < 4 {
+                return Err(OSDClientError::Internal(
+                    "Incomplete entry in list response".into(),
+                ));
+            }
+            let locator_len = buf.get_u32_le() as usize;
+            if buf.remaining() < locator_len {
+                return Err(OSDClientError::Internal(
+                    "Incomplete locator in list response".into(),
+                ));
+            }
+            let locator = String::from_utf8(buf.copy_to_bytes(locator_len).to_vec())
+                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in locator".into()))?;
+
+            entries.push(ListObjectEntry::new(nspace, oid, locator));
+        }
+
+        // Convert handle to cursor
+        // Handle of u64::MAX means we've reached the end
+        let cursor = if handle == u64::MAX {
+            None
+        } else {
+            Some(handle.to_string())
+        };
+
+        Ok(ListResult { entries, cursor })
     }
 
     /// List all pools in the cluster

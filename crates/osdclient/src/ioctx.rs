@@ -251,11 +251,15 @@ impl IoCtx {
             self.pool_id, cursor, max_entries
         );
 
-        // This would use the pg_nls (PG namespace list) functionality
-        // For now, return a placeholder
-        // TODO: Implement actual object listing using CEPH_OSD_OP_PGLS
-        info!("Object listing not yet fully implemented");
-        Ok((Vec::new(), None))
+        let result = self
+            .client
+            .list(self.pool_id, cursor, max_entries as u64)
+            .await?;
+
+        // Extract object names from entries
+        let object_names: Vec<String> = result.entries.into_iter().map(|entry| entry.oid).collect();
+
+        Ok((object_names, result.cursor))
     }
 
     /// Flush all pending writes

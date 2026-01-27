@@ -75,6 +75,12 @@ enum Commands {
         /// Object name
         object: String,
     },
+    /// List objects in pool
+    Ls {
+        /// Maximum number of objects to list (default: 100)
+        #[arg(short, long, default_value = "100")]
+        max: usize,
+    },
 }
 
 #[tokio::main]
@@ -246,6 +252,21 @@ async fn main() -> Result<()> {
 
             if cli.debug {
                 eprintln!("Removed {}", object);
+            }
+        }
+        Commands::Ls { max } => {
+            let (objects, _cursor) = ioctx
+                .list_objects(None, max)
+                .await
+                .context("Failed to list objects")?;
+
+            // Print each object on its own line
+            for obj in &objects {
+                println!("{}", obj);
+            }
+
+            if cli.debug {
+                eprintln!("Listed {} objects", objects.len());
             }
         }
     }

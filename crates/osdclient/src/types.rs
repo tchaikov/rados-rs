@@ -117,6 +117,8 @@ pub mod flags {
     pub const CEPH_OSD_FLAG_READ: u32 = 0x0010;
     /// Op may write
     pub const CEPH_OSD_FLAG_WRITE: u32 = 0x0020;
+    /// PG operation, no object
+    pub const CEPH_OSD_FLAG_PGOP: u32 = 0x0400;
 }
 
 // OSD operation modes (from Ceph's rados.h)
@@ -309,15 +311,26 @@ impl OSDOp {
     }
 
     /// Create a pgls (PG list) operation
-    pub fn pgls(max_entries: u64, start_epoch: u32) -> Self {
+    ///
+    /// # Arguments
+    /// * `max_entries` - Maximum number of entries to return
+    /// * `cursor` - Continuation cursor (0 for start)
+    /// * `start_epoch` - OSD map epoch for consistency
+    pub fn pgls(max_entries: u64, cursor: u64, start_epoch: u32) -> Self {
+        use bytes::BufMut;
+
+        // Encode cursor into indata (little-endian u64)
+        let mut indata = bytes::BytesMut::with_capacity(8);
+        indata.put_u64_le(cursor);
+
         Self {
             op: OpCode::Pgls,
-            flags: 0,
+            flags: flags::CEPH_OSD_FLAG_PGOP, // Required for PG operations
             op_data: OpData::Pgls {
                 max_entries,
                 start_epoch,
             },
-            indata: Bytes::new(),
+            indata: indata.freeze(),
         }
     }
 }
@@ -376,4 +389,34 @@ pub struct PoolInfo {
     pub pool_id: i64,
     /// Pool name
     pub pool_name: String,
+}
+
+/// Single object entry from listing
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListObjectEntry {
+    /// Namespace (usually empty)
+    pub nspace: String,
+    /// Object name
+    pub oid: String,
+    /// Object locator key (usually empty)
+    pub locator: String,
+}
+
+impl ListObjectEntry {
+    pub fn new(nspace: String, oid: String, locator: String) -> Self {
+        Self {
+            nspace,
+            oid,
+            locator,
+        }
+    }
+}
+
+/// Result of a list operation
+#[derive(Debug, Clone)]
+pub struct ListResult {
+    /// Listed objects
+    pub entries: Vec<ListObjectEntry>,
+    /// Continuation cursor for pagination (None if at end)
+    pub cursor: Option<String>,
 }
