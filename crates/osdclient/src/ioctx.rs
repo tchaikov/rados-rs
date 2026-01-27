@@ -262,6 +262,53 @@ impl IoCtx {
         Ok((object_names, result.cursor))
     }
 
+    /// List all objects in the pool
+    ///
+    /// This method automatically handles pagination and returns all objects in the pool.
+    /// It's equivalent to the C++ librados `ls` command.
+    ///
+    /// # Returns
+    ///
+    /// Returns a vector of all object names in the pool
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use osdclient::IoCtx;
+    /// # async fn example(ioctx: IoCtx) -> Result<(), Box<dyn std::error::Error>> {
+    /// let objects = ioctx.ls().await?;
+    /// for obj in objects {
+    ///     println!("{}", obj);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn ls(&self) -> Result<Vec<String>> {
+        info!("Listing all objects in pool {}", self.pool_id);
+
+        let mut all_objects = Vec::new();
+        let mut cursor = None;
+        const MAX_ENTRIES_PER_REQUEST: usize = 100;
+
+        loop {
+            let (objects, next_cursor) = self.list_objects(cursor, MAX_ENTRIES_PER_REQUEST).await?;
+
+            all_objects.extend(objects);
+
+            cursor = next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        info!(
+            "Found {} total objects in pool {}",
+            all_objects.len(),
+            self.pool_id
+        );
+        Ok(all_objects)
+    }
+
     /// Flush all pending writes
     ///
     /// Waits for all outstanding write operations to be acknowledged by OSDs.

@@ -113,11 +113,15 @@ impl VersionedEncode for PgNlsResponse {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        eprintln!("DEBUG pg_nls_response decode_content: buf.remaining()={}, features={:#x}", buf.remaining(), features);
+
         // Decode handle
         let handle = <HObject as Denc>::decode(buf, features)?;
+        eprintln!("DEBUG pg_nls_response: decoded handle, buf.remaining()={}", buf.remaining());
 
         // Decode entry count
         let n = <u32 as Denc>::decode(buf, features)?;
+        eprintln!("DEBUG pg_nls_response: decoded entry count n={}, buf.remaining()={}", n, buf.remaining());
 
         // Decode entries
         let mut entries = Vec::with_capacity(n as usize);
@@ -137,15 +141,34 @@ impl VersionedEncode for PgNlsResponse {
 }
 
 impl Denc for PgNlsResponse {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <PgNlsResponse as VersionedEncode>::FEATURE_DEPENDENT;
+    const USES_VERSIONING: bool = false;  // Changed to false to use direct decode
+    const FEATURE_DEPENDENT: bool = false;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
+        // Decode handle (hobject_t) - this uses versioned encoding
+        let handle = <HObject as Denc>::decode(buf, features)?;
+
+        // Decode entry count
+        let n = <u32 as Denc>::decode(buf, features)?;
+
+        // Decode entries
+        let mut entries = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let nspace = <String as Denc>::decode(buf, features)?;
+            let oid = <String as Denc>::decode(buf, features)?;
+            let locator = <String as Denc>::decode(buf, features)?;
+            entries.push(ListObjectImpl {
+                nspace,
+                oid,
+                locator,
+            });
+        }
+
+        Ok(Self { handle, entries })
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {

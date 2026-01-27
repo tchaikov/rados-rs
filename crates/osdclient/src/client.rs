@@ -795,10 +795,22 @@ impl OSDClient {
                 ));
             }
 
+            debug!("Operation result: return_code={}, outdata.len()={}",
+                   result.ops[0].return_code, result.ops[0].outdata.len());
+
             let outdata = &result.ops[0].outdata;
+
+            // Debug: print the response data
+            debug!("PGLS response data length: {}", outdata.len());
+            if outdata.len() <= 200 {
+                debug!("PGLS response data bytes: {:02x?}", outdata.as_ref());
+            } else {
+                debug!("PGLS response data (first 200 bytes): {:02x?}", &outdata.as_ref()[..200]);
+            }
 
             // Decode pg_nls_response_t using proper Denc
             let response = denc::PgNlsResponse::decode(&mut outdata.as_ref(), 0).map_err(|e| {
+                debug!("Decoding failed, outdata bytes: {:02x?}", outdata.as_ref());
                 OSDClientError::Decoding(format!("Failed to decode pg_nls_response: {}", e))
             })?;
 
