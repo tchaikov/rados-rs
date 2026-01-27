@@ -128,6 +128,7 @@ const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
 const CEPH_OSD_OP_TYPE_ATTR: u16 = 0x0300; // Attribute operations
+const CEPH_OSD_OP_TYPE_PG: u16 = 0x0100; // PG operations
 
 /// Helper macro to construct operation codes using Ceph's encoding scheme
 /// Matches __CEPH_OSD_OP(mode, type, nr) macro from rados.h
@@ -146,6 +147,9 @@ macro_rules! osd_op {
     };
     (WR, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_ATTR | $nr
+    };
+    (RD, PG, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_PG | $nr
     };
 }
 
@@ -178,6 +182,8 @@ pub enum OpCode {
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
+    /// PG list operation: __CEPH_OSD_OP(RD, PG, 1)
+    Pgls = osd_op!(RD, PG, 1),
 }
 
 impl OpCode {
@@ -196,28 +202,31 @@ impl OpCode {
     }
 }
 
-/// Extent for read/write operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Extent {
-    /// Offset in bytes
-    pub offset: u64,
-    /// Length in bytes
-    pub length: u64,
-    /// Truncate size (0 = no truncate)
-    pub truncate_size: u64,
-    /// Truncate sequence number
-    pub truncate_seq: u32,
-}
-
-impl Extent {
-    pub fn new(offset: u64, length: u64) -> Self {
-        Self {
-            offset,
-            length,
-            truncate_size: 0,
-            truncate_seq: 0,
-        }
-    }
+/// Operation-specific data for different OSD operations
+///
+/// Each OSD operation type has its own specific fields as a variant.
+/// This enforces type safety and makes it impossible to accidentally
+/// use the wrong fields for an operation.
+#[derive(Debug, Clone)]
+pub enum OpData {
+    /// Extent-based operations (read, write, etc.)
+    Extent {
+        offset: u64,
+        length: u64,
+        truncate_size: u64,
+        truncate_seq: u32,
+    },
+    /// PG list operation (for object listing)
+    Pgls { max_entries: u64, start_epoch: u32 },
+    /// Extended attribute operations
+    Xattr {
+        name_len: u32,
+        value_len: u32,
+        cmp_op: u8,
+        cmp_mode: u8,
+    },
+    /// Operations with no specific data
+    None,
 }
 
 /// Single OSD operation
@@ -227,8 +236,8 @@ pub struct OSDOp {
     pub op: OpCode,
     /// Operation flags
     pub flags: u32,
-    /// Extent for read/write operations
-    pub extent: Option<Extent>,
+    /// Operation-specific data
+    pub op_data: OpData,
     /// Input data payload
     pub indata: Bytes,
 }
@@ -239,7 +248,12 @@ impl OSDOp {
         Self {
             op: OpCode::Read,
             flags: 0,
-            extent: Some(Extent::new(offset, length)),
+            op_data: OpData::Extent {
+                offset,
+                length,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
             indata: Bytes::new(),
         }
     }
@@ -249,7 +263,12 @@ impl OSDOp {
         Self {
             op: OpCode::Write,
             flags: 0,
-            extent: Some(Extent::new(offset, data.len() as u64)),
+            op_data: OpData::Extent {
+                offset,
+                length: data.len() as u64,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
             indata: data,
         }
     }
@@ -259,7 +278,12 @@ impl OSDOp {
         Self {
             op: OpCode::WriteFull,
             flags: 0,
-            extent: Some(Extent::new(0, data.len() as u64)),
+            op_data: OpData::Extent {
+                offset: 0,
+                length: data.len() as u64,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
             indata: data,
         }
     }
@@ -269,7 +293,7 @@ impl OSDOp {
         Self {
             op: OpCode::Stat,
             flags: 0,
-            extent: None,
+            op_data: OpData::None,
             indata: Bytes::new(),
         }
     }
@@ -279,7 +303,20 @@ impl OSDOp {
         Self {
             op: OpCode::Delete,
             flags: 0,
-            extent: None,
+            op_data: OpData::None,
+            indata: Bytes::new(),
+        }
+    }
+
+    /// Create a pgls (PG list) operation
+    pub fn pgls(max_entries: u64, start_epoch: u32) -> Self {
+        Self {
+            op: OpCode::Pgls,
+            flags: 0,
+            op_data: OpData::Pgls {
+                max_entries,
+                start_epoch,
+            },
             indata: Bytes::new(),
         }
     }

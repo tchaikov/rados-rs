@@ -3,7 +3,7 @@
 //! This module implements encoding/decoding for MOSDOp and MOSDOpReply messages.
 
 use crate::error::{OSDClientError, Result};
-use crate::types::{OSDOp, ObjectId, OpReply, OpResult, RequestId, StripedPgId};
+use crate::types::{OSDOp, ObjectId, OpData, OpReply, OpResult, RequestId, StripedPgId};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use tracing::debug;
 
@@ -165,18 +165,52 @@ impl MOSDOp {
             buf.put_u16_le(op.op.as_u16()); // op code
             buf.put_u32_le(op.flags); // flags
 
-            // Encode extent union (28 bytes)
-            if let Some(extent) = op.extent {
-                buf.put_u64_le(extent.offset);
-                buf.put_u64_le(extent.length);
-                buf.put_u64_le(extent.truncate_size);
-                buf.put_u32_le(extent.truncate_seq);
-            } else {
-                // Empty extent
-                buf.put_u64_le(0);
-                buf.put_u64_le(0);
-                buf.put_u64_le(0);
-                buf.put_u32_le(0);
+            // Encode operation data union (28 bytes total)
+            match &op.op_data {
+                OpData::Extent {
+                    offset,
+                    length,
+                    truncate_size,
+                    truncate_seq,
+                } => {
+                    buf.put_u64_le(*offset);
+                    buf.put_u64_le(*length);
+                    buf.put_u64_le(*truncate_size);
+                    buf.put_u32_le(*truncate_seq);
+                    // 8 + 8 + 8 + 4 = 28 bytes ✓
+                }
+                OpData::Pgls {
+                    max_entries,
+                    start_epoch,
+                } => {
+                    buf.put_u64_le(*max_entries);
+                    buf.put_u32_le(*start_epoch);
+                    // Pad to 28 bytes: 8 + 4 = 12, need 16 more
+                    buf.put_u64_le(0);
+                    buf.put_u64_le(0);
+                }
+                OpData::Xattr {
+                    name_len,
+                    value_len,
+                    cmp_op,
+                    cmp_mode,
+                } => {
+                    buf.put_u32_le(*name_len);
+                    buf.put_u32_le(*value_len);
+                    buf.put_u8(*cmp_op);
+                    buf.put_u8(*cmp_mode);
+                    // Pad to 28 bytes: 4 + 4 + 1 + 1 = 10, need 18 more
+                    buf.put_u64_le(0);
+                    buf.put_u64_le(0);
+                    buf.put_u16_le(0);
+                }
+                OpData::None => {
+                    // Empty union - 28 bytes of zeros
+                    buf.put_u64_le(0);
+                    buf.put_u64_le(0);
+                    buf.put_u64_le(0);
+                    buf.put_u32_le(0);
+                }
             }
 
             // payload_len - data length for this op (stored separately from ops array)
