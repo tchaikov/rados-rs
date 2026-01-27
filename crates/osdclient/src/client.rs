@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
+use denc::Denc;
+
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
 use crate::session::OSDSession;
@@ -631,12 +633,12 @@ impl OSDClient {
 
     /// List objects in a pool
     ///
-    /// Lists objects in the specified pool, optionally starting from a cursor.
+    /// Lists objects in the specified pool, iterating through all PGs.
     /// Returns a list of objects and an optional continuation cursor for pagination.
     ///
     /// # Arguments
     /// * `pool` - Pool ID to list objects from
-    /// * `cursor` - Optional cursor for pagination (None for first page)
+    /// * `cursor` - Optional cursor for pagination (format: "pg:hash")
     /// * `max_entries` - Maximum number of entries to return
     pub async fn list(
         &self,
@@ -649,163 +651,228 @@ impl OSDClient {
             pool, cursor, max_entries
         );
 
-        // For listing, we use a special object name (empty string)
-        // and rely on the PGLS operation
-        let oid = "";
+        // Parse cursor to extract starting PG and hobject position
+        // Format: "pg:hash" where hash is the hobject hash
+        let (mut current_pg, mut hobject_cursor) = if let Some(ref c) = cursor {
+            if let Some((pg_str, hash_str)) = c.split_once(':') {
+                let pg = pg_str.parse::<u32>().unwrap_or(0);
+                let hash = hash_str.parse::<u32>().unwrap_or(0);
+                (pg, denc::HObject::new(pool, String::new(), hash))
+            } else {
+                let pg = c.parse::<u32>().unwrap_or(0);
+                (pg, denc::HObject::empty_cursor(pool))
+            }
+        } else {
+            (0, denc::HObject::empty_cursor(pool))
+        };
 
-        // Map to OSDs
-        let (spgid, osds) = self.object_to_osds(pool, oid).await?;
-        let primary_osd = osds[0];
-
-        // Get session
-        let session = self.get_or_create_session(primary_osd).await?;
-
-        // Create object ID
-        let object = ObjectId::new(pool, oid);
-        // For PGLS operations, don't calculate hash from object name
-        // The hash should match the PG we're querying
-        // object.calculate_hash();
-
-        // Get OSDMap epoch for start_epoch parameter
+        // Get OSDMap to look up pool info and pg_num
         let osdmap = self
             .mon_client
             .get_osdmap()
             .await
             .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
 
-        // Parse cursor (default to 0 for start)
-        let cursor_value = cursor
+        // Find pool info
+        let pool_info = osdmap
+            .pools
+            .get(&pool)
+            .ok_or(OSDClientError::PoolNotFound(pool))?;
+
+        // Get number of PGs in this pool
+        let pg_num = pool_info.pg_num;
+        let starting_pg = current_pg;
+
+        // Check if pool has hashpspool flag
+        const FLAG_HASHPSPOOL: u64 = 1;
+        let hashpspool = (pool_info.flags & FLAG_HASHPSPOOL) != 0;
+
+        let crush_map = osdmap
+            .crush
             .as_ref()
-            .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(0);
+            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
 
-        // Create pgls operation
-        let ops = vec![OSDOp::pgls(max_entries, cursor_value, osdmap.epoch)];
+        let osdmap_epoch = osdmap.epoch;
 
-        // Build request ID
-        let tid = session.next_tid();
-        let reqid = crate::types::RequestId::new(
-            &self.config.entity_name,
-            tid,
-            self.config.client_inc as i32,
-        );
+        // Collect entries from PGs until we have enough or reach the end
+        let mut all_entries = Vec::new();
 
-        // Build message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object,
-            spgid,
-            ops,
-            reqid,
-        );
+        // Loop through PGs starting from current_pg
+        loop {
+            debug!(
+                "Querying PG {}/{}, collected {} entries so far",
+                current_pg,
+                pg_num,
+                all_entries.len()
+            );
 
-        // Submit operation
-        let result_rx = session.submit_op(msg).await?;
+            // Create StripedPgId for the current PG
+            let spgid = StripedPgId::from_pg(pool, current_pg);
 
-        // Wait for result with timeout
-        let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-            .await
-            .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-            .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+            // Look up which OSDs handle this PG using CRUSH
+            let pg = crush::placement::PgId {
+                pool,
+                seed: current_pg,
+            };
 
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "List operation failed".into(),
-            });
+            let osds = crush::placement::pg_to_osds(
+                crush_map,
+                pg,
+                pool_info.crush_rule as u32,
+                &osdmap.osd_weight,
+                pool_info.size as usize,
+                hashpspool,
+            )
+            .map_err(|e| OSDClientError::Crush(format!("PG->OSD mapping failed: {}", e)))?;
+
+            if osds.is_empty() {
+                // Skip this PG if no OSDs
+                current_pg += 1;
+                if current_pg >= pg_num {
+                    break;
+                }
+                hobject_cursor = denc::HObject::empty_cursor(pool);
+                continue;
+            }
+
+            let primary_osd = osds[0];
+
+            // Get session
+            let session = self.get_or_create_session(primary_osd).await?;
+
+            // Create object ID (empty for PGLS)
+            let mut object = ObjectId::new(pool, "");
+            object.hash = 0;
+
+            // Create pgls operation
+            // Request up to max_entries total, but we may get less per PG
+            let remaining = max_entries.saturating_sub(all_entries.len() as u64);
+            let ops = vec![OSDOp::pgls(remaining, hobject_cursor.clone(), osdmap_epoch)];
+
+            // Build request ID
+            let tid = session.next_tid();
+            let reqid = crate::types::RequestId::new(
+                &self.config.entity_name,
+                tid,
+                self.config.client_inc as i32,
+            );
+
+            // Build message
+            let flags = MOSDOp::calculate_flags(&ops);
+            let msg = MOSDOp::new(
+                self.config.client_inc,
+                osdmap.epoch,
+                flags,
+                object,
+                spgid,
+                ops,
+                reqid,
+            );
+
+            // Submit operation
+            let result_rx = session.submit_op(msg).await?;
+
+            // Wait for result with timeout
+            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
+                .await
+                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
+                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+
+            // For PGLS: result = 1 means "reached end of PG" (success)
+            //           result = 0 means "more objects available" (success)
+            //           result < 0 means error
+            if result.result < 0 {
+                return Err(OSDClientError::OSDError {
+                    code: result.result,
+                    message: format!("List operation failed for PG {}", current_pg),
+                });
+            }
+
+            // Parse the pg_nls_response from outdata
+            if result.ops.is_empty() {
+                return Err(OSDClientError::Internal(
+                    "No operation reply in list response".into(),
+                ));
+            }
+
+            let outdata = &result.ops[0].outdata;
+
+            // Decode pg_nls_response_t using proper Denc
+            let response = denc::PgNlsResponse::decode(&mut outdata.as_ref(), 0).map_err(|e| {
+                OSDClientError::Decoding(format!("Failed to decode pg_nls_response: {}", e))
+            })?;
+
+            debug!(
+                "PG {} returned {} entries, handle.hash={:#x}, result={}",
+                current_pg,
+                response.entries.len(),
+                response.handle.hash,
+                result.result
+            );
+
+            // Convert entries to ListObjectEntry
+            for entry in response.entries {
+                all_entries.push(ListObjectEntry::new(entry.nspace, entry.oid, entry.locator));
+            }
+
+            // Check if we have enough entries
+            if all_entries.len() >= max_entries as usize {
+                // Return with cursor pointing to current position
+                let cursor = if response.handle.hash == u32::MAX {
+                    // End of this PG, next request should start at next PG
+                    let next_pg = current_pg + 1;
+                    if next_pg >= pg_num {
+                        None // End of pool
+                    } else {
+                        Some(format!("{}:0", next_pg))
+                    }
+                } else {
+                    // More objects in this PG
+                    Some(format!("{}:{}", current_pg, response.handle.hash))
+                };
+                return Ok(ListResult {
+                    entries: all_entries,
+                    cursor,
+                });
+            }
+
+            // Check if we reached the end of this PG
+            if response.handle.hash == u32::MAX || result.result == 1 {
+                // Move to next PG
+                current_pg += 1;
+                if current_pg >= pg_num {
+                    // Reached end of all PGs
+                    debug!(
+                        "Reached end of pool at PG {}, total {} entries",
+                        current_pg,
+                        all_entries.len()
+                    );
+                    return Ok(ListResult {
+                        entries: all_entries,
+                        cursor: None, // End of pool
+                    });
+                }
+                // Check if we've wrapped around to where we started
+                if current_pg == starting_pg && all_entries.is_empty() {
+                    // Avoid infinite loop if pool is empty
+                    return Ok(ListResult {
+                        entries: all_entries,
+                        cursor: None,
+                    });
+                }
+                // Reset cursor for next PG
+                hobject_cursor = denc::HObject::empty_cursor(pool);
+            } else {
+                // Continue within same PG using the returned handle as cursor
+                hobject_cursor = response.handle;
+            }
         }
 
-        // Parse the pg_nls_response from outdata
-        if result.ops.is_empty() {
-            return Err(OSDClientError::Internal(
-                "No operation reply in list response".into(),
-            ));
-        }
-
-        let outdata = &result.ops[0].outdata;
-
-        // Decode pg_nls_response_t
-        // Format: handle (u64) + count (u32) + entries
-        use bytes::Buf;
-
-        if outdata.len() < 12 {
-            return Err(OSDClientError::Internal("List response too short".into()));
-        }
-
-        let mut buf = outdata.as_ref();
-
-        // Read handle (cursor for next iteration)
-        let handle = buf.get_u64_le();
-
-        // Read entry count
-        let count = buf.get_u32_le();
-
-        // Parse entries
-        let mut entries = Vec::with_capacity(count as usize);
-        for _ in 0..count {
-            // Each entry: namespace (string), oid (string), locator (string)
-            // String format: length (u32) + bytes
-
-            // namespace
-            if buf.remaining() < 4 {
-                return Err(OSDClientError::Internal(
-                    "Incomplete entry in list response".into(),
-                ));
-            }
-            let nspace_len = buf.get_u32_le() as usize;
-            if buf.remaining() < nspace_len {
-                return Err(OSDClientError::Internal(
-                    "Incomplete namespace in list response".into(),
-                ));
-            }
-            let nspace = String::from_utf8(buf.copy_to_bytes(nspace_len).to_vec())
-                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in namespace".into()))?;
-
-            // oid
-            if buf.remaining() < 4 {
-                return Err(OSDClientError::Internal(
-                    "Incomplete entry in list response".into(),
-                ));
-            }
-            let oid_len = buf.get_u32_le() as usize;
-            if buf.remaining() < oid_len {
-                return Err(OSDClientError::Internal(
-                    "Incomplete oid in list response".into(),
-                ));
-            }
-            let oid = String::from_utf8(buf.copy_to_bytes(oid_len).to_vec())
-                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in oid".into()))?;
-
-            // locator
-            if buf.remaining() < 4 {
-                return Err(OSDClientError::Internal(
-                    "Incomplete entry in list response".into(),
-                ));
-            }
-            let locator_len = buf.get_u32_le() as usize;
-            if buf.remaining() < locator_len {
-                return Err(OSDClientError::Internal(
-                    "Incomplete locator in list response".into(),
-                ));
-            }
-            let locator = String::from_utf8(buf.copy_to_bytes(locator_len).to_vec())
-                .map_err(|_| OSDClientError::Internal("Invalid UTF-8 in locator".into()))?;
-
-            entries.push(ListObjectEntry::new(nspace, oid, locator));
-        }
-
-        // Convert handle to cursor
-        // Handle of u64::MAX means we've reached the end
-        let cursor = if handle == u64::MAX {
-            None
-        } else {
-            Some(handle.to_string())
-        };
-
-        Ok(ListResult { entries, cursor })
+        // Shouldn't reach here, but return what we have
+        Ok(ListResult {
+            entries: all_entries,
+            cursor: None,
+        })
     }
 
     /// List all pools in the cluster
