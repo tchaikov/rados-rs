@@ -7,15 +7,20 @@ use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 
 /// Implement VersionedEncode for crush::ObjectLocator
-/// Matches Linux kernel encoding (version 5) from ~/dev/linux/net/ceph/osd_client.c
-/// The Linux kernel uses version 5, compat 4, which includes pool and namespace but NOT hash
+/// Matches C++ object_locator_t encoding from ~/dev/ceph/src/osd/osd_types.cc
+/// Uses version 6, compat 3 (or 6 if hash != -1), includes pool, preferred, key, nspace, and hash
 impl VersionedEncode for crush::ObjectLocator {
     fn encoding_version(&self, _features: u64) -> u8 {
-        5 // Match Linux kernel - version 5 includes pool, preferred, key, namespace (NO hash)
+        6 // Match C++ - version 6 includes pool, preferred, key, nspace, hash
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
-        4 // Match Linux kernel - version 4 is minimum to decode namespace
+        // If hash != -1, we need version 6 to decode it, otherwise version 3 is sufficient
+        if self.hash != -1 {
+            6
+        } else {
+            3
+        }
     }
 
     fn encode_content<B: BufMut>(
@@ -31,7 +36,7 @@ impl VersionedEncode for crush::ObjectLocator {
             ));
         }
 
-        // Encode fields (version 5 format - NO hash field)
+        // Encode fields (version 6 format - includes hash)
         self.pool_id.encode(buf, features)?;
 
         // Encode preferred (always -1 for compatibility with old code)
@@ -40,7 +45,7 @@ impl VersionedEncode for crush::ObjectLocator {
 
         self.key.encode(buf, features)?;
         self.namespace.encode(buf, features)?;
-        // DO NOT encode hash - version 5 doesn't include it
+        self.hash.encode(buf, features)?;
 
         Ok(())
     }
@@ -74,9 +79,12 @@ impl VersionedEncode for crush::ObjectLocator {
             String::new()
         };
 
-        // hash field added in v6, but we don't use it (matching Linux kernel which uses v5)
-        // Always set hash to -1
-        let hash = -1i64;
+        // Decode hash (added in v6)
+        let hash = if struct_v >= 6 {
+            i64::decode(buf, features)?
+        } else {
+            -1i64
+        };
 
         // Verify that nobody's corrupted the locator (hash == -1 OR key is empty)
         if hash != -1 && !key.is_empty() {

@@ -24,10 +24,11 @@
   
 ## cluster for testing
 
-- there is a cluster running locally. it's setting is located at `/home/kefu/dev/ceph/build/ceph.conf`, use `cd ~/dev/ceph/build; ../src/vstart.sh -d` to start it, and use `cd ~/dev/ceph/build; ../src/stop.sh` to stop it
-- please use `LD_PRELOAD=/usr/lib/libasan.so.8 /home/kefu/dev/ceph/build/bin/ceph --conf "/home/kefu/dev/rust-app-ceres/docker/ceph-config/ceph.conf" -s 2>/dev/null` to run the offical client to verify the behavior, or when we need to dump the TCP traffic to cross check with our own implementation`
+- there is a cluster running locally. it's setting is located at `/home/kefu/dev/ceph/build/ceph.conf`, use `cd ~/dev/ceph/build; ../src/vstart.sh -d --without-dashboard` to start it, and use `cd ~/dev/ceph/build; ../src/stop.sh` to stop it
+- please use `LD_PRELOAD=/usr/lib/libasan.so.8 /home/kefu/dev/ceph/build/bin/ceph --conf "/home/kefu/dev/ceph/build/ceph.conf" -s 2>/dev/null` to run the offical client to verify the behavior, or when we need to dump the TCP traffic to cross check with our own implementation`
 
 ## guidelines
 
 - do not start from scratch.
 - always fix existing code
+- test encoding using dencoder in this project, and verify it using ceph-dencoder with the corpus fro ceph project
