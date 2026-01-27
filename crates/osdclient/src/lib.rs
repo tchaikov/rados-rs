@@ -13,6 +13,7 @@
 pub mod ceph_message_impl;
 pub mod client;
 pub mod error;
+pub mod ioctx;
 pub mod messages;
 pub mod operation;
 pub mod session;
@@ -22,6 +23,9 @@ pub mod types;
 // Re-export commonly used types
 pub use client::{OSDClient, OSDClientConfig};
 pub use error::OSDClientError;
-pub use types::{OSDOp, ObjectId, OpCode, ReadResult, StatResult, StripedPgId, WriteResult};
+pub use ioctx::IoCtx;
+pub use types::{
+    OSDOp, ObjectId, OpCode, PoolInfo, ReadResult, StatResult, StripedPgId, WriteResult,
+};
 
 pub type Result<T> = std::result::Result<T, OSDClientError>;

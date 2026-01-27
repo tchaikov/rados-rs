@@ -178,9 +178,11 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let osd_client = osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client))
-        .await
-        .context("Failed to create OSDClient")?;
+    let osd_client = Arc::new(
+        osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client))
+            .await
+            .context("Failed to create OSDClient")?,
+    );
 
     debug!("OSD client created");
 
@@ -189,12 +191,19 @@ async fn main() -> Result<()> {
 
     debug!("Using pool ID: {}", pool_id);
 
+    // Create IoCtx for the pool
+    let ioctx = osdclient::IoCtx::new(Arc::clone(&osd_client), pool_id)
+        .await
+        .context("Failed to create IoCtx")?;
+
+    debug!("IoCtx created for pool {}", pool_id);
+
     // Execute command
     match cli.command {
         Commands::Put { object, file } => {
             let data = read_input(&file).context("Failed to read input")?;
-            let result = osd_client
-                .write_full(pool_id, &object, data.clone())
+            let result = ioctx
+                .write_full(&object, data.clone())
                 .await
                 .context("Failed to write object")?;
 
@@ -208,8 +217,8 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Get { object, file } => {
-            let result = osd_client
-                .read(pool_id, &object, 0, u64::MAX)
+            let result = ioctx
+                .read(&object, 0, u64::MAX)
                 .await
                 .context("Failed to read object")?;
 
@@ -225,16 +234,13 @@ async fn main() -> Result<()> {
             }
         }
         Commands::Stat { object } => {
-            let stat = osd_client
-                .stat(pool_id, &object)
-                .await
-                .context("Failed to stat object")?;
+            let stat = ioctx.stat(&object).await.context("Failed to stat object")?;
 
             println!("{} mtime {:?} size {}", object, stat.mtime, stat.size);
         }
         Commands::Rm { object } => {
-            osd_client
-                .delete(pool_id, &object)
+            ioctx
+                .remove(&object)
                 .await
                 .context("Failed to delete object")?;
 

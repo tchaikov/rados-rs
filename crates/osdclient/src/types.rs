@@ -331,3 +331,12 @@ pub struct OpReply {
     /// Output data
     pub outdata: Bytes,
 }
+
+/// Pool information
+#[derive(Debug, Clone)]
+pub struct PoolInfo {
+    /// Pool ID
+    pub pool_id: i64,
+    /// Pool name
+    pub pool_name: String,
+}

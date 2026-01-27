@@ -626,4 +626,31 @@ impl OSDClient {
 
         Ok(())
     }
+
+    /// List all pools in the cluster
+    ///
+    /// Returns a list of all pools with their IDs and names.
+    pub async fn list_pools(&self) -> Result<Vec<crate::types::PoolInfo>> {
+        debug!("Listing pools");
+
+        // Get OSDMap from monitor
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+
+        // Extract pool information from OSDMap
+        let mut pools = Vec::new();
+        for pool_id in osdmap.pools.keys() {
+            if let Some(pool_name) = osdmap.pool_name.get(pool_id) {
+                pools.push(crate::types::PoolInfo {
+                    pool_id: *pool_id,
+                    pool_name: pool_name.clone(),
+                });
+            }
+        }
+
+        Ok(pools)
+    }
 }
