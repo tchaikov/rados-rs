@@ -119,6 +119,20 @@ pub mod flags {
     pub const CEPH_OSD_FLAG_WRITE: u32 = 0x0020;
     /// PG operation, no object
     pub const CEPH_OSD_FLAG_PGOP: u32 = 0x0400;
+
+    // Internal OSD op flags (RMW flags) - set based on op types
+    // These are per-operation flags, not message-level flags
+    pub const CEPH_OSD_RMW_FLAG_READ: u32 = 1 << 1;
+    pub const CEPH_OSD_RMW_FLAG_WRITE: u32 = 1 << 2;
+    pub const CEPH_OSD_RMW_FLAG_CLASS_READ: u32 = 1 << 3;
+    pub const CEPH_OSD_RMW_FLAG_CLASS_WRITE: u32 = 1 << 4;
+    pub const CEPH_OSD_RMW_FLAG_PGOP: u32 = 1 << 5;
+    pub const CEPH_OSD_RMW_FLAG_CACHE: u32 = 1 << 6;
+    pub const CEPH_OSD_RMW_FLAG_FORCE_PROMOTE: u32 = 1 << 7;
+    pub const CEPH_OSD_RMW_FLAG_SKIP_HANDLE_CACHE: u32 = 1 << 8;
+    pub const CEPH_OSD_RMW_FLAG_SKIP_PROMOTE: u32 = 1 << 9;
+    pub const CEPH_OSD_RMW_FLAG_RWORDERED: u32 = 1 << 10;
+    pub const CEPH_OSD_RMW_FLAG_RETURNVEC: u32 = 1 << 11;
 }
 
 // OSD operation modes (from Ceph's rados.h)
@@ -130,7 +144,7 @@ const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
 const CEPH_OSD_OP_TYPE_ATTR: u16 = 0x0300; // Attribute operations
-const CEPH_OSD_OP_TYPE_PG: u16 = 0x0100; // PG operations
+const CEPH_OSD_OP_TYPE_PG: u16 = 0x0500; // PG operations
 
 /// Helper macro to construct operation codes using Ceph's encoding scheme
 /// Matches __CEPH_OSD_OP(mode, type, nr) macro from rados.h
@@ -184,7 +198,7 @@ pub enum OpCode {
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
-    /// PG list operation: __CEPH_OSD_OP(RD, PG, 1)
+    /// PG list operation: __CEPH_OSD_OP(RD, PG, 1) = PGLS
     Pgls = osd_op!(RD, PG, 1),
 }
 
@@ -201,6 +215,11 @@ impl OpCode {
     /// Check if this operation is a write operation
     pub fn is_write(self) -> bool {
         (self as u16) & CEPH_OSD_OP_MODE_WR != 0
+    }
+
+    /// Check if this is a PG operation (operates on placement group, not object)
+    pub fn is_pg_op(self) -> bool {
+        (self as u16) & CEPH_OSD_OP_TYPE_PG != 0
     }
 }
 
@@ -314,18 +333,21 @@ impl OSDOp {
     ///
     /// # Arguments
     /// * `max_entries` - Maximum number of entries to return
-    /// * `cursor` - Continuation cursor (0 for start)
+    /// * `cursor` - Continuation cursor (HObject for pagination)
     /// * `start_epoch` - OSD map epoch for consistency
-    pub fn pgls(max_entries: u64, cursor: u64, start_epoch: u32) -> Self {
-        use bytes::BufMut;
+    pub fn pgls(max_entries: u64, cursor: denc::HObject, start_epoch: u32) -> Self {
+        use bytes::BytesMut;
+        use denc::denc::Denc;
 
-        // Encode cursor into indata (little-endian u64)
-        let mut indata = bytes::BytesMut::with_capacity(8);
-        indata.put_u64_le(cursor);
+        // Encode cursor (hobject_t) into indata
+        let mut indata = BytesMut::new();
+        cursor
+            .encode(&mut indata, 0)
+            .expect("Failed to encode HObject cursor");
 
         Self {
             op: OpCode::Pgls,
-            flags: flags::CEPH_OSD_FLAG_PGOP, // Required for PG operations
+            flags: 0, // Operation-specific flags (CEPH_OSD_OP_FLAG_*), not RMW flags
             op_data: OpData::Pgls {
                 max_entries,
                 start_epoch,
