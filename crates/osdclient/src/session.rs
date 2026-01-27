@@ -219,11 +219,12 @@ impl OSDSession {
 
         // Convert CephMessage to msgr2::Message for sending
         // The msgr2::Message is used by the protocol layer for framing
-        // Note: We don't need the full encoded message here, just the front and data sections
+        // Use the version from the CephMessage header (set by CephMessagePayload trait)
         let mut msg =
             msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
-                .with_version(8)
+                .with_version(ceph_msg.header.version)
                 .with_tid(tid);
+        msg.header.compat_version = ceph_msg.header.compat_version;
         msg.data = ceph_msg.data;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)

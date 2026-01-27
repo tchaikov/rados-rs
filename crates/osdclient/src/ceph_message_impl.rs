@@ -7,8 +7,14 @@ use crate::messages::{MOSDOp, MOSDOpReply, CEPH_MSG_OSD_OP, CEPH_MSG_OSD_OPREPLY
 use bytes::Bytes;
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 
+#[cfg(test)]
+use crate::types::OpData;
+
 /// MOSDOp message version (from MOSDOp.h HEAD_VERSION)
-const MOSDOP_VERSION: u16 = 8;
+const MOSDOP_VERSION: u16 = 9;
+
+/// MOSDOp compat version (from MOSDOp.h COMPAT_VERSION)
+const MOSDOP_COMPAT_VERSION: u16 = 3;
 
 /// MOSDOpReply message version (from MOSDOpReply.h HEAD_VERSION)
 const MOSDOPREPLY_VERSION: u16 = 8;
@@ -20,6 +26,10 @@ impl CephMessagePayload for MOSDOp {
 
     fn msg_version() -> u16 {
         MOSDOP_VERSION
+    }
+
+    fn msg_compat_version() -> u16 {
+        MOSDOP_COMPAT_VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -95,12 +105,12 @@ mod tests {
         let ops = vec![OSDOp {
             op: OpCode::Read,
             flags: 0,
-            extent: Some(crate::types::Extent {
+            op_data: OpData::Extent {
                 offset: 0,
                 length: 4096,
                 truncate_size: 0,
                 truncate_seq: 0,
-            }),
+            },
             indata: Bytes::new(),
         }];
 
@@ -148,12 +158,12 @@ mod tests {
         let ops = vec![OSDOp {
             op: OpCode::Write,
             flags: 0,
-            extent: Some(crate::types::Extent {
+            op_data: OpData::Extent {
                 offset: 0,
                 length: 1024,
                 truncate_size: 0,
                 truncate_seq: 0,
-            }),
+            },
             indata: write_data.clone(),
         }];
 

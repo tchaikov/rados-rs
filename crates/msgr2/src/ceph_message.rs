@@ -177,6 +177,11 @@ pub trait CephMessagePayload: Sized {
     /// Get the message version
     fn msg_version() -> u16;
 
+    /// Get the compat version (defaults to msg_version if not overridden)
+    fn msg_compat_version() -> u16 {
+        Self::msg_version()
+    }
+
     /// Encode the payload (front section) of the message
     fn encode_payload(&self, features: u64) -> Result<Bytes>;
 
@@ -221,8 +226,9 @@ impl CephMessage {
         let middle = payload.encode_middle(features)?;
         let data = payload.encode_data(features)?;
 
-        // Create header
+        // Create header with proper version and compat_version
         let mut header = CephMsgHeader::new(T::msg_type(), T::msg_version());
+        header.compat_version = T::msg_compat_version();
         header.front_len = front.len() as u32;
         header.middle_len = middle.len() as u32;
         header.data_len = data.len() as u32;
