@@ -12,6 +12,7 @@
 
 pub mod ceph_message_impl;
 pub mod client;
+pub mod denc_types;
 pub mod error;
 pub mod ioctx;
 pub mod messages;
