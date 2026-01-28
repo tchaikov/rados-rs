@@ -210,8 +210,9 @@ impl MOSDOp {
         }
 
         // 10. object name (object_t)
-        buf.put_u32_le(self.object.oid.len() as u32);
-        buf.put_slice(self.object.oid.as_bytes());
+        self.object.oid.encode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode object name: {}", e))
+        })?;
 
         // 11. operations
         buf.put_u16_le(self.ops.len() as u16);
@@ -230,7 +231,7 @@ impl MOSDOp {
             // Encode ceph_osd_op structure (38 bytes) using Denc
             let op_start = buf.len();
             op.encode(&mut buf, 0)
-                .expect("Failed to encode OSDOp with Denc");
+                .map_err(|e| OSDClientError::Encoding(format!("Failed to encode OSDOp: {}", e)))?;
 
             // Debug: print hex dump of this operation
             let op_end = buf.len();
@@ -265,10 +266,9 @@ impl MOSDOp {
         buf.put_u64_le(self.snap_seq);
 
         // 14. snaps vector
-        buf.put_u32_le(self.snaps.len() as u32);
-        for snap in &self.snaps {
-            buf.put_u64_le(*snap);
-        }
+        self.snaps.encode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode snaps vector: {}", e))
+        })?;
 
         // 15. retry_attempt
         buf.put_i32_le(self.retry_attempt);
