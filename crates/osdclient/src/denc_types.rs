@@ -683,6 +683,49 @@ impl Denc for OSDOp {
     }
 }
 
+// ============= OsdStatData =============
+
+/// Result data from CEPH_OSD_OP_STAT operation
+///
+/// This contains the object size and modification time returned by the OSD.
+/// Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OsdStatData {
+    pub size: u64,
+    pub tv_sec: u32,
+    pub tv_nsec: u32,
+}
+
+impl Denc for OsdStatData {
+    const USES_VERSIONING: bool = false;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        buf.put_u64_le(self.size);
+        buf.put_u32_le(self.tv_sec);
+        buf.put_u32_le(self.tv_nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 16 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for OsdStatData: need 16, have {}",
+                buf.remaining()
+            )));
+        }
+
+        Ok(Self {
+            size: buf.get_u64_le(),
+            tv_sec: buf.get_u32_le(),
+            tv_nsec: buf.get_u32_le(),
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(16) // u64 + u32 + u32
+    }
+}
+
 // ============= Size Constants =============
 
 /// Size of spg_t encoding (with version header)
@@ -1032,5 +1075,25 @@ mod tests {
             indata: Bytes::new(),
         };
         assert_eq!(op.encoded_size(0), Some(OSD_OP_ENCODED_SIZE));
+    }
+
+    #[test]
+    fn test_osd_stat_data_roundtrip() {
+        use bytes::BytesMut;
+
+        let original = OsdStatData {
+            size: 12345,
+            tv_sec: 1234567890,
+            tv_nsec: 123456789,
+        };
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 16);
+
+        let decoded = OsdStatData::decode(&mut &buf[..], 0).unwrap();
+        assert_eq!(decoded.size, original.size);
+        assert_eq!(decoded.tv_sec, original.tv_sec);
+        assert_eq!(decoded.tv_nsec, original.tv_nsec);
     }
 }

@@ -585,24 +585,18 @@ impl OSDClient {
 
         // Parse stat data from outdata
         // Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
-        use bytes::Buf;
-        let mut data = &stat_op.outdata[..];
-
-        if data.remaining() < 16 {
-            return Err(OSDClientError::Decoding(format!(
-                "Incomplete stat data: expected 16 bytes, got {}",
-                data.remaining()
-            )));
-        }
-
-        let size = data.get_u64_le();
-        let tv_sec = data.get_u32_le();
-        let tv_nsec = data.get_u32_le();
+        use denc::Denc;
+        let stat_data = crate::denc_types::OsdStatData::decode(&mut &stat_op.outdata[..], 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode stat data: {}", e)))?;
 
         // Convert to SystemTime
-        let mtime = std::time::UNIX_EPOCH + std::time::Duration::new(tv_sec as u64, tv_nsec);
+        let mtime = std::time::UNIX_EPOCH
+            + std::time::Duration::new(stat_data.tv_sec as u64, stat_data.tv_nsec);
 
-        Ok(StatResult { size, mtime })
+        Ok(StatResult {
+            size: stat_data.size,
+            mtime,
+        })
     }
 
     /// Delete an object
