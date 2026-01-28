@@ -10,7 +10,6 @@
 //! - Message encoding/decoding for MOSDOp and MOSDOpReply
 //! - Integration with MonClient for OSDMap updates and CRUSH placement
 
-pub mod ceph_message_impl;
 pub mod client;
 pub mod denc_types;
 pub mod error;
