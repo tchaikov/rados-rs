@@ -164,7 +164,7 @@ impl OSDSession {
                                 let tid = msg.tid();
 
                                 // Decode MOSDOpReply from message sections
-                                match MOSDOpReply::decode_internal(&msg.front, &msg.data) {
+                                match MOSDOpReply::decode(&msg.front, &msg.data) {
                                     Ok(reply) => {
                                         Self::handle_reply(tid, reply, &pending_ops).await;
                                     }

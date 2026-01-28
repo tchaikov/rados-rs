@@ -3,7 +3,7 @@
 //! This module implements encoding/decoding for MOSDOp and MOSDOpReply messages.
 
 use crate::error::{OSDClientError, Result};
-use crate::types::{OSDOp, ObjectId, OpData, OpReply, OpResult, RequestId, StripedPgId};
+use crate::types::{OSDOp, ObjectId, OpData, OpReply, OpResult, PgId, RequestId, StripedPgId};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 use tracing::debug;
@@ -395,7 +395,7 @@ impl MOSDOpReply {
     /// Message version (from MOSDOpReply.h HEAD_VERSION)
     pub const VERSION: u16 = 8;
 
-    /// Decode the message from bytes (v8 format)
+    /// Decode MOSDOpReply from front and data sections
     ///
     /// This implements v8 decoding format for MOSDOpReply.
     /// Reference: ~/dev/ceph/src/messages/MOSDOpReply.h lines 199-230
@@ -403,9 +403,11 @@ impl MOSDOpReply {
     /// # Arguments
     /// * `front` - The front (payload) section of the message
     /// * `data` - The data section of the message (contains operation output data)
-    pub(crate) fn decode_internal(mut front: &[u8], data: &[u8]) -> Result<Self> {
+    pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
+        use denc::Denc;
+
         eprintln!(
-            "DEBUG: MOSDOpReply::decode_internal called: front.len()={}, data.len()={}",
+            "DEBUG: MOSDOpReply::decode called: front.len()={}, data.len()={}",
             front.len(),
             data.len()
         );
@@ -413,7 +415,9 @@ impl MOSDOpReply {
             "DEBUG: First 64 bytes of front: {:02x?}",
             &front[..std::cmp::min(64, front.len())]
         );
-        if front.remaining() < 16 {
+
+        let mut cursor = front;
+        if cursor.remaining() < 16 {
             return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
         }
 
@@ -435,54 +439,38 @@ impl MOSDOpReply {
         // encode_trace(payload, features);
 
         // 1. oid (object_t) - just the name as a string
-        let oid_len = front.get_u32_le() as usize;
-        if front.remaining() < oid_len {
-            return Err(OSDClientError::Decoding("Incomplete object name".into()));
-        }
-        let oid_bytes = &front[..oid_len];
-        let oid = String::from_utf8(oid_bytes.to_vec())
-            .map_err(|e| OSDClientError::Decoding(format!("Invalid UTF-8: {}", e)))?;
-        front.advance(oid_len);
+        let oid = String::decode(&mut cursor, 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode oid: {}", e)))?;
 
-        // 2. pgid (pg_t) - has version byte + pool (int64_t) + seed (uint32_t) + preferred (int32_t)
-        // Reference: ~/dev/linux/include/linux/ceph/osdmap.h ceph_decode_pgid()
-        let pg_version = front.get_u8();
-        if pg_version > 1 {
-            return Err(OSDClientError::Decoding(format!(
-                "Unknown pg_t version: {}",
-                pg_version
-            )));
-        }
-        let pg_pool = front.get_i64_le();
-        let pg_seed = front.get_u32_le();
-        // preferred field is deprecated and always -1 (kept for wire protocol compatibility)
-        let _pg_preferred = front.get_i32_le();
+        // 2. pgid (pg_t) - use Denc infrastructure
+        let pgid_raw = PgId::decode(&mut cursor, 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode pgid: {}", e)))?;
 
         let pgid = StripedPgId {
-            pool: pg_pool,
-            seed: pg_seed,
+            pool: pgid_raw.pool,
+            seed: pgid_raw.seed,
             shard: -1, // Not in pg_t, only in spg_t
         };
 
         // 3. flags (int64_t)
-        let flags = front.get_i64_le() as u32;
+        let flags = cursor.get_i64_le() as u32;
 
         // 4. result (errorcode32_t = int32_t)
-        let result = front.get_i32_le();
+        let result = cursor.get_i32_le();
         eprintln!("DEBUG: Overall result code: {}", result);
 
         // 5. bad_replay_version (eversion_t = epoch + version)
         // This is for backwards compatibility with old clients.
         // Modern clients should use replay_version (our 'version' field) and user_version instead.
         // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
-        let _bad_replay_epoch = front.get_u32_le();
-        let _bad_replay_version = front.get_u64_le();
+        let _bad_replay_epoch = cursor.get_u32_le();
+        let _bad_replay_version = cursor.get_u64_le();
 
         // 6. osdmap_epoch (epoch_t = u32)
-        let epoch = front.get_u32_le();
+        let epoch = cursor.get_u32_le();
 
         // 7. num_ops (u32)
-        let num_ops = front.get_u32_le() as usize;
+        let num_ops = cursor.get_u32_le() as usize;
 
         // 8. For each op: osd_op structure
         // osd_op is defined in rados.h and has a fixed size
@@ -500,16 +488,16 @@ impl MOSDOpReply {
         // Parse osd_op structures to get payload lengths
         let mut payload_lens = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
-            if front.remaining() < 38 {
+            if cursor.remaining() < 38 {
                 return Err(OSDClientError::Decoding(format!(
                     "Incomplete osd_op {}: need 38 bytes, have {}",
                     i,
-                    front.remaining()
+                    cursor.remaining()
                 )));
             }
             // Skip to payload_len field (at offset 34)
-            front.advance(34);
-            let payload_len = front.get_u32_le();
+            cursor.advance(34);
+            let payload_len = cursor.get_u32_le();
             eprintln!(
                 "DEBUG: Op {} payload_len from osd_op structure: {}",
                 i, payload_len
@@ -520,19 +508,19 @@ impl MOSDOpReply {
         // 9. retry_attempt (int32_t)
         // Used to validate that the reply matches the request attempt
         // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
-        let retry_attempt = front.get_i32_le();
+        let retry_attempt = cursor.get_i32_le();
 
         // 10. For each op: rval (int32_t)
         let mut ops = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
-            if front.remaining() < 4 {
+            if cursor.remaining() < 4 {
                 return Err(OSDClientError::Decoding(format!(
                     "Incomplete rval {}: need 4 bytes, have {}",
                     i,
-                    front.remaining()
+                    cursor.remaining()
                 )));
             }
-            let return_code = front.get_i32_le();
+            let return_code = cursor.get_i32_le();
             eprintln!("DEBUG: Op {} return_code (rval): {}", i, return_code);
 
             ops.push(OpReply {
@@ -543,22 +531,22 @@ impl MOSDOpReply {
 
         // 11. replay_version (eversion_t = epoch + version)
         // The epoch part is not currently used since we track OSDMap epoch separately
-        let _replay_epoch = front.get_u32_le();
-        let version = front.get_u64_le();
+        let _replay_epoch = cursor.get_u32_le();
+        let version = cursor.get_u64_le();
         eprintln!(
             "DEBUG: Decoded version from MOSDOpReply: epoch={}, version={}",
             _replay_epoch, version
         );
 
         // 12. user_version (version_t = u64)
-        let user_version = front.get_u64_le();
+        let user_version = cursor.get_u64_le();
         eprintln!(
             "DEBUG: Decoded user_version from MOSDOpReply: {}",
             user_version
         );
 
         // 13. do_redirect (bool)
-        let do_redirect = front.get_u8() != 0;
+        let do_redirect = cursor.get_u8() != 0;
 
         // 14. If do_redirect: redirect structure
         if do_redirect {
@@ -568,7 +556,7 @@ impl MOSDOpReply {
             // - string (redirect_object)
             // - u32 (legacy field, always 0)
 
-            if front.remaining() < 6 {
+            if cursor.remaining() < 6 {
                 return Err(OSDClientError::Decoding(
                     "Incomplete redirect header".into(),
                 ));
@@ -576,21 +564,21 @@ impl MOSDOpReply {
 
             // Version fields from ENCODE_START macro
             // TODO: In production, should validate struct_v is compatible
-            let _struct_v = front.get_u8();
-            let _struct_compat = front.get_u8();
-            let redirect_len = front.get_u32_le();
+            let _struct_v = cursor.get_u8();
+            let _struct_compat = cursor.get_u8();
+            let redirect_len = cursor.get_u32_le();
 
-            if front.remaining() < redirect_len as usize {
+            if cursor.remaining() < redirect_len as usize {
                 return Err(OSDClientError::Decoding(format!(
                     "Incomplete redirect data: expected {} bytes, got {}",
                     redirect_len,
-                    front.remaining()
+                    cursor.remaining()
                 )));
             }
 
             // Skip the redirect data for now - we don't handle redirects yet
             // In the future, we could parse and follow the redirect
-            front.advance(redirect_len as usize);
+            cursor.advance(redirect_len as usize);
 
             debug!("Received redirect response (not following redirect)");
         }
@@ -599,10 +587,10 @@ impl MOSDOpReply {
         // The trace is used for distributed tracing (Zipkin/Jaeger)
         // These fields could be exposed in the future for observability/debugging
         // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
-        if front.remaining() >= 24 {
-            let _trace_id = front.get_i64_le();
-            let _span_id = front.get_i64_le();
-            let _parent_span_id = front.get_i64_le();
+        if cursor.remaining() >= 24 {
+            let _trace_id = cursor.get_i64_le();
+            let _span_id = cursor.get_i64_le();
+            let _parent_span_id = cursor.get_i64_le();
         }
 
         // 16. Distribute data section to operations
@@ -635,7 +623,7 @@ impl MOSDOpReply {
         }
 
         let object = ObjectId {
-            pool: pg_pool,
+            pool: pgid_raw.pool,
             oid,
             snap: 0,
             hash: 0,
@@ -666,13 +654,6 @@ impl MOSDOpReply {
             user_version: self.user_version,
             ops: self.ops,
         }
-    }
-
-    /// Decode MOSDOpReply from front and data sections
-    ///
-    /// This is the primary decoding method for MOSDOpReply messages.
-    pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
-        Self::decode_internal(front, data)
     }
 }
 
@@ -736,7 +717,7 @@ impl CephMessagePayload for MOSDOpReply {
         _middle: &[u8],
         data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode_internal(front, data)
+        Self::decode(front, data)
             .map_err(|_e| msgr2::Error::Deserialization("MOSDOpReply decode failed".into()))
     }
 }
