@@ -314,18 +314,6 @@ impl MOSDOp {
         }
         buf.freeze()
     }
-
-    /// Legacy encode method for backwards compatibility
-    #[deprecated(note = "Use CephMessage::from_payload instead")]
-    pub fn encode(&self) -> Result<Bytes> {
-        self.encode_payload_internal(0)
-    }
-
-    /// Legacy get_data_section method for backwards compatibility
-    #[deprecated(note = "Use encode_data instead")]
-    pub fn get_data_section(&self) -> Bytes {
-        self.get_data_section_internal()
-    }
 }
 
 /// MOSDOpReply message - OSD to Client (message type 43)
@@ -664,6 +652,7 @@ mod tests {
     #[test]
     fn test_mosdop_encoding_v9() {
         use crate::types::{OSDOp, ObjectId, RequestId, StripedPgId};
+        use msgr2::ceph_message::{CephMessage, CrcFlags};
 
         // Create a PGLS operation
         let object = ObjectId::new(3, "");
@@ -682,27 +671,26 @@ mod tests {
             0,
         );
 
-        // Encode
-        let encoded = mosdop.encode().expect("Failed to encode");
+        // Encode using CephMessage framework
+        let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();
 
-        // Verify size
+        // Verify front section size
         // Expected: 216 bytes for v9 (based on actual encoding)
-        eprintln!("Encoded front size: {} bytes", encoded.len());
+        eprintln!("Encoded front size: {} bytes", msg.front.len());
         eprintln!(
             "Expected front size: {} bytes",
             MOSDOp::expected_front_size_pgls()
         );
         assert_eq!(
-            encoded.len(),
+            msg.front.len(),
             MOSDOp::expected_front_size_pgls(),
             "Front section should be 216 bytes for v9"
         );
 
         // Verify data section (should contain the 39-byte HObject cursor)
-        let data = mosdop.get_data_section();
-        eprintln!("Data section size: {} bytes", data.len());
+        eprintln!("Data section size: {} bytes", msg.data.len());
         assert_eq!(
-            data.len(),
+            msg.data.len(),
             39,
             "Data section should contain 39-byte HObject cursor"
         );
