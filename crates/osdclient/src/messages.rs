@@ -505,14 +505,14 @@ impl MOSDOpReply {
             None
         };
 
-        // 15. trace (blkin_trace_info: 3 x i64)
+        // 15. trace (blkin_trace_info: 3 x u64)
         // The trace is used for distributed tracing (Zipkin/Jaeger)
         // These fields could be exposed in the future for observability/debugging
         // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
         if cursor.remaining() >= 24 {
-            let _trace_id = cursor.get_i64_le();
-            let _span_id = cursor.get_i64_le();
-            let _parent_span_id = cursor.get_i64_le();
+            let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0).map_err(|e| {
+                OSDClientError::Decoding(format!("Failed to decode blkin_trace_info: {}", e))
+            })?;
         }
 
         // 16. Distribute data section to operations
