@@ -9,7 +9,6 @@ use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName};
 use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
-use std::str::FromStr;
 use std::time::Duration;
 use tracing::{debug, trace};
 
@@ -48,7 +47,7 @@ impl CephXClientHandler {
     /// * `entity_name_str` - Entity name (e.g., "client.admin")
     /// * `auth_mode` - Auth mode (AuthMode::Mon for monitors, AuthMode::Authorizer for OSDs)
     pub fn new(entity_name_str: String, auth_mode: AuthMode) -> Result<Self> {
-        let entity_name = EntityName::from_str(&entity_name_str)?;
+        let entity_name = entity_name_str.parse()?;
         Ok(Self {
             entity_name,
             server_challenge: None,

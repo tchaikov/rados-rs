@@ -127,12 +127,16 @@ impl EntityName {
     pub fn new(entity_type: u8, num: u64) -> Self {
         Self { entity_type, num }
     }
+}
+
+impl std::str::FromStr for EntityName {
+    type Err = String;
 
     /// Parse from string like "client.0"
-    pub fn from_str(s: &str) -> Option<Self> {
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 2 {
-            return None;
+            return Err(format!("Invalid entity name format: {}", s));
         }
 
         let entity_type = match parts[0] {
@@ -142,11 +146,13 @@ impl EntityName {
             "client" => CEPH_ENTITY_TYPE_CLIENT,
             "mgr" => CEPH_ENTITY_TYPE_MGR,
             "auth" => CEPH_ENTITY_TYPE_AUTH,
-            _ => return None,
+            _ => return Err(format!("Unknown entity type: {}", parts[0])),
         };
 
-        let num = parts[1].parse().ok()?;
-        Some(Self { entity_type, num })
+        let num = parts[1]
+            .parse()
+            .map_err(|e| format!("Invalid entity number: {}", e))?;
+        Ok(Self { entity_type, num })
     }
 }
 

@@ -41,6 +41,7 @@ impl MOSDOp {
     pub const COMPAT_VERSION: u16 = 3;
 
     /// Create a new MOSDOp message
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client_inc: u32,
         osdmap_epoch: u32,

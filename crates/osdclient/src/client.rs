@@ -18,7 +18,7 @@ use crate::types::{
 };
 
 /// Configuration for OSD client
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct OSDClientConfig {
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
@@ -31,19 +31,6 @@ pub struct OSDClientConfig {
     /// In Ceph C++, this is typically 0, with uniqueness provided by the global_id
     /// in the entity_name instead.
     pub client_inc: u32,
-}
-
-impl Default for OSDClientConfig {
-    fn default() -> Self {
-        Self {
-            entity_name: String::new(),
-            keyring_path: None,
-            tracker_config: TrackerConfig::default(),
-            // Use 0 like Ceph C++ clients
-            // Uniqueness comes from global_id in entity_name, not from client_inc
-            client_inc: 0,
-        }
-    }
 }
 
 /// Main OSD client for performing object operations
