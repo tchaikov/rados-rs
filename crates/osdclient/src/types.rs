@@ -398,6 +398,23 @@ impl OpCode {
         self as u16
     }
 
+    /// Try to convert a u16 to an OpCode
+    pub fn from_u16(value: u16) -> Option<Self> {
+        match value {
+            0x1201 => Some(OpCode::Read),      // RD | DATA | 1
+            0x1202 => Some(OpCode::Stat),      // RD | DATA | 2
+            0x2201 => Some(OpCode::Write),     // WR | DATA | 1
+            0x2202 => Some(OpCode::WriteFull), // WR | DATA | 2
+            0x2203 => Some(OpCode::Truncate),  // WR | DATA | 3
+            0x2205 => Some(OpCode::Delete),    // WR | DATA | 5
+            0x220D => Some(OpCode::Create),    // WR | DATA | 13
+            0x1301 => Some(OpCode::GetXattr),  // RD | ATTR | 1
+            0x2301 => Some(OpCode::SetXattr),  // WR | ATTR | 1
+            0x1501 => Some(OpCode::Pgls),      // RD | PG | 1
+            _ => None,
+        }
+    }
+
     /// Check if this operation is a read operation
     pub fn is_read(self) -> bool {
         (self as u16) & CEPH_OSD_OP_MODE_RD != 0

@@ -8,8 +8,8 @@ use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
 
 use crate::types::{
-    BlkinTraceInfo, EntityName, JaegerSpanContext, ObjectLocator, PgId, RequestRedirect,
-    StripedPgId,
+    BlkinTraceInfo, EntityName, JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PgId,
+    RequestRedirect, StripedPgId,
 };
 
 // Re-export types for convenience
@@ -519,6 +519,170 @@ impl Denc for RequestRedirect {
     }
 }
 
+// ============= OSDOp (ceph_osd_op) =============
+
+/// Denc implementation for OSDOp
+///
+/// This implements encoding/decoding for the 38-byte ceph_osd_op structure:
+/// - op (u16) - 2 bytes
+/// - flags (u32) - 4 bytes
+/// - union (28 bytes) - OpData variant based on op
+/// - payload_len (u32) - 4 bytes
+///
+/// Note: The actual payload data (indata) is stored separately in the message
+/// data section and is not part of this 38-byte structure.
+impl Denc for OSDOp {
+    const USES_VERSIONING: bool = false;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // 1. op (u16)
+        buf.put_u16_le(self.op.as_u16());
+
+        // 2. flags (u32)
+        buf.put_u32_le(self.flags);
+
+        // 3. Union (28 bytes) - OpData variant based on op
+        match &self.op_data {
+            OpData::Extent {
+                offset,
+                length,
+                truncate_size,
+                truncate_seq,
+            } => {
+                buf.put_u64_le(*offset);
+                buf.put_u64_le(*length);
+                buf.put_u64_le(*truncate_size);
+                buf.put_u32_le(*truncate_seq);
+                // 8 + 8 + 8 + 4 = 28 bytes ✓
+            }
+            OpData::Pgls {
+                max_entries,
+                start_epoch,
+            } => {
+                buf.put_u64_le(*max_entries);
+                buf.put_u32_le(*start_epoch);
+                // Pad to 28 bytes: 8 + 4 = 12, need 16 more
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+            }
+            OpData::Xattr {
+                name_len,
+                value_len,
+                cmp_op,
+                cmp_mode,
+            } => {
+                buf.put_u32_le(*name_len);
+                buf.put_u32_le(*value_len);
+                buf.put_u8(*cmp_op);
+                buf.put_u8(*cmp_mode);
+                // Pad to 28 bytes: 4 + 4 + 1 + 1 = 10, need 18 more
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+                buf.put_u16_le(0);
+            }
+            OpData::None => {
+                // Empty union - 28 bytes of zeros
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+                buf.put_u32_le(0);
+            }
+        }
+
+        // 4. payload_len (u32)
+        buf.put_u32_le(self.indata.len() as u32);
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        // Need at least 38 bytes for ceph_osd_op
+        if buf.remaining() < 38 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for ceph_osd_op: need 38, have {}",
+                buf.remaining()
+            )));
+        }
+
+        // 1. op (u16)
+        let op_code = buf.get_u16_le();
+        let op = OpCode::from_u16(op_code).ok_or_else(|| {
+            RadosError::Protocol(format!("Unknown operation code: 0x{:04x}", op_code))
+        })?;
+
+        // 2. flags (u32)
+        let flags = buf.get_u32_le();
+
+        // 3. Union (28 bytes) - decode based on op
+        let op_data = match op {
+            OpCode::Read | OpCode::Write | OpCode::WriteFull | OpCode::Truncate | OpCode::Stat => {
+                // Extent-based operations
+                let offset = buf.get_u64_le();
+                let length = buf.get_u64_le();
+                let truncate_size = buf.get_u64_le();
+                let truncate_seq = buf.get_u32_le();
+                OpData::Extent {
+                    offset,
+                    length,
+                    truncate_size,
+                    truncate_seq,
+                }
+            }
+            OpCode::Pgls => {
+                // PG list operation
+                let max_entries = buf.get_u64_le();
+                let start_epoch = buf.get_u32_le();
+                // Skip padding (16 bytes)
+                buf.advance(16);
+                OpData::Pgls {
+                    max_entries,
+                    start_epoch,
+                }
+            }
+            OpCode::GetXattr | OpCode::SetXattr => {
+                // Extended attribute operations
+                let name_len = buf.get_u32_le();
+                let value_len = buf.get_u32_le();
+                let cmp_op = buf.get_u8();
+                let cmp_mode = buf.get_u8();
+                // Skip padding (18 bytes)
+                buf.advance(18);
+                OpData::Xattr {
+                    name_len,
+                    value_len,
+                    cmp_op,
+                    cmp_mode,
+                }
+            }
+            _ => {
+                // Other operations - skip 28 bytes
+                buf.advance(28);
+                OpData::None
+            }
+        };
+
+        // 4. payload_len (u32)
+        let _payload_len = buf.get_u32_le();
+
+        // Note: We don't decode the actual payload data here - that comes from
+        // the message data section. We just store the length for now.
+        // The caller will need to extract the data separately.
+
+        Ok(Self {
+            op,
+            flags,
+            op_data,
+            indata: bytes::Bytes::new(), // Will be filled from data section
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // Fixed size: 38 bytes
+        // op (2) + flags (4) + union (28) + payload_len (4) = 38
+        Some(38)
+    }
+}
+
 // ============= Size Constants =============
 
 /// Size of spg_t encoding (with version header)
@@ -532,6 +696,9 @@ pub const BLKIN_TRACE_INFO_SIZE: usize = 24; // 3 x u64
 
 /// Size of jspan_context encoding (with version header, when invalid)
 pub const JSPAN_CONTEXT_ENCODED_SIZE: usize = 7; // 6 (header) + 1 (is_valid)
+
+/// Size of ceph_osd_op structure
+pub const OSD_OP_ENCODED_SIZE: usize = 38; // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len)
 
 #[cfg(test)]
 mod tests {
@@ -710,5 +877,160 @@ mod tests {
         assert!(decoded.is_empty());
         assert!(decoded.redirect_locator.is_empty());
         assert_eq!(decoded.redirect_object, "");
+    }
+
+    #[test]
+    fn test_osd_op_extent_roundtrip() {
+        use bytes::Bytes;
+
+        let op = OSDOp {
+            op: OpCode::Read,
+            flags: 0,
+            op_data: OpData::Extent {
+                offset: 0,
+                length: 4096,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
+            indata: Bytes::new(),
+        };
+
+        let mut buf = BytesMut::new();
+
+        op.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 38);
+
+        let decoded = OSDOp::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.op.as_u16(), OpCode::Read.as_u16());
+        assert_eq!(decoded.flags, 0);
+        match decoded.op_data {
+            OpData::Extent {
+                offset,
+                length,
+                truncate_size,
+                truncate_seq,
+            } => {
+                assert_eq!(offset, 0);
+                assert_eq!(length, 4096);
+                assert_eq!(truncate_size, 0);
+                assert_eq!(truncate_seq, 0);
+            }
+            _ => panic!("Expected Extent variant"),
+        }
+    }
+
+    #[test]
+    fn test_osd_op_pgls_roundtrip() {
+        use bytes::Bytes;
+
+        let op = OSDOp {
+            op: OpCode::Pgls,
+            flags: 0,
+            op_data: OpData::Pgls {
+                max_entries: 100,
+                start_epoch: 42,
+            },
+            indata: Bytes::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        op.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 38);
+
+        let decoded = OSDOp::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.op.as_u16(), OpCode::Pgls.as_u16());
+        match decoded.op_data {
+            OpData::Pgls {
+                max_entries,
+                start_epoch,
+            } => {
+                assert_eq!(max_entries, 100);
+                assert_eq!(start_epoch, 42);
+            }
+            _ => panic!("Expected Pgls variant"),
+        }
+    }
+
+    #[test]
+    fn test_osd_op_xattr_roundtrip() {
+        use bytes::Bytes;
+
+        let op = OSDOp {
+            op: OpCode::GetXattr,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: 10,
+                value_len: 20,
+                cmp_op: 1,
+                cmp_mode: 2,
+            },
+            indata: Bytes::new(),
+        };
+        let mut buf = BytesMut::new();
+
+        op.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 38);
+
+        let decoded = OSDOp::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.op.as_u16(), OpCode::GetXattr.as_u16());
+        match decoded.op_data {
+            OpData::Xattr {
+                name_len,
+                value_len,
+                cmp_op,
+                cmp_mode,
+            } => {
+                assert_eq!(name_len, 10);
+                assert_eq!(value_len, 20);
+                assert_eq!(cmp_op, 1);
+                assert_eq!(cmp_mode, 2);
+            }
+            _ => panic!("Expected Xattr variant"),
+        }
+    }
+
+    #[test]
+    fn test_osd_op_with_indata() {
+        use bytes::Bytes;
+
+        let write_data = Bytes::from(vec![0x42; 1024]);
+        let op = OSDOp {
+            op: OpCode::Write,
+            flags: 0,
+            op_data: OpData::Extent {
+                offset: 0,
+                length: 1024,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
+            indata: write_data.clone(),
+        };
+        let mut buf = BytesMut::new();
+
+        op.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 38);
+
+        // The last 4 bytes should be the payload_len
+        let payload_len_bytes = &buf[34..38];
+        let payload_len = u32::from_le_bytes([
+            payload_len_bytes[0],
+            payload_len_bytes[1],
+            payload_len_bytes[2],
+            payload_len_bytes[3],
+        ]);
+        assert_eq!(payload_len, 1024);
+    }
+
+    #[test]
+    fn test_osd_op_size_constant() {
+        use bytes::Bytes;
+
+        let op = OSDOp {
+            op: OpCode::Read,
+            flags: 0,
+            op_data: OpData::None,
+            indata: Bytes::new(),
+        };
+        assert_eq!(op.encoded_size(0), Some(OSD_OP_ENCODED_SIZE));
     }
 }

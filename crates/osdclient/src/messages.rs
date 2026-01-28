@@ -4,8 +4,11 @@
 
 use crate::error::{OSDClientError, Result};
 use crate::types::{
-    OSDOp, ObjectId, OpData, OpReply, OpResult, PgId, RequestId, RequestRedirect, StripedPgId,
+    OSDOp, ObjectId, OpReply, OpResult, PgId, RequestId, RequestRedirect, StripedPgId,
 };
+
+#[cfg(test)]
+use crate::types::OpData;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 use tracing::debug;
@@ -213,6 +216,8 @@ impl MOSDOp {
         // 11. operations
         buf.put_u16_le(self.ops.len() as u16);
         for op in &self.ops {
+            use denc::Denc;
+
             // Debug logging for PGLS operations
             eprintln!(
                 "DEBUG encode: op={:#x} ({:?}), flags={:#x}, indata_len={}",
@@ -222,66 +227,10 @@ impl MOSDOp {
                 op.indata.len()
             );
 
-            // Encode ceph_osd_op structure (38 bytes total)
-            // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len) = 38
+            // Encode ceph_osd_op structure (38 bytes) using Denc
             let op_start = buf.len();
-            buf.put_u16_le(op.op.as_u16()); // op code
-            buf.put_u32_le(op.flags); // flags
-
-            // Encode operation data union (28 bytes total)
-            match &op.op_data {
-                OpData::Extent {
-                    offset,
-                    length,
-                    truncate_size,
-                    truncate_seq,
-                } => {
-                    buf.put_u64_le(*offset);
-                    buf.put_u64_le(*length);
-                    buf.put_u64_le(*truncate_size);
-                    buf.put_u32_le(*truncate_seq);
-                    // 8 + 8 + 8 + 4 = 28 bytes ✓
-                }
-                OpData::Pgls {
-                    max_entries,
-                    start_epoch,
-                } => {
-                    eprintln!(
-                        "DEBUG encode Pgls: max_entries={}, start_epoch={}",
-                        max_entries, start_epoch
-                    );
-                    buf.put_u64_le(*max_entries);
-                    buf.put_u32_le(*start_epoch);
-                    // Pad to 28 bytes: 8 + 4 = 12, need 16 more
-                    buf.put_u64_le(0);
-                    buf.put_u64_le(0);
-                }
-                OpData::Xattr {
-                    name_len,
-                    value_len,
-                    cmp_op,
-                    cmp_mode,
-                } => {
-                    buf.put_u32_le(*name_len);
-                    buf.put_u32_le(*value_len);
-                    buf.put_u8(*cmp_op);
-                    buf.put_u8(*cmp_mode);
-                    // Pad to 28 bytes: 4 + 4 + 1 + 1 = 10, need 18 more
-                    buf.put_u64_le(0);
-                    buf.put_u64_le(0);
-                    buf.put_u16_le(0);
-                }
-                OpData::None => {
-                    // Empty union - 28 bytes of zeros
-                    buf.put_u64_le(0);
-                    buf.put_u64_le(0);
-                    buf.put_u64_le(0);
-                    buf.put_u32_le(0);
-                }
-            }
-
-            // payload_len - data length for this op (stored separately from ops array)
-            buf.put_u32_le(op.indata.len() as u32);
+            op.encode(&mut buf, 0)
+                .expect("Failed to encode OSDOp with Denc");
 
             // Debug: print hex dump of this operation
             let op_end = buf.len();
