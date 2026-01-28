@@ -726,6 +726,61 @@ impl Denc for OsdStatData {
     }
 }
 
+// ============= UTime (utime_t/timespec) =============
+
+/// Ceph utime_t structure (timespec)
+///
+/// Represents time with second and nanosecond precision.
+/// Wire format: u32 tv_sec + u32 tv_nsec
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UTime {
+    pub tv_sec: u32,
+    pub tv_nsec: u32,
+}
+
+impl UTime {
+    /// Create a new UTime with zero time
+    pub const fn zero() -> Self {
+        Self {
+            tv_sec: 0,
+            tv_nsec: 0,
+        }
+    }
+
+    /// Create a new UTime from seconds and nanoseconds
+    pub const fn new(tv_sec: u32, tv_nsec: u32) -> Self {
+        Self { tv_sec, tv_nsec }
+    }
+}
+
+impl Denc for UTime {
+    const USES_VERSIONING: bool = false;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        buf.put_u32_le(self.tv_sec);
+        buf.put_u32_le(self.tv_nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for UTime: need 8, have {}",
+                buf.remaining()
+            )));
+        }
+
+        Ok(Self {
+            tv_sec: buf.get_u32_le(),
+            tv_nsec: buf.get_u32_le(),
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8) // u32 + u32
+    }
+}
+
 // ============= Size Constants =============
 
 /// Size of spg_t encoding (with version header)
@@ -1095,5 +1150,25 @@ mod tests {
         assert_eq!(decoded.size, original.size);
         assert_eq!(decoded.tv_sec, original.tv_sec);
         assert_eq!(decoded.tv_nsec, original.tv_nsec);
+    }
+
+    #[test]
+    fn test_utime_roundtrip() {
+        use bytes::BytesMut;
+
+        let original = UTime::new(1234567890, 123456789);
+
+        let mut buf = BytesMut::new();
+        original.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+
+        let decoded = UTime::decode(&mut &buf[..], 0).unwrap();
+        assert_eq!(decoded.tv_sec, original.tv_sec);
+        assert_eq!(decoded.tv_nsec, original.tv_nsec);
+
+        // Test zero
+        let zero = UTime::zero();
+        assert_eq!(zero.tv_sec, 0);
+        assert_eq!(zero.tv_nsec, 0);
     }
 }

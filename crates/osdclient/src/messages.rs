@@ -25,7 +25,7 @@ pub struct MOSDOp {
     pub client_inc: u32,
     pub osdmap_epoch: u32,
     pub flags: u32,
-    pub mtime: u64, // Simplified: using u64 instead of UTime for now
+    pub mtime: crate::denc_types::UTime,
     pub retry_attempt: i32,
     pub object: ObjectId,
     pub pgid: StripedPgId,
@@ -61,7 +61,7 @@ impl MOSDOp {
             client_inc,
             osdmap_epoch,
             flags,
-            mtime: 0, // Current time - simplified for now
+            mtime: crate::denc_types::UTime::zero(),
             retry_attempt: -1,
             object,
             pgid,
@@ -460,9 +460,10 @@ impl CephMessagePayload for MOSDOp {
         buf.put_u32_le(self.client_inc);
         eprintln!("DEBUG: After client_inc, buf.len() = {}", buf.len());
 
-        // 8. mtime (timespec: sec as u32, nsec as u32)
-        buf.put_u32_le(self.mtime as u32); // sec
-        buf.put_u32_le(0); // nsec
+        // 8. mtime (utime_t: timespec with sec as u32, nsec as u32)
+        self.mtime
+            .encode(&mut buf, 0)
+            .map_err(|_| msgr2::Error::Serialization)?;
         eprintln!("DEBUG: After mtime, buf.len() = {}", buf.len());
 
         // 9. object_locator_t (using Denc encoding)
