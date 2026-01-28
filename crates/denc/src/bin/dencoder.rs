@@ -22,8 +22,10 @@ use bytes::Bytes;
 use denc::denc::{Denc, VersionedEncode};
 use denc::entity_addr::EntityAddr;
 use denc::error::RadosError;
+use denc::hobject::HObject;
 use denc::monmap::*;
 use denc::osdmap::*;
+use denc::pg_nls_response::PgNlsResponse;
 use serde::Serialize;
 use std::any::Any;
 use std::fmt;
@@ -300,6 +302,50 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
             },
         }),
 
+        // hobject_t (HObject) - Hashed object identifier
+        // Dependencies: String, u64, u32, bool, i64
+        "hobject_t" => Some(TypeInfo {
+            decode_fn: |bytes, features| {
+                let obj = HObject::decode(bytes, features).map_err(DencoderError::DecodeError)?;
+                Ok(Box::new(obj))
+            },
+            encode_fn: |obj: &dyn SerializableType, features| {
+                let typed = obj.as_any().downcast_ref::<HObject>().ok_or_else(|| {
+                    DencoderError::EncodeError(RadosError::Protocol("Type mismatch".to_string()))
+                })?;
+                let mut buf = bytes::BytesMut::new();
+                typed
+                    .encode(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
+            },
+        }),
+
+        // pg_nls_response_t (PgNlsResponse) - PG namespace list response
+        // Dependencies: HObject (L3), Vec<ListObjectImpl>
+        "pg_nls_response_t" => Some(TypeInfo {
+            decode_fn: |bytes, features| {
+                let obj =
+                    PgNlsResponse::decode(bytes, features).map_err(DencoderError::DecodeError)?;
+                Ok(Box::new(obj))
+            },
+            encode_fn: |obj: &dyn SerializableType, features| {
+                let typed = obj
+                    .as_any()
+                    .downcast_ref::<PgNlsResponse>()
+                    .ok_or_else(|| {
+                        DencoderError::EncodeError(RadosError::Protocol(
+                            "Type mismatch".to_string(),
+                        ))
+                    })?;
+                let mut buf = bytes::BytesMut::new();
+                typed
+                    .encode(&mut buf, features)
+                    .map_err(DencoderError::EncodeError)?;
+                Ok(buf.freeze())
+            },
+        }),
+
         // pg_pool_t (PgPool) - Dependencies: UTime (L1), PoolSnapInfo (L2), SnapInterval (L1), HitSetParams (L2), PgMergeMeta (L3)
         // This is the most complex type - test LAST
         "pg_pool_t" => Some(TypeInfo {
@@ -419,6 +465,9 @@ fn list_types() {
     println!("LEVEL 3: Complex types");
     println!("  Test these ONLY after Level 1 & 2 are validated");
     println!("  pg_merge_meta_t   - PG merge metadata [versioned]");
+    println!("  object_locator_t  - Object placement information [versioned]");
+    println!("  hobject_t         - Hashed object identifier [versioned]");
+    println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
     println!();
     println!("LEVEL 4: Top-level cluster structures");
