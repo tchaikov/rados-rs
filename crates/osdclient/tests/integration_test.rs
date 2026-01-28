@@ -12,6 +12,7 @@
 //!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test
 
 use bytes::Bytes;
+use cephconfig;
 use std::env;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -71,9 +72,9 @@ impl TestConfig {
 
         // Pool ID still comes from environment variable
         let pool_id = env::var("CEPH_POOL_ID")
-            .unwrap_or_else(|_| "1".to_string())
+            .unwrap_or_else(|_| "2".to_string()) // Default to pool 2 (test pool)
             .parse()
-            .unwrap_or(1);
+            .unwrap_or(2);
 
         Ok(Self {
             mon_addrs,
@@ -185,6 +186,9 @@ async fn test_stat_operation() {
     osd.write_full(pool, &object, test_data)
         .await
         .expect("write_full failed");
+
+    // Give the cluster a moment to persist the write
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Stat object
     let stat_result = osd.stat(pool, &object).await.expect("stat failed");
@@ -385,9 +389,15 @@ async fn test_overwrite_object() {
         .expect("second write_full failed");
 
     // Version should increase
+    eprintln!(
+        "DEBUG: result1.version={}, result2.version={}",
+        result1.version, result2.version
+    );
     assert!(
         result2.version > result1.version,
-        "Version should increase after overwrite"
+        "Version should increase after overwrite: result1.version={}, result2.version={}",
+        result1.version,
+        result2.version
     );
 
     // Read back
