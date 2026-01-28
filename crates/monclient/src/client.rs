@@ -483,10 +483,16 @@ impl MonClient {
 
         // Store as active connection
         let mut state = self.state.write().await;
+
+        // Get global_id from the connection
+        let global_id = mon_con.global_id().await;
+        tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
+
         state.active_con = Some(mon_con);
         state.hunting = false;
         // Authentication was completed during MonConnection::connect() -> establish_session()
         state.authenticated = true;
+        state.global_id = global_id; // Store global_id in MonClient
         drop(state);
 
         info!("Successfully connected to mon.{}", rank);
@@ -1399,6 +1405,15 @@ impl MonClient {
     pub async fn get_fsid(&self) -> UuidD {
         let state = self.state.read().await;
         UuidD::from_bytes(*state.monmap.fsid.as_bytes())
+    }
+
+    /// Get the global ID assigned during authentication
+    ///
+    /// Returns the global ID assigned by the monitor during authentication.
+    /// Returns 0 if not authenticated yet.
+    pub async fn get_global_id(&self) -> u64 {
+        let state = self.state.read().await;
+        state.global_id
     }
 
     /// Get the current OSDMap

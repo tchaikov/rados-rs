@@ -32,12 +32,13 @@ impl CephMessagePayload for MOSDOp {
         MOSDOP_COMPAT_VERSION
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode_payload_internal(features)
+            .map_err(|_e| msgr2::Error::Serialization)
     }
 
     fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        Ok(self.get_data_section())
+        Ok(self.get_data_section_internal())
     }
 
     fn decode_payload(
@@ -74,7 +75,7 @@ impl CephMessagePayload for MOSDOpReply {
         _middle: &[u8],
         data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode(front, data)
+        Self::decode_internal(front, data)
             .map_err(|_e| msgr2::Error::Deserialization("MOSDOpReply decode failed".into()))
     }
 }
@@ -120,7 +121,7 @@ mod tests {
             inc: 1,
         };
 
-        let mosdop = MOSDOp::new(1, 1, 0, object, pgid, ops, reqid);
+        let mosdop = MOSDOp::new(1, 1, 0, object, pgid, ops, reqid, 0);
 
         // Create a complete message
         let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();
@@ -173,7 +174,7 @@ mod tests {
             inc: 1,
         };
 
-        let mosdop = MOSDOp::new(1, 1, 0, object, pgid, ops, reqid);
+        let mosdop = MOSDOp::new(1, 1, 0, object, pgid, ops, reqid, 0);
 
         // Create a complete message
         let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();

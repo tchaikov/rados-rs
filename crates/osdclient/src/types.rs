@@ -61,6 +61,24 @@ impl ObjectId {
     }
 }
 
+/// Placement group ID (corresponds to pg_t in Ceph)
+///
+/// This is the base PG identifier without shard information.
+/// For erasure-coded pools, use StripedPgId which includes shard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PgId {
+    /// Pool ID
+    pub pool: i64,
+    /// PG seed (ps)
+    pub seed: u32,
+}
+
+impl PgId {
+    pub fn new(pool: i64, seed: u32) -> Self {
+        Self { pool, seed }
+    }
+}
+
 /// Striped placement group ID (corresponds to spg_t in Ceph)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StripedPgId {
@@ -86,7 +104,53 @@ impl StripedPgId {
     }
 }
 
-/// Request identifier for tracking operations
+/// Entity name (corresponds to entity_name_t in Ceph)
+///
+/// Represents a Ceph entity like "client.0", "osd.1", etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntityName {
+    /// Entity type (CEPH_ENTITY_TYPE_*)
+    pub entity_type: u8,
+    /// Entity number
+    pub num: u64,
+}
+
+/// Entity type constants (from Ceph's msgr.h)
+pub const CEPH_ENTITY_TYPE_MON: u8 = 0x01;
+pub const CEPH_ENTITY_TYPE_MDS: u8 = 0x02;
+pub const CEPH_ENTITY_TYPE_OSD: u8 = 0x04;
+pub const CEPH_ENTITY_TYPE_CLIENT: u8 = 0x08;
+pub const CEPH_ENTITY_TYPE_MGR: u8 = 0x10;
+pub const CEPH_ENTITY_TYPE_AUTH: u8 = 0x20;
+
+impl EntityName {
+    pub fn new(entity_type: u8, num: u64) -> Self {
+        Self { entity_type, num }
+    }
+
+    /// Parse from string like "client.0"
+    pub fn from_str(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+
+        let entity_type = match parts[0] {
+            "mon" => CEPH_ENTITY_TYPE_MON,
+            "mds" => CEPH_ENTITY_TYPE_MDS,
+            "osd" => CEPH_ENTITY_TYPE_OSD,
+            "client" => CEPH_ENTITY_TYPE_CLIENT,
+            "mgr" => CEPH_ENTITY_TYPE_MGR,
+            "auth" => CEPH_ENTITY_TYPE_AUTH,
+            _ => return None,
+        };
+
+        let num = parts[1].parse().ok()?;
+        Some(Self { entity_type, num })
+    }
+}
+
+/// Request identifier for tracking operations (corresponds to osd_reqid_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestId {
     /// Client entity name
@@ -104,6 +168,45 @@ impl RequestId {
             tid,
             inc,
         }
+    }
+}
+
+/// Blkin trace info (corresponds to blkin_trace_info in Ceph)
+///
+/// Used for distributed tracing with Zipkin/Jaeger.
+/// In most cases, all fields are 0 (tracing disabled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlkinTraceInfo {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+}
+
+impl BlkinTraceInfo {
+    /// Create empty trace info (tracing disabled)
+    pub const fn empty() -> Self {
+        Self {
+            trace_id: 0,
+            span_id: 0,
+            parent_span_id: 0,
+        }
+    }
+}
+
+/// OpenTelemetry trace context (corresponds to jspan_context in Ceph)
+///
+/// Used for OpenTelemetry distributed tracing.
+/// When Jaeger is not enabled, this is just a flag indicating validity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JaegerSpanContext {
+    pub is_valid: bool,
+    // Additional fields would go here if tracing is enabled
+}
+
+impl JaegerSpanContext {
+    /// Create invalid context (tracing disabled)
+    pub const fn invalid() -> Self {
+        Self { is_valid: false }
     }
 }
 

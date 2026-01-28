@@ -659,7 +659,18 @@ impl State for AuthConnecting {
                         }
 
                         // Go directly to SessionConnecting
-                        Ok(StateResult::Transition(Box::new(SessionConnecting::new())))
+                        // The global_id and addresses will be set in apply_result()
+                        Ok(StateResult::Transition(Box::new(
+                            SessionConnecting::new_with_encryption(
+                                con_mode,
+                                None, // No session key for AuthMethod::None
+                                None, // No connection secret for AuthMethod::None
+                                None, // No expected server signature for AuthMethod::None
+                                global_id,
+                                denc::EntityAddr::default(), // Placeholder, will be set in apply_result
+                                denc::EntityAddr::default(), // Placeholder, will be set in apply_result
+                            ),
+                        )))
                     } else {
                         // CephX authentication - extract session_key and connection_secret
                         let provider = self
@@ -1639,6 +1650,9 @@ pub struct StateMachine {
     config: crate::ConnectionConfig,
     /// Preserved auth provider (kept across state transitions)
     preserved_auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    /// Global ID assigned by the server during authentication
+    /// Used to uniquely identify this client session
+    global_id: u64,
 }
 
 impl StateMachine {
@@ -1671,6 +1685,7 @@ impl StateMachine {
             peer_supported_features: 0, // Will be set after banner exchange
             config,
             preserved_auth_provider,
+            global_id: 0, // Will be set during authentication
         }
     }
 
@@ -1721,6 +1736,12 @@ impl StateMachine {
         self.pre_auth_enabled
     }
 
+    /// Get the global_id assigned during authentication
+    /// Returns 0 if authentication hasn't completed yet
+    pub fn global_id(&self) -> u64 {
+        self.global_id
+    }
+
     /// Create a new state machine for server connection
     pub fn new_server() -> Self {
         Self {
@@ -1737,6 +1758,7 @@ impl StateMachine {
             peer_supported_features: 0, // Will be set after banner exchange
             config: crate::ConnectionConfig::default(),
             preserved_auth_provider: None, // Server doesn't use auth provider
+            global_id: 0, // Server doesn't have a global_id (it assigns them to clients)
         }
     }
 
@@ -1954,6 +1976,10 @@ impl StateMachine {
                     let server_addr = self.server_addr.clone().unwrap_or_default();
                     let client_addr = self.client_addr.clone().unwrap_or_default();
 
+                    // Store global_id in StateMachine for later access
+                    self.global_id = global_id;
+                    tracing::debug!("Stored global_id {} in StateMachine", global_id);
+
                     // Compute HMAC-SHA256 signature of pre_auth_rxbuf using session_key
                     let our_signature = if let Some(ref key) = session_key {
                         use hmac::{Hmac, Mac};
@@ -2080,11 +2106,53 @@ impl StateMachine {
                             compression_state.client_addr.clone(),
                         ));
 
+                        // Store global_id in StateMachine for later access
+                        self.global_id = compression_state.global_id;
+                        tracing::debug!(
+                            "Stored global_id {} in StateMachine (from CompressionConnecting)",
+                            compression_state.global_id
+                        );
+
                         self.current_state = new_session_state;
                         let enter_result = self.current_state.enter()?;
                         return self.apply_result(enter_result);
                     }
                     // If peer supports compression, proceed normally
+                } else if new_state.kind() == StateKind::SessionConnecting {
+                    // Store global_id from SessionConnecting state and fix up addresses
+                    let session_state = new_state
+                        .as_any()
+                        .downcast_ref::<SessionConnecting>()
+                        .expect("State kind is SESSION_CONNECTING but downcast failed");
+
+                    self.global_id = session_state.our_global_id;
+                    tracing::debug!(
+                        "Stored global_id {} in StateMachine (from SessionConnecting)",
+                        session_state.our_global_id
+                    );
+
+                    // If addresses are default, fix them up with actual addresses
+                    if session_state.server_addr == denc::EntityAddr::default()
+                        || session_state.client_addr == denc::EntityAddr::default()
+                    {
+                        let server_addr = self.server_addr.clone().unwrap_or_default();
+                        let client_addr = self.client_addr.clone().unwrap_or_default();
+
+                        // Create new SessionConnecting with correct addresses
+                        let new_session_state = Box::new(SessionConnecting::new_with_encryption(
+                            session_state.connection_mode,
+                            session_state.session_key.clone(),
+                            session_state.connection_secret.clone(),
+                            session_state.expected_server_signature.clone(),
+                            session_state.our_global_id,
+                            server_addr,
+                            client_addr,
+                        ));
+
+                        self.current_state = new_session_state;
+                        let enter_result = self.current_state.enter()?;
+                        return self.apply_result(enter_result);
+                    }
                 }
 
                 self.current_state = new_state;

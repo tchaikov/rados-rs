@@ -99,6 +99,10 @@ impl MonConnection {
 
         tracing::info!("✓ Session established with monitor rank {}", rank);
 
+        // Get the global_id from the connection
+        let global_id = connection.global_id();
+        tracing::debug!("Retrieved global_id {} from connection", global_id);
+
         // Get the authenticated auth provider from the connection
         // This provider now contains the session and service tickets
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
@@ -167,7 +171,7 @@ impl MonConnection {
             addrs,
             state: Arc::new(Mutex::new(ConnectionState {
                 auth_state: AuthState::Authenticated,
-                global_id: 0,
+                global_id, // Use the global_id from authentication
                 has_session: true,
             })),
             auth_provider,

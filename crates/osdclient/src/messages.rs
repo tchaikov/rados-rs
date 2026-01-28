@@ -28,6 +28,8 @@ pub struct MOSDOp {
     pub snap_seq: u64,
     pub snaps: Vec<u64>,
     pub reqid: RequestId,
+    /// Global ID from monitor authentication (used in entity_name)
+    pub global_id: u64,
 }
 
 impl MOSDOp {
@@ -40,6 +42,7 @@ impl MOSDOp {
         pgid: StripedPgId,
         ops: Vec<OSDOp>,
         reqid: RequestId,
+        global_id: u64,
     ) -> Self {
         Self {
             client_inc,
@@ -54,6 +57,7 @@ impl MOSDOp {
             snap_seq: 0,
             snaps: Vec::new(),
             reqid,
+            global_id,
         }
     }
 
@@ -86,12 +90,18 @@ impl MOSDOp {
         flags
     }
 
-    /// Encode the message to bytes (v9 format)
+    /// Encode the message payload (front section) to bytes (v9 format)
     ///
     /// This implements v9 encoding format for MOSDOp.
     /// Note: This is a basic implementation that may need refinement for
     /// full Ceph protocol compatibility.
-    pub fn encode(&self) -> Result<Bytes> {
+    pub(crate) fn encode_payload_internal(&self, _features: u64) -> Result<Bytes> {
+        use crate::denc_types::OsdReqId;
+        use crate::types::{
+            BlkinTraceInfo, EntityName, JaegerSpanContext, CEPH_ENTITY_TYPE_CLIENT,
+        };
+        use denc::denc::Denc;
+
         let mut buf = BytesMut::new();
 
         // Debug logging for MOSDOp message
@@ -100,21 +110,10 @@ impl MOSDOp {
             self.pgid.pool, self.pgid.seed, self.object.hash, self.snapid, self.flags
         );
 
-        // V8 encoding format:
         // 1. spgid (spg_t) - with version header (1,1)
-        // Version header: struct_v, struct_compat, len
-        buf.put_u8(1); // struct_v
-        buf.put_u8(1); // struct_compat
-        buf.put_u32_le(18); // len: 17 bytes for pgid + 1 byte for shard
-
-        // pgid encoding (with its own version byte)
-        buf.put_u8(1); // pgid version
-        buf.put_i64_le(self.pgid.pool);
-        buf.put_u32_le(self.pgid.seed);
-        buf.put_i32_le(-1); // preferred (always -1)
-
-        // shard
-        buf.put_i8(self.pgid.shard);
+        self.pgid
+            .encode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode spg_t: {}", e)))?;
 
         // 2. hash (raw pg hash)
         buf.put_u32_le(self.object.hash);
@@ -126,34 +125,31 @@ impl MOSDOp {
         buf.put_u32_le(self.flags);
 
         // 5. reqid (osd_reqid_t) - with version header (2,2)
-        buf.put_u8(2); // struct_v
-        buf.put_u8(2); // struct_compat
-        buf.put_u32_le(21); // len: 9 bytes entity_name + 8 bytes tid + 4 bytes inc
-
-        // entity_name_t: type (u8) + num (u64)
-        buf.put_u8(8); // CEPH_ENTITY_TYPE_CLIENT
-        buf.put_u64_le(0); // client num (extracted from entity_name)
-
-        // reqid fields
-        buf.put_u64_le(self.reqid.tid);
-        buf.put_i32_le(self.reqid.inc);
+        let entity_name = EntityName::new(CEPH_ENTITY_TYPE_CLIENT, self.global_id);
+        let reqid = OsdReqId {
+            name: entity_name,
+            tid: self.reqid.tid,
+            inc: self.reqid.inc,
+        };
+        reqid.encode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode osd_reqid_t: {}", e))
+        })?;
 
         // 6. trace (blkin_trace_info) - 3 x u64 = 24 bytes
-        buf.put_u64_le(0); // trace_id
-        buf.put_u64_le(0); // span_id
-        buf.put_u64_le(0); // parent_span_id
+        let trace = BlkinTraceInfo::empty();
+        trace.encode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode blkin_trace_info: {}", e))
+        })?;
         eprintln!(
             "DEBUG: After blkin_trace encoding, buf.len() = {}",
             buf.len()
         );
 
         // 6b. otel_trace (jspan_context) - added in v9
-        // When Jaeger is not enabled (common case), this is just:
-        // ENCODE_START(1, 1, bl) + bool is_valid = false + ENCODE_FINISH
-        buf.put_u8(1); // struct_v
-        buf.put_u8(1); // struct_compat
-        buf.put_u32_le(1); // struct_len (just the bool)
-        buf.put_u8(0); // is_valid = false
+        let otel_trace = JaegerSpanContext::invalid();
+        otel_trace.encode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Encoding(format!("Failed to encode jspan_context: {}", e))
+        })?;
         eprintln!(
             "DEBUG: After otel_trace encoding, buf.len() = {}",
             buf.len()
@@ -171,13 +167,13 @@ impl MOSDOp {
         eprintln!("DEBUG: After mtime, buf.len() = {}", buf.len());
 
         // 9. object_locator_t (using Denc encoding)
+        // Note: hash=-1 means "calculate from object name" which is the normal case
         let locator = crush::ObjectLocator {
             pool_id: self.object.pool,
             key: self.object.key.clone(),
             namespace: self.object.namespace.clone(),
             hash: -1,
         };
-        use denc::denc::Denc;
 
         let before_len = buf.len();
         locator.encode(&mut buf, 0).map_err(|e| {
@@ -340,17 +336,17 @@ impl MOSDOp {
     /// Get the expected front section size for a PGLS operation
     ///
     /// This is useful for verifying the encoding is correct.
-    /// The size should be 215 bytes for v9 (201 bytes for v8 + 7 bytes + 7 bytes for otel_trace)
+    /// The size should be 216 bytes for v9 (based on actual encoding)
     pub fn expected_front_size_pgls() -> usize {
         // Calculated from actual v9 encoding
-        201 + 7 // v8 size + otel_trace
+        216
     }
 
     /// Extract operation data for message data section
     ///
     /// Collects all indata from operations into a single buffer for the message data section.
     /// This follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data()
-    pub fn get_data_section(&self) -> Bytes {
+    pub(crate) fn get_data_section_internal(&self) -> Bytes {
         let mut buf = BytesMut::new();
         for op in &self.ops {
             if !op.indata.is_empty() {
@@ -358,6 +354,18 @@ impl MOSDOp {
             }
         }
         buf.freeze()
+    }
+
+    /// Legacy encode method for backwards compatibility
+    #[deprecated(note = "Use CephMessage::from_payload instead")]
+    pub fn encode(&self) -> Result<Bytes> {
+        self.encode_payload_internal(0)
+    }
+
+    /// Legacy get_data_section method for backwards compatibility
+    #[deprecated(note = "Use encode_data instead")]
+    pub fn get_data_section(&self) -> Bytes {
+        self.get_data_section_internal()
     }
 }
 
@@ -384,7 +392,16 @@ impl MOSDOpReply {
     /// # Arguments
     /// * `front` - The front (payload) section of the message
     /// * `data` - The data section of the message (contains operation output data)
-    pub fn decode(mut front: &[u8], data: &[u8]) -> Result<Self> {
+    pub(crate) fn decode_internal(mut front: &[u8], data: &[u8]) -> Result<Self> {
+        eprintln!(
+            "DEBUG: MOSDOpReply::decode_internal called: front.len()={}, data.len()={}",
+            front.len(),
+            data.len()
+        );
+        eprintln!(
+            "DEBUG: First 64 bytes of front: {:02x?}",
+            &front[..std::cmp::min(64, front.len())]
+        );
         if front.remaining() < 16 {
             return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
         }
@@ -441,6 +458,7 @@ impl MOSDOpReply {
 
         // 4. result (errorcode32_t = int32_t)
         let result = front.get_i32_le();
+        eprintln!("DEBUG: Overall result code: {}", result);
 
         // 5. bad_replay_version (eversion_t = epoch + version)
         // This is for backwards compatibility with old clients.
@@ -481,6 +499,10 @@ impl MOSDOpReply {
             // Skip to payload_len field (at offset 34)
             front.advance(34);
             let payload_len = front.get_u32_le();
+            eprintln!(
+                "DEBUG: Op {} payload_len from osd_op structure: {}",
+                i, payload_len
+            );
             payload_lens.push(payload_len as usize);
         }
 
@@ -500,6 +522,7 @@ impl MOSDOpReply {
                 )));
             }
             let return_code = front.get_i32_le();
+            eprintln!("DEBUG: Op {} return_code (rval): {}", i, return_code);
 
             ops.push(OpReply {
                 return_code,
@@ -511,9 +534,17 @@ impl MOSDOpReply {
         // The epoch part is not currently used since we track OSDMap epoch separately
         let _replay_epoch = front.get_u32_le();
         let version = front.get_u64_le();
+        eprintln!(
+            "DEBUG: Decoded version from MOSDOpReply: epoch={}, version={}",
+            _replay_epoch, version
+        );
 
         // 12. user_version (version_t = u64)
         let user_version = front.get_u64_le();
+        eprintln!(
+            "DEBUG: Decoded user_version from MOSDOpReply: {}",
+            user_version
+        );
 
         // 13. do_redirect (bool)
         let do_redirect = front.get_u8() != 0;
@@ -565,6 +596,12 @@ impl MOSDOpReply {
 
         // 16. Distribute data section to operations
         // The data section contains concatenated output data for all operations
+        eprintln!(
+            "DEBUG: Distributing data section: {} ops, data.len()={}, payload_lens={:?}",
+            ops.len(),
+            data.len(),
+            payload_lens
+        );
         let mut data_offset = 0;
         for (i, op) in ops.iter_mut().enumerate() {
             let len = payload_lens[i];
@@ -580,6 +617,9 @@ impl MOSDOpReply {
                 }
                 op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
                 data_offset += len;
+                eprintln!("DEBUG: Op {}: assigned {} bytes of outdata", i, len);
+            } else {
+                eprintln!("DEBUG: Op {}: no outdata (payload_len=0)", i);
             }
         }
 
@@ -609,10 +649,19 @@ impl MOSDOpReply {
     pub fn to_op_result(self) -> OpResult {
         OpResult {
             result: self.result,
-            version: self.version,
+            // Use user_version as the primary version - this is the object version
+            // that clients should see. The replay_version is used internally by OSDs.
+            version: self.user_version,
             user_version: self.user_version,
             ops: self.ops,
         }
+    }
+
+    /// Decode MOSDOpReply from front and data sections
+    ///
+    /// This is the primary decoding method for MOSDOpReply messages.
+    pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
+        Self::decode_internal(front, data)
     }
 }
 
@@ -638,13 +687,14 @@ mod tests {
             pgid,
             ops,
             reqid,
+            0,
         );
 
         // Encode
         let encoded = mosdop.encode().expect("Failed to encode");
 
         // Verify size
-        // Expected: 215 bytes for v9 (208 + 7 for otel_trace)
+        // Expected: 216 bytes for v9 (based on actual encoding)
         eprintln!("Encoded front size: {} bytes", encoded.len());
         eprintln!(
             "Expected front size: {} bytes",
@@ -653,7 +703,7 @@ mod tests {
         assert_eq!(
             encoded.len(),
             MOSDOp::expected_front_size_pgls(),
-            "Front section should be 215 bytes for v9"
+            "Front section should be 216 bytes for v9"
         );
 
         // Verify data section (should contain the 39-byte HObject cursor)

@@ -1063,4 +1063,10 @@ impl Connection {
     pub fn get_auth_provider(&self) -> Option<Box<dyn auth::AuthProvider>> {
         self.state.state_machine.get_auth_provider()
     }
+
+    /// Get the global_id assigned during authentication
+    /// Returns 0 if authentication hasn't completed yet
+    pub fn global_id(&self) -> u64 {
+        self.state.state_machine.global_id()
+    }
 }

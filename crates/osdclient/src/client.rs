@@ -18,7 +18,7 @@ use crate::types::{
 };
 
 /// Configuration for OSD client
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OSDClientConfig {
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
@@ -27,7 +27,23 @@ pub struct OSDClientConfig {
     /// Operation timeout configuration
     pub tracker_config: TrackerConfig,
     /// Client incarnation number
+    /// This should be unique per client instance to avoid OSD duplicate request detection.
+    /// In Ceph C++, this is typically 0, with uniqueness provided by the global_id
+    /// in the entity_name instead.
     pub client_inc: u32,
+}
+
+impl Default for OSDClientConfig {
+    fn default() -> Self {
+        Self {
+            entity_name: String::new(),
+            keyring_path: None,
+            tracker_config: TrackerConfig::default(),
+            // Use 0 like Ceph C++ clients
+            // Uniqueness comes from global_id in entity_name, not from client_inc
+            client_inc: 0,
+        }
+    }
 }
 
 /// Main OSD client for performing object operations
@@ -36,6 +52,8 @@ pub struct OSDClient {
     mon_client: Arc<monclient::MonClient>,
     sessions: Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
     tracker: Arc<Tracker>,
+    /// Global ID from monitor authentication (used in entity_name for request IDs)
+    global_id: u64,
 }
 
 impl OSDClient {
@@ -46,6 +64,10 @@ impl OSDClient {
     ) -> Result<Self> {
         info!("Creating OSDClient for {}", config.entity_name);
 
+        // Get global_id from MonClient (assigned during authentication)
+        let global_id = mon_client.get_global_id().await;
+        info!("OSDClient using global_id {} from monitor", global_id);
+
         let tracker = Arc::new(Tracker::new(config.tracker_config.clone()));
 
         Ok(Self {
@@ -53,6 +75,7 @@ impl OSDClient {
             mon_client,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             tracker,
+            global_id,
         })
     }
 
@@ -299,6 +322,7 @@ impl OSDClient {
             spgid,
             ops,
             reqid,
+            self.global_id,
         );
 
         // Submit operation
@@ -309,6 +333,14 @@ impl OSDClient {
             .await
             .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
             .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+
+        // Check overall result code first
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Read operation failed".into(),
+            });
+        }
 
         // Extract read data
         if result.ops.is_empty() {
@@ -384,6 +416,7 @@ impl OSDClient {
             spgid,
             ops,
             reqid,
+            self.global_id,
         );
 
         // Submit operation
@@ -419,6 +452,10 @@ impl OSDClient {
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
         let primary_osd = osds[0];
+        eprintln!(
+            "DEBUG write_full: object='{}' mapped to PG={:?}, primary_osd={}, all_osds={:?}",
+            oid, spgid, primary_osd, osds
+        );
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -455,6 +492,7 @@ impl OSDClient {
             spgid,
             ops,
             reqid,
+            self.global_id,
         );
 
         // Submit operation
@@ -485,6 +523,10 @@ impl OSDClient {
         // Map to OSDs
         let (spgid, osds) = self.object_to_osds(pool, oid).await?;
         let primary_osd = osds[0];
+        eprintln!(
+            "DEBUG stat: object='{}' mapped to PG={:?}, primary_osd={}, all_osds={:?}",
+            oid, spgid, primary_osd, osds
+        );
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
@@ -521,6 +563,7 @@ impl OSDClient {
             spgid,
             ops,
             reqid,
+            self.global_id,
         );
 
         // Submit operation
@@ -531,6 +574,14 @@ impl OSDClient {
             .await
             .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
             .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+
+        // Check overall result code first
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Stat operation failed".into(),
+            });
+        }
 
         // Extract stat data
         if result.ops.is_empty() {
@@ -610,6 +661,7 @@ impl OSDClient {
             spgid,
             ops,
             reqid,
+            self.global_id,
         );
 
         // Submit operation
@@ -767,6 +819,7 @@ impl OSDClient {
                 spgid,
                 ops,
                 reqid,
+                self.global_id,
             );
 
             // Submit operation
@@ -795,22 +848,10 @@ impl OSDClient {
                 ));
             }
 
-            debug!("Operation result: return_code={}, outdata.len()={}",
-                   result.ops[0].return_code, result.ops[0].outdata.len());
-
             let outdata = &result.ops[0].outdata;
-
-            // Debug: print the response data
-            debug!("PGLS response data length: {}", outdata.len());
-            if outdata.len() <= 200 {
-                debug!("PGLS response data bytes: {:02x?}", outdata.as_ref());
-            } else {
-                debug!("PGLS response data (first 200 bytes): {:02x?}", &outdata.as_ref()[..200]);
-            }
 
             // Decode pg_nls_response_t using proper Denc
             let response = denc::PgNlsResponse::decode(&mut outdata.as_ref(), 0).map_err(|e| {
-                debug!("Decoding failed, outdata bytes: {:02x?}", outdata.as_ref());
                 OSDClientError::Decoding(format!("Failed to decode pg_nls_response: {}", e))
             })?;
 
