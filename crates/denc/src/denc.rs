@@ -329,22 +329,9 @@ pub trait VersionedEncode: Sized {
             ));
         }
 
-        // Debug: print first 16 bytes of buffer
-        let remaining_before = buf.remaining();
-        eprintln!("DEBUG decode_versioned: buf.remaining()={}", remaining_before);
-        if remaining_before >= 16 {
-            let chunk = buf.chunk();
-            eprintln!("DEBUG decode_versioned: first 16 bytes: {:02x?}", &chunk[..16]);
-        } else {
-            let chunk = buf.chunk();
-            eprintln!("DEBUG decode_versioned: all {} bytes: {:02x?}", chunk.len(), chunk);
-        }
-
         let struct_v = buf.get_u8();
         let struct_compat = buf.get_u8();
         let struct_len = buf.get_u32_le() as usize;
-
-        eprintln!("DEBUG decode_versioned: struct_v={}, struct_compat={}, struct_len={}", struct_v, struct_compat, struct_len);
 
         if buf.remaining() < struct_len {
             return Err(RadosError::Protocol(format!(

@@ -68,30 +68,6 @@ impl HObject {
             pool,
         }
     }
-
-    /// Decode without version header (for compatibility)
-    fn decode_direct<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        // Decode fields directly without version header
-        // This matches version 4 format: key, oid, snap, hash, max, nspace, pool
-
-        let key = <String as Denc>::decode(buf, features)?;
-        let oid = <String as Denc>::decode(buf, features)?;
-        let snapid = <u64 as Denc>::decode(buf, features)?;
-        let hash = <u32 as Denc>::decode(buf, features)?;
-        let max = <bool as Denc>::decode(buf, features)?;
-        let nspace = <String as Denc>::decode(buf, features)?;
-        let pool = <i64 as Denc>::decode(buf, features)?;
-
-        Ok(Self {
-            key,
-            oid,
-            snapid,
-            hash,
-            max,
-            nspace,
-            pool,
-        })
-    }
 }
 
 impl VersionedEncode for HObject {
@@ -205,22 +181,7 @@ impl Denc for HObject {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        // Check if this looks like a versioned encoding
-        if buf.remaining() >= 6 {
-            let chunk = buf.chunk();
-            let struct_v = chunk[0];
-            let struct_compat = chunk[1];
-
-            // If struct_v is 4 and struct_compat is 3, use versioned decode
-            // Otherwise, try direct decode (for compatibility with older formats)
-            if struct_v == 4 && struct_compat == 3 {
-                return Self::decode_versioned(buf, features);
-            }
-        }
-
-        // Try direct decode without version header
-        eprintln!("DEBUG HObject: using direct decode, buf.remaining()={}", buf.remaining());
-        Self::decode_direct(buf, features)
+        Self::decode_versioned(buf, features)
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
