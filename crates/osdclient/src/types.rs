@@ -199,6 +199,88 @@ impl BlkinTraceInfo {
     }
 }
 
+/// Object locator (corresponds to object_locator_t in Ceph)
+///
+/// A locator constrains the placement of an object. Mainly specifies which pool
+/// the object goes in, and optionally namespace, key, or hash position.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ObjectLocator {
+    /// Pool ID
+    pub pool: i64,
+    /// Key string (if non-empty) - specify either hash or key, not both
+    pub key: String,
+    /// Namespace
+    pub nspace: String,
+    /// Hash position (if >= 0) - specify either hash or key, not both
+    pub hash: i64,
+}
+
+impl ObjectLocator {
+    /// Create an empty object locator
+    pub fn new() -> Self {
+        Self {
+            pool: -1,
+            key: String::new(),
+            nspace: String::new(),
+            hash: -1,
+        }
+    }
+
+    /// Create an object locator for a specific pool
+    pub fn with_pool(pool: i64) -> Self {
+        Self {
+            pool,
+            key: String::new(),
+            nspace: String::new(),
+            hash: -1,
+        }
+    }
+
+    /// Check if the locator is empty
+    pub fn is_empty(&self) -> bool {
+        self.pool == -1 && self.key.is_empty() && self.nspace.is_empty() && self.hash == -1
+    }
+}
+
+impl Default for ObjectLocator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Request redirect (corresponds to request_redirect_t in Ceph)
+///
+/// Used in MOSDOpReply to indicate that the request should be redirected
+/// to a different object or pool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RequestRedirect {
+    /// Authoritative redirect locator
+    pub redirect_locator: ObjectLocator,
+    /// If non-empty, the request goes to this object name
+    pub redirect_object: String,
+}
+
+impl RequestRedirect {
+    /// Create an empty redirect
+    pub fn new() -> Self {
+        Self {
+            redirect_locator: ObjectLocator::new(),
+            redirect_object: String::new(),
+        }
+    }
+
+    /// Check if the redirect is empty
+    pub fn is_empty(&self) -> bool {
+        self.redirect_locator.is_empty() && self.redirect_object.is_empty()
+    }
+}
+
+impl Default for RequestRedirect {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// OpenTelemetry trace context (corresponds to jspan_context in Ceph)
 ///
 /// Used for OpenTelemetry distributed tracing.

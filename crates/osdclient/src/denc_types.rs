@@ -7,7 +7,10 @@ use bytes::{Buf, BufMut};
 use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
 
-use crate::types::{BlkinTraceInfo, EntityName, JaegerSpanContext, PgId, StripedPgId};
+use crate::types::{
+    BlkinTraceInfo, EntityName, JaegerSpanContext, ObjectLocator, PgId, RequestRedirect,
+    StripedPgId,
+};
 
 // Re-export types for convenience
 pub use crate::types::{
@@ -339,6 +342,183 @@ impl Denc for JaegerSpanContext {
     }
 }
 
+// ============= ObjectLocator (object_locator_t) =============
+
+impl VersionedEncode for ObjectLocator {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        6
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        3
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Encode pool (i64)
+        buf.put_i64_le(self.pool);
+
+        // Encode preferred (i32, always -1, deprecated field)
+        buf.put_i32_le(-1);
+
+        // Encode key (String)
+        self.key.encode(buf, features)?;
+
+        // Encode nspace (String)
+        self.nspace.encode(buf, features)?;
+
+        // Encode hash (i64)
+        buf.put_i64_le(self.hash);
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // Decode pool (i64)
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for object_locator_t pool".to_string(),
+            ));
+        }
+        let pool = buf.get_i64_le();
+
+        // Decode preferred (i32, deprecated)
+        if buf.remaining() < 4 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for object_locator_t preferred".to_string(),
+            ));
+        }
+        let _preferred = buf.get_i32_le();
+
+        // Decode key (String)
+        let key = String::decode(buf, features)?;
+
+        // Decode nspace (String)
+        let nspace = String::decode(buf, features)?;
+
+        // Decode hash (i64)
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for object_locator_t hash".to_string(),
+            ));
+        }
+        let hash = buf.get_i64_le();
+
+        Ok(ObjectLocator {
+            pool,
+            key,
+            nspace,
+            hash,
+        })
+    }
+}
+
+impl Denc for ObjectLocator {
+    const USES_VERSIONING: bool = true;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
+        // Content: pool (8) + preferred (4) + key + nspace + hash (8)
+        // Key and nspace are variable-length strings
+        let key_size = self.key.encoded_size(features)?;
+        let nspace_size = self.nspace.encoded_size(features)?;
+        Some(6 + 8 + 4 + key_size + nspace_size + 8)
+    }
+}
+
+// ============= RequestRedirect (request_redirect_t) =============
+
+impl VersionedEncode for RequestRedirect {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // Encode redirect_locator (object_locator_t)
+        self.redirect_locator.encode(buf, features)?;
+
+        // Encode redirect_object (String)
+        self.redirect_object.encode(buf, features)?;
+
+        // Encode legacy field (u32, always 0)
+        buf.put_u32_le(0);
+
+        Ok(())
+    }
+
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
+        // Decode redirect_locator (object_locator_t)
+        let redirect_locator = ObjectLocator::decode(buf, features)?;
+
+        // Decode redirect_object (String)
+        let redirect_object = String::decode(buf, features)?;
+
+        // Decode legacy field (u32, ignore)
+        if buf.remaining() < 4 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for request_redirect_t legacy field".to_string(),
+            ));
+        }
+        let _legacy = buf.get_u32_le();
+
+        Ok(RequestRedirect {
+            redirect_locator,
+            redirect_object,
+        })
+    }
+}
+
+impl Denc for RequestRedirect {
+    const USES_VERSIONING: bool = true;
+
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.encode_versioned(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Self::decode_versioned(buf, features)
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
+        // Content: redirect_locator + redirect_object + legacy (4)
+        let locator_size = self.redirect_locator.encoded_size(features)?;
+        let object_size = self.redirect_object.encoded_size(features)?;
+        Some(6 + locator_size + object_size + 4)
+    }
+}
+
 // ============= Size Constants =============
 
 /// Size of spg_t encoding (with version header)
@@ -460,5 +640,75 @@ mod tests {
 
         let ctx = JaegerSpanContext::invalid();
         assert_eq!(ctx.encoded_size(0), Some(JSPAN_CONTEXT_ENCODED_SIZE));
+    }
+
+    #[test]
+    fn test_object_locator_roundtrip() {
+        let locator = ObjectLocator {
+            pool: 3,
+            key: "test_key".to_string(),
+            nspace: "test_nspace".to_string(),
+            hash: -1,
+        };
+        let mut buf = BytesMut::new();
+
+        locator.encode(&mut buf, 0).unwrap();
+
+        let decoded = ObjectLocator::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.pool, 3);
+        assert_eq!(decoded.key, "test_key");
+        assert_eq!(decoded.nspace, "test_nspace");
+        assert_eq!(decoded.hash, -1);
+    }
+
+    #[test]
+    fn test_object_locator_empty() {
+        let locator = ObjectLocator::new();
+        let mut buf = BytesMut::new();
+
+        locator.encode(&mut buf, 0).unwrap();
+
+        let decoded = ObjectLocator::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.pool, -1);
+        assert_eq!(decoded.key, "");
+        assert_eq!(decoded.nspace, "");
+        assert_eq!(decoded.hash, -1);
+        assert!(decoded.is_empty());
+    }
+
+    #[test]
+    fn test_request_redirect_roundtrip() {
+        let redirect = RequestRedirect {
+            redirect_locator: ObjectLocator {
+                pool: 5,
+                key: "redirect_key".to_string(),
+                nspace: "redirect_nspace".to_string(),
+                hash: 42,
+            },
+            redirect_object: "redirect_obj".to_string(),
+        };
+        let mut buf = BytesMut::new();
+
+        redirect.encode(&mut buf, 0).unwrap();
+
+        let decoded = RequestRedirect::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded.redirect_locator.pool, 5);
+        assert_eq!(decoded.redirect_locator.key, "redirect_key");
+        assert_eq!(decoded.redirect_locator.nspace, "redirect_nspace");
+        assert_eq!(decoded.redirect_locator.hash, 42);
+        assert_eq!(decoded.redirect_object, "redirect_obj");
+    }
+
+    #[test]
+    fn test_request_redirect_empty() {
+        let redirect = RequestRedirect::new();
+        let mut buf = BytesMut::new();
+
+        redirect.encode(&mut buf, 0).unwrap();
+
+        let decoded = RequestRedirect::decode(&mut buf, 0).unwrap();
+        assert!(decoded.is_empty());
+        assert!(decoded.redirect_locator.is_empty());
+        assert_eq!(decoded.redirect_object, "");
     }
 }

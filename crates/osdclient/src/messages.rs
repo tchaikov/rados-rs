@@ -3,7 +3,9 @@
 //! This module implements encoding/decoding for MOSDOp and MOSDOpReply messages.
 
 use crate::error::{OSDClientError, Result};
-use crate::types::{OSDOp, ObjectId, OpData, OpReply, OpResult, PgId, RequestId, StripedPgId};
+use crate::types::{
+    OSDOp, ObjectId, OpData, OpReply, OpResult, PgId, RequestId, RequestRedirect, StripedPgId,
+};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 use tracing::debug;
@@ -388,6 +390,7 @@ pub struct MOSDOpReply {
     pub version: u64,
     pub user_version: u64,
     pub retry_attempt: i32,
+    pub redirect: Option<RequestRedirect>,
     pub ops: Vec<OpReply>,
 }
 
@@ -548,40 +551,22 @@ impl MOSDOpReply {
         // 13. do_redirect (bool)
         let do_redirect = cursor.get_u8() != 0;
 
-        // 14. If do_redirect: redirect structure
-        if do_redirect {
-            // request_redirect_t encoding (v1):
-            // - struct_v (u8), struct_compat (u8), len (u32)
-            // - object_locator_t (redirect_locator)
-            // - string (redirect_object)
-            // - u32 (legacy field, always 0)
-
-            if cursor.remaining() < 6 {
-                return Err(OSDClientError::Decoding(
-                    "Incomplete redirect header".into(),
-                ));
-            }
-
-            // Version fields from ENCODE_START macro
-            // TODO: In production, should validate struct_v is compatible
-            let _struct_v = cursor.get_u8();
-            let _struct_compat = cursor.get_u8();
-            let redirect_len = cursor.get_u32_le();
-
-            if cursor.remaining() < redirect_len as usize {
-                return Err(OSDClientError::Decoding(format!(
-                    "Incomplete redirect data: expected {} bytes, got {}",
-                    redirect_len,
-                    cursor.remaining()
-                )));
-            }
-
-            // Skip the redirect data for now - we don't handle redirects yet
-            // In the future, we could parse and follow the redirect
-            cursor.advance(redirect_len as usize);
-
-            debug!("Received redirect response (not following redirect)");
-        }
+        // 14. If do_redirect: redirect structure (request_redirect_t)
+        let redirect = if do_redirect {
+            let r = RequestRedirect::decode(&mut cursor, 0).map_err(|e| {
+                OSDClientError::Decoding(format!("Failed to decode redirect: {}", e))
+            })?;
+            debug!(
+                "Received redirect: pool={}, key={}, nspace={}, object={}",
+                r.redirect_locator.pool,
+                r.redirect_locator.key,
+                r.redirect_locator.nspace,
+                r.redirect_object
+            );
+            Some(r)
+        } else {
+            None
+        };
 
         // 15. trace (blkin_trace_info: 3 x i64)
         // The trace is used for distributed tracing (Zipkin/Jaeger)
@@ -640,6 +625,7 @@ impl MOSDOpReply {
             version,
             user_version,
             retry_attempt,
+            redirect,
             ops,
         })
     }
