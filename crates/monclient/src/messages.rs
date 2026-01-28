@@ -50,6 +50,7 @@ impl MMonSubscribe {
 
     /// Encode to bytes for message payload
     pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
         let mut buf = BytesMut::new();
 
         // Encode map size
@@ -57,9 +58,9 @@ impl MMonSubscribe {
 
         // Encode each subscription
         for (name, item) in &self.what {
-            // Encode name length and name
-            buf.put_u32_le(name.len() as u32);
-            buf.put_slice(name.as_bytes());
+            // Encode name using Denc
+            name.encode(&mut buf, 0)
+                .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
             tracing::info!(
                 "  📝 Subscription: '{}' start={} flags={}",
                 name,
@@ -72,9 +73,10 @@ impl MMonSubscribe {
             buf.put_u8(item.flags);
         }
 
-        // Encode hostname (version 3)
-        buf.put_u32_le(self.hostname.len() as u32);
-        buf.put_slice(self.hostname.as_bytes());
+        // Encode hostname (version 3) using Denc
+        self.hostname
+            .encode(&mut buf, 0)
+            .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
         tracing::info!("  🖥️  Hostname: '{}'", self.hostname);
 
         let bytes = buf.freeze();
@@ -84,6 +86,7 @@ impl MMonSubscribe {
 
     /// Decode from message payload
     pub fn decode(mut data: &[u8]) -> Result<Self> {
+        use denc::Denc;
         if data.remaining() < 4 {
             return Err(MonClientError::DecodingError(
                 "Incomplete MMonSubscribe".into(),
@@ -94,21 +97,10 @@ impl MMonSubscribe {
         let mut what = HashMap::new();
 
         for _ in 0..count {
-            if data.remaining() < 4 {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete subscription entry".into(),
-                ));
-            }
-
-            // Decode name
-            let name_len = data.get_u32_le() as usize;
-            if data.remaining() < name_len {
-                return Err(MonClientError::DecodingError("Incomplete name".into()));
-            }
-            let name_bytes = &data[..name_len];
-            let name = String::from_utf8(name_bytes.to_vec())
-                .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?;
-            data.advance(name_len);
+            // Decode name using Denc
+            let name = String::decode(&mut data, 0).map_err(|e| {
+                MonClientError::DecodingError(format!("Failed to decode name: {}", e))
+            })?;
 
             // Decode subscribe item
             if data.remaining() < 9 {
@@ -122,16 +114,9 @@ impl MMonSubscribe {
             what.insert(name, SubscribeItem { start, flags });
         }
 
-        // Decode hostname (version 3)
+        // Decode hostname (version 3) using Denc
         let hostname = if data.remaining() >= 4 {
-            let hostname_len = data.get_u32_le() as usize;
-            if data.remaining() >= hostname_len {
-                let hostname_bytes = &data[..hostname_len];
-                String::from_utf8(hostname_bytes.to_vec())
-                    .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?
-            } else {
-                "unknown".to_string()
-            }
+            String::decode(&mut data, 0).unwrap_or_else(|_| "unknown".to_string())
         } else {
             "unknown".to_string()
         };
@@ -195,10 +180,12 @@ impl MMonGetVersion {
     }
 
     pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
         let mut buf = BytesMut::new();
         buf.put_u64_le(self.tid);
-        buf.put_u32_le(self.what.len() as u32);
-        buf.put_slice(self.what.as_bytes());
+        self.what
+            .encode(&mut buf, 0)
+            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
         let result = buf.freeze();
         eprintln!(
             "DEBUG: MMonGetVersion::encode() tid={}, what='{}', payload={} bytes: {:02x?}",
@@ -211,6 +198,7 @@ impl MMonGetVersion {
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
+        use denc::Denc;
         if data.remaining() < 12 {
             return Err(MonClientError::DecodingError(
                 "Incomplete MMonGetVersion".into(),
@@ -218,17 +206,9 @@ impl MMonGetVersion {
         }
 
         let tid = data.get_u64_le();
-        let what_len = data.get_u32_le() as usize;
-
-        if data.remaining() < what_len {
-            return Err(MonClientError::DecodingError(
-                "Incomplete what string".into(),
-            ));
-        }
-
-        let what_bytes = &data[..what_len];
-        let what = String::from_utf8(what_bytes.to_vec())
-            .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?;
+        let what = String::decode(&mut data, 0).map_err(|e| {
+            MonClientError::DecodingError(format!("Failed to decode what string: {}", e))
+        })?;
 
         Ok(Self { tid, what })
     }
@@ -472,11 +452,11 @@ impl PaxosServiceMessage for MMonCommand {
             .map_err(|e| MonClientError::DecodingError(format!("Failed to encode fsid: {}", e)))?;
         tracing::debug!("MMonCommand::encode: fsid={}", self.fsid);
 
-        // Encode command array
+        // Encode command array using Denc
         buf.put_u32_le(self.cmd.len() as u32);
         for s in &self.cmd {
-            buf.put_u32_le(s.len() as u32);
-            buf.put_slice(s.as_bytes());
+            s.encode(buf, 0)
+                .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
         }
         tracing::debug!("MMonCommand::encode: cmd={:?}", self.cmd);
 
@@ -488,7 +468,7 @@ impl PaxosServiceMessage for MMonCommand {
         let fsid = UuidD::decode(data, 0)
             .map_err(|e| MonClientError::DecodingError(format!("Failed to decode fsid: {}", e)))?;
 
-        // Decode command array
+        // Decode command array using Denc
         if data.remaining() < 4 {
             return Err(MonClientError::DecodingError(
                 "Incomplete command count".into(),
@@ -498,18 +478,9 @@ impl PaxosServiceMessage for MMonCommand {
         let mut cmd = Vec::with_capacity(cmd_count);
 
         for _ in 0..cmd_count {
-            if data.remaining() < 4 {
-                return Err(MonClientError::DecodingError("Incomplete command".into()));
-            }
-            let len = data.get_u32_le() as usize;
-            if data.remaining() < len {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete command string".into(),
-                ));
-            }
-            let s = String::from_utf8(data[..len].to_vec())
-                .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?;
-            data.advance(len);
+            let s = String::decode(data, 0).map_err(|e| {
+                MonClientError::DecodingError(format!("Failed to decode command string: {}", e))
+            })?;
             cmd.push(s);
         }
 
@@ -554,14 +525,16 @@ impl PaxosServiceMessage for MMonCommandAck {
         buf.put_i32_le(self.r);
 
         // Encode rs string
-        buf.put_u32_le(self.rs.len() as u32);
-        buf.put_slice(self.rs.as_bytes());
+        // Encode rs string using Denc
+        self.rs
+            .encode(buf, 0)
+            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
 
-        // Encode cmd array
+        // Encode cmd array using Denc
         buf.put_u32_le(self.cmd.len() as u32);
         for s in &self.cmd {
-            buf.put_u32_le(s.len() as u32);
-            buf.put_slice(s.as_bytes());
+            s.encode(buf, 0)
+                .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
         }
 
         Ok(())
@@ -585,28 +558,12 @@ impl PaxosServiceMessage for MMonCommandAck {
 
         tracing::debug!("Decoded r={}, remaining={}", r, data.remaining());
 
-        // Decode rs string
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(format!(
-                "Incomplete rs length: need 4 bytes, got {}",
-                data.remaining()
-            )));
-        }
-        let rs_len = data.get_u32_le() as usize;
-        tracing::debug!("rs_len={}, remaining={}", rs_len, data.remaining());
+        // Decode rs string using Denc
+        let rs = String::decode(data, 0).map_err(|e| {
+            MonClientError::DecodingError(format!("Failed to decode rs string: {}", e))
+        })?;
 
-        if data.remaining() < rs_len {
-            return Err(MonClientError::DecodingError(format!(
-                "Incomplete rs: need {} bytes, got {}",
-                rs_len,
-                data.remaining()
-            )));
-        }
-        let rs = String::from_utf8(data[..rs_len].to_vec())
-            .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?;
-        data.advance(rs_len);
-
-        // Decode cmd array
+        // Decode cmd array using Denc
         if data.remaining() < 4 {
             return Err(MonClientError::DecodingError(format!(
                 "Incomplete cmd count: need 4 bytes, got {}",
@@ -618,23 +575,9 @@ impl PaxosServiceMessage for MMonCommandAck {
 
         let mut cmd = Vec::with_capacity(cmd_count);
         for i in 0..cmd_count {
-            if data.remaining() < 4 {
-                return Err(MonClientError::DecodingError(format!(
-                    "Incomplete cmd[{}] length",
-                    i
-                )));
-            }
-            let len = data.get_u32_le() as usize;
-            if data.remaining() < len {
-                return Err(MonClientError::DecodingError(format!(
-                    "Incomplete cmd[{}] data",
-                    i
-                )));
-            }
-            let s = String::from_utf8(data[..len].to_vec()).map_err(|e| {
-                MonClientError::DecodingError(format!("Invalid UTF-8 in cmd[{}]: {}", i, e))
+            let s = String::decode(data, 0).map_err(|e| {
+                MonClientError::DecodingError(format!("Failed to decode cmd[{}]: {}", i, e))
             })?;
-            data.advance(len);
             cmd.push(s);
         }
 
