@@ -34,6 +34,12 @@ pub struct MOSDOp {
 }
 
 impl MOSDOp {
+    /// Message version (from MOSDOp.h HEAD_VERSION)
+    pub const VERSION: u16 = 9;
+
+    /// Message compat version (from MOSDOp.h COMPAT_VERSION)
+    pub const COMPAT_VERSION: u16 = 3;
+
     /// Create a new MOSDOp message
     pub fn new(
         client_inc: u32,
@@ -385,6 +391,9 @@ pub struct MOSDOpReply {
 }
 
 impl MOSDOpReply {
+    /// Message version (from MOSDOpReply.h HEAD_VERSION)
+    pub const VERSION: u16 = 8;
+
     /// Decode the message from bytes (v8 format)
     ///
     /// This implements v8 decoding format for MOSDOpReply.
@@ -670,26 +679,17 @@ impl MOSDOpReply {
 // CephMessagePayload trait implementations
 // ============================================================================
 
-/// MOSDOp message version (from MOSDOp.h HEAD_VERSION)
-const MOSDOP_VERSION: u16 = 9;
-
-/// MOSDOp compat version (from MOSDOp.h COMPAT_VERSION)
-const MOSDOP_COMPAT_VERSION: u16 = 3;
-
-/// MOSDOpReply message version (from MOSDOpReply.h HEAD_VERSION)
-const MOSDOPREPLY_VERSION: u16 = 8;
-
 impl CephMessagePayload for MOSDOp {
     fn msg_type() -> u16 {
         CEPH_MSG_OSD_OP
     }
 
     fn msg_version() -> u16 {
-        MOSDOP_VERSION
+        Self::VERSION
     }
 
     fn msg_compat_version() -> u16 {
-        MOSDOP_COMPAT_VERSION
+        Self::COMPAT_VERSION
     }
 
     fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -721,7 +721,7 @@ impl CephMessagePayload for MOSDOpReply {
     }
 
     fn msg_version() -> u16 {
-        MOSDOPREPLY_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -835,7 +835,7 @@ mod tests {
 
         // Verify message structure
         assert_eq!(msg.header.msg_type, CEPH_MSG_OSD_OP);
-        assert_eq!(msg.header.version, MOSDOP_VERSION);
+        assert_eq!(msg.header.version, MOSDOp::VERSION);
         assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0); // No data for read operation
