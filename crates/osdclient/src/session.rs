@@ -163,9 +163,8 @@ impl OSDSession {
                             if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
                                 let tid = msg.tid();
 
-                                // Use the unified CephMessage framework for decoding
-                                // Note: msgr2::Message doesn't include header/footer, so we decode directly
-                                match MOSDOpReply::decode(&msg.front, &msg.data) {
+                                // Decode MOSDOpReply from message sections
+                                match MOSDOpReply::decode_internal(&msg.front, &msg.data) {
                                     Ok(reply) => {
                                         Self::handle_reply(tid, reply, &pending_ops).await;
                                     }
