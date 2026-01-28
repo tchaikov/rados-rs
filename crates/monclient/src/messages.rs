@@ -682,9 +682,10 @@ impl PaxosServiceMessage for MPoolOp {
         // Encode snapid
         buf.put_u64_le(self.snapid);
 
-        // Encode name
-        buf.put_u32_le(self.name.len() as u32);
-        buf.put_slice(self.name.as_bytes());
+        // Encode name using Denc
+        self.name
+            .encode(buf, 0)
+            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
 
         // Encode pad (for v3->v4 encoding change)
         buf.put_u8(0);
@@ -724,19 +725,9 @@ impl PaxosServiceMessage for MPoolOp {
         }
         let snapid = data.get_u64_le();
 
-        // Decode name
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete name length".into(),
-            ));
-        }
-        let name_len = data.get_u32_le() as usize;
-        if data.remaining() < name_len {
-            return Err(MonClientError::DecodingError("Incomplete name".into()));
-        }
-        let name = String::from_utf8(data[..name_len].to_vec())
-            .map_err(|e| MonClientError::DecodingError(format!("Invalid UTF-8: {}", e)))?;
-        data.advance(name_len);
+        // Decode name using Denc
+        let name = String::decode(data, 0)
+            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode name: {}", e)))?;
 
         // Decode pad (for v3->v4 encoding change)
         if data.remaining() < 1 {
