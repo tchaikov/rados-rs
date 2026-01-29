@@ -837,12 +837,10 @@ impl MonClient {
             info!("Message receive loop terminated");
         });
 
-        // Store task handle
+        // Store task handle directly (no need to spawn a task just to store a value)
         let recv_task = Arc::clone(&self.recv_task);
-        tokio::spawn(async move {
-            let mut task_guard = recv_task.write().await;
-            *task_guard = Some(handle);
-        });
+        let mut task_guard = recv_task.blocking_write();
+        *task_guard = Some(handle);
 
         info!("Started message receive loop");
     }
@@ -881,12 +879,10 @@ impl MonClient {
             info!("Tick loop terminated");
         });
 
-        // Store task handle
+        // Store task handle directly (no need to spawn a task just to store a value)
         let tick_task = Arc::clone(&self.tick_task);
-        tokio::spawn(async move {
-            let mut task_guard = tick_task.write().await;
-            *task_guard = Some(handle);
-        });
+        let mut task_guard = tick_task.blocking_write();
+        *task_guard = Some(handle);
 
         info!("Started tick loop");
     }
@@ -971,8 +967,13 @@ impl MonClient {
             msgr2::message::CEPH_MSG_PING => {
                 trace!("Received CEPH_MSG_PING, sending PING_ACK");
                 // Respond to monitor's ping with PING_ACK
-                let state_guard = state.read().await;
-                if let Some(active_con) = &state_guard.active_con {
+                // Clone connection before async operation to avoid holding lock
+                let active_con = {
+                    let state_guard = state.read().await;
+                    state_guard.active_con.clone()
+                };
+
+                if let Some(active_con) = active_con {
                     let ping_ack = msgr2::message::Message::ping_ack();
                     if let Err(e) = active_con.send_message(ping_ack).await {
                         warn!("Failed to send PING_ACK: {}", e);
