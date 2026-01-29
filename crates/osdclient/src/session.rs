@@ -219,13 +219,11 @@ impl OSDSession {
                                                 pending_op.attempts += 1;
 
                                                 // Encode the operation
-                                                let encode_result = CephMessage::from_payload(
+                                                match CephMessage::from_payload(
                                                     &pending_op.op,
                                                     0,
                                                     CrcFlags::ALL,
-                                                );
-
-                                                match encode_result {
+                                                ) {
                                                     Ok(ceph_msg) => {
                                                         // Create msgr2 message
                                                         let mut retry_msg =
@@ -241,31 +239,23 @@ impl OSDSession {
 
                                                         pending_op.tid = tid;
 
-                                                        // Re-add to pending ops before sending
-                                                        {
-                                                            let mut pending =
-                                                                pending_ops.write().await;
-                                                            pending.insert(tid, pending_op);
-                                                        }
-
-                                                        // Send the message - if this fails, operation will timeout
-                                                        if let Err(e) = send_tx.send(retry_msg).await
-                                                        {
+                                                        // Try to send first, only add to pending if successful
+                                                        if let Err(e) = send_tx.send(retry_msg).await {
                                                             error!(
                                                                 "Failed to send retry for tid {}: {}",
                                                                 tid, e
                                                             );
-                                                            // Remove from pending and notify client of failure
+                                                            // Send failed - notify client directly
+                                                            let _ = pending_op.result_tx.send(Err(
+                                                                OSDClientError::Connection(
+                                                                    "Failed to send retry".into(),
+                                                                ),
+                                                            ));
+                                                        } else {
+                                                            // Send succeeded - add back to pending ops
                                                             let mut pending =
                                                                 pending_ops.write().await;
-                                                            if let Some(op) = pending.remove(&tid) {
-                                                                let _ = op.result_tx.send(Err(
-                                                                    OSDClientError::Connection(
-                                                                        "Failed to send retry"
-                                                                            .into(),
-                                                                    ),
-                                                                ));
-                                                            }
+                                                            pending.insert(tid, pending_op);
                                                         }
                                                     }
                                                     Err(e) => {
