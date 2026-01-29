@@ -432,10 +432,67 @@ struct Backoff {
 
 ## 🎯 Conclusion
 
-The rados-rs implementation provides a solid foundation but needs significant enhancements for production readiness. The three most critical gaps are:
+The rados-rs implementation provides a solid foundation and has made significant progress on the critical gaps:
 
-1. **msgr2 connection resumption** - for network resilience
-2. **OSDMap-triggered rescanning** - for topology awareness
-3. **OSD backoff handling** - for cluster health
+1. **✅ msgr2 connection resumption** - IMPLEMENTED
+   - Session cookies and sequence tracking
+   - Transparent reconnection in send/recv
+   - Message replay queue with ACK protocol
+   - Full integration into protocol layer
+
+2. **⚠️ OSDMap-triggered rescanning** - INFRASTRUCTURE READY
+   - PendingOp extended with pool_id, object_id, osdmap_epoch, op fields
+   - MonClient provides map event subscription via `subscribe_events()`
+   - TODO: Wire up event subscription in OSDClient::new()
+   - TODO: Implement rescan logic to recalculate targets and migrate operations
+   - TODO: Handle pool deletion (POOL_DNE) and EIO conditions
+
+3. **✅ OSD backoff handling** - IMPLEMENTED
+   - MOSDBackoff message type with BLOCK/ACK_BLOCK/UNBLOCK operations
+   - Backoff tracking per PG in OSDSession
+   - Automatic ACK_BLOCK responses
+   - Operation blocking when in backoff range
+   - HObject comparison for range checking
+
+### Remaining Work for OSDMap Rescanning:
+
+The infrastructure is in place. Implementation requires:
+
+1. **Subscribe to map events in OSDClient**:
+```rust
+// In OSDClient::new()
+let mut map_rx = mon_client.subscribe_events();
+let sessions = Arc::clone(&sessions);
+tokio::spawn(async move {
+    while let Ok(event) = map_rx.recv().await {
+        if let MapEvent::OsdMapUpdated { epoch } = event {
+            Self::handle_osdmap_update(epoch, &sessions).await;
+        }
+    }
+});
+```
+
+2. **Implement operation rescanning**:
+```rust
+async fn handle_osdmap_update(epoch: u64, sessions: &HashMap<i32, Arc<OSDSession>>) {
+    let osdmap = mon_client.get_osdmap().await;
+    for session in sessions.values() {
+        for pending_op in session.pending_ops.read().await.values() {
+            // Recalculate target using CRUSH
+            let new_target = crush::calc_pg_primary(&osdmap, pending_op.pool_id, &pending_op.object_id);
+            if new_target != session.osd_id {
+                // Remove from old session, resubmit to new OSD
+                session.cancel_operation(pending_op.tid).await;
+                client.submit_to_osd(new_target, pending_op.op.clone()).await;
+            }
+        }
+    }
+}
+```
+
+3. **Handle special cases**:
+   - Pool deletion (POOL_DNE): Cancel operations with ENOENT
+   - Pool EIO: Cancel operations with EIO
+   - OSD down: Close session, operations will be rescanned to new primary
 
 These should be addressed before considering the client production-ready for demanding workloads.
