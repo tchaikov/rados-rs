@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, error, info, trace, warn};
 
 /// Monitor client configuration
 #[derive(Debug, Clone)]
@@ -738,6 +738,7 @@ impl MonClient {
         let state = Arc::clone(&self.state);
         let keepalive_state = Arc::clone(&self.keepalive_state);
         let config = self.config.clone();
+        let self_clone = self.clone(); // Clone Arc<Self> for use in spawned task
 
         // Use tick_interval if specified, otherwise use hunt_interval
         let tick_interval = config.tick_interval.unwrap_or(config.hunt_interval);
@@ -758,7 +759,7 @@ impl MonClient {
                 }
 
                 // Perform tick operations
-                if let Err(e) = Self::tick(&state, &keepalive_state, &config).await {
+                if let Err(e) = self_clone.tick(&state, &keepalive_state).await {
                     tracing::error!("Error in tick: {}", e);
                 }
             }
@@ -778,9 +779,9 @@ impl MonClient {
 
     /// Periodic maintenance tick
     async fn tick(
+        &self,
         state: &Arc<RwLock<MonClientState>>,
         _keepalive_state: &Arc<Mutex<KeepaliveState>>,
-        _config: &MonClientConfig,
     ) -> Result<()> {
         // Get active connection (using read lock, quickly released)
         let active_con = {
@@ -798,8 +799,26 @@ impl MonClient {
         // The background task in MonConnection sends a timeout notification
         // when keepalive ACK is not received within the configured timeout
         if let Some(()) = active_con.try_recv_timeout().await {
-            warn!("Keepalive timeout detected, reopening session");
-            return active_con.reopen_session().await;
+            warn!(
+                "Keepalive timeout detected on mon.{}, hunting for new monitor",
+                active_con.rank()
+            );
+
+            // Clear the failed connection and trigger hunting
+            {
+                let mut state_guard = state.write().await;
+                state_guard.active_con = None;
+                state_guard.hunting = true;
+            }
+
+            // Trigger hunting to find a more responsive monitor
+            if let Err(e) = self.start_hunting().await {
+                error!("Failed to start hunting after keepalive timeout: {}", e);
+                return Err(e);
+            }
+
+            info!("Successfully started hunting after keepalive timeout");
+            return Ok(());
         }
 
         // Check if auth tickets need renewal
