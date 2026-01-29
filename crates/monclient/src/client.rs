@@ -58,6 +58,18 @@ pub struct MonClientConfig {
     /// Tick interval (how often to run periodic maintenance tasks like auth renewal)
     /// Default: same as hunt_interval
     pub tick_interval: Option<Duration>,
+
+    /// Backoff multiplier applied to hunt_interval after each failed hunt
+    /// Default: 1.5
+    pub hunt_interval_backoff: f64,
+
+    /// Minimum multiplier for hunt interval backoff
+    /// Default: 1.0
+    pub hunt_interval_min_multiple: f64,
+
+    /// Maximum multiplier for hunt interval backoff
+    /// Default: 10.0
+    pub hunt_interval_max_multiple: f64,
 }
 
 impl Default for MonClientConfig {
@@ -73,6 +85,9 @@ impl Default for MonClientConfig {
             keepalive_interval: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(30),
             tick_interval: None, // Defaults to hunt_interval
+            hunt_interval_backoff: 1.5,
+            hunt_interval_min_multiple: 1.0,
+            hunt_interval_max_multiple: 10.0,
         }
     }
 }
@@ -185,6 +200,14 @@ struct MonClientState {
     want_monmap: bool,
     initialized: bool,
     stopping: bool,
+
+    /// Hunting backoff state
+    /// Current backoff multiplier for hunt interval
+    reopen_interval_multiplier: f64,
+    /// Time of last hunting attempt
+    last_hunt_attempt: Option<std::time::Instant>,
+    /// Whether we've ever had a successful connection (for backoff logic)
+    had_a_connection: bool,
 }
 
 struct MapWaiter {
@@ -295,6 +318,9 @@ impl MonClient {
             want_monmap: true,
             initialized: false,
             stopping: false,
+            reopen_interval_multiplier: config.hunt_interval_min_multiple,
+            last_hunt_attempt: None,
+            had_a_connection: false,
         };
 
         Ok(Self {
@@ -389,6 +415,59 @@ impl MonClient {
     /// Start hunting for an available monitor
     async fn start_hunting(&self) -> Result<()> {
         info!("Starting monitor hunt");
+
+        // Apply backoff delay if we had a connection and recently tried hunting
+        let delay = {
+            let mut state = self.state.write().await;
+
+            // Calculate backoff delay
+            let delay = if state.had_a_connection {
+                if let Some(last_attempt) = state.last_hunt_attempt {
+                    let elapsed = last_attempt.elapsed();
+                    let hunt_delay = self
+                        .config
+                        .hunt_interval
+                        .mul_f64(state.reopen_interval_multiplier);
+
+                    if elapsed < hunt_delay {
+                        let remaining = hunt_delay - elapsed;
+                        debug!(
+                            "Applying hunting backoff: waiting {:?} (multiplier: {:.2})",
+                            remaining, state.reopen_interval_multiplier
+                        );
+                        Some(remaining)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Update last hunt attempt time
+            state.last_hunt_attempt = Some(std::time::Instant::now());
+
+            // Increase backoff multiplier for next attempt
+            if state.had_a_connection {
+                state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
+                if state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
+                    state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
+                }
+                debug!(
+                    "Updated backoff multiplier to {:.2} (max: {:.2})",
+                    state.reopen_interval_multiplier, self.config.hunt_interval_max_multiple
+                );
+            }
+
+            delay
+        };
+
+        // Sleep for backoff delay if needed
+        if let Some(delay) = delay {
+            tokio::time::sleep(delay).await;
+        }
 
         let state = self.state.read().await;
         let monmap = state.monmap.clone();
@@ -553,6 +632,23 @@ impl MonClient {
         // Authentication was completed during MonConnection::connect() -> establish_session()
         state.authenticated = true;
         state.global_id = global_id; // Store global_id in MonClient
+
+        // Mark that we've had a successful connection
+        state.had_a_connection = true;
+
+        // Un-backoff: reduce the backoff multiplier on successful connection
+        let old_multiplier = state.reopen_interval_multiplier;
+        state.reopen_interval_multiplier = (state.reopen_interval_multiplier
+            / self.config.hunt_interval_backoff)
+            .max(self.config.hunt_interval_min_multiple);
+
+        if old_multiplier != state.reopen_interval_multiplier {
+            debug!(
+                "Un-backoff: reduced multiplier from {:.2} to {:.2}",
+                old_multiplier, state.reopen_interval_multiplier
+            );
+        }
+
         drop(state);
 
         info!("Successfully connected to mon.{}", rank);
