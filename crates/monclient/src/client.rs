@@ -843,8 +843,11 @@ impl MonClient {
         });
 
         // Store task handle directly (no need to spawn a task just to store a value)
+        // Use try_write since we're called from async context (init())
         let recv_task = Arc::clone(&self.recv_task);
-        let mut task_guard = recv_task.blocking_write();
+        let mut task_guard = recv_task
+            .try_write()
+            .expect("recv_task lock should not be held during initialization");
         *task_guard = Some(handle);
 
         info!("Started message receive loop");
@@ -885,8 +888,11 @@ impl MonClient {
         });
 
         // Store task handle directly (no need to spawn a task just to store a value)
+        // Use try_write since we're called from async context (init())
         let tick_task = Arc::clone(&self.tick_task);
-        let mut task_guard = tick_task.blocking_write();
+        let mut task_guard = tick_task
+            .try_write()
+            .expect("tick_task lock should not be held during initialization");
         *task_guard = Some(handle);
 
         info!("Started tick loop");
