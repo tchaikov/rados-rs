@@ -129,11 +129,17 @@ pub enum MapEvent {
     MdsMapUpdated { epoch: u64 },
 }
 
-/// Keepalive state (separate from main state to avoid lock contention)
+/// TODO: Keepalive state tracking (for future implementation)
+///
+/// The official MonClient tracks keepalive state to detect connection timeouts.
+/// Our current architecture needs refactoring to properly support this:
+/// - The msgr2::Connection is in a background task, not directly accessible
+/// - Need to add either: command channel, move to background task, or refactor architecture
 #[derive(Default)]
+#[allow(dead_code)]
 struct KeepaliveState {
-    /// Last time we received a keepalive ACK (from monitor-initiated pings)
-    last_ack: Option<std::time::Instant>,
+    /// Last time we sent a keepalive (Keepalive2 frame)
+    last_sent: Option<std::time::Instant>,
 }
 
 struct MonClientState {
@@ -762,8 +768,8 @@ impl MonClient {
     /// Periodic maintenance tick
     async fn tick(
         state: &Arc<RwLock<MonClientState>>,
-        keepalive_state: &Arc<Mutex<KeepaliveState>>,
-        config: &MonClientConfig,
+        _keepalive_state: &Arc<Mutex<KeepaliveState>>,
+        _config: &MonClientConfig,
     ) -> Result<()> {
         // Get active connection (using read lock, quickly released)
         let active_con = {
@@ -779,31 +785,26 @@ impl MonClient {
 
         let now = std::time::Instant::now();
 
-        // NOTE: Application-level keepalive (CEPH_MSG_PING) is NOT sent to monitors
-        // because monitors reject these messages from clients. The msgr2 protocol
-        // has built-in connection-level keepalive that handles this automatically.
-        // We only check for timeout but don't send pings.
+        // TODO: Implement connection-level keepalive using Keepalive2 frames
+        //
+        // The official MonClient (MonClient.cc:1001-1013) implements keepalive by:
+        // 1. Calling con->send_keepalive() every mon_client_ping_interval (default: 10s)
+        // 2. Checking con->get_last_keepalive_ack() and reopening session on timeout
+        //
+        // Our current architecture has the msgr2::Connection in a background task,
+        // so we can't directly call send_keepalive() or access last_keepalive_ack().
+        //
+        // Options for proper implementation:
+        // 1. Add a command channel to send keepalive commands to the background task
+        // 2. Move keepalive responsibility to the background task itself
+        // 3. Refactor MonConnection to expose the msgr2::Connection in Arc<Mutex>
+        //
+        // For now, we rely on:
+        // - msgr2 protocol's built-in Keepalive2 frame handling (responds to monitor pings)
+        // - Command timeouts to detect dead connections
+        // - Transport-level error detection
 
-        // Check if we should reopen due to keepalive timeout
-        let should_reopen = {
-            let ka_state = keepalive_state.lock().await;
-            if config.keepalive_timeout > Duration::from_secs(0) {
-                if let Some(last_ack_time) = ka_state.last_ack {
-                    now.duration_since(last_ack_time) > config.keepalive_timeout
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        };
-
-        // Check keepalive timeout (but don't send pings - monitors reject them!)
-        if should_reopen {
-            warn!("Keepalive timeout exceeded, reopening session");
-            // This will return an error, which will trigger reconnection
-            return active_con.reopen_session().await;
-        }
+        let _ = now; // Suppress unused variable warning
 
         // Check if auth tickets need renewal
         if let Some(auth_provider) = active_con.get_auth_provider() {
@@ -821,7 +822,7 @@ impl MonClient {
     /// Dispatch received message to appropriate handler
     async fn dispatch_message(
         state: &Arc<RwLock<MonClientState>>,
-        keepalive_state: &Arc<Mutex<KeepaliveState>>,
+        _keepalive_state: &Arc<Mutex<KeepaliveState>>,
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
@@ -850,10 +851,10 @@ impl MonClient {
                 }
             }
             msgr2::message::CEPH_MSG_PING_ACK => {
-                trace!("Received CEPH_MSG_PING_ACK");
-                // Update last_keepalive_ack timestamp
-                let mut ka_state = keepalive_state.lock().await;
-                ka_state.last_ack = Some(std::time::Instant::now());
+                // PING/PING_ACK are not used between clients and monitors
+                // Only monitors exchange PING messages with each other
+                // Clients use Keepalive2 frames at the msgr2 protocol level
+                trace!("Received unexpected CEPH_MSG_PING_ACK (monitors don't send these to clients)");
             }
             CEPH_MSG_OSD_MAP => {
                 info!("Received CEPH_MSG_OSD_MAP");

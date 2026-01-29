@@ -67,6 +67,8 @@ pub enum StateResult {
         /// Last message sequence acknowledged by server
         msg_seq: u64,
     },
+    /// Update last keepalive ACK timestamp
+    SetKeepAliveAck(std::time::Instant),
     /// Connection should be closed due to error
     Fault(String),
 }
@@ -1780,7 +1782,7 @@ impl State for Ready {
                 }
             }
             Tag::Keepalive2Ack => {
-                // Handle keepalive ack - just log it
+                // Handle keepalive ack - update timestamp for timeout detection
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
                     let timestamp_sec = u32::decode(&mut payload, 0).unwrap_or(0);
@@ -1792,7 +1794,8 @@ impl State for Ready {
                         timestamp_nsec
                     );
                 }
-                Ok(StateResult::Continue)
+                // Update last_keepalive_ack timestamp for timeout detection
+                Ok(StateResult::SetKeepAliveAck(std::time::Instant::now()))
             }
             Tag::Ack => {
                 // Handle ACK frame
@@ -1851,6 +1854,8 @@ pub struct StateMachine {
     connect_seq: u64,
     /// Last received message sequence number
     in_seq: u64,
+    /// Last time we received a Keepalive2Ack (for timeout detection)
+    last_keepalive_ack: Option<std::time::Instant>,
 }
 
 impl StateMachine {
@@ -1889,6 +1894,7 @@ impl StateMachine {
             global_seq: 0,
             connect_seq: 0,
             in_seq: 0,
+            last_keepalive_ack: None, // Will be set when we receive first Keepalive2Ack
         }
     }
 
@@ -1961,6 +1967,12 @@ impl StateMachine {
         self.global_id
     }
 
+    /// Get the last keepalive ACK timestamp
+    /// Returns None if no keepalive ACK has been received yet
+    pub fn last_keepalive_ack(&self) -> Option<std::time::Instant> {
+        self.last_keepalive_ack
+    }
+
     /// Create a new state machine for server connection
     pub fn new_server() -> Self {
         Self {
@@ -1983,6 +1995,7 @@ impl StateMachine {
             global_seq: 0,
             connect_seq: 0,
             in_seq: 0,
+            last_keepalive_ack: None,
         }
     }
 
@@ -2411,6 +2424,11 @@ impl StateMachine {
                     frame,
                     next_state: Box::new(Ready), // Placeholder
                 })
+            }
+            StateResult::SetKeepAliveAck(timestamp) => {
+                // Update last_keepalive_ack timestamp
+                self.last_keepalive_ack = Some(timestamp);
+                Ok(StateResult::Continue)
             }
             other => Ok(other),
         }

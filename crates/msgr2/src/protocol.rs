@@ -1515,4 +1515,37 @@ impl Connection {
     pub fn global_id(&self) -> u64 {
         self.state.state_machine.global_id()
     }
+
+    /// Send a keepalive frame to the peer
+    ///
+    /// This sends a Keepalive2 frame with the current timestamp.
+    /// The peer should respond with a Keepalive2Ack frame.
+    pub async fn send_keepalive(&mut self) -> Result<()> {
+        use crate::frames::Keepalive2Frame;
+        use crate::state_machine::create_frame_from_trait;
+
+        // Get current timestamp
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let timestamp_sec = now.as_secs() as u32;
+        let timestamp_nsec = now.subsec_nanos();
+
+        // Create Keepalive2 frame
+        let keepalive_frame = Keepalive2Frame::new(timestamp_sec, timestamp_nsec);
+        let frame = create_frame_from_trait(&keepalive_frame, crate::frames::Tag::Keepalive2);
+
+        tracing::trace!("Sending KEEPALIVE2 with timestamp {}.{:09}", timestamp_sec, timestamp_nsec);
+
+        // Send the frame
+        self.state.send_frame(&frame).await
+    }
+
+    /// Get the last keepalive ACK timestamp
+    ///
+    /// Returns None if no keepalive ACK has been received yet.
+    /// This can be used to detect connection timeouts.
+    pub fn last_keepalive_ack(&self) -> Option<std::time::Instant> {
+        self.state.state_machine.last_keepalive_ack()
+    }
 }
