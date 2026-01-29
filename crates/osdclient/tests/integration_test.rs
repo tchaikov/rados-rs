@@ -12,7 +12,6 @@
 //!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test
 
 use bytes::Bytes;
-use cephconfig;
 use std::env;
 use std::sync::Arc;
 use uuid::Uuid;

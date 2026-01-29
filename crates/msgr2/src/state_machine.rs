@@ -408,7 +408,7 @@ impl AuthConnecting {
             .copied()
             .unwrap_or(crate::AuthMethod::None);
 
-        tracing::info!(
+        tracing::debug!(
             "AuthConnecting::new with auth method {:?}, has_provider={}, service_id={}",
             preferred_auth_method,
             auth_provider.is_some(),
@@ -507,7 +507,7 @@ impl State for AuthConnecting {
                     "DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
                     rejected_method, result, allowed_methods, allowed_modes
                 );
-                tracing::info!(
+                tracing::debug!(
                     "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
                     rejected_method,
                     result,
@@ -538,7 +538,7 @@ impl State for AuthConnecting {
                     )));
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     "Negotiated auth method: {:?} (client={:?}, server={:?})",
                     negotiated_method,
                     self.supported_auth_methods,
@@ -548,7 +548,7 @@ impl State for AuthConnecting {
                 // Negotiate connection modes
                 let negotiated_modes = self.negotiate_connection_modes(&allowed_modes);
 
-                tracing::info!("Negotiated connection modes: {:?}", negotiated_modes);
+                tracing::debug!("Negotiated connection modes: {:?}", negotiated_modes);
 
                 // Create new AuthConnecting state with negotiated parameters
                 let mut new_state = Self {
@@ -651,7 +651,7 @@ impl State for AuthConnecting {
 
                     // For AuthMethod::None, we don't need to extract session_key and connection_secret
                     if self.auth_method == crate::AuthMethod::None {
-                        tracing::info!(
+                        tracing::debug!(
                             "AuthMethod::None - no session key/connection secret needed"
                         );
 
@@ -736,12 +736,12 @@ impl State for AuthConnecting {
 
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
-                tracing::info!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
+                tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
                 // For no-auth, send empty payload
                 (crate::AuthMethod::None.as_u32(), Bytes::new())
             }
             crate::AuthMethod::Cephx => {
-                tracing::info!("Sending AUTH_REQUEST with AuthMethod::Cephx");
+                tracing::debug!("Sending AUTH_REQUEST with AuthMethod::Cephx");
                 let provider = self
                     .auth_provider
                     .as_mut()
@@ -854,7 +854,7 @@ impl State for CompressionConnecting {
                         Error::protocol_error(&format!("Failed to decode method: {:?}", e))
                     })?;
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Received COMPRESSION_DONE - is_compress: {}, method: {}",
                         is_compress,
                         method
@@ -1248,7 +1248,7 @@ impl State for SessionConnecting {
                         Error::protocol_error(&format!("Failed to decode cookie: {:?}", e))
                     })?;
 
-                    tracing::info!(
+                    tracing::debug!(
                         "Received SERVER_IDENT - addrs: {:?}, gid: {}, global_seq: {}, features_supported: 0x{:x}, features_required: 0x{:x}, flags: 0x{:x}, cookie: {}",
                         addrs,
                         gid,
@@ -1479,7 +1479,7 @@ impl State for SessionConnecting {
         // Check if we're reconnecting to an existing session
         if self.server_cookie != 0 {
             // Reconnecting to existing session - send SESSION_RECONNECT
-            tracing::info!(
+            tracing::debug!(
                 "Reconnecting to existing session: client_cookie={}, server_cookie={}, global_seq={}, connect_seq={}, in_seq={}",
                 self.client_cookie,
                 self.server_cookie,
@@ -1572,7 +1572,7 @@ impl State for SessionConnecting {
 
             if !frame.segments.is_empty() {
                 let payload_bytes = &frame.segments[0];
-                tracing::info!(
+                tracing::debug!(
                     "CLIENT_IDENT payload: {} bytes, hex: {}",
                     payload_bytes.len(),
                     hex::encode(&payload_bytes[..payload_bytes.len().min(128)])
@@ -2170,7 +2170,7 @@ impl StateMachine {
                     self.current_state.as_any().downcast_ref::<AuthConnecting>()
                 {
                     if let Some(ref provider) = auth_connecting.auth_provider {
-                        tracing::info!("Preserving auth provider from AuthConnecting");
+                        tracing::debug!("Preserving auth provider from AuthConnecting");
                         self.preserved_auth_provider = Some(provider.clone_box());
                     }
                 } else if let Some(hello_connecting) = self
@@ -2179,7 +2179,7 @@ impl StateMachine {
                     .downcast_ref::<HelloConnecting>()
                 {
                     if let Some(ref provider) = hello_connecting.auth_provider {
-                        tracing::info!("Preserving auth provider from HelloConnecting");
+                        tracing::debug!("Preserving auth provider from HelloConnecting");
                         self.preserved_auth_provider = Some(provider.clone_box());
                     }
                 }
@@ -2280,10 +2280,10 @@ impl StateMachine {
                     // Save buffers to files for debugging
                     std::fs::write("/tmp/pre_auth_rxbuf.bin", &self.pre_auth_rxbuf[..]).ok();
                     std::fs::write("/tmp/pre_auth_txbuf.bin", &self.pre_auth_txbuf[..]).ok();
-                    tracing::info!("Saved pre-auth buffers to /tmp/pre_auth_rxbuf.bin and /tmp/pre_auth_txbuf.bin");
+                    tracing::debug!("Saved pre-auth buffers to /tmp/pre_auth_rxbuf.bin and /tmp/pre_auth_txbuf.bin");
 
                     if let Some(ref connection_secret) = connection_secret {
-                        tracing::info!("Setting up frame encryption for SECURE mode");
+                        tracing::debug!("Setting up frame encryption for SECURE mode");
                         self.setup_encryption(connection_secret)?;
                     }
 
@@ -2307,7 +2307,7 @@ impl StateMachine {
                 } else if new_state.kind() == StateKind::CompressionConnecting {
                     // Check if compression negotiation is needed (both client and server must support it)
                     if !self.compression_negotiation_needed() {
-                        tracing::info!(
+                        tracing::debug!(
                             "Compression negotiation not needed (our features: 0x{:x}, peer features: 0x{:x}), skipping compression negotiation",
                             self.config.supported_features,
                             self.peer_supported_features

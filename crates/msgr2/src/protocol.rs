@@ -65,7 +65,7 @@ impl FrameIO {
         let preamble_bytes = &wire_bytes[..Self::PREAMBLE_SIZE];
         let mut payload_bytes = wire_bytes[Self::PREAMBLE_SIZE..].to_vec();
 
-        tracing::info!(
+        tracing::trace!(
             "send_frame: tag={:?}, has_encryption={}, num_segments={}, payload_len={}",
             frame.preamble.tag,
             state_machine.has_encryption(),
@@ -119,14 +119,14 @@ impl FrameIO {
                 epilogue.extend_from_slice(&[0u8; CRYPTO_BLOCK_SIZE - 1]);
                 payload_bytes.extend_from_slice(&epilogue);
 
-                tracing::info!(
+                tracing::trace!(
                     "Secure multi-segment: num_segments={}, total_payload={} (includes {} byte epilogue)",
                     frame.preamble.num_segments,
                     payload_bytes.len(),
                     CRYPTO_BLOCK_SIZE
                 );
             } else {
-                tracing::info!("Secure single-segment: payload_len={}", payload_bytes.len());
+                tracing::trace!("Secure single-segment: payload_len={}", payload_bytes.len());
             }
 
             let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
@@ -159,7 +159,7 @@ impl FrameIO {
             // Encrypt remaining payload if any (starts after first 48 bytes)
             if remaining_size > 0 {
                 let remaining_data = &payload_bytes[Self::INLINE_SIZE..];
-                tracing::info!(
+                tracing::trace!(
                     "About to encrypt remaining: remaining_data.len()={}, payload_bytes.len()={}, inline_size={}, remaining_size={}",
                     remaining_data.len(),
                     payload_bytes.len(),
@@ -727,7 +727,7 @@ impl Connection {
         }
         state_machine.set_client_addr(client_entity_addr);
 
-        tracing::info!("✓ Created client state machine");
+        tracing::debug!("✓ Created client state machine");
 
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
@@ -830,7 +830,7 @@ impl Connection {
         }
         state_machine.set_client_addr(client_entity_addr);
 
-        tracing::info!("✓ Created client state machine");
+        tracing::debug!("✓ Created client state machine");
 
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
@@ -920,7 +920,7 @@ impl Connection {
         // Enter state machine and send HELLO
         match self.state.enter()? {
             StateResult::SendAndWait { frame, .. } => {
-                tracing::info!("✓ Sending HELLO frame");
+                tracing::debug!("✓ Sending HELLO frame");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -932,9 +932,9 @@ impl Connection {
         }
 
         // Read HELLO response
-        tracing::info!("Reading HELLO response from server...");
+        tracing::debug!("Reading HELLO response from server...");
         let hello_response = self.state.recv_frame().await?;
-        tracing::info!(
+        tracing::debug!(
             "✓ Received HELLO response (tag: {:?})",
             hello_response.preamble.tag
         );
@@ -942,7 +942,7 @@ impl Connection {
         // Process HELLO response
         match self.state.handle_frame(hello_response)? {
             StateResult::SendAndWait { frame, .. } => {
-                tracing::info!("✓ Sending AUTH_REQUEST frame");
+                tracing::debug!("✓ Sending AUTH_REQUEST frame");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -962,17 +962,17 @@ impl Connection {
                 return Err(Error::Protocol("Too many auth rounds".to_string()));
             }
 
-            tracing::info!("Auth round {}", auth_rounds);
+            tracing::debug!("Auth round {}", auth_rounds);
 
             let auth_response = self.state.recv_frame().await?;
-            tracing::info!(
+            tracing::debug!(
                 "✓ Received auth frame (tag: {:?})",
                 auth_response.preamble.tag
             );
 
             match self.state.handle_frame(auth_response)? {
                 StateResult::SendAndWait { frame, .. } | StateResult::SendFrame { frame, .. } => {
-                    tracing::info!("  → Sending next auth frame");
+                    tracing::debug!("  → Sending next auth frame");
                     self.state.send_frame(&frame).await?;
 
                     // Check if we've transitioned past auth states
@@ -984,14 +984,14 @@ impl Connection {
                         );
                         break;
                     } else if !state_kind.is_auth_state() {
-                        tracing::info!("✓ Transitioned to state: {}", state_kind.as_str());
+                        tracing::debug!("✓ Transitioned to state: {}", state_kind.as_str());
                         break;
                     }
                     // Continue loop for AUTH_CONNECTING and AUTH_CONNECTING_SIGN states
                 }
                 StateResult::Transition(_) => {
                     let state_kind = self.state.current_state_kind();
-                    tracing::info!("✓ Transitioned to state: {}", state_kind.as_str());
+                    tracing::debug!("✓ Transitioned to state: {}", state_kind.as_str());
                     // Only break if we're past the auth states
                     if !state_kind.is_auth_state() {
                         break;
@@ -1008,13 +1008,13 @@ impl Connection {
 
         // Handle compression negotiation if we're in COMPRESSION_CONNECTING state
         if self.state.current_state_kind() == StateKind::CompressionConnecting {
-            tracing::info!(
+            tracing::debug!(
                 "✓ Now in COMPRESSION_CONNECTING state, handling compression negotiation"
             );
 
             // Read COMPRESSION_DONE response
             let compression_response = self.state.recv_frame().await?;
-            tracing::info!(
+            tracing::debug!(
                 "✓ Received frame (tag: {:?})",
                 compression_response.preamble.tag
             );
@@ -1022,7 +1022,7 @@ impl Connection {
             // Process compression response and transition to SESSION_CONNECTING
             match self.state.handle_frame(compression_response)? {
                 StateResult::SendAndWait { frame, .. } => {
-                    tracing::info!("✓ Transitioned to SESSION_CONNECTING, sending CLIENT_IDENT");
+                    tracing::debug!("✓ Transitioned to SESSION_CONNECTING, sending CLIENT_IDENT");
                     self.state.send_frame(&frame).await?;
                 }
                 result => {
@@ -1036,13 +1036,13 @@ impl Connection {
 
         // Now we should be in SESSION_CONNECTING state and CLIENT_IDENT has been sent
         if self.state.current_state_kind() == StateKind::SessionConnecting {
-            tracing::info!("✓ CLIENT_IDENT sent, waiting for SERVER_IDENT");
+            tracing::debug!("✓ CLIENT_IDENT sent, waiting for SERVER_IDENT");
 
             // Loop to handle potential AUTH_SIGNATURE followed by SERVER_IDENT
             loop {
-                tracing::info!("Reading response frame...");
+                tracing::debug!("Reading response frame...");
                 let response_frame = self.state.recv_frame().await?;
-                tracing::info!("✓ Received frame (tag: {:?})", response_frame.preamble.tag);
+                tracing::debug!("✓ Received frame (tag: {:?})", response_frame.preamble.tag);
 
                 // Process frame
                 match self.state.handle_frame(response_frame)? {
@@ -1439,7 +1439,7 @@ impl Connection {
                         payload[6], payload[7],
                     ]);
 
-                    tracing::info!("✓ Received ACK frame: seq={}", ack_seq);
+                    tracing::debug!("✓ Received ACK frame: seq={}", ack_seq);
 
                     // Discard acknowledged messages from sent queue (following Ceph's practice)
                     self.state.discard_acknowledged_messages(ack_seq);

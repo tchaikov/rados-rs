@@ -61,7 +61,7 @@ impl MMonSubscribe {
             // Encode name using Denc
             name.encode(&mut buf, 0)
                 .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
-            tracing::info!(
+            tracing::debug!(
                 "  📝 Subscription: '{}' start={} flags={}",
                 name,
                 item.start,
@@ -77,7 +77,7 @@ impl MMonSubscribe {
         self.hostname
             .encode(&mut buf, 0)
             .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
-        tracing::info!("  🖥️  Hostname: '{}'", self.hostname);
+        tracing::debug!("  🖥️  Hostname: '{}'", self.hostname);
 
         let bytes = buf.freeze();
 

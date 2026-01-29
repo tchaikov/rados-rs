@@ -885,7 +885,7 @@ mod tests {
         assert_eq!(buf.len(), 7);
 
         let decoded = JaegerSpanContext::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.is_valid, false);
+        assert!(!decoded.is_valid);
     }
 
     #[test]

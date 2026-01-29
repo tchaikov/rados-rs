@@ -89,7 +89,7 @@ impl MonConnection {
             .await
             .map_err(MonClientError::MessageError)?;
 
-        tracing::info!("Banner exchange complete, establishing session...");
+        tracing::debug!("Banner exchange complete, establishing session...");
 
         // Complete the full handshake (HELLO, AUTH, SESSION)
         connection
@@ -107,14 +107,14 @@ impl MonConnection {
         // This provider now contains the session and service tickets
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
             eprintln!("DEBUG: Retrieved auth provider from connection after authentication");
-            tracing::info!("Retrieved auth provider from connection after authentication");
+            tracing::debug!("Retrieved auth provider from connection after authentication");
             // Downcast to MonitorAuthProvider
             provider
                 .as_any()
                 .downcast_ref::<auth::MonitorAuthProvider>()
                 .map(|mon_auth| {
                     eprintln!("DEBUG: Successfully downcast to MonitorAuthProvider");
-                    tracing::info!("Successfully downcast to MonitorAuthProvider");
+                    tracing::debug!("Successfully downcast to MonitorAuthProvider");
                     mon_auth.clone()
                 })
         });
@@ -135,23 +135,23 @@ impl MonConnection {
         // Spawn a unified task to handle both sending and receiving
         // This avoids deadlock by ensuring only one task accesses the connection
         tokio::spawn(async move {
-            tracing::info!("Send/Receive task started");
+            tracing::debug!("Send/Receive task started");
             loop {
                 tokio::select! {
                     // Handle outgoing messages
                     Some(msg) = send_rx.recv() => {
-                        tracing::info!("Send/Recv task: Sending message");
+                        tracing::trace!("Send/Recv task: Sending message");
                         if let Err(e) = connection_for_task.send_message(msg).await {
                             tracing::error!("Failed to send message: {}", e);
                             break;
                         }
-                        tracing::info!("Send/Recv task: Message sent successfully");
+                        tracing::trace!("Send/Recv task: Message sent successfully");
                     }
                     // Handle incoming messages
                     result = connection_for_task.recv_message() => {
                         match result {
                             Ok(msg) => {
-                                tracing::info!("Send/Recv task: Received message, broadcasting");
+                                tracing::trace!("Send/Recv task: Received message, broadcasting");
                                 let _ = recv_tx.send(msg);
                             }
                             Err(e) => {
@@ -179,7 +179,7 @@ impl MonConnection {
             recv_rx: Arc::new(Mutex::new(recv_rx)),
         };
 
-        tracing::info!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
+        tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
 
         Ok(mon_conn)
     }
@@ -241,7 +241,7 @@ impl MonConnection {
         // Copy fields from packed struct to avoid alignment issues
         let msg_type = msg.msg_type();
         let tid = msg.header.tid;
-        tracing::info!(
+        tracing::debug!(
             "MonConnection::send_message: Sending message type 0x{:04x} (tid={}) to mon.{}",
             msg_type,
             tid,
@@ -250,7 +250,7 @@ impl MonConnection {
         self.send_tx
             .send(msg)
             .map_err(|_| MonClientError::Other("Send channel closed".into()))?;
-        tracing::info!("MonConnection::send_message: Message queued for sending");
+        tracing::trace!("MonConnection::send_message: Message queued for sending");
         Ok(())
     }
 

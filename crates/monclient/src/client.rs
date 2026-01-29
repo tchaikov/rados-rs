@@ -1308,7 +1308,7 @@ impl MonClient {
 
         // Create MMonCommand with cluster fsid
         let fsid = self.get_fsid().await;
-        tracing::info!(
+        tracing::debug!(
             "send_command: Sending command (tid={}): {:?} with fsid: {}",
             tid,
             cmd,
@@ -1323,12 +1323,12 @@ impl MonClient {
         // Set the transaction ID in the message header
         message.header.tid = tid;
 
-        tracing::info!(
+        tracing::trace!(
             "send_command: About to send command message with tid={}",
             tid
         );
         active_con.send_message(message).await?;
-        tracing::info!("send_command: Command message sent successfully, waiting for response");
+        tracing::trace!("send_command: Command message sent successfully, waiting for response");
 
         // Wait for response with timeout
         let result = tokio::time::timeout(self.config.command_timeout, rx)
@@ -1684,13 +1684,13 @@ impl MonClient {
     /// * `Ok(Vec<String>)` - List of pool names
     /// * `Err(MonClientError)` if the operation failed
     pub async fn list_pools_from_monitor(&self) -> Result<Vec<String>> {
-        tracing::info!("list_pools: Creating command");
+        tracing::debug!("list_pools: Creating command");
         // Commands must be JSON formatted: {"prefix": "command"}
         let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
 
-        tracing::info!("list_pools: Calling send_command with cmd={:?}", cmd);
+        tracing::debug!("list_pools: Calling send_command with cmd={:?}", cmd);
         let result = self.send_command(cmd, Bytes::new()).await?;
-        tracing::info!("list_pools: Received result from send_command");
+        tracing::debug!("list_pools: Received result from send_command");
 
         if result.is_success() {
             // Parse the output - pool names are separated by newlines

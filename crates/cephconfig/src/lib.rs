@@ -337,6 +337,7 @@ debug mon = 20
     }
 
     #[test]
+    #[allow(dead_code)]
     fn test_define_config_macro() {
         define_config! {
             /// Test configuration
