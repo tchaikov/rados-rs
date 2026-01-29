@@ -374,26 +374,31 @@ impl MonClient {
 
     /// Shutdown the client
     pub async fn shutdown(&self) -> Result<()> {
-        let mut state = self.state.write().await;
+        let (active_con, pending_cons) = {
+            let mut state = self.state.write().await;
 
-        if state.stopping {
-            return Ok(());
-        }
+            if state.stopping {
+                return Ok(());
+            }
 
-        info!("Shutting down MonClient");
-        state.stopping = true;
+            info!("Shutting down MonClient");
+            state.stopping = true;
 
-        // Close active connection
-        if let Some(con) = state.active_con.take() {
+            // Take connections to close them after releasing the lock
+            let active_con = state.active_con.take();
+            let pending_cons: Vec<_> = state.pending_cons.drain().map(|(_, con)| con).collect();
+
+            (active_con, pending_cons)
+        };
+
+        // Close connections after releasing the lock
+        if let Some(con) = active_con {
             con.close().await?;
         }
 
-        // Close pending connections
-        for (_, con) in state.pending_cons.drain() {
+        for con in pending_cons {
             con.close().await?;
         }
-
-        drop(state);
 
         // Stop receive task
         let mut recv_task = self.recv_task.write().await;
