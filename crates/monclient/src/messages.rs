@@ -632,7 +632,12 @@ impl MPoolOp {
     /// * `name` - Pool name
     /// * `crush_rule` - Optional CRUSH rule ID
     /// * `version` - Current OSDMap epoch (used by paxos versioning)
-    pub fn create_pool(fsid: [u8; 16], name: String, crush_rule: Option<i16>, version: u64) -> Self {
+    pub fn create_pool(
+        fsid: [u8; 16],
+        name: String,
+        crush_rule: Option<i16>,
+        version: u64,
+    ) -> Self {
         Self {
             paxos: PaxosFields::with_version(version),
             fsid: UuidD::from_bytes(fsid),

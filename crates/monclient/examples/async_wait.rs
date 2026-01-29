@@ -27,6 +27,7 @@ async fn main() -> anyhow::Result<()> {
         command_timeout: Duration::from_secs(60),
         hunt_interval: Duration::from_secs(3),
         hunt_parallel: 3,
+        ..Default::default()
     };
 
     // Create client

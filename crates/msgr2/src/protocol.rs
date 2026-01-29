@@ -1492,6 +1492,12 @@ impl Connection {
 
                     return Ok(msg);
                 }
+                Tag::Keepalive2Ack => {
+                    // Handle Keepalive2Ack frame - just continue waiting for Message
+                    // The state machine already updated last_keepalive_ack timestamp
+                    tracing::trace!("✓ Received Keepalive2Ack frame (processed by state machine)");
+                    continue;
+                }
                 _ => {
                     return Err(Error::protocol_error(&format!(
                         "Unexpected frame type in recv_message: {:?}",
@@ -1535,7 +1541,11 @@ impl Connection {
         let keepalive_frame = Keepalive2Frame::new(timestamp_sec, timestamp_nsec);
         let frame = create_frame_from_trait(&keepalive_frame, crate::frames::Tag::Keepalive2);
 
-        tracing::trace!("Sending KEEPALIVE2 with timestamp {}.{:09}", timestamp_sec, timestamp_nsec);
+        tracing::trace!(
+            "Sending KEEPALIVE2 with timestamp {}.{:09}",
+            timestamp_sec,
+            timestamp_nsec
+        );
 
         // Send the frame
         self.state.send_frame(&frame).await

@@ -8,7 +8,42 @@ use msgr2::protocol::Connection as Msgr2Connection;
 use msgr2::ConnectionConfig;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::{broadcast, mpsc, Mutex};
+
+/// Keepalive policy for the connection
+///
+/// This determines when the protocol layer sends keepalive frames and
+/// when it should notify the upper layer of keepalive timeouts.
+#[derive(Debug, Clone)]
+pub struct KeepalivePolicy {
+    /// Interval between keepalive sends
+    /// Set to None to disable keepalive
+    pub interval: Option<Duration>,
+
+    /// Timeout for keepalive ACK
+    /// If no ACK is received within this duration, the upper layer is notified
+    /// Set to None to disable timeout checking
+    pub timeout: Option<Duration>,
+}
+
+impl KeepalivePolicy {
+    /// Create a keepalive policy with specified interval and timeout
+    pub fn new(interval: Duration, timeout: Duration) -> Self {
+        Self {
+            interval: Some(interval),
+            timeout: Some(timeout),
+        }
+    }
+
+    /// Create a keepalive policy with no keepalive
+    pub fn disabled() -> Self {
+        Self {
+            interval: None,
+            timeout: None,
+        }
+    }
+}
 
 /// Monitor connection state
 pub struct MonConnection {
@@ -33,6 +68,10 @@ pub struct MonConnection {
 
     /// Channel for receiving messages
     recv_rx: Arc<Mutex<broadcast::Receiver<msgr2::message::Message>>>,
+
+    /// Channel for receiving keepalive timeout notifications
+    /// The background task sends () when a keepalive timeout occurs
+    timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
 }
 
 #[derive(Debug)]
@@ -62,6 +101,7 @@ impl MonConnection {
         addrs: EntityAddrVec,
         entity_name: String,
         keyring_path: Option<String>,
+        keepalive_policy: KeepalivePolicy,
     ) -> Result<Self> {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
@@ -129,13 +169,26 @@ impl MonConnection {
         // Create channels for sending and receiving messages (to avoid deadlock)
         let (send_tx, mut send_rx) = mpsc::unbounded_channel::<msgr2::message::Message>();
         let (recv_tx, recv_rx) = broadcast::channel::<msgr2::message::Message>(100);
+        let (timeout_tx, timeout_rx) = mpsc::unbounded_channel::<()>();
 
         let mut connection_for_task = connection;
 
-        // Spawn a unified task to handle both sending and receiving
+        // Spawn a unified task to handle sending, receiving, and keepalive
         // This avoids deadlock by ensuring only one task accesses the connection
         tokio::spawn(async move {
-            tracing::debug!("Send/Receive task started");
+            tracing::debug!("Send/Receive/Keepalive task started");
+
+            // Set up keepalive timer if enabled
+            let mut keepalive_interval = keepalive_policy.interval.map(|interval| {
+                let mut ticker = tokio::time::interval(interval);
+                // Don't fire immediately on first tick
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                ticker
+            });
+
+            // Track when we last sent a keepalive (for timeout checking when no ACK received yet)
+            let mut last_keepalive_sent: Option<std::time::Instant> = None;
+
             loop {
                 tokio::select! {
                     // Handle outgoing messages
@@ -147,6 +200,7 @@ impl MonConnection {
                         }
                         tracing::trace!("Send/Recv task: Message sent successfully");
                     }
+
                     // Handle incoming messages
                     result = connection_for_task.recv_message() => {
                         match result {
@@ -160,9 +214,63 @@ impl MonConnection {
                             }
                         }
                     }
+
+                    // Handle keepalive timing
+                    _ = async {
+                        if let Some(ref mut interval) = keepalive_interval {
+                            interval.tick().await;
+                        } else {
+                            // If keepalive is disabled, wait forever
+                            std::future::pending::<()>().await;
+                        }
+                    } => {
+                        // First check for keepalive timeout (before sending new one)
+                        if let Some(timeout_duration) = keepalive_policy.timeout {
+                            // Only check timeout if we've sent at least one keepalive
+                            if let Some(sent_time) = last_keepalive_sent {
+                                if let Some(last_ack) = connection_for_task.last_keepalive_ack() {
+                                    // We have received at least one ACK - check if it's stale
+                                    let elapsed = last_ack.elapsed();
+                                    if elapsed > timeout_duration {
+                                        tracing::warn!(
+                                            "Keepalive timeout: no ACK for {:?} (threshold: {:?})",
+                                            elapsed,
+                                            timeout_duration
+                                        );
+                                        // Notify upper layer of timeout
+                                        let _ = timeout_tx.send(());
+                                        // Break the loop to close the connection
+                                        break;
+                                    }
+                                } else {
+                                    // No ACK received yet - check if we've been waiting too long
+                                    let elapsed_since_send = sent_time.elapsed();
+                                    if elapsed_since_send > timeout_duration {
+                                        tracing::warn!(
+                                            "Keepalive timeout: no initial ACK for {:?} (threshold: {:?})",
+                                            elapsed_since_send,
+                                            timeout_duration
+                                        );
+                                        // Notify upper layer of timeout
+                                        let _ = timeout_tx.send(());
+                                        // Break the loop to close the connection
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+
+                        // Now send keepalive
+                        tracing::trace!("Keepalive interval elapsed, sending keepalive");
+                        if let Err(e) = connection_for_task.send_keepalive().await {
+                            tracing::error!("Failed to send keepalive: {}", e);
+                            break;
+                        }
+                        last_keepalive_sent = Some(std::time::Instant::now());
+                    }
                 }
             }
-            tracing::debug!("Send/Receive task terminated");
+            tracing::debug!("Send/Receive/Keepalive task terminated");
         });
 
         let mon_conn = Self {
@@ -177,6 +285,7 @@ impl MonConnection {
             auth_provider,
             send_tx,
             recv_rx: Arc::new(Mutex::new(recv_rx)),
+            timeout_rx: Arc::new(Mutex::new(timeout_rx)),
         };
 
         tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
@@ -315,6 +424,15 @@ impl MonConnection {
         Err(MonClientError::Other(
             "Connection timed out, need to reconnect".into(),
         ))
+    }
+
+    /// Try to receive a keepalive timeout notification (non-blocking)
+    ///
+    /// Returns Some(()) if a keepalive timeout has occurred, None otherwise.
+    /// The upper layer should call reopen_session() when this returns Some(()).
+    pub async fn try_recv_timeout(&self) -> Option<()> {
+        let mut rx = self.timeout_rx.lock().await;
+        rx.try_recv().ok()
     }
 
     /// Create a ServiceAuthProvider for OSD/MDS/MGR connections

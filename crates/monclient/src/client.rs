@@ -2,7 +2,7 @@
 //!
 //! Main MonClient struct and implementation.
 
-use crate::connection::MonConnection;
+use crate::connection::{KeepalivePolicy, MonConnection};
 use crate::error::{MonClientError, Result};
 use crate::messages::*;
 use crate::monmap::MonMap;
@@ -515,6 +515,16 @@ impl MonClient {
             Some(self.config.keyring_path.clone())
         };
 
+        // Create keepalive policy from config
+        let keepalive_policy = if self.config.keepalive_interval.as_secs() > 0 {
+            KeepalivePolicy::new(
+                self.config.keepalive_interval,
+                self.config.keepalive_timeout,
+            )
+        } else {
+            KeepalivePolicy::disabled()
+        };
+
         // Create actual msgr2 connection
         let mon_con = Arc::new(
             MonConnection::connect(
@@ -523,6 +533,7 @@ impl MonClient {
                 addrs,
                 self.config.entity_name.clone(),
                 keyring_path,
+                keepalive_policy,
             )
             .await?,
         );
@@ -783,28 +794,13 @@ impl MonClient {
             }
         };
 
-        let now = std::time::Instant::now();
-
-        // TODO: Implement connection-level keepalive using Keepalive2 frames
-        //
-        // The official MonClient (MonClient.cc:1001-1013) implements keepalive by:
-        // 1. Calling con->send_keepalive() every mon_client_ping_interval (default: 10s)
-        // 2. Checking con->get_last_keepalive_ack() and reopening session on timeout
-        //
-        // Our current architecture has the msgr2::Connection in a background task,
-        // so we can't directly call send_keepalive() or access last_keepalive_ack().
-        //
-        // Options for proper implementation:
-        // 1. Add a command channel to send keepalive commands to the background task
-        // 2. Move keepalive responsibility to the background task itself
-        // 3. Refactor MonConnection to expose the msgr2::Connection in Arc<Mutex>
-        //
-        // For now, we rely on:
-        // - msgr2 protocol's built-in Keepalive2 frame handling (responds to monitor pings)
-        // - Command timeouts to detect dead connections
-        // - Transport-level error detection
-
-        let _ = now; // Suppress unused variable warning
+        // Check for keepalive timeout
+        // The background task in MonConnection sends a timeout notification
+        // when keepalive ACK is not received within the configured timeout
+        if let Some(()) = active_con.try_recv_timeout().await {
+            warn!("Keepalive timeout detected, reopening session");
+            return active_con.reopen_session().await;
+        }
 
         // Check if auth tickets need renewal
         if let Some(auth_provider) = active_con.get_auth_provider() {
@@ -854,7 +850,9 @@ impl MonClient {
                 // PING/PING_ACK are not used between clients and monitors
                 // Only monitors exchange PING messages with each other
                 // Clients use Keepalive2 frames at the msgr2 protocol level
-                trace!("Received unexpected CEPH_MSG_PING_ACK (monitors don't send these to clients)");
+                trace!(
+                    "Received unexpected CEPH_MSG_PING_ACK (monitors don't send these to clients)"
+                );
             }
             CEPH_MSG_OSD_MAP => {
                 info!("Received CEPH_MSG_OSD_MAP");
@@ -1810,7 +1808,10 @@ impl MonClient {
         // Get current OSDMap epoch for paxos versioning
         let version = osdmap.epoch as u64;
 
-        info!("Deleting pool '{}' with ID {} (OSDMap epoch {})", pool_name, pool_id, version);
+        info!(
+            "Deleting pool '{}' with ID {} (OSDMap epoch {})",
+            pool_name, pool_id, version
+        );
 
         drop(state);
 
