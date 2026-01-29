@@ -783,6 +783,85 @@ define_control_frame!(
     timestamp_nsec: u32
 );
 
+// Session reconnection frames
+define_control_frame!(
+    SessionReconnectFrame,
+    SessionReconnect,
+    addrs: denc::EntityAddrvec,
+    client_cookie: u64,
+    server_cookie: u64,
+    global_seq: u64,
+    connect_seq: u64,
+    msg_seq: u64
+);
+
+define_control_frame!(
+    SessionReconnectOkFrame,
+    SessionReconnectOk,
+    msg_seq: u64
+);
+
+define_control_frame!(
+    SessionRetryFrame,
+    SessionRetry,
+    connect_seq: u64
+);
+
+define_control_frame!(
+    SessionRetryGlobalFrame,
+    SessionRetryGlobal,
+    global_seq: u64
+);
+
+define_control_frame!(
+    SessionResetFrame,
+    SessionReset,
+    full: bool
+);
+
+// WaitFrame has no payload
+#[derive(Debug, Clone)]
+pub struct WaitFrame;
+
+impl Default for WaitFrame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WaitFrame {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn to_wire(
+        &self,
+        assembler: &mut FrameAssembler,
+        features: u64,
+    ) -> Result<Bytes, RadosError> {
+        assembler.to_wire(self, features)
+    }
+
+    pub fn from_wire(buf: Bytes) -> Result<Self, RadosError> {
+        FrameAssembler::from_wire(buf)
+    }
+
+    fn segments_to_bytes(&self, _features: u64) -> Vec<Bytes> {
+        vec![Bytes::new()]
+    }
+
+    fn from_bytes_segments(_segments: Vec<Bytes>) -> Result<Self, RadosError> {
+        Ok(Self)
+    }
+}
+
+define_frame!(
+    WaitFrame,
+    tag = Tag::Wait,
+    segments = 1,
+    alignments = [DEFAULT_ALIGNMENT]
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

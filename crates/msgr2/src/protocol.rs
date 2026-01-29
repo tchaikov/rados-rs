@@ -468,16 +468,50 @@ pub struct ConnectionState {
     frame_io: FrameIO,
     /// Outgoing message sequence number (incremented for each message sent)
     out_seq: u64,
+    /// Incoming message sequence number (last received from peer)
+    in_seq: u64,
+    /// Session cookies for reconnection
+    session: SessionState,
+}
+
+/// Session state preserved across reconnections
+#[derive(Debug, Clone)]
+struct SessionState {
+    /// Client cookie - generated on first connection, identifies this client instance
+    client_cookie: u64,
+    /// Server cookie - assigned by server, identifies the session at server side
+    server_cookie: u64,
+    /// Global sequence number - monotonically increasing across all connections
+    global_seq: u64,
+    /// Connection sequence number - incremented on each reconnection attempt
+    connect_seq: u64,
+    /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
+    sent_messages: std::collections::VecDeque<Message>,
+    /// Connection policy - if true, connection is lossy (no reconnection support)
+    is_lossy: bool,
 }
 
 impl ConnectionState {
     /// Create a new connection state with the given stream and state machine
     pub fn new(stream: TcpStream, state_machine: StateMachine) -> Self {
         let frame_io = FrameIO::new(stream);
+
+        // Generate a random client cookie for this connection instance
+        let client_cookie = rand::random::<u64>();
+
         Self {
             state_machine,
             frame_io,
             out_seq: 0, // Starts at 0, first message will get seq=1
+            in_seq: 0,
+            session: SessionState {
+                client_cookie,
+                server_cookie: 0, // Will be assigned by server
+                global_seq: 0,
+                connect_seq: 0,
+                sent_messages: std::collections::VecDeque::new(),
+                is_lossy: false, // Default to lossless (reconnectable)
+            },
         }
     }
 
@@ -512,6 +546,97 @@ impl ConnectionState {
     pub fn current_state_kind(&self) -> StateKind {
         self.state_machine.current_state_kind()
     }
+
+    // Session state management methods
+
+    /// Get the client cookie for this connection
+    pub fn client_cookie(&self) -> u64 {
+        self.session.client_cookie
+    }
+
+    /// Get the server cookie (0 if not yet assigned)
+    pub fn server_cookie(&self) -> u64 {
+        self.session.server_cookie
+    }
+
+    /// Set the server cookie (called when SERVER_IDENT is received)
+    pub fn set_server_cookie(&mut self, cookie: u64) {
+        self.session.server_cookie = cookie;
+    }
+
+    /// Check if this connection has a valid session that can be reconnected
+    pub fn can_reconnect(&self) -> bool {
+        !self.session.is_lossy && self.session.server_cookie != 0
+    }
+
+    /// Get the current global sequence number
+    pub fn global_seq(&self) -> u64 {
+        self.session.global_seq
+    }
+
+    /// Set the global sequence number
+    pub fn set_global_seq(&mut self, seq: u64) {
+        self.session.global_seq = seq;
+    }
+
+    /// Get the current connection sequence number
+    pub fn connect_seq(&self) -> u64 {
+        self.session.connect_seq
+    }
+
+    /// Increment the connection sequence number (for reconnection attempts)
+    pub fn increment_connect_seq(&mut self) {
+        self.session.connect_seq += 1;
+    }
+
+    /// Get the last received message sequence number
+    pub fn in_seq(&self) -> u64 {
+        self.in_seq
+    }
+
+    /// Set the incoming message sequence number
+    pub fn set_in_seq(&mut self, seq: u64) {
+        self.in_seq = seq;
+    }
+
+    /// Record a sent message for potential replay
+    pub fn record_sent_message(&mut self, message: Message) {
+        if !self.session.is_lossy {
+            self.session.sent_messages.push_back(message);
+        }
+    }
+
+    /// Discard acknowledged messages up to the given sequence number
+    pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
+        while let Some(msg) = self.session.sent_messages.front() {
+            if msg.header.seq <= ack_seq {
+                self.session.sent_messages.pop_front();
+            } else {
+                break;
+            }
+        }
+    }
+
+    /// Get all unacknowledged messages for replay
+    pub fn get_unacknowledged_messages(&self) -> &std::collections::VecDeque<Message> {
+        &self.session.sent_messages
+    }
+
+    /// Clear the sent message queue
+    pub fn clear_sent_messages(&mut self) {
+        self.session.sent_messages.clear();
+    }
+
+    /// Reset session state for a new connection
+    pub fn reset_session(&mut self) {
+        self.session.server_cookie = 0;
+        self.session.global_seq = 0;
+        self.session.connect_seq = 0;
+        self.session.sent_messages.clear();
+        self.in_seq = 0;
+        self.out_seq = 0;
+        // Note: client_cookie is preserved across resets
+    }
 }
 
 /// High-level msgr2 Protocol V2 connection
@@ -520,6 +645,12 @@ impl ConnectionState {
 /// handling authentication, and exchanging messages.
 pub struct Connection {
     state: ConnectionState,
+    /// Server address for reconnection
+    server_addr: SocketAddr,
+    /// Target entity address (for connect_with_target), if applicable
+    target_entity_addr: Option<denc::EntityAddr>,
+    /// Connection configuration
+    config: crate::ConnectionConfig,
 }
 
 impl Connection {
@@ -568,7 +699,7 @@ impl Connection {
         let mut state_machine = StateMachine::new_client(config.clone());
 
         // Use the provided target_entity_addr directly (preserving nonce)
-        state_machine.set_server_addr(target_entity_addr);
+        state_machine.set_server_addr(target_entity_addr.clone());
 
         // Set our local client address for CLIENT_IDENT
         let mut client_entity_addr = denc::EntityAddr::new();
@@ -603,7 +734,12 @@ impl Connection {
 
         let state = ConnectionState::new(stream, state_machine);
 
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            server_addr: addr,
+            target_entity_addr: Some(target_entity_addr),
+            config,
+        })
     }
 
     /// Connect to a Ceph server at the given address
@@ -701,7 +837,12 @@ impl Connection {
 
         let state = ConnectionState::new(stream, state_machine);
 
-        Ok(Self { state })
+        Ok(Self {
+            state,
+            server_addr: addr,
+            target_entity_addr: None,
+            config,
+        })
     }
 
     /// Perform msgr2 banner exchange
@@ -909,6 +1050,50 @@ impl Connection {
                         tracing::info!("🎉 Session established! Ready for message exchange");
                         break;
                     }
+                    StateResult::ReconnectReady { msg_seq } => {
+                        tracing::info!(
+                            "🎉 Session reconnected! Server acknowledged up to msg_seq={}",
+                            msg_seq
+                        );
+
+                        // Discard acknowledged messages from sent queue (following Ceph's practice)
+                        self.state.discard_acknowledged_messages(msg_seq);
+
+                        // Replay unacknowledged messages (following Ceph's practice)
+                        let messages_to_replay: Vec<_> =
+                            self.state.session.sent_messages.iter().cloned().collect();
+
+                        if !messages_to_replay.is_empty() {
+                            tracing::info!(
+                                "Replaying {} unacknowledged messages",
+                                messages_to_replay.len()
+                            );
+
+                            for msg in messages_to_replay {
+                                tracing::debug!(
+                                    "Replaying message: type={}, seq={}",
+                                    msg.msg_type(),
+                                    msg.seq()
+                                );
+
+                                // Resend the message with its original sequence number
+                                // (following Ceph's practice of preserving message sequence)
+                                let msg_frame = MessageFrame::new(
+                                    msg.header.clone(),
+                                    msg.front.clone(),
+                                    msg.middle.clone(),
+                                    msg.data.clone(),
+                                );
+
+                                let frame = create_frame_from_trait(&msg_frame, Tag::Message);
+                                self.state.send_frame(&frame).await?;
+                            }
+
+                            tracing::info!("✓ Message replay complete");
+                        }
+
+                        break;
+                    }
                     StateResult::Continue => {
                         // Frame was handled (e.g., AUTH_SIGNATURE), continue to next frame
                         tracing::debug!("Frame handled, continuing to read next frame");
@@ -935,27 +1120,222 @@ impl Connection {
         Ok(())
     }
 
+    /// Attempt to reconnect after TCP connection failure
+    ///
+    /// This preserves the session state (cookies, sequences, sent messages)
+    /// and attempts to resume the session using SESSION_RECONNECT.
+    async fn reconnect(&mut self) -> Result<()> {
+        // Check if we can reconnect (need server_cookie and non-lossy policy)
+        if !self.state.can_reconnect() {
+            return Err(Error::Protocol(
+                "Cannot reconnect: lossy connection or no session established".to_string(),
+            ));
+        }
+
+        tracing::warn!(
+            "Connection lost, attempting to reconnect to {}",
+            self.server_addr
+        );
+
+        // Preserve session state from current connection
+        let client_cookie = self.state.client_cookie();
+        let server_cookie = self.state.server_cookie();
+        let global_seq = self.state.session.global_seq;
+        let connect_seq = self.state.session.connect_seq + 1; // Increment for new attempt
+        let in_seq = self.state.in_seq;
+        let out_seq = self.state.out_seq;
+        let sent_messages = self.state.session.sent_messages.clone();
+
+        tracing::debug!(
+            "Reconnecting with: client_cookie={}, server_cookie={}, global_seq={}, connect_seq={}, in_seq={}, out_seq={}, queued_messages={}",
+            client_cookie, server_cookie, global_seq, connect_seq, in_seq, out_seq, sent_messages.len()
+        );
+
+        // Establish new TCP connection
+        let mut stream = TcpStream::connect(self.server_addr).await?;
+        tracing::info!("✓ TCP reconnection established to {}", self.server_addr);
+
+        // Get local address for CLIENT_IDENT
+        let local_addr = stream.local_addr()?;
+
+        // Create new state machine with preserved session cookies
+        let mut state_machine = StateMachine::new_client(self.config.clone());
+
+        // Restore session cookies so reconnection handshake uses SESSION_RECONNECT
+        state_machine.set_session_cookies(
+            client_cookie,
+            server_cookie,
+            global_seq,
+            connect_seq,
+            in_seq,
+        );
+
+        // Set server and client addresses
+        if let Some(ref target_addr) = self.target_entity_addr {
+            state_machine.set_server_addr(target_addr.clone());
+        } else {
+            // Reconstruct server EntityAddr from SocketAddr
+            let mut server_entity_addr = denc::EntityAddr::new();
+            server_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+            match self.server_addr {
+                SocketAddr::V4(v4) => {
+                    let mut data = Vec::with_capacity(16);
+                    data.extend_from_slice(&2u16.to_le_bytes());
+                    data.extend_from_slice(&v4.port().to_be_bytes());
+                    data.extend_from_slice(&v4.ip().octets());
+                    data.extend_from_slice(&[0u8; 8]);
+                    server_entity_addr.sockaddr_data = data;
+                }
+                SocketAddr::V6(v6) => {
+                    let mut data = Vec::with_capacity(28);
+                    data.extend_from_slice(&10u16.to_le_bytes());
+                    data.extend_from_slice(&v6.port().to_be_bytes());
+                    data.extend_from_slice(&0u32.to_be_bytes());
+                    data.extend_from_slice(&v6.ip().octets());
+                    data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                    server_entity_addr.sockaddr_data = data;
+                }
+            }
+            state_machine.set_server_addr(server_entity_addr);
+        }
+
+        // Set client address
+        let mut client_entity_addr = denc::EntityAddr::new();
+        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+        match local_addr {
+            SocketAddr::V4(v4) => {
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&2u16.to_le_bytes());
+                data.extend_from_slice(&v4.port().to_be_bytes());
+                data.extend_from_slice(&v4.ip().octets());
+                data.extend_from_slice(&[0u8; 8]);
+                client_entity_addr.sockaddr_data = data;
+            }
+            SocketAddr::V6(v6) => {
+                let mut data = Vec::with_capacity(28);
+                data.extend_from_slice(&10u16.to_le_bytes());
+                data.extend_from_slice(&v6.port().to_be_bytes());
+                data.extend_from_slice(&0u32.to_be_bytes());
+                data.extend_from_slice(&v6.ip().octets());
+                data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                client_entity_addr.sockaddr_data = data;
+            }
+        }
+        state_machine.set_client_addr(client_entity_addr);
+
+        // Perform banner exchange
+        Self::exchange_banner(&mut stream, &mut state_machine, &self.config).await?;
+
+        // Create new ConnectionState
+        let mut state = ConnectionState::new(stream, state_machine);
+
+        // Restore session state
+        state.out_seq = out_seq;
+        state.in_seq = in_seq;
+        state.session.sent_messages = sent_messages;
+
+        // Replace current state with new reconnected state
+        self.state = state;
+
+        tracing::info!("✓ Session state restored, initiating reconnection handshake");
+
+        // Run the full session establishment (this will use SESSION_RECONNECT since server_cookie != 0)
+        self.establish_session().await?;
+
+        tracing::info!("✓ Reconnection complete, session resumed");
+
+        Ok(())
+    }
+
+    /// Check if an error is a connection error that warrants reconnection
+    fn is_connection_error(err: &Error) -> bool {
+        match err {
+            Error::Io(io_err) => matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+            ),
+            _ => false,
+        }
+    }
+
     /// Send a Ceph message over the established session
-    pub async fn send_message(&mut self, mut msg: Message) -> Result<()> {
+    ///
+    /// This method automatically handles connection failures by attempting
+    /// reconnection and message replay according to the msgr2 protocol.
+    pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+        const MAX_RECONNECT_ATTEMPTS: usize = 3;
+
+        for attempt in 0..MAX_RECONNECT_ATTEMPTS {
+            match self.send_message_inner(msg.clone()).await {
+                Ok(()) => return Ok(()),
+                Err(e) if Self::is_connection_error(&e) && self.state.can_reconnect() => {
+                    tracing::warn!(
+                        "Send failed due to connection error (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_RECONNECT_ATTEMPTS,
+                        e
+                    );
+
+                    // Attempt reconnection
+                    if let Err(reconnect_err) = self.reconnect().await {
+                        tracing::error!("Reconnection failed: {}", reconnect_err);
+                        // If this was the last attempt, return the reconnection error
+                        if attempt + 1 == MAX_RECONNECT_ATTEMPTS {
+                            return Err(reconnect_err);
+                        }
+                        // Otherwise, continue to next attempt
+                        continue;
+                    }
+
+                    tracing::info!("Reconnection successful, message will be replayed");
+                    // Message is already in sent_messages queue and will be replayed
+                    // during reconnection, so we can return success
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::Protocol(format!(
+            "Failed to send message after {} attempts",
+            MAX_RECONNECT_ATTEMPTS
+        )))
+    }
+
+    /// Internal implementation of send_message without reconnection logic
+    async fn send_message_inner(&mut self, mut msg: Message) -> Result<()> {
         let msg_type = msg.msg_type();
 
         // Increment sequence number (pre-increment, like C++ does with ++out_seq)
         self.state.out_seq += 1;
         msg.header.seq = self.state.out_seq;
+
+        // Piggyback ACK in message header (like Ceph does)
+        msg.header.ack_seq = self.state.in_seq;
+
         let seq = msg.seq();
+        let ack_seq = msg.header.ack_seq; // Copy to avoid packed field reference
 
         let version = msg.header.version;
         let compat_version = msg.header.compat_version;
         eprintln!(
-            "DEBUG: send_message() type=0x{:04x}, seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
+            "DEBUG: send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
             msg_type,
             seq,
+            ack_seq,
             msg.front.len(),
             msg.middle.len(),
             msg.data.len(),
             version,
             compat_version
         );
+
+        // Record message in sent queue for potential replay (before sending)
+        // This follows Ceph's practice of recording before transmission
+        self.state.record_sent_message(msg.clone());
 
         // Convert Message to MessageFrame
         let msg_frame = MessageFrame::new(
@@ -979,12 +1359,60 @@ impl Connection {
         // Send the frame
         self.state.send_frame(&frame).await?;
 
-        tracing::debug!("Sent message: type={}, seq={}", msg_type, seq);
+        tracing::debug!(
+            "Sent message: type={}, seq={}, ack_seq={}",
+            msg_type,
+            seq,
+            ack_seq
+        );
         Ok(())
     }
 
     /// Receive a Ceph message from the established session
+    ///
+    /// This method automatically handles connection failures by attempting
+    /// reconnection according to the msgr2 protocol.
     pub async fn recv_message(&mut self) -> Result<Message> {
+        const MAX_RECONNECT_ATTEMPTS: usize = 3;
+
+        for attempt in 0..MAX_RECONNECT_ATTEMPTS {
+            match self.recv_message_inner().await {
+                Ok(msg) => return Ok(msg),
+                Err(e) if Self::is_connection_error(&e) && self.state.can_reconnect() => {
+                    tracing::warn!(
+                        "Receive failed due to connection error (attempt {}/{}): {}",
+                        attempt + 1,
+                        MAX_RECONNECT_ATTEMPTS,
+                        e
+                    );
+
+                    // Attempt reconnection
+                    if let Err(reconnect_err) = self.reconnect().await {
+                        tracing::error!("Reconnection failed: {}", reconnect_err);
+                        // If this was the last attempt, return the reconnection error
+                        if attempt + 1 == MAX_RECONNECT_ATTEMPTS {
+                            return Err(reconnect_err);
+                        }
+                        // Otherwise, continue to next attempt
+                        continue;
+                    }
+
+                    tracing::info!("Reconnection successful, retrying receive");
+                    // Retry the receive after successful reconnection
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(Error::Protocol(format!(
+            "Failed to receive message after {} attempts",
+            MAX_RECONNECT_ATTEMPTS
+        )))
+    }
+
+    /// Internal implementation of recv_message without reconnection logic
+    async fn recv_message_inner(&mut self) -> Result<Message> {
         // Loop until we get a Message frame, handling ACKs along the way
         loop {
             // Receive a frame
@@ -1012,6 +1440,10 @@ impl Connection {
                     ]);
 
                     tracing::info!("✓ Received ACK frame: seq={}", ack_seq);
+
+                    // Discard acknowledged messages from sent queue (following Ceph's practice)
+                    self.state.discard_acknowledged_messages(ack_seq);
+
                     // Continue loop to wait for Message frame
                     continue;
                 }
@@ -1031,8 +1463,12 @@ impl Connection {
                     let middle = frame.segments.get(2).cloned().unwrap_or_default();
                     let data = frame.segments.get(3).cloned().unwrap_or_default();
 
+                    // Copy header fields to avoid packed field references
+                    let msg_seq = header.seq;
+                    let ack_seq = header.ack_seq;
+
                     let msg = Message {
-                        header,
+                        header: header.clone(),
                         front,
                         middle,
                         data,
@@ -1040,10 +1476,20 @@ impl Connection {
                     };
 
                     tracing::debug!(
-                        "Received message: type={}, seq={}",
+                        "Received message: type={}, seq={}, ack_seq={}",
                         msg.msg_type(),
-                        msg.seq()
+                        msg_seq,
+                        ack_seq
                     );
+
+                    // Update in_seq to the received message's sequence (following Ceph's practice)
+                    self.state.set_in_seq(msg_seq);
+
+                    // Process piggybacked ACK in message header (following Ceph's practice)
+                    if ack_seq > 0 {
+                        self.state.discard_acknowledged_messages(ack_seq);
+                    }
+
                     return Ok(msg);
                 }
                 _ => {

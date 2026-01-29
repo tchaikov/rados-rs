@@ -4,7 +4,7 @@
 
 use crate::error::{Error, Result};
 use crate::frames::{
-    AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, AuthSignatureFrame, ClientIdentFrame,
+    AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, AuthSignatureFrame,
     CompressionRequestFrame, Frame, FrameTrait, HelloFrame, Keepalive2AckFrame, ServerIdentFrame,
     Tag,
 };
@@ -62,6 +62,11 @@ pub enum StateResult {
     },
     /// Connection established successfully
     Ready,
+    /// Reconnection established successfully - replay messages after msg_seq
+    ReconnectReady {
+        /// Last message sequence acknowledged by server
+        msg_seq: u64,
+    },
     /// Connection should be closed due to error
     Fault(String),
 }
@@ -669,6 +674,11 @@ impl State for AuthConnecting {
                                 global_id,
                                 denc::EntityAddr::default(), // Placeholder, will be set in apply_result
                                 denc::EntityAddr::default(), // Placeholder, will be set in apply_result
+                                rand::random(), // client_cookie - will be overridden in apply_result
+                                0,              // server_cookie - will be set in apply_result
+                                0,              // global_seq - will be set in apply_result
+                                0,              // connect_seq - will be set in apply_result
+                                0,              // in_seq - will be set in apply_result
                             ),
                         )))
                     } else {
@@ -860,6 +870,11 @@ impl State for CompressionConnecting {
                             self.global_id,
                             self.server_addr.clone(),
                             self.client_addr.clone(),
+                            rand::random(), // client_cookie - will be overridden in apply_result
+                            0,              // server_cookie - will be set in apply_result
+                            0,              // global_seq - will be set in apply_result
+                            0,              // connect_seq - will be set in apply_result
+                            0,              // in_seq - will be set in apply_result
                         ),
                     )))
                 } else {
@@ -1025,6 +1040,11 @@ impl State for AuthConnectingSign {
                             self.global_id,
                             self.server_addr.clone(),
                             self.client_addr.clone(),
+                            rand::random(), // client_cookie - will be overridden in apply_result
+                            0,              // server_cookie - will be set in apply_result
+                            0,              // global_seq - will be set in apply_result
+                            0,              // connect_seq - will be set in apply_result
+                            0,              // in_seq - will be set in apply_result
                         ),
                     )))
                 }
@@ -1095,6 +1115,12 @@ pub struct SessionConnecting {
     pub our_global_id: u64,
     pub server_addr: denc::EntityAddr,
     pub client_addr: denc::EntityAddr,
+    // Session cookies for reconnection
+    pub client_cookie: u64,
+    pub server_cookie: u64,
+    pub global_seq: u64,
+    pub connect_seq: u64,
+    pub in_seq: u64,
 }
 
 impl Default for SessionConnecting {
@@ -1117,6 +1143,11 @@ impl SessionConnecting {
             our_global_id: 0,
             server_addr: denc::EntityAddr::default(),
             client_addr: denc::EntityAddr::default(),
+            client_cookie: rand::random(),
+            server_cookie: 0,
+            global_seq: 0,
+            connect_seq: 0,
+            in_seq: 0,
         }
     }
 
@@ -1128,6 +1159,11 @@ impl SessionConnecting {
         our_global_id: u64,
         server_addr: denc::EntityAddr,
         client_addr: denc::EntityAddr,
+        client_cookie: u64,
+        server_cookie: u64,
+        global_seq: u64,
+        connect_seq: u64,
+        in_seq: u64,
     ) -> Self {
         Self {
             peer_addrs: Vec::new(),
@@ -1141,6 +1177,11 @@ impl SessionConnecting {
             our_global_id,
             server_addr,
             client_addr,
+            client_cookie,
+            server_cookie,
+            global_seq,
+            connect_seq,
+            in_seq,
         }
     }
 }
@@ -1156,6 +1197,10 @@ impl State for SessionConnecting {
             Tag::IdentMissingFeatures,
             Tag::Wait,
             Tag::AuthSignature,
+            Tag::SessionReconnectOk,
+            Tag::SessionRetry,
+            Tag::SessionRetryGlobal,
+            Tag::SessionReset,
         ]
     }
 
@@ -1305,6 +1350,113 @@ impl State for SessionConnecting {
                     Ok(StateResult::Continue)
                 }
             }
+            Tag::SessionReconnectOk => {
+                // Server accepted our reconnection
+                if let Some(segment) = frame.segments.first() {
+                    let mut payload = segment.clone();
+                    let msg_seq = u64::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!("Failed to decode msg_seq: {:?}", e))
+                    })?;
+
+                    tracing::info!(
+                        "✓ Reconnection successful! Server acknowledged up to msg_seq={}",
+                        msg_seq
+                    );
+
+                    // Return ReconnectReady with msg_seq so Connection can replay unacknowledged messages
+                    Ok(StateResult::ReconnectReady { msg_seq })
+                } else {
+                    Err(Error::protocol_error(
+                        "SESSION_RECONNECT_OK frame missing payload",
+                    ))
+                }
+            }
+            Tag::SessionRetry => {
+                // Server wants us to retry with a new connect_seq
+                if let Some(segment) = frame.segments.first() {
+                    let mut payload = segment.clone();
+                    let server_connect_seq = u64::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!("Failed to decode connect_seq: {:?}", e))
+                    })?;
+
+                    tracing::warn!(
+                        "Server sent SESSION_RETRY: server_connect_seq={}, our_connect_seq={}. Incrementing and retrying.",
+                        server_connect_seq,
+                        self.connect_seq
+                    );
+                    eprintln!(
+                        "DEBUG: SESSION_RETRY received, incrementing connect_seq and retrying"
+                    );
+
+                    // Increment connect_seq and resend RECONNECT
+                    self.connect_seq += 1;
+
+                    // Re-enter to send reconnect again
+                    self.enter()
+                } else {
+                    Err(Error::protocol_error("SESSION_RETRY frame missing payload"))
+                }
+            }
+            Tag::SessionRetryGlobal => {
+                // Server wants us to retry with a new global_seq
+                if let Some(segment) = frame.segments.first() {
+                    let mut payload = segment.clone();
+                    let server_global_seq = u64::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!("Failed to decode global_seq: {:?}", e))
+                    })?;
+
+                    tracing::warn!(
+                        "Server sent SESSION_RETRY_GLOBAL: server_global_seq={}, our_global_seq={}. Updating and retrying.",
+                        server_global_seq,
+                        self.global_seq
+                    );
+                    eprintln!(
+                        "DEBUG: SESSION_RETRY_GLOBAL received, updating global_seq and retrying"
+                    );
+
+                    // Update global_seq to server's value
+                    self.global_seq = server_global_seq.max(self.global_seq + 1);
+
+                    // Re-enter to send reconnect again
+                    self.enter()
+                } else {
+                    Err(Error::protocol_error(
+                        "SESSION_RETRY_GLOBAL frame missing payload",
+                    ))
+                }
+            }
+            Tag::SessionReset => {
+                // Server wants us to reset the session and start fresh
+                if let Some(segment) = frame.segments.first() {
+                    let mut payload = segment.clone();
+                    let full = bool::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!("Failed to decode full flag: {:?}", e))
+                    })?;
+
+                    tracing::warn!(
+                        "Server sent SESSION_RESET (full={}). Resetting session and sending CLIENT_IDENT",
+                        full
+                    );
+                    eprintln!(
+                        "DEBUG: SESSION_RESET received (full={}), resetting session",
+                        full
+                    );
+
+                    // Reset session cookies (server_cookie = 0 will trigger CLIENT_IDENT in enter())
+                    self.server_cookie = 0;
+                    if full {
+                        // Full reset - also reset sequences
+                        self.global_seq = 0;
+                        self.connect_seq = 0;
+                        self.in_seq = 0;
+                    }
+
+                    // Re-enter to send CLIENT_IDENT
+                    self.enter()
+                } else {
+                    Err(Error::protocol_error("SESSION_RESET frame missing payload"))
+                }
+            }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in SESSION_CONNECTING state",
                 frame.preamble.tag
@@ -1316,87 +1468,121 @@ impl State for SessionConnecting {
         eprintln!("DEBUG: SessionConnecting::enter() called");
         eprintln!("DEBUG:   our_global_id={}", self.our_global_id);
         eprintln!("DEBUG:   connection_mode={}", self.connection_mode);
+        eprintln!("DEBUG:   client_cookie={}", self.client_cookie);
+        eprintln!("DEBUG:   server_cookie={}", self.server_cookie);
         eprintln!(
             "DEBUG:   has_connection_secret={}",
             self.connection_secret.is_some()
         );
-        // Send CLIENT_IDENT frame with proper values
-        // Use our real client address from the connection
-        // Note: EntityAddrvec now includes marker byte (0x02) in encoding
-        let addrs = denc::EntityAddrvec::with_addr(self.client_addr.clone());
 
-        // Target address is the server we're connecting to
-        let target_addr = self.server_addr.clone();
-
-        // Global ID from authentication
-        let gid = self.our_global_id as i64;
-
-        // Features - basic msgr2 features plus common Ceph features
-        // Include MSG_ADDR2 (required for msgr2) and other common features
-        const CEPH_FEATURE_MSG_ADDR2: u64 = 1 << 59;
-        const CEPH_FEATURE_SERVER_NAUTILUS: u64 = 1 << 61;
-        const CEPH_FEATURE_SERVER_OCTOPUS: u64 = 1 << 62;
-
-        let features_supported: u64 = CEPH_FEATURE_MSG_ADDR2
-            | CEPH_FEATURE_SERVER_NAUTILUS
-            | CEPH_FEATURE_SERVER_OCTOPUS
-            | (0x3fffffffffffffff); // All features up to bit 61
-
-        let features_required: u64 = CEPH_FEATURE_MSG_ADDR2;
-
-        // Flags - default to 0 (non-lossy)
-        let flags: u64 = 0;
-
-        // Cookie - generate a random cookie
-        let cookie: u64 = rand::random();
-
-        tracing::debug!(
-            "Sending CLIENT_IDENT: gid={}, target={:?}, client_addr={:?}, cookie={}",
-            gid,
-            target_addr,
-            addrs,
-            cookie
-        );
-
-        let client_ident = ClientIdentFrame::new(
-            addrs.clone(),
-            target_addr.clone(),
-            gid,
-            0, // global_seq - use 0 for new connections
-            features_supported,
-            features_required,
-            flags,
-            cookie,
-        );
-        let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
-
-        eprintln!(
-            "DEBUG: Created CLIENT_IDENT frame, {} segments",
-            frame.segments.len()
-        );
-        eprintln!("DEBUG: CLIENT_IDENT values:");
-        eprintln!("DEBUG:   addrs: {:?}", addrs);
-        eprintln!("DEBUG:   target_addr: {:?}", target_addr);
-        eprintln!("DEBUG:   gid: {}", gid);
-        eprintln!("DEBUG:   global_seq: {}", 0);
-        eprintln!("DEBUG:   features_supported: 0x{:x}", features_supported);
-        eprintln!("DEBUG:   features_required: 0x{:x}", features_required);
-        eprintln!("DEBUG:   flags: 0x{:x}", flags);
-        eprintln!("DEBUG:   cookie: {}", cookie);
-        // Log the exact bytes we're encoding for CLIENT_IDENT
-        if !frame.segments.is_empty() {
-            let payload_bytes = &frame.segments[0];
+        // Check if we're reconnecting to an existing session
+        if self.server_cookie != 0 {
+            // Reconnecting to existing session - send SESSION_RECONNECT
             tracing::info!(
-                "CLIENT_IDENT payload: {} bytes, hex: {}",
-                payload_bytes.len(),
-                hex::encode(&payload_bytes[..payload_bytes.len().min(128)])
+                "Reconnecting to existing session: client_cookie={}, server_cookie={}, global_seq={}, connect_seq={}, in_seq={}",
+                self.client_cookie,
+                self.server_cookie,
+                self.global_seq,
+                self.connect_seq,
+                self.in_seq
             );
-        }
 
-        Ok(StateResult::SendAndWait {
-            frame,
-            next_state: Box::new(self.clone()),
-        })
+            let addrs = denc::EntityAddrvec::with_addr(self.client_addr.clone());
+
+            let reconnect = crate::frames::SessionReconnectFrame::new(
+                addrs.clone(),
+                self.client_cookie,
+                self.server_cookie,
+                self.global_seq,
+                self.connect_seq,
+                self.in_seq,
+            );
+
+            let frame = create_frame_from_trait(&reconnect, Tag::SessionReconnect);
+
+            eprintln!("DEBUG: Created SESSION_RECONNECT frame");
+            eprintln!("DEBUG:   addrs: {:?}", addrs);
+            eprintln!("DEBUG:   client_cookie: {}", self.client_cookie);
+            eprintln!("DEBUG:   server_cookie: {}", self.server_cookie);
+            eprintln!("DEBUG:   global_seq: {}", self.global_seq);
+            eprintln!("DEBUG:   connect_seq: {}", self.connect_seq);
+            eprintln!("DEBUG:   in_seq (msg_seq): {}", self.in_seq);
+
+            Ok(StateResult::SendAndWait {
+                frame,
+                next_state: Box::new(self.clone()),
+            })
+        } else {
+            // New connection - send CLIENT_IDENT
+            tracing::debug!("Starting new session: client_cookie={}", self.client_cookie);
+
+            let addrs = denc::EntityAddrvec::with_addr(self.client_addr.clone());
+            let target_addr = self.server_addr.clone();
+            let gid = self.our_global_id as i64;
+
+            // Features - basic msgr2 features plus common Ceph features
+            const CEPH_FEATURE_MSG_ADDR2: u64 = 1 << 59;
+            const CEPH_FEATURE_SERVER_NAUTILUS: u64 = 1 << 61;
+            const CEPH_FEATURE_SERVER_OCTOPUS: u64 = 1 << 62;
+
+            let features_supported: u64 = CEPH_FEATURE_MSG_ADDR2
+                | CEPH_FEATURE_SERVER_NAUTILUS
+                | CEPH_FEATURE_SERVER_OCTOPUS
+                | (0x3fffffffffffffff); // All features up to bit 61
+
+            let features_required: u64 = CEPH_FEATURE_MSG_ADDR2;
+
+            // Flags - default to 0 (non-lossy)
+            let flags: u64 = 0;
+
+            tracing::debug!(
+                "Sending CLIENT_IDENT: gid={}, target={:?}, client_addr={:?}, client_cookie={}",
+                gid,
+                target_addr,
+                addrs,
+                self.client_cookie
+            );
+
+            let client_ident = crate::frames::ClientIdentFrame::new(
+                addrs.clone(),
+                target_addr.clone(),
+                gid,
+                self.global_seq,
+                features_supported,
+                features_required,
+                flags,
+                self.client_cookie,
+            );
+            let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
+
+            eprintln!(
+                "DEBUG: Created CLIENT_IDENT frame, {} segments",
+                frame.segments.len()
+            );
+            eprintln!("DEBUG: CLIENT_IDENT values:");
+            eprintln!("DEBUG:   addrs: {:?}", addrs);
+            eprintln!("DEBUG:   target_addr: {:?}", target_addr);
+            eprintln!("DEBUG:   gid: {}", gid);
+            eprintln!("DEBUG:   global_seq: {}", self.global_seq);
+            eprintln!("DEBUG:   features_supported: 0x{:x}", features_supported);
+            eprintln!("DEBUG:   features_required: 0x{:x}", features_required);
+            eprintln!("DEBUG:   flags: 0x{:x}", flags);
+            eprintln!("DEBUG:   cookie: {}", self.client_cookie);
+
+            if !frame.segments.is_empty() {
+                let payload_bytes = &frame.segments[0];
+                tracing::info!(
+                    "CLIENT_IDENT payload: {} bytes, hex: {}",
+                    payload_bytes.len(),
+                    hex::encode(&payload_bytes[..payload_bytes.len().min(128)])
+                );
+            }
+
+            Ok(StateResult::SendAndWait {
+                frame,
+                next_state: Box::new(self.clone()),
+            })
+        }
     }
 }
 
@@ -1653,6 +1839,17 @@ pub struct StateMachine {
     /// Global ID assigned by the server during authentication
     /// Used to uniquely identify this client session
     global_id: u64,
+    // Session state for reconnection
+    /// Client cookie - generated on first connection
+    client_cookie: u64,
+    /// Server cookie - assigned by server in SERVER_IDENT
+    server_cookie: u64,
+    /// Global sequence number
+    global_seq: u64,
+    /// Connection sequence number
+    connect_seq: u64,
+    /// Last received message sequence number
+    in_seq: u64,
 }
 
 impl StateMachine {
@@ -1685,7 +1882,12 @@ impl StateMachine {
             peer_supported_features: 0, // Will be set after banner exchange
             config,
             preserved_auth_provider,
-            global_id: 0, // Will be set during authentication
+            global_id: 0,                  // Will be set during authentication
+            client_cookie: rand::random(), // Generate random client cookie
+            server_cookie: 0,              // Will be assigned by server
+            global_seq: 0,
+            connect_seq: 0,
+            in_seq: 0,
         }
     }
 
@@ -1697,6 +1899,22 @@ impl StateMachine {
     /// Set the client address (called from protocol.rs after connection)
     pub fn set_client_addr(&mut self, addr: denc::EntityAddr) {
         self.client_addr = Some(addr);
+    }
+
+    /// Set session cookies for reconnection (called when resuming a session)
+    pub fn set_session_cookies(
+        &mut self,
+        client_cookie: u64,
+        server_cookie: u64,
+        global_seq: u64,
+        connect_seq: u64,
+        in_seq: u64,
+    ) {
+        self.client_cookie = client_cookie;
+        self.server_cookie = server_cookie;
+        self.global_seq = global_seq;
+        self.connect_seq = connect_seq;
+        self.in_seq = in_seq;
     }
 
     /// Set peer's supported msgr2 features (from banner exchange)
@@ -1759,6 +1977,11 @@ impl StateMachine {
             config: crate::ConnectionConfig::default(),
             preserved_auth_provider: None, // Server doesn't use auth provider
             global_id: 0, // Server doesn't have a global_id (it assigns them to clients)
+            client_cookie: 0, // Will be received from client
+            server_cookie: rand::random(), // Generate random server cookie
+            global_seq: 0,
+            connect_seq: 0,
+            in_seq: 0,
         }
     }
 
@@ -2104,6 +2327,11 @@ impl StateMachine {
                             compression_state.global_id,
                             compression_state.server_addr.clone(),
                             compression_state.client_addr.clone(),
+                            self.client_cookie,
+                            self.server_cookie,
+                            self.global_seq,
+                            self.connect_seq,
+                            self.in_seq,
                         ));
 
                         // Store global_id in StateMachine for later access
@@ -2147,6 +2375,11 @@ impl StateMachine {
                             session_state.our_global_id,
                             server_addr,
                             client_addr,
+                            self.client_cookie,
+                            self.server_cookie,
+                            self.global_seq,
+                            self.connect_seq,
+                            self.in_seq,
                         ));
 
                         self.current_state = new_session_state;
