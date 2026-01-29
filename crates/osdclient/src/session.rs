@@ -148,8 +148,17 @@ impl OSDSession {
         let pending_ops = Arc::clone(&self.pending_ops);
         let backoffs = Arc::clone(&self.backoffs);
         let osd_id = self.osd_id;
+        let send_tx_clone = self.send_tx.clone();
         tokio::spawn(async move {
-            Self::io_task(osd_id, connection, send_rx, pending_ops, backoffs).await;
+            Self::io_task(
+                osd_id,
+                connection,
+                send_tx_clone,
+                send_rx,
+                pending_ops,
+                backoffs,
+            )
+            .await;
         });
 
         info!("✓ I/O task started for OSD {}", self.osd_id);
@@ -167,6 +176,7 @@ impl OSDSession {
     async fn io_task(
         osd_id: i32,
         mut connection: msgr2::protocol::Connection,
+        send_tx: mpsc::Sender<msgr2::message::Message>,
         mut send_rx: mpsc::Receiver<msgr2::message::Message>,
         pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
         backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
@@ -194,7 +204,51 @@ impl OSDSession {
                                     // Decode MOSDOpReply from message sections
                                     match MOSDOpReply::decode(&msg.front, &msg.data) {
                                         Ok(reply) => {
-                                            Self::handle_reply(tid, reply, &pending_ops).await;
+                                            // Handle reply and check if retry is needed
+                                            if let Some((mut pending_op, new_flags)) =
+                                                Self::handle_reply(tid, reply, &pending_ops).await
+                                            {
+                                                // EAGAIN on replica read - retry to primary
+                                                debug!(
+                                                    "Resubmitting operation tid {} with flags 0x{:x} (was 0x{:x})",
+                                                    tid, new_flags, pending_op.op.flags
+                                                );
+
+                                                // Modify flags
+                                                pending_op.op.flags = new_flags;
+                                                pending_op.attempts += 1;
+
+                                                // Encode the operation
+                                                match CephMessage::from_payload(&pending_op.op, 0, CrcFlags::ALL) {
+                                                    Ok(ceph_msg) => {
+                                                        // Create msgr2 message
+                                                        let mut retry_msg = msgr2::message::Message::new(
+                                                            crate::messages::CEPH_MSG_OSD_OP,
+                                                            ceph_msg.front,
+                                                        )
+                                                        .with_version(ceph_msg.header.version)
+                                                        .with_tid(tid);
+                                                        retry_msg.header.compat_version = ceph_msg.header.compat_version;
+                                                        retry_msg.data = ceph_msg.data;
+
+                                                        pending_op.tid = tid;
+
+                                                        // Re-add to pending ops
+                                                        {
+                                                            let mut pending = pending_ops.write().await;
+                                                            pending.insert(tid, pending_op);
+                                                        }
+
+                                                        // Send the message
+                                                        if let Err(e) = send_tx.send(retry_msg).await {
+                                                            error!("Failed to resubmit operation: {}", e);
+                                                        }
+                                                    }
+                                                    Err(e) => {
+                                                        error!("Failed to encode retry operation: {}", e);
+                                                    }
+                                                }
+                                            }
                                         }
                                         Err(e) => {
                                             error!("Failed to decode MOSDOpReply: {}", e);
@@ -301,11 +355,13 @@ impl OSDSession {
     }
 
     /// Handle an operation reply
+    ///
+    /// Returns Some((pending_op, modified_flags)) if the operation should be retried with modified flags
     async fn handle_reply(
         tid: u64,
         reply: MOSDOpReply,
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
-    ) {
+    ) -> Option<(PendingOp, u32)> {
         let pending_op = {
             let mut pending = pending_ops.write().await;
             pending.remove(&tid)
@@ -322,11 +378,31 @@ impl OSDSession {
                         "Ignoring stale reply for tid {}: retry_attempt {} != expected {} (attempts={})",
                         tid, reply.retry_attempt, pending_op.attempts - 1, pending_op.attempts
                     );
-                    return;
+                    return None;
                 }
             } else {
                 // Old server that doesn't support retry_attempt
                 warn!("Received reply without retry_attempt for tid {}", tid);
+            }
+
+            // Check for EAGAIN on replica reads
+            // See: ~/dev/ceph/src/osdc/Objecter.cc handle_reply()
+            const EAGAIN: i32 = -11;
+            if reply.result == EAGAIN {
+                // Check if this was a replica read
+                use crate::types::{CEPH_OSD_FLAG_BALANCE_READS, CEPH_OSD_FLAG_LOCALIZE_READS};
+                let replica_flags = CEPH_OSD_FLAG_BALANCE_READS | CEPH_OSD_FLAG_LOCALIZE_READS;
+
+                if pending_op.op.flags & replica_flags != 0 {
+                    debug!(
+                        "Got EAGAIN for replica read tid {}, resubmitting to primary",
+                        tid
+                    );
+
+                    // Remove replica read flags and retry (will go to primary)
+                    let new_flags = pending_op.op.flags & !replica_flags;
+                    return Some((pending_op, new_flags));
+                }
             }
 
             let result = reply.to_op_result();
@@ -334,6 +410,8 @@ impl OSDSession {
         } else {
             warn!("Received reply for unknown tid: {}", tid);
         }
+
+        None
     }
 
     /// Handle an OSD backoff message

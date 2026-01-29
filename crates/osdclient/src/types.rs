@@ -10,6 +10,10 @@ pub const CEPH_OSD_FLAG_IGNORE_CACHE: u32 = 0x8000;
 pub const CEPH_OSD_FLAG_IGNORE_OVERLAY: u32 = 0x20000;
 /// Operation has been redirected (for EC pools)
 pub const CEPH_OSD_FLAG_REDIRECTED: u32 = 0x200000;
+/// Balance reads among replicas
+pub const CEPH_OSD_FLAG_BALANCE_READS: u32 = 0x0100;
+/// Read from nearby replica, if any
+pub const CEPH_OSD_FLAG_LOCALIZE_READS: u32 = 0x2000;
 
 /// Object identification (corresponds to hobject_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
