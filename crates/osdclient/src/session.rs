@@ -44,6 +44,14 @@ pub struct PendingOp {
     /// Number of times this operation has been attempted
     /// Used to validate retry_attempt in replies
     pub attempts: i32,
+    /// Pool ID for OSDMap rescanning
+    pub pool_id: i64,
+    /// Object ID for OSDMap rescanning
+    pub object_id: String,
+    /// OSDMap epoch this operation was submitted against
+    pub osdmap_epoch: u32,
+    /// Full operation for potential resubmission
+    pub op: MOSDOp,
 }
 
 impl OSDSession {
@@ -208,6 +216,10 @@ impl OSDSession {
                     result_tx: tx,
                     submitted_at: Instant::now(),
                     attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
+                    pool_id: op.object.pool,
+                    object_id: op.object.oid.clone(),
+                    osdmap_epoch: op.osdmap_epoch,
+                    op: op.clone(),
                 },
             );
         }
