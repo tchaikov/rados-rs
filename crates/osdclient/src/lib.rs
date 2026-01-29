@@ -17,6 +17,7 @@ pub mod ioctx;
 pub mod messages;
 pub mod operation;
 pub mod session;
+pub mod throttle;
 pub mod tracker;
 pub mod types;
 

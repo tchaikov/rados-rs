@@ -3,6 +3,14 @@
 use bytes::Bytes;
 use std::time::SystemTime;
 
+// OSD operation flags (from ~/dev/ceph/src/include/rados.h)
+/// Ignore cache logic (used for redirects)
+pub const CEPH_OSD_FLAG_IGNORE_CACHE: u32 = 0x8000;
+/// Ignore pool overlay (used for redirects)
+pub const CEPH_OSD_FLAG_IGNORE_OVERLAY: u32 = 0x20000;
+/// Operation has been redirected (for EC pools)
+pub const CEPH_OSD_FLAG_REDIRECTED: u32 = 0x200000;
+
 /// Object identification (corresponds to hobject_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectId {
@@ -565,6 +573,47 @@ impl OSDOp {
     }
 }
 
+/// Calculate operation budget (bytes consumed by operations)
+///
+/// This matches C++ Objecter::calc_op_budget() from ~/dev/ceph/src/osdc/Objecter.cc:3527-3543
+///
+/// Budget calculation rules:
+/// - Write operations: sum of indata lengths (actual data being written)
+/// - Read operations with extent: extent length (expected response size)
+/// - Attribute operations: name_len + value_len
+/// - Other operations: 0 bytes
+///
+/// # Arguments
+/// * `ops` - List of OSD operations
+///
+/// # Returns
+/// Total bytes that this operation set will consume in-flight
+pub fn calc_op_budget(ops: &[OSDOp]) -> usize {
+    ops.iter()
+        .map(|op| {
+            // Write operations contribute indata size
+            if op.op.is_write() {
+                return op.indata.len();
+            }
+
+            // Read operations contribute expected response size
+            if op.op.is_read() {
+                if let OpData::Extent { length, .. } = op.op_data {
+                    if length > 0 {
+                        return length as usize;
+                    }
+                }
+                // Attribute operations (getxattr, etc.)
+                // In C++: name_len + value_len from op.xattr
+                // For now we'll estimate conservatively
+                // TODO: Add xattr fields to OpData::Xattr variant if needed
+            }
+
+            0
+        })
+        .sum()
+}
+
 /// Result of a read operation
 #[derive(Debug, Clone)]
 pub struct ReadResult {
@@ -601,6 +650,8 @@ pub struct OpResult {
     pub user_version: u64,
     /// Per-operation results
     pub ops: Vec<OpReply>,
+    /// Redirect information (for EC pools)
+    pub redirect: Option<RequestRedirect>,
 }
 
 /// Single operation reply

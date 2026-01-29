@@ -381,6 +381,7 @@ impl MOSDOpReply {
             version: self.user_version,
             user_version: self.user_version,
             ops: self.ops,
+            redirect: self.redirect,
         }
     }
 }
