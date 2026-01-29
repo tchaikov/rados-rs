@@ -8,6 +8,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use denc::Denc;
+use monclient::client::MapEvent;
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
@@ -57,13 +58,79 @@ impl OSDClient {
 
         let tracker = Arc::new(Tracker::new(config.tracker_config.clone()));
 
-        Ok(Self {
+        let client = Self {
             config,
-            mon_client,
+            mon_client: Arc::clone(&mon_client),
             sessions: Arc::new(RwLock::new(HashMap::new())),
             tracker,
             global_id,
-        })
+        };
+
+        // Subscribe to OSDMap updates for request rescanning
+        let mut map_rx = mon_client.subscribe_events();
+        let sessions = Arc::clone(&client.sessions);
+        let mon_client_clone = Arc::clone(&mon_client);
+        tokio::spawn(async move {
+            info!("OSDMap event listener task started");
+            while let Ok(event) = map_rx.recv().await {
+                if let MapEvent::OsdMapUpdated { epoch } = event {
+                    debug!("OSDMap updated to epoch {}, rescanning operations", epoch);
+                    if let Err(e) =
+                        Self::handle_osdmap_update(epoch, &sessions, &mon_client_clone).await
+                    {
+                        tracing::error!("Error handling OSDMap update: {}", e);
+                    }
+                }
+            }
+            info!("OSDMap event listener task ended");
+        });
+
+        Ok(client)
+    }
+
+    /// Handle OSDMap updates and rescan pending operations
+    ///
+    /// This method is called when the OSDMap is updated. It checks if any pending
+    /// operations need to be moved to a different OSD due to topology changes.
+    ///
+    /// TODO: Implement full operation migration logic
+    /// Currently this only logs when operations would need to move.
+    /// Full implementation requires:
+    /// - Methods in OSDSession to access and cancel pending operations
+    /// - Logic to migrate operations between sessions
+    /// - Proper handling of result channels and attempts counters
+    async fn handle_osdmap_update(
+        epoch: u64,
+        _sessions: &Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
+        mon_client: &Arc<monclient::MonClient>,
+    ) -> Result<()> {
+        // Get the new OSDMap
+        let osdmap = mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+
+        if osdmap.epoch != epoch as u32 {
+            debug!(
+                "OSDMap epoch mismatch: expected {}, got {}",
+                epoch, osdmap.epoch
+            );
+        }
+
+        debug!(
+            "OSDMap updated to epoch {}, rescanning not yet fully implemented",
+            epoch
+        );
+
+        // TODO: Implement full rescanning logic:
+        // 1. For each session with pending operations
+        // 2. For each pending operation:
+        //    - Recalculate CRUSH placement with new OSDMap
+        //    - Check if target OSD changed
+        //    - If changed: cancel old operation, resubmit to new OSD
+        // 3. Handle POOL_DNE (pool deleted) and POOL_EIO conditions
+
+        Ok(())
     }
 
     /// Get or create a session for an OSD

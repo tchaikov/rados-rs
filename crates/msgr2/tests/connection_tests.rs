@@ -1,13 +1,12 @@
 //! Integration tests for msgr2 connection functionality
 //!
-//! These tests require a running Ceph cluster and the CEPH_MON_ADDR environment variable to be set.
-//! Tests are marked with `#[ignore]` to skip them during regular `cargo test` runs.
+//! These tests require a running Ceph cluster and CEPH_CONF environment variable.
 //!
-//! To run these tests:
-//! ```bash
-//! export CEPH_MON_ADDR=<your_monitor_address:port>
-//! cargo test --test connection_tests -- --ignored --nocapture
-//! ```
+//! Configuration:
+//!    CEPH_CONF=/path/to/ceph.conf cargo test --test connection_tests -- --ignored
+//!
+//! Example:
+//!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package msgr2 --test connection_tests -- --ignored
 //!
 //! To run all tests including these integration tests locally:
 //! ```bash
@@ -16,39 +15,35 @@
 //!
 //! ## Authentication Configuration
 //!
-//! The tests support both CephX authentication and no-auth clusters.
-//! Authentication method can be controlled via the `CEPH_AUTH_METHOD` environment variable:
-//!
-//! ### For clusters with authentication disabled (no-auth):
-//! ```bash
-//! export CEPH_AUTH_METHOD=none
-//! ```
-//!
-//! ### For clusters with authentication enabled (CephX):
-//! ```bash
-//! export CEPH_AUTH_METHOD=cephx
-//! export CEPH_KEYRING=/path/to/ceph/build/keyring
-//! ```
-//!
-//! ### Auto-detection behavior:
-//! If `CEPH_AUTH_METHOD` is not set, the protocol layer will auto-detect:
-//! - If ceph.conf is found → parse `auth client required` setting
-//! - Filter out cephx if keyring is not available or not readable
-//! - Use the available authentication methods from ceph.conf
+//! Authentication settings are read from ceph.conf automatically.
 //!
 
 use msgr2::protocol::Connection;
 use msgr2::{AuthMethod, ConnectionConfig};
+use std::env;
 use std::net::SocketAddr;
 use std::path::Path;
 
-/// Helper function to get the Ceph monitor address from environment variable
-/// Panics if CEPH_MON_ADDR is not set or invalid
+/// Helper function to get the Ceph monitor address from ceph.conf
 fn get_ceph_mon_addr() -> SocketAddr {
-    std::env::var("CEPH_MON_ADDR")
-        .expect("CEPH_MON_ADDR environment variable not set. Set it with: export CEPH_MON_ADDR=<monitor_address:port>")
-        .parse()
-        .expect("Failed to parse CEPH_MON_ADDR as a valid socket address (format: IP:PORT)")
+    let conf_path =
+        env::var("CEPH_CONF").unwrap_or_else(|_| "/home/kefu/dev/ceph/build/ceph.conf".to_string());
+
+    let config = cephconfig::CephConfig::from_file(&conf_path)
+        .unwrap_or_else(|_| panic!("Failed to read ceph.conf at {}", conf_path));
+
+    let addr = config
+        .first_v2_mon_addr()
+        .expect("Failed to get v2 monitor address from ceph.conf");
+
+    // Parse v2:IP:PORT format
+    let stripped = addr
+        .strip_prefix("v2:")
+        .unwrap_or_else(|| panic!("Monitor address does not have v2: prefix: {}", addr));
+
+    stripped
+        .parse::<SocketAddr>()
+        .unwrap_or_else(|_| panic!("Failed to parse monitor address: {}", stripped))
 }
 
 /// Helper function to configure authentication method based on ceph.conf
