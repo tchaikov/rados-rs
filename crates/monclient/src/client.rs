@@ -1017,7 +1017,7 @@ impl MonClient {
                     "Received CEPH_MSG_POOLOP_REPLY (0x{:04x})",
                     msgr2::message::CEPH_MSG_POOLOP_REPLY
                 );
-                Self::handle_poolop_reply(state, msg).await?;
+                Self::handle_poolop_reply(state, map_events, msg).await?;
             }
             _ => {
                 debug!(
@@ -1380,6 +1380,7 @@ impl MonClient {
     /// Handle pool operation reply
     async fn handle_poolop_reply(
         state: &Arc<RwLock<MonClientState>>,
+        map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         // Decode the pool operation reply message from the front payload
@@ -1412,28 +1413,60 @@ impl MonClient {
                 reply_epoch, current_epoch
             );
 
-            // Wait for OSDMap to be updated (with timeout)
-            let max_wait = std::time::Duration::from_secs(30);
-            let start = std::time::Instant::now();
+            // Subscribe to map events (event-driven approach, not polling)
+            let mut map_rx = map_events.subscribe();
+            let max_wait = tokio::time::Duration::from_secs(30);
 
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Wait for OSDMap update using event-driven approach
+            match tokio::time::timeout(max_wait, async {
+                loop {
+                    // Check current epoch first
+                    {
+                        let state_guard = state.read().await;
+                        let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
+                        if current >= reply_epoch {
+                            return current;
+                        }
+                    }
 
-                let state_guard = state.read().await;
-                let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
-                drop(state_guard);
-
-                if current >= reply_epoch {
-                    info!("✓ OSDMap updated to epoch {}", current);
-                    break;
+                    // Wait for next map event
+                    match map_rx.recv().await {
+                        Ok(MapEvent::OsdMapUpdated { epoch }) => {
+                            if epoch >= reply_epoch as u64 {
+                                return epoch as u32;
+                            }
+                        }
+                        Ok(_) => continue, // Other map types, ignore
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // Lagged behind, check current state and continue
+                            let state_guard = state.read().await;
+                            let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
+                            if current >= reply_epoch {
+                                return current;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            warn!("Map events channel closed unexpectedly");
+                            break;
+                        }
+                    }
                 }
-
-                if start.elapsed() > max_wait {
+                0 // Should not reach here
+            })
+            .await
+            {
+                Ok(epoch) => {
+                    info!("✓ OSDMap updated to epoch {}", epoch);
+                }
+                Err(_) => {
+                    let current_epoch = {
+                        let state_guard = state.read().await;
+                        state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0)
+                    };
                     warn!(
                         "Timeout waiting for OSDMap epoch {} (current: {})",
-                        reply_epoch, current
+                        reply_epoch, current_epoch
                     );
-                    break;
                 }
             }
         }
