@@ -620,18 +620,34 @@ impl MonClient {
         // Note: Connection is now managed by a background task, no need to test it
         // The task was already spawned in MonConnection::connect()
 
-        // Store as active connection
+        // Store as active connection (but check if we won the race)
         let mut state = self.state.write().await;
+
+        // If we're no longer hunting, another connection won the race
+        if !state.hunting {
+            debug!(
+                "Connection to mon.{} succeeded but another monitor already won the hunt",
+                rank
+            );
+            drop(state);
+            // Close this connection since we don't need it
+            mon_con.close().await?;
+            return Ok(());
+        }
 
         // Get global_id from the connection
         let global_id = mon_con.global_id().await;
         tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
 
+        // We won the race - set this as the active connection
         state.active_con = Some(mon_con);
         state.hunting = false;
         // Authentication was completed during MonConnection::connect() -> establish_session()
         state.authenticated = true;
         state.global_id = global_id; // Store global_id in MonClient
+
+        // Clear any pending connections (from parallel hunt)
+        state.pending_cons.clear();
 
         // Mark that we've had a successful connection
         state.had_a_connection = true;
