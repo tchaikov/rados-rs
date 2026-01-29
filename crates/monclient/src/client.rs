@@ -416,12 +416,11 @@ impl MonClient {
     async fn start_hunting(&self) -> Result<()> {
         info!("Starting monitor hunt");
 
-        // Apply backoff delay if we had a connection and recently tried hunting
+        // Apply backoff delay if we recently tried hunting
         let delay = {
-            let mut state = self.state.write().await;
+            let state = self.state.read().await;
 
-            // Calculate backoff delay
-            let delay = if state.had_a_connection {
+            if state.had_a_connection {
                 if let Some(last_attempt) = state.last_hunt_attempt {
                     let elapsed = last_attempt.elapsed();
                     let hunt_delay = self
@@ -444,30 +443,16 @@ impl MonClient {
                 }
             } else {
                 None
-            };
-
-            // Update last hunt attempt time
-            state.last_hunt_attempt = Some(std::time::Instant::now());
-
-            // Increase backoff multiplier for next attempt
-            if state.had_a_connection {
-                state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
-                if state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
-                    state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
-                }
-                debug!(
-                    "Updated backoff multiplier to {:.2} (max: {:.2})",
-                    state.reopen_interval_multiplier, self.config.hunt_interval_max_multiple
-                );
             }
-
-            delay
         };
 
         // Sleep for backoff delay if needed
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
+
+        // Record hunt attempt time before trying
+        let hunt_start = std::time::Instant::now();
 
         let state = self.state.read().await;
         let monmap = state.monmap.clone();
@@ -536,9 +521,9 @@ impl MonClient {
         };
 
         // Try connecting to n monitors in parallel
-        if n == 1 {
+        let hunt_result = if n == 1 {
             // Simple case: try one monitor
-            self.connect_to_mon(selected_ranks[0]).await?;
+            self.connect_to_mon(selected_ranks[0]).await
         } else {
             // Parallel case: try multiple monitors, first one to succeed wins
             use futures::future::select_ok;
@@ -557,14 +542,31 @@ impl MonClient {
                 Ok((_, _)) => {
                     // First connection succeeded
                     info!("Successfully connected to a monitor");
+                    Ok(())
                 }
-                Err(e) => {
-                    return Err(e);
+                Err(e) => Err(e),
+            }
+        };
+
+        // Update backoff state based on hunt result
+        {
+            let mut state = self.state.write().await;
+            state.last_hunt_attempt = Some(hunt_start);
+
+            if hunt_result.is_err() && state.had_a_connection {
+                // Hunt failed - increase backoff for next attempt
+                state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
+                if state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
+                    state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
                 }
+                debug!(
+                    "Hunt failed, increased backoff multiplier to {:.2}",
+                    state.reopen_interval_multiplier
+                );
             }
         }
 
-        Ok(())
+        hunt_result
     }
 
     /// Connect to a specific monitor
@@ -620,6 +622,10 @@ impl MonClient {
         // Note: Connection is now managed by a background task, no need to test it
         // The task was already spawned in MonConnection::connect()
 
+        // Get global_id before taking lock (avoid holding lock during async call)
+        let global_id = mon_con.global_id().await;
+        tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
+
         // Store as active connection (but check if we won the race)
         let mut state = self.state.write().await;
 
@@ -634,10 +640,6 @@ impl MonClient {
             mon_con.close().await?;
             return Ok(());
         }
-
-        // Get global_id from the connection
-        let global_id = mon_con.global_id().await;
-        tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // We won the race - set this as the active connection
         state.active_con = Some(mon_con);

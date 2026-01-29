@@ -219,33 +219,67 @@ impl OSDSession {
                                                 pending_op.attempts += 1;
 
                                                 // Encode the operation
-                                                match CephMessage::from_payload(&pending_op.op, 0, CrcFlags::ALL) {
+                                                let encode_result = CephMessage::from_payload(
+                                                    &pending_op.op,
+                                                    0,
+                                                    CrcFlags::ALL,
+                                                );
+
+                                                match encode_result {
                                                     Ok(ceph_msg) => {
                                                         // Create msgr2 message
-                                                        let mut retry_msg = msgr2::message::Message::new(
-                                                            crate::messages::CEPH_MSG_OSD_OP,
-                                                            ceph_msg.front,
-                                                        )
-                                                        .with_version(ceph_msg.header.version)
-                                                        .with_tid(tid);
-                                                        retry_msg.header.compat_version = ceph_msg.header.compat_version;
+                                                        let mut retry_msg =
+                                                            msgr2::message::Message::new(
+                                                                crate::messages::CEPH_MSG_OSD_OP,
+                                                                ceph_msg.front,
+                                                            )
+                                                            .with_version(ceph_msg.header.version)
+                                                            .with_tid(tid);
+                                                        retry_msg.header.compat_version =
+                                                            ceph_msg.header.compat_version;
                                                         retry_msg.data = ceph_msg.data;
 
                                                         pending_op.tid = tid;
 
-                                                        // Re-add to pending ops
+                                                        // Re-add to pending ops before sending
                                                         {
-                                                            let mut pending = pending_ops.write().await;
+                                                            let mut pending =
+                                                                pending_ops.write().await;
                                                             pending.insert(tid, pending_op);
                                                         }
 
-                                                        // Send the message
-                                                        if let Err(e) = send_tx.send(retry_msg).await {
-                                                            error!("Failed to resubmit operation: {}", e);
+                                                        // Send the message - if this fails, operation will timeout
+                                                        if let Err(e) = send_tx.send(retry_msg).await
+                                                        {
+                                                            error!(
+                                                                "Failed to send retry for tid {}: {}",
+                                                                tid, e
+                                                            );
+                                                            // Remove from pending and notify client of failure
+                                                            let mut pending =
+                                                                pending_ops.write().await;
+                                                            if let Some(op) = pending.remove(&tid) {
+                                                                let _ = op.result_tx.send(Err(
+                                                                    OSDClientError::Connection(
+                                                                        "Failed to send retry"
+                                                                            .into(),
+                                                                    ),
+                                                                ));
+                                                            }
                                                         }
                                                     }
                                                     Err(e) => {
-                                                        error!("Failed to encode retry operation: {}", e);
+                                                        error!(
+                                                            "Failed to encode retry for tid {}: {}",
+                                                            tid, e
+                                                        );
+                                                        // Notify client of encoding failure
+                                                        let _ = pending_op.result_tx.send(Err(
+                                                            OSDClientError::Encoding(format!(
+                                                                "Failed to encode retry: {}",
+                                                                e
+                                                            )),
+                                                        ));
                                                     }
                                                 }
                                             }
