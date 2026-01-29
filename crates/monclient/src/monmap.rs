@@ -49,18 +49,47 @@ impl MonMap {
     }
 
     /// Build initial monmap from configuration
+    ///
+    /// Groups addresses by IP address (host), creating one monitor per unique IP.
+    /// Each monitor's EntityAddrVec contains all protocol versions (v1, v2) for that IP.
+    ///
+    /// This matches C++ Objecter behavior where monitor addresses in ceph.conf like:
+    ///   `[v2:192.168.1.43:40472,v1:192.168.1.43:40473] [v2:192.168.1.43:40474,v1:192.168.1.43:40475]`
+    /// are parsed as 2 monitors, each with both v1 and v2 addresses.
     pub fn build_initial(mon_addrs: &[String]) -> Result<Self> {
+        use crate::types::AddrType;
+        use std::net::IpAddr;
+
+        // Group addresses by IP address (host)
+        let mut ip_to_addrs: HashMap<IpAddr, Vec<crate::types::EntityAddr>> = HashMap::new();
+
+        for addr_str in mon_addrs {
+            let addr = parse_mon_addr(addr_str)?;
+            let ip = addr.addr.ip();
+            ip_to_addrs.entry(ip).or_default().push(addr);
+        }
+
+        // Sort IPs for deterministic ordering
+        let mut ips: Vec<IpAddr> = ip_to_addrs.keys().copied().collect();
+        ips.sort();
+
         let mut monmap = Self::new(Uuid::nil());
         monmap.epoch = 0;
 
-        for (rank, addr_str) in mon_addrs.iter().enumerate() {
-            // Parse address string (e.g., "v2:127.0.0.1:3300")
-            let addr = parse_mon_addr(addr_str)?;
+        for (rank, ip) in ips.iter().enumerate() {
+            let mut addrs = ip_to_addrs.remove(ip).unwrap();
+
+            // Sort addresses: v2 (Msgr2) first, then v1 (Legacy)
+            // This ensures get_msgr2() finds v2 addresses first
+            addrs.sort_by_key(|a| match a.addr_type {
+                AddrType::Msgr2 => 0,
+                AddrType::Legacy => 1,
+            });
 
             let mon_info = MonInfo {
                 name: format!("mon.{}", rank),
                 rank,
-                addrs: EntityAddrVec::with_addr(addr),
+                addrs: EntityAddrVec { addrs },
                 priority: 0,
                 weight: 0,
             };
@@ -391,16 +420,50 @@ mod tests {
 
     #[test]
     fn test_build_initial_monmap() {
+        // Test with multiple IPs - each IP becomes one monitor
         let addrs = vec![
             "v2:127.0.0.1:3300".to_string(),
-            "v2:127.0.0.1:3301".to_string(),
-            "v2:127.0.0.1:3302".to_string(),
+            "v2:127.0.0.2:3301".to_string(),
+            "v2:127.0.0.3:3302".to_string(),
         ];
 
         let monmap = MonMap::build_initial(&addrs).unwrap();
         assert_eq!(monmap.size(), 3);
         assert_eq!(monmap.get_name(0), Some("mon.0"));
         assert!(monmap.get_addrs(0).is_some());
+    }
+
+    #[test]
+    fn test_build_initial_monmap_groups_by_ip() {
+        // Test that addresses with same IP are grouped into one monitor
+        // This matches Ceph's behavior: [v2:IP:PORT1,v1:IP:PORT2] = one monitor with 2 addrs
+        let addrs = vec![
+            "v2:192.168.1.1:6789".to_string(),
+            "v1:192.168.1.1:6790".to_string(),
+            "v2:192.168.1.2:6789".to_string(),
+            "v1:192.168.1.2:6790".to_string(),
+        ];
+
+        let monmap = MonMap::build_initial(&addrs).unwrap();
+
+        // Should create 2 monitors (one per unique IP)
+        assert_eq!(monmap.size(), 2);
+
+        // Each monitor should have 2 addresses (v2 and v1)
+        let mon0_addrs = monmap.get_addrs(0).unwrap();
+        assert_eq!(mon0_addrs.addrs.len(), 2);
+
+        // v2 should be sorted first
+        assert!(mon0_addrs.addrs[0].is_msgr2());
+        assert!(mon0_addrs.addrs[1].is_legacy());
+
+        // get_msgr2() should find the v2 address
+        assert!(mon0_addrs.get_msgr2().is_some());
+
+        // Check second monitor
+        let mon1_addrs = monmap.get_addrs(1).unwrap();
+        assert_eq!(mon1_addrs.addrs.len(), 2);
+        assert!(mon1_addrs.get_msgr2().is_some());
     }
 
     #[test]

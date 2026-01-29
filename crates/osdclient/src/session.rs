@@ -476,4 +476,127 @@ impl OSDSession {
 
         false
     }
+
+    // === OSDMap Rescanning Support ===
+
+    /// Get metadata for all pending operations
+    ///
+    /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
+    /// Used by OSDClient to determine which operations need rescanning.
+    pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, i64, String, u32)> {
+        let pending = self.pending_ops.read().await;
+        pending
+            .iter()
+            .map(|(tid, op)| (*tid, op.pool_id, op.object_id.clone(), op.osdmap_epoch))
+            .collect()
+    }
+
+    /// Remove and return a pending operation
+    ///
+    /// Used during OSDMap rescanning to extract operations that need to be
+    /// migrated to a different OSD. Returns None if the operation doesn't exist.
+    pub async fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
+        let mut pending = self.pending_ops.write().await;
+        pending.remove(&tid)
+    }
+
+    /// Insert a migrated operation from another session
+    ///
+    /// Used during OSDMap rescanning to insert an operation that was removed
+    /// from another session. The operation's MOSDOp, attempts counter, and
+    /// osdmap_epoch are updated before insertion.
+    ///
+    /// Returns an error if the operation is blocked by backoff or if sending fails.
+    pub async fn insert_migrated_op(
+        &self,
+        mut pending_op: PendingOp,
+        new_osdmap_epoch: u32,
+    ) -> Result<()> {
+        let tid = pending_op.tid;
+
+        // Update the operation's OSDMap epoch
+        pending_op.osdmap_epoch = new_osdmap_epoch;
+        pending_op.op.osdmap_epoch = new_osdmap_epoch;
+
+        // Increment attempts counter (matching C++ Objecter behavior)
+        pending_op.attempts += 1;
+
+        // Create HObject for backoff checking
+        let hobj = denc::HObject {
+            key: pending_op.op.object.key.clone(),
+            oid: pending_op.op.object.oid.clone(),
+            snapid: pending_op.op.snapid,
+            hash: pending_op.op.object.hash,
+            max: false,
+            nspace: pending_op.op.object.namespace.clone(),
+            pool: pending_op.op.object.pool,
+        };
+
+        // Check if operation is blocked by backoff
+        if self.is_blocked_by_backoff(&pending_op.op.pgid, &hobj).await {
+            // Cancel the operation with backoff error
+            let _ = pending_op
+                .result_tx
+                .send(Err(OSDClientError::Backoff(format!(
+                    "Migrated operation blocked by OSD backoff: pgid={:?}, object={}",
+                    pending_op.op.pgid, pending_op.op.object.oid
+                ))));
+            return Err(OSDClientError::Backoff(format!(
+                "Migrated operation blocked by backoff: pgid={:?}",
+                pending_op.op.pgid
+            )));
+        }
+
+        // Insert into pending operations
+        {
+            let mut pending = self.pending_ops.write().await;
+            pending.insert(tid, pending_op);
+        }
+
+        // Note: We don't send the message here because the io_task will handle retransmission
+        // if needed based on the OSDMap epoch mismatch. The OSD will detect the stale epoch
+        // and respond appropriately.
+        //
+        // Actually, we DO need to send it because this is a migration from a different session.
+        // The new session's io_task doesn't know about this operation yet.
+
+        // Get a reference to the op for sending
+        let pending = self.pending_ops.read().await;
+        let op = match pending.get(&tid) {
+            Some(p) => p.op.clone(),
+            None => {
+                return Err(OSDClientError::Internal(
+                    "Operation disappeared after insertion".into(),
+                ))
+            }
+        };
+        drop(pending);
+
+        // Encode and send the operation
+        let ceph_msg = CephMessage::from_payload(&op, 0, CrcFlags::ALL)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
+
+        let mut msg =
+            msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
+                .with_version(ceph_msg.header.version)
+                .with_tid(tid);
+        msg.header.compat_version = ceph_msg.header.compat_version;
+        msg.data = ceph_msg.data;
+
+        // Send to channel
+        self.send_tx
+            .send(msg)
+            .await
+            .map_err(|_| OSDClientError::Connection("Send channel closed".into()))?;
+
+        info!(
+            "Migrated operation {} to OSD {} (attempt {}, epoch {})",
+            tid,
+            self.osd_id,
+            op.reqid.inc + 1,
+            new_osdmap_epoch
+        );
+
+        Ok(())
+    }
 }
