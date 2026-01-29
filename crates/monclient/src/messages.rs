@@ -626,9 +626,15 @@ impl MPoolOp {
     }
 
     /// Create a pool creation message
-    pub fn create_pool(fsid: [u8; 16], name: String, crush_rule: Option<i16>) -> Self {
+    ///
+    /// # Arguments
+    /// * `fsid` - Cluster FSID
+    /// * `name` - Pool name
+    /// * `crush_rule` - Optional CRUSH rule ID
+    /// * `version` - Current OSDMap epoch (used by paxos versioning)
+    pub fn create_pool(fsid: [u8; 16], name: String, crush_rule: Option<i16>, version: u64) -> Self {
         Self {
-            paxos: PaxosFields::new(),
+            paxos: PaxosFields::with_version(version),
             fsid: UuidD::from_bytes(fsid),
             pool: 0,
             name,
@@ -644,14 +650,15 @@ impl MPoolOp {
     /// * `fsid` - Cluster FSID
     /// * `pool` - Pool ID to delete
     /// * `_pool_name` - Pool name (unused, kept for API compatibility)
+    /// * `version` - Current OSDMap epoch (used by paxos versioning)
     ///
     /// # Note
     /// The `name` field is set to "delete" as a confirmation mechanism.
     /// This prevents accidental deletions - the monitor will only proceed
     /// with deletion if the name field is NOT a valid pool name.
-    pub fn delete_pool(fsid: [u8; 16], pool: u32, _pool_name: String) -> Self {
+    pub fn delete_pool(fsid: [u8; 16], pool: u32, _pool_name: String, version: u64) -> Self {
         Self {
-            paxos: PaxosFields::new(),
+            paxos: PaxosFields::with_version(version),
             fsid: UuidD::from_bytes(fsid),
             pool,
             name: "delete".to_string(), // Confirmation string, NOT the pool name!

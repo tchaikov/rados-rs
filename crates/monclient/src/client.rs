@@ -132,9 +132,7 @@ pub enum MapEvent {
 /// Keepalive state (separate from main state to avoid lock contention)
 #[derive(Default)]
 struct KeepaliveState {
-    /// Last time we sent a keepalive ping
-    last_sent: Option<std::time::Instant>,
-    /// Last time we received a keepalive ACK
+    /// Last time we received a keepalive ACK (from monitor-initiated pings)
     last_ack: Option<std::time::Instant>,
 }
 
@@ -781,15 +779,15 @@ impl MonClient {
 
         let now = std::time::Instant::now();
 
-        // Get keepalive timing and check if we need to send
-        let (should_send_keepalive, should_reopen) = {
-            let ka_state = keepalive_state.lock().await;
-            let should_send = match ka_state.last_sent {
-                Some(last) => now.duration_since(last) >= config.keepalive_interval,
-                None => true, // Send first keepalive
-            };
+        // NOTE: Application-level keepalive (CEPH_MSG_PING) is NOT sent to monitors
+        // because monitors reject these messages from clients. The msgr2 protocol
+        // has built-in connection-level keepalive that handles this automatically.
+        // We only check for timeout but don't send pings.
 
-            let should_reopen = if config.keepalive_timeout > Duration::from_secs(0) {
+        // Check if we should reopen due to keepalive timeout
+        let should_reopen = {
+            let ka_state = keepalive_state.lock().await;
+            if config.keepalive_timeout > Duration::from_secs(0) {
                 if let Some(last_ack_time) = ka_state.last_ack {
                     now.duration_since(last_ack_time) > config.keepalive_timeout
                 } else {
@@ -797,22 +795,10 @@ impl MonClient {
                 }
             } else {
                 false
-            };
-
-            (should_send, should_reopen)
+            }
         };
 
-        // Send keepalive if needed
-        if should_send_keepalive {
-            debug!("Sending keepalive ping");
-            active_con.send_keepalive().await?;
-
-            // Update last_keepalive_sent
-            let mut ka_state = keepalive_state.lock().await;
-            ka_state.last_sent = Some(now);
-        }
-
-        // Check keepalive timeout
+        // Check keepalive timeout (but don't send pings - monitors reject them!)
         if should_reopen {
             warn!("Keepalive timeout exceeded, reopening session");
             // This will return an error, which will trigger reconnection
@@ -1755,8 +1741,18 @@ impl MonClient {
         // Use MPoolOp message (official librados approach)
         let fsid = self.get_fsid().await;
 
+        // Get current OSDMap epoch to include in the message
+        let version = {
+            let state = self.state.read().await;
+            state
+                .osdmap
+                .as_ref()
+                .map(|map| map.epoch as u64)
+                .unwrap_or(0)
+        };
+
         // For pool creation, pool_id is 0 (pool doesn't exist yet)
-        let msg = MPoolOp::create_pool(fsid.bytes, pool_name.to_string(), crush_rule);
+        let msg = MPoolOp::create_pool(fsid.bytes, pool_name.to_string(), crush_rule, version);
 
         let result = self.send_poolop(pool_name.to_string(), msg).await?;
 
@@ -1796,7 +1792,7 @@ impl MonClient {
         // Get fsid
         let fsid = self.get_fsid().await;
 
-        // Look up pool ID from OSDMap
+        // Look up pool ID and epoch from OSDMap
         let state = self.state.read().await;
         let osdmap = state
             .osdmap
@@ -1810,12 +1806,15 @@ impl MonClient {
             .map(|(id, _)| *id as u32)
             .ok_or_else(|| MonClientError::Other(format!("Pool '{}' not found", pool_name)))?;
 
-        info!("Deleting pool '{}' with ID {}", pool_name, pool_id);
+        // Get current OSDMap epoch for paxos versioning
+        let version = osdmap.epoch as u64;
+
+        info!("Deleting pool '{}' with ID {} (OSDMap epoch {})", pool_name, pool_id, version);
 
         drop(state);
 
-        // Create and send MPoolOp delete message
-        let msg = MPoolOp::delete_pool(fsid.bytes, pool_id, pool_name.to_string());
+        // Create and send MPoolOp delete message with current epoch
+        let msg = MPoolOp::delete_pool(fsid.bytes, pool_id, pool_name.to_string(), version);
         let result = self.send_poolop(pool_name.to_string(), msg).await?;
 
         if result.is_success() {
