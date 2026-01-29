@@ -190,14 +190,20 @@ impl CephMessagePayload for MMonCommand {
         PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
     }
 
+    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        Ok(self.inbl.clone())
+    }
+
     fn decode_payload(
         _header: &CephMsgHeader,
         front: &[u8],
         _middle: &[u8],
-        _data: &[u8],
+        data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        PaxosServiceMessage::decode(front)
-            .map_err(|_e| msgr2::Error::Deserialization("MMonCommand decode failed".into()))
+        let mut cmd: MMonCommand = PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonCommand decode failed".into()))?;
+        cmd.inbl = Bytes::copy_from_slice(data);
+        Ok(cmd)
     }
 }
 

@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 /// Monitor client configuration
 #[derive(Debug, Clone)]
@@ -45,6 +45,19 @@ pub struct MonClientConfig {
     /// Number of monitors to try connecting to in parallel during hunt
     /// (0 means try all available monitors)
     pub hunt_parallel: usize,
+
+    /// Keepalive interval (how often to send keepalive messages)
+    /// Default: 10 seconds
+    pub keepalive_interval: Duration,
+
+    /// Keepalive timeout (how long to wait for keepalive ACK before reconnecting)
+    /// Set to 0 to disable keepalive timeout checking
+    /// Default: 30 seconds
+    pub keepalive_timeout: Duration,
+
+    /// Tick interval (how often to run periodic maintenance tasks like auth renewal)
+    /// Default: same as hunt_interval
+    pub tick_interval: Option<Duration>,
 }
 
 impl Default for MonClientConfig {
@@ -57,6 +70,9 @@ impl Default for MonClientConfig {
             command_timeout: Duration::from_secs(60),
             hunt_interval: Duration::from_secs(3),
             hunt_parallel: 3, // Try 3 monitors in parallel by default
+            keepalive_interval: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(30),
+            tick_interval: None, // Defaults to hunt_interval
         }
     }
 }
@@ -79,6 +95,12 @@ pub struct MonClient {
     /// Message receive task handle
     recv_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 
+    /// Tick task handle (for periodic keepalive and auth renewal)
+    tick_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+
+    /// Keepalive state (separate lock to avoid contention)
+    keepalive_state: Arc<Mutex<KeepaliveState>>,
+
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
 }
@@ -91,6 +113,8 @@ impl Clone for MonClient {
             state: Arc::clone(&self.state),
             runtime: self.runtime.clone(),
             recv_task: Arc::clone(&self.recv_task),
+            tick_task: Arc::clone(&self.tick_task),
+            keepalive_state: Arc::clone(&self.keepalive_state),
             map_events: self.map_events.clone(),
         }
     }
@@ -103,6 +127,15 @@ pub enum MapEvent {
     OsdMapUpdated { epoch: u64 },
     MgrMapUpdated { epoch: u64 },
     MdsMapUpdated { epoch: u64 },
+}
+
+/// Keepalive state (separate from main state to avoid lock contention)
+#[derive(Default)]
+struct KeepaliveState {
+    /// Last time we sent a keepalive ping
+    last_sent: Option<std::time::Instant>,
+    /// Last time we received a keepalive ACK
+    last_ack: Option<std::time::Instant>,
 }
 
 struct MonClientState {
@@ -266,6 +299,8 @@ impl MonClient {
             state: Arc::new(RwLock::new(state)),
             runtime: tokio::runtime::Handle::current(),
             recv_task: Arc::new(RwLock::new(None)),
+            tick_task: Arc::new(RwLock::new(None)),
+            keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             map_events,
         })
     }
@@ -289,6 +324,9 @@ impl MonClient {
         // Start message receive loop BEFORE connecting
         // This ensures we don't miss any messages the monitor sends immediately after session establishment
         self.start_message_loop();
+
+        // Start tick loop for periodic keepalive and auth renewal
+        self.start_tick_loop();
 
         // Start hunting process (connects to monitor)
         self.start_hunting().await?;
@@ -332,6 +370,13 @@ impl MonClient {
         if let Some(handle) = recv_task.take() {
             handle.abort();
             info!("Aborted message receive task");
+        }
+
+        // Stop tick task
+        let mut tick_task = self.tick_task.write().await;
+        if let Some(handle) = tick_task.take() {
+            handle.abort();
+            info!("Aborted tick task");
         }
 
         Ok(())
@@ -603,6 +648,7 @@ impl MonClient {
     /// Start background message receive loop
     fn start_message_loop(&self) {
         let state = Arc::clone(&self.state);
+        let keepalive_state = Arc::clone(&self.keepalive_state);
         let map_events = self.map_events.clone();
 
         let handle = tokio::spawn(async move {
@@ -647,7 +693,9 @@ impl MonClient {
                 match active_con.receive_message().await {
                     Ok(msg) => {
                         info!("✓ Received message type: 0x{:04x}", msg.msg_type());
-                        if let Err(e) = Self::dispatch_message(&state, &map_events, msg).await {
+                        if let Err(e) =
+                            Self::dispatch_message(&state, &keepalive_state, &map_events, msg).await
+                        {
                             tracing::error!("Error dispatching message: {}", e);
                         }
                     }
@@ -670,9 +718,124 @@ impl MonClient {
         info!("Started message receive loop");
     }
 
+    /// Start background tick loop for periodic maintenance
+    fn start_tick_loop(&self) {
+        let state = Arc::clone(&self.state);
+        let keepalive_state = Arc::clone(&self.keepalive_state);
+        let config = self.config.clone();
+
+        // Use tick_interval if specified, otherwise use hunt_interval
+        let tick_interval = config.tick_interval.unwrap_or(config.hunt_interval);
+
+        let handle = tokio::spawn(async move {
+            info!("Tick loop started (interval: {:?})", tick_interval);
+
+            loop {
+                tokio::time::sleep(tick_interval).await;
+
+                // Check if stopping
+                {
+                    let state_guard = state.read().await;
+                    if state_guard.stopping {
+                        info!("Stopping flag set, exiting tick loop");
+                        break;
+                    }
+                }
+
+                // Perform tick operations
+                if let Err(e) = Self::tick(&state, &keepalive_state, &config).await {
+                    tracing::error!("Error in tick: {}", e);
+                }
+            }
+
+            info!("Tick loop terminated");
+        });
+
+        // Store task handle
+        let tick_task = Arc::clone(&self.tick_task);
+        tokio::spawn(async move {
+            let mut task_guard = tick_task.write().await;
+            *task_guard = Some(handle);
+        });
+
+        info!("Started tick loop");
+    }
+
+    /// Periodic maintenance tick
+    async fn tick(
+        state: &Arc<RwLock<MonClientState>>,
+        keepalive_state: &Arc<Mutex<KeepaliveState>>,
+        config: &MonClientConfig,
+    ) -> Result<()> {
+        // Get active connection (using read lock, quickly released)
+        let active_con = {
+            let state_guard = state.read().await;
+            match &state_guard.active_con {
+                Some(con) => Arc::clone(con),
+                None => {
+                    debug!("No active connection in tick");
+                    return Ok(());
+                }
+            }
+        };
+
+        let now = std::time::Instant::now();
+
+        // Get keepalive timing and check if we need to send
+        let (should_send_keepalive, should_reopen) = {
+            let ka_state = keepalive_state.lock().await;
+            let should_send = match ka_state.last_sent {
+                Some(last) => now.duration_since(last) >= config.keepalive_interval,
+                None => true, // Send first keepalive
+            };
+
+            let should_reopen = if config.keepalive_timeout > Duration::from_secs(0) {
+                if let Some(last_ack_time) = ka_state.last_ack {
+                    now.duration_since(last_ack_time) > config.keepalive_timeout
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            (should_send, should_reopen)
+        };
+
+        // Send keepalive if needed
+        if should_send_keepalive {
+            debug!("Sending keepalive ping");
+            active_con.send_keepalive().await?;
+
+            // Update last_keepalive_sent
+            let mut ka_state = keepalive_state.lock().await;
+            ka_state.last_sent = Some(now);
+        }
+
+        // Check keepalive timeout
+        if should_reopen {
+            warn!("Keepalive timeout exceeded, reopening session");
+            // This will return an error, which will trigger reconnection
+            return active_con.reopen_session().await;
+        }
+
+        // Check if auth tickets need renewal
+        if let Some(auth_provider) = active_con.get_auth_provider() {
+            // Check if service tickets are about to expire
+            // TODO: Implement actual ticket expiry checking
+            // For now, just log that we have an auth provider
+            trace!("Auth provider available for ticket renewal check");
+            let _ = auth_provider; // Suppress unused variable warning
+        }
+
+        trace!("Tick completed");
+        Ok(())
+    }
+
     /// Dispatch received message to appropriate handler
     async fn dispatch_message(
         state: &Arc<RwLock<MonClientState>>,
+        keepalive_state: &Arc<Mutex<KeepaliveState>>,
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
@@ -688,6 +851,23 @@ impl MonClient {
             msgr2::message::CEPH_MSG_MON_MAP => {
                 info!("Received CEPH_MSG_MON_MAP");
                 Self::handle_monmap(state, map_events, msg).await?;
+            }
+            msgr2::message::CEPH_MSG_PING => {
+                trace!("Received CEPH_MSG_PING, sending PING_ACK");
+                // Respond to monitor's ping with PING_ACK
+                let state_guard = state.read().await;
+                if let Some(active_con) = &state_guard.active_con {
+                    let ping_ack = msgr2::message::Message::ping_ack();
+                    if let Err(e) = active_con.send_message(ping_ack).await {
+                        warn!("Failed to send PING_ACK: {}", e);
+                    }
+                }
+            }
+            msgr2::message::CEPH_MSG_PING_ACK => {
+                trace!("Received CEPH_MSG_PING_ACK");
+                // Update last_keepalive_ack timestamp
+                let mut ka_state = keepalive_state.lock().await;
+                ka_state.last_ack = Some(std::time::Instant::now());
             }
             CEPH_MSG_OSD_MAP => {
                 info!("Received CEPH_MSG_OSD_MAP");

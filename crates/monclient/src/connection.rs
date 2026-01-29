@@ -278,6 +278,45 @@ impl MonConnection {
         Ok(())
     }
 
+    /// Send a keepalive ping message
+    pub async fn send_keepalive(&self) -> Result<()> {
+        let ping_msg = msgr2::message::Message::ping();
+        self.send_message(ping_msg).await?;
+        tracing::trace!("Sent keepalive ping to mon.{}", self.rank);
+        Ok(())
+    }
+
+    /// Get a reference to the authentication provider
+    ///
+    /// Returns None if no authentication was used (no-auth cluster).
+    pub fn get_auth_provider(&self) -> Option<&auth::MonitorAuthProvider> {
+        self.auth_provider.as_ref()
+    }
+
+    /// Reopen the session after a timeout
+    ///
+    /// This marks the connection as closed and returns an error,
+    /// which will trigger the client to reconnect.
+    pub async fn reopen_session(&self) -> Result<()> {
+        tracing::warn!(
+            "Keepalive timeout on mon.{}, marking connection as closed",
+            self.rank
+        );
+
+        // Mark session as lost
+        let mut state = self.state.lock().await;
+        state.has_session = false;
+
+        // Close the underlying connection
+        let mut connection = self.connection.lock().await;
+        *connection = None;
+
+        // Return an error to trigger reconnection at the MonClient level
+        Err(MonClientError::Other(
+            "Connection timed out, need to reconnect".into(),
+        ))
+    }
+
     /// Create a ServiceAuthProvider for OSD/MDS/MGR connections
     ///
     /// This creates an authorizer-based auth provider using the service tickets

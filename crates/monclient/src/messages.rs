@@ -419,14 +419,16 @@ pub struct MMonCommand {
     // MMonCommand fields
     pub fsid: UuidD,
     pub cmd: Vec<String>,
+    pub inbl: Bytes, // Input buffer (data segment)
 }
 
 impl MMonCommand {
-    pub fn new(_tid: u64, cmd: Vec<String>, _inbl: Bytes, fsid: UuidD) -> Self {
+    pub fn new(_tid: u64, cmd: Vec<String>, inbl: Bytes, fsid: UuidD) -> Self {
         Self {
             paxos: PaxosFields::new(),
             fsid,
             cmd,
+            inbl,
         }
     }
 }
@@ -484,7 +486,12 @@ impl PaxosServiceMessage for MMonCommand {
             cmd.push(s);
         }
 
-        Ok(Self { paxos, fsid, cmd })
+        Ok(Self {
+            paxos,
+            fsid,
+            cmd,
+            inbl: Bytes::new(), // Will be filled by CephMessagePayload::decode_payload
+        })
     }
 }
 
