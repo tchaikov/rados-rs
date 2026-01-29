@@ -19,6 +19,14 @@ pub const CEPH_MSG_OSD_OP: u16 = 42;
 /// Message type for MOSDOpReply (OSD to Client)
 pub const CEPH_MSG_OSD_OPREPLY: u16 = 43;
 
+/// Message type for MOSDBackoff (OSD to Client)
+pub const CEPH_MSG_OSD_BACKOFF: u16 = 61;
+
+/// Backoff operation codes
+pub const CEPH_OSD_BACKOFF_OP_BLOCK: u8 = 1;
+pub const CEPH_OSD_BACKOFF_OP_ACK_BLOCK: u8 = 2;
+pub const CEPH_OSD_BACKOFF_OP_UNBLOCK: u8 = 3;
+
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
 pub struct MOSDOp {
@@ -377,6 +385,135 @@ impl MOSDOpReply {
     }
 }
 
+/// MOSDBackoff message - OSD to Client (message type 61)
+///
+/// Used by OSDs to request clients pause operations on specific object ranges
+/// during recovery, backfill, or when the OSD is overloaded.
+///
+/// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h
+#[derive(Debug, Clone)]
+pub struct MOSDBackoff {
+    /// Placement group ID
+    pub pgid: StripedPgId,
+    /// OSDMap epoch
+    pub map_epoch: u32,
+    /// Operation code (CEPH_OSD_BACKOFF_OP_*)
+    pub op: u8,
+    /// Unique backoff ID within this session
+    pub id: u64,
+    /// Start of object range (inclusive)
+    pub begin: denc::HObject,
+    /// End of object range (exclusive)
+    /// If begin == end, blocks a single object
+    pub end: denc::HObject,
+}
+
+impl MOSDBackoff {
+    /// Message version (from MOSDBackoff.h HEAD_VERSION)
+    pub const VERSION: u16 = 1;
+
+    /// Message compat version (from MOSDBackoff.h COMPAT_VERSION)
+    pub const COMPAT_VERSION: u16 = 1;
+
+    /// Create a new MOSDBackoff message
+    pub fn new(
+        pgid: StripedPgId,
+        map_epoch: u32,
+        op: u8,
+        id: u64,
+        begin: denc::HObject,
+        end: denc::HObject,
+    ) -> Self {
+        Self {
+            pgid,
+            map_epoch,
+            op,
+            id,
+            begin,
+            end,
+        }
+    }
+
+    /// Decode MOSDBackoff from front section
+    ///
+    /// This implements v1 decoding format for MOSDBackoff.
+    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 63-72
+    ///
+    /// # Arguments
+    /// * `front` - The front (payload) section of the message
+    pub fn decode(front: &[u8]) -> Result<Self> {
+        use denc::Denc;
+
+        let mut cursor = front;
+
+        // 1. pgid (spg_t)
+        let pgid = StripedPgId::decode(&mut cursor, 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode pgid: {}", e)))?;
+
+        // 2. map_epoch (epoch_t = u32)
+        let map_epoch = cursor.get_u32_le();
+
+        // 3. op (uint8_t)
+        let op = cursor.get_u8();
+
+        // 4. id (uint64_t)
+        let id = cursor.get_u64_le();
+
+        // 5. begin (hobject_t)
+        let begin = denc::HObject::decode(&mut cursor, 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode begin: {}", e)))?;
+
+        // 6. end (hobject_t)
+        let end = denc::HObject::decode(&mut cursor, 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode end: {}", e)))?;
+
+        Ok(Self {
+            pgid,
+            map_epoch,
+            op,
+            id,
+            begin,
+            end,
+        })
+    }
+
+    /// Encode MOSDBackoff to bytes
+    ///
+    /// This implements v1 encoding format for MOSDBackoff.
+    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 53-61
+    pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
+
+        let mut buf = BytesMut::new();
+
+        // 1. pgid (spg_t)
+        self.pgid
+            .encode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode pgid: {}", e)))?;
+
+        // 2. map_epoch (epoch_t = u32)
+        buf.put_u32_le(self.map_epoch);
+
+        // 3. op (uint8_t)
+        buf.put_u8(self.op);
+
+        // 4. id (uint64_t)
+        buf.put_u64_le(self.id);
+
+        // 5. begin (hobject_t)
+        self.begin
+            .encode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode begin: {}", e)))?;
+
+        // 6. end (hobject_t)
+        self.end
+            .encode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode end: {}", e)))?;
+
+        Ok(buf.freeze())
+    }
+}
+
 // ============================================================================
 // CephMessagePayload trait implementations
 // ============================================================================
@@ -628,6 +765,30 @@ impl CephMessagePayload for MOSDOpReply {
     ) -> std::result::Result<Self, msgr2::Error> {
         Self::decode(front, data)
             .map_err(|_e| msgr2::Error::Deserialization("MOSDOpReply decode failed".into()))
+    }
+}
+
+impl CephMessagePayload for MOSDBackoff {
+    fn msg_type() -> u16 {
+        CEPH_MSG_OSD_BACKOFF
+    }
+
+    fn msg_version() -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MOSDBackoff decode failed".into()))
     }
 }
 

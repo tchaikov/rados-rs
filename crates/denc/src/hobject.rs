@@ -38,6 +38,79 @@ pub struct HObject {
     pub pool: i64,
 }
 
+impl PartialOrd for HObject {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for HObject {
+    /// Compare hobject_t objects following Ceph's ordering
+    ///
+    /// Reference: ~/dev/ceph/src/common/hobject.h operator<=>
+    ///
+    /// Ordering: max > pool > hash/key > nspace > oid > snap
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+
+        // 1. max field (reversed: max objects come last)
+        match self.max.cmp(&other.max) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // 2. pool
+        match self.pool.cmp(&other.pool) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // 3. bitwise key (hash or key)
+        // If key is empty, use hash; otherwise use key string
+        let self_bitwise = if self.key.is_empty() {
+            None
+        } else {
+            Some(&self.key)
+        };
+        let other_bitwise = if other.key.is_empty() {
+            None
+        } else {
+            Some(&other.key)
+        };
+
+        match (self_bitwise, other_bitwise) {
+            (Some(k1), Some(k2)) => match k1.cmp(k2) {
+                Ordering::Equal => {}
+                ord => return ord,
+            },
+            (Some(_), None) => return Ordering::Greater,
+            (None, Some(_)) => return Ordering::Less,
+            (None, None) => {
+                // Both use hash
+                match self.hash.cmp(&other.hash) {
+                    Ordering::Equal => {}
+                    ord => return ord,
+                }
+            }
+        }
+
+        // 4. nspace
+        match self.nspace.cmp(&other.nspace) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // 5. oid
+        match self.oid.cmp(&other.oid) {
+            Ordering::Equal => {}
+            ord => return ord,
+        }
+
+        // 6. snap
+        self.snapid.cmp(&other.snapid)
+    }
+}
+
 /// Special snapid values
 pub const SNAP_HEAD: u64 = u64::MAX - 1; // -2 in two's complement
 pub const SNAP_DIR: u64 = u64::MAX; // -1 in two's complement

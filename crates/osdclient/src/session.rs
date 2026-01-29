@@ -18,8 +18,20 @@ use tracing::{debug, error, info, warn};
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::{MOSDOp, MOSDOpReply};
-use crate::types::{OpResult, RequestId};
+use crate::types::{OpResult, RequestId, StripedPgId};
 use msgr2::ceph_message::{CephMessage, CrcFlags};
+
+/// OSD backoff tracking
+///
+/// Represents an active backoff from the OSD requesting the client
+/// to pause operations on a specific object range.
+#[derive(Debug, Clone)]
+pub struct OSDBackoff {
+    pub pgid: StripedPgId,
+    pub id: u64,
+    pub begin: denc::HObject,
+    pub end: denc::HObject,
+}
 
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
@@ -33,6 +45,10 @@ pub struct OSDSession {
     #[allow(dead_code)]
     client_inc: u32,
     auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    /// Active backoffs from OSD
+    /// Outer map: pgid -> inner map
+    /// Inner map: begin hobject -> backoff info
+    backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
 }
 
 /// Tracking information for a pending operation
@@ -74,6 +90,7 @@ impl OSDSession {
             entity_name,
             client_inc,
             auth_provider,
+            backoffs: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -129,9 +146,10 @@ impl OSDSession {
         // Spawn I/O task that owns the connection
         // This task multiplexes send/receive using tokio::select!
         let pending_ops = Arc::clone(&self.pending_ops);
+        let backoffs = Arc::clone(&self.backoffs);
         let osd_id = self.osd_id;
         tokio::spawn(async move {
-            Self::io_task(osd_id, connection, send_rx, pending_ops).await;
+            Self::io_task(osd_id, connection, send_rx, pending_ops, backoffs).await;
         });
 
         info!("✓ I/O task started for OSD {}", self.osd_id);
@@ -151,6 +169,7 @@ impl OSDSession {
         mut connection: msgr2::protocol::Connection,
         mut send_rx: mpsc::Receiver<msgr2::message::Message>,
         pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
+        backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
     ) {
         info!("I/O task started for OSD {}", osd_id);
 
@@ -168,20 +187,34 @@ impl OSDSession {
                 result = connection.recv_message() => {
                     match result {
                         Ok(msg) => {
-                            if msg.msg_type() == crate::messages::CEPH_MSG_OSD_OPREPLY {
-                                let tid = msg.tid();
+                            match msg.msg_type() {
+                                crate::messages::CEPH_MSG_OSD_OPREPLY => {
+                                    let tid = msg.tid();
 
-                                // Decode MOSDOpReply from message sections
-                                match MOSDOpReply::decode(&msg.front, &msg.data) {
-                                    Ok(reply) => {
-                                        Self::handle_reply(tid, reply, &pending_ops).await;
-                                    }
-                                    Err(e) => {
-                                        error!("Failed to decode MOSDOpReply: {}", e);
+                                    // Decode MOSDOpReply from message sections
+                                    match MOSDOpReply::decode(&msg.front, &msg.data) {
+                                        Ok(reply) => {
+                                            Self::handle_reply(tid, reply, &pending_ops).await;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to decode MOSDOpReply: {}", e);
+                                        }
                                     }
                                 }
-                            } else {
-                                warn!("Received unexpected message type: 0x{:04x}", msg.msg_type());
+                                crate::messages::CEPH_MSG_OSD_BACKOFF => {
+                                    // Decode MOSDBackoff from message sections
+                                    match crate::messages::MOSDBackoff::decode(&msg.front) {
+                                        Ok(backoff_msg) => {
+                                            Self::handle_backoff(osd_id, backoff_msg, &backoffs, &mut connection).await;
+                                        }
+                                        Err(e) => {
+                                            error!("Failed to decode MOSDBackoff: {}", e);
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    warn!("Received unexpected message type: 0x{:04x}", msg.msg_type());
+                                }
                             }
                         }
                         Err(e) => {
@@ -201,6 +234,25 @@ impl OSDSession {
     /// This queues the message for sending (non-blocking, like ceph_con_send)
     pub async fn submit_op(&self, op: MOSDOp) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
+
+        // Create HObject from operation for backoff checking
+        let hobj = denc::HObject {
+            key: op.object.key.clone(),
+            oid: op.object.oid.clone(),
+            snapid: op.snapid,
+            hash: op.object.hash,
+            max: false,
+            nspace: op.object.namespace.clone(),
+            pool: op.object.pool,
+        };
+
+        // Check if operation is blocked by backoff
+        if self.is_blocked_by_backoff(&op.pgid, &hobj).await {
+            return Err(OSDClientError::Backoff(format!(
+                "Operation blocked by OSD backoff: pgid={:?}, object={}",
+                op.pgid, op.object.oid
+            )));
+        }
 
         // Create channel for result
         let (tx, rx) = oneshot::channel();
@@ -284,9 +336,144 @@ impl OSDSession {
         }
     }
 
+    /// Handle an OSD backoff message
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff()
+    async fn handle_backoff(
+        osd_id: i32,
+        backoff: crate::messages::MOSDBackoff,
+        backoffs: &Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+        connection: &mut msgr2::protocol::Connection,
+    ) {
+        use crate::messages::{
+            CEPH_OSD_BACKOFF_OP_ACK_BLOCK, CEPH_OSD_BACKOFF_OP_BLOCK, CEPH_OSD_BACKOFF_OP_UNBLOCK,
+        };
+
+        match backoff.op {
+            CEPH_OSD_BACKOFF_OP_BLOCK => {
+                info!(
+                    "OSD {} requests backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+                    osd_id,
+                    backoff.pgid.pool,
+                    backoff.pgid.seed,
+                    backoff.pgid.shard,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end
+                );
+
+                // Register backoff
+                {
+                    let mut backoffs_map = backoffs.write().await;
+                    let pg_backoffs = backoffs_map
+                        .entry(backoff.pgid)
+                        .or_insert_with(HashMap::new);
+
+                    let backoff_entry = OSDBackoff {
+                        pgid: backoff.pgid,
+                        id: backoff.id,
+                        begin: backoff.begin.clone(),
+                        end: backoff.end.clone(),
+                    };
+
+                    pg_backoffs.insert(backoff.begin.clone(), backoff_entry);
+                }
+
+                // Send ACK_BLOCK reply
+                let ack = crate::messages::MOSDBackoff::new(
+                    backoff.pgid,
+                    backoff.map_epoch,
+                    CEPH_OSD_BACKOFF_OP_ACK_BLOCK,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end,
+                );
+
+                match ack.encode() {
+                    Ok(payload) => {
+                        let msg = msgr2::message::Message::new(
+                            crate::messages::CEPH_MSG_OSD_BACKOFF,
+                            payload,
+                        )
+                        .with_version(crate::messages::MOSDBackoff::VERSION);
+
+                        if let Err(e) = connection.send_message(msg).await {
+                            error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
+                        } else {
+                            debug!("Sent ACK_BLOCK for backoff id={} to OSD {}", ack.id, osd_id);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to encode ACK_BLOCK message: {}", e);
+                    }
+                }
+            }
+
+            CEPH_OSD_BACKOFF_OP_UNBLOCK => {
+                info!(
+                    "OSD {} lifts backoff: pgid={}:{}.{}, id={}",
+                    osd_id, backoff.pgid.pool, backoff.pgid.seed, backoff.pgid.shard, backoff.id
+                );
+
+                // Remove backoff
+                {
+                    let mut backoffs_map = backoffs.write().await;
+                    if let Some(pg_backoffs) = backoffs_map.get_mut(&backoff.pgid) {
+                        pg_backoffs.remove(&backoff.begin);
+
+                        // Remove PG entry if no more backoffs
+                        if pg_backoffs.is_empty() {
+                            backoffs_map.remove(&backoff.pgid);
+                        }
+                    }
+                }
+
+                // TODO: Resend queued operations in this range
+                // This requires tracking which operations were blocked
+                // For now, operations will timeout and be retried naturally
+                debug!(
+                    "Backoff lifted for pgid={:?}, future operations will proceed",
+                    backoff.pgid
+                );
+            }
+
+            _ => {
+                warn!(
+                    "Received unknown backoff operation {} from OSD {}",
+                    backoff.op, osd_id
+                );
+            }
+        }
+    }
+
     /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
         // Connection is alive if the send channel is not closed
         !self.send_tx.is_closed()
+    }
+
+    /// Check if an operation is blocked by an active backoff
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _send_op()
+    async fn is_blocked_by_backoff(&self, pgid: &StripedPgId, hobj: &denc::HObject) -> bool {
+        let backoffs_map = self.backoffs.read().await;
+
+        // Check if this PG has any backoffs
+        if let Some(pg_backoffs) = backoffs_map.get(pgid) {
+            // Find the backoff range that might contain this object
+            // We need to check if hobj falls in [begin, end) for any backoff
+            for backoff in pg_backoffs.values() {
+                // Check if hobj is in [begin, end)
+                if hobj >= &backoff.begin && hobj < &backoff.end {
+                    debug!(
+                        "Operation blocked by backoff: pgid={:?}, hobj={:?}, backoff=[{:?}, {:?})",
+                        pgid, hobj, backoff.begin, backoff.end
+                    );
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 }

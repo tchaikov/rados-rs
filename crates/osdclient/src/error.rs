@@ -45,6 +45,9 @@ pub enum OSDClientError {
     #[error("CRUSH error: {0}")]
     Crush(String),
 
+    #[error("OSD backoff: {0}")]
+    Backoff(String),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }
