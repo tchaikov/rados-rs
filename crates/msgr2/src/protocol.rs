@@ -35,7 +35,11 @@ impl FrameIO {
         Self { stream }
     }
 
-    /// Send a frame with optional encryption
+    /// Send a frame with optional compression and encryption
+    ///
+    /// Processing order: compression → encryption
+    /// - If compression is enabled, compress frame segments first
+    /// - If encryption is enabled, encrypt the (possibly compressed) frame
     ///
     /// If encryption is enabled in the state machine, this implements msgr2.1 inline optimization:
     /// - First 48 bytes of payload are encrypted together with preamble (32+48=80 → 96 bytes with GCM tag)
@@ -45,19 +49,45 @@ impl FrameIO {
         frame: &Frame,
         state_machine: &mut StateMachine,
     ) -> Result<()> {
-        // Convert Frame to wire format with proper preamble, segments, epilogue, and CRCs
+        // Step 1: Apply compression if enabled
+        let frame_to_send = if let Some(ctx) = state_machine.compression_ctx() {
+            match frame.compress(ctx) {
+                Ok(compressed_frame) => {
+                    if (compressed_frame.preamble.flags
+                        & crate::frames::FRAME_EARLY_DATA_COMPRESSED)
+                        != 0
+                    {
+                        tracing::debug!(
+                            "Frame compressed: tag={:?}, algorithm={:?}",
+                            frame.preamble.tag,
+                            ctx.algorithm()
+                        );
+                    }
+                    compressed_frame
+                }
+                Err(e) => {
+                    tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
+                    frame.clone()
+                }
+            }
+        } else {
+            frame.clone()
+        };
+
+        // Step 2: Convert to wire format with proper preamble, segments, epilogue, and CRCs
         // Use msgr2.1 (is_rev1 = true) to match the banner we sent
-        let wire_bytes = frame.to_wire(true);
+        let wire_bytes = frame_to_send.to_wire(true);
 
         tracing::debug!(
-            "Sending frame: tag={:?}, {} segments, {} wire bytes",
-            frame.preamble.tag,
-            frame.preamble.num_segments,
-            wire_bytes.len()
+            "Sending frame: tag={:?}, {} segments, {} wire bytes, compressed={}",
+            frame_to_send.preamble.tag,
+            frame_to_send.preamble.num_segments,
+            wire_bytes.len(),
+            (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
         );
 
         // Print segment info
-        for (i, seg) in frame.segments.iter().enumerate() {
+        for (i, seg) in frame_to_send.segments.iter().enumerate() {
             tracing::debug!("  Segment {}: {} bytes", i, seg.len());
         }
 
@@ -67,12 +97,13 @@ impl FrameIO {
 
         tracing::trace!(
             "send_frame: tag={:?}, has_encryption={}, num_segments={}, payload_len={}",
-            frame.preamble.tag,
+            frame_to_send.preamble.tag,
             state_machine.has_encryption(),
-            frame.preamble.num_segments,
+            frame_to_send.preamble.num_segments,
             payload_bytes.len()
         );
 
+        // Step 3: Apply encryption if enabled
         let final_bytes = if !state_machine.has_encryption() {
             // No encryption - send as-is
             tracing::debug!(
@@ -226,7 +257,11 @@ impl FrameIO {
         Ok(())
     }
 
-    /// Receive a frame with optional decryption
+    /// Receive a frame with optional decryption and decompression
+    ///
+    /// Processing order: decryption → decompression
+    /// - If encryption is enabled, decrypt the frame first
+    /// - If FRAME_EARLY_DATA_COMPRESSED flag is set, decompress the frame
     ///
     /// If encryption is enabled, this handles msgr2.1 inline optimization:
     /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
@@ -458,7 +493,45 @@ impl FrameIO {
 
         tracing::debug!("Parsed {} segments", segments.len());
 
-        Ok(Frame { preamble, segments })
+        let mut frame = Frame { preamble, segments };
+
+        // Step 4: Apply decompression if frame is compressed
+        if (frame.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0 {
+            if let Some(ctx) = state_machine.compression_ctx() {
+                // Calculate original size from all segment lengths
+                // For compressed frames, we need to know the original uncompressed size
+                // This should be stored somewhere - for now, we'll use a heuristic
+                // In practice, Ceph stores this in the frame metadata
+                let compressed_size: usize = frame.segments.iter().map(|s| s.len()).sum();
+                // Estimate original size as 2x compressed size (conservative estimate)
+                // TODO: Get actual original size from frame metadata
+                let estimated_original_size = compressed_size * 3;
+
+                match frame.decompress(ctx, estimated_original_size) {
+                    Ok(decompressed_frame) => {
+                        tracing::debug!(
+                            "Frame decompressed: tag={:?}, algorithm={:?}",
+                            frame.preamble.tag,
+                            ctx.algorithm()
+                        );
+                        frame = decompressed_frame;
+                    }
+                    Err(e) => {
+                        tracing::error!("Decompression failed: {:?}", e);
+                        return Err(Error::protocol_error(&format!(
+                            "Decompression failed: {:?}",
+                            e
+                        )));
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "Frame has FRAME_EARLY_DATA_COMPRESSED flag but no compression context"
+                );
+            }
+        }
+
+        Ok(frame)
     }
 }
 

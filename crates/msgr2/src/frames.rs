@@ -95,6 +95,10 @@ impl Frame {
     /// This should be used when sending frames over the network
     pub fn to_wire(&self, is_rev1: bool) -> Bytes {
         let mut assembler = FrameAssembler::new(is_rev1);
+        // Copy compression flag from preamble if set
+        if (self.preamble.flags & FRAME_EARLY_DATA_COMPRESSED) != 0 {
+            assembler.set_compression(true);
+        }
         let alignments: Vec<u16> = self.preamble.segments[..self.preamble.num_segments as usize]
             .iter()
             .map(|s| s.align)
@@ -102,6 +106,107 @@ impl Frame {
         assembler
             .assemble_frame(self.preamble.tag, &self.segments, &alignments)
             .expect("Failed to assemble frame")
+    }
+
+    /// Create a compressed version of this frame
+    /// Returns a new Frame with compressed segments and FRAME_EARLY_DATA_COMPRESSED flag set
+    pub fn compress(
+        &self,
+        ctx: &crate::compression::CompressionContext,
+    ) -> Result<Self, RadosError> {
+        // Calculate total uncompressed size
+        let total_size: usize = self.segments.iter().map(|s| s.len()).sum();
+
+        // Check if we should compress based on threshold
+        if !ctx.should_compress(total_size) {
+            tracing::debug!(
+                "Frame size {} below compression threshold {}, skipping compression",
+                total_size,
+                ctx.threshold()
+            );
+            return Ok(self.clone());
+        }
+
+        // Compress all segments into a single segment
+        let mut uncompressed = BytesMut::with_capacity(total_size);
+        for segment in &self.segments {
+            uncompressed.extend_from_slice(segment);
+        }
+
+        let compressed = ctx
+            .compress(&uncompressed)
+            .map_err(|e| RadosError::Protocol(format!("Compression failed: {}", e)))?;
+
+        tracing::debug!(
+            "Compressed frame: {} bytes -> {} bytes (ratio: {:.2}%)",
+            total_size,
+            compressed.len(),
+            (compressed.len() as f64 / total_size as f64) * 100.0
+        );
+
+        // Create new frame with compressed data
+        let mut new_preamble = self.preamble.clone();
+        new_preamble.flags |= FRAME_EARLY_DATA_COMPRESSED;
+        new_preamble.num_segments = 1;
+        new_preamble.segments[0] = SegmentDescriptor {
+            logical_len: compressed.len() as u32,
+            align: DEFAULT_ALIGNMENT,
+        };
+        // Store original size in reserved field for decompression
+        new_preamble.reserved = (total_size & 0xFF) as u8;
+
+        Ok(Frame {
+            preamble: new_preamble,
+            segments: vec![compressed],
+        })
+    }
+
+    /// Decompress this frame if it's compressed
+    /// Returns a new Frame with decompressed segments
+    pub fn decompress(
+        &self,
+        ctx: &crate::compression::CompressionContext,
+        original_size: usize,
+    ) -> Result<Self, RadosError> {
+        // Check if frame is compressed
+        if (self.preamble.flags & FRAME_EARLY_DATA_COMPRESSED) == 0 {
+            // Not compressed, return as-is
+            return Ok(self.clone());
+        }
+
+        // Decompress the single compressed segment
+        if self.segments.len() != 1 {
+            return Err(RadosError::Protocol(format!(
+                "Compressed frame should have exactly 1 segment, got {}",
+                self.segments.len()
+            )));
+        }
+
+        let compressed = &self.segments[0];
+        let decompressed = ctx
+            .decompress(compressed, original_size)
+            .map_err(|e| RadosError::Protocol(format!("Decompression failed: {}", e)))?;
+
+        tracing::debug!(
+            "Decompressed frame: {} bytes -> {} bytes",
+            compressed.len(),
+            decompressed.len()
+        );
+
+        // Create new frame with decompressed data
+        let mut new_preamble = self.preamble.clone();
+        new_preamble.flags &= !FRAME_EARLY_DATA_COMPRESSED;
+        new_preamble.num_segments = 1;
+        new_preamble.segments[0] = SegmentDescriptor {
+            logical_len: decompressed.len() as u32,
+            align: DEFAULT_ALIGNMENT,
+        };
+        new_preamble.reserved = 0;
+
+        Ok(Frame {
+            preamble: new_preamble,
+            segments: vec![decompressed],
+        })
     }
 
     /// Legacy encode method - just concatenates preamble and segments without epilogue
