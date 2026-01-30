@@ -184,28 +184,33 @@ impl RevocationManagerState {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
 /// use msgr2::revocation::RevocationManager;
 ///
+/// # async fn example() -> Result<(), &'static str> {
 /// let manager = RevocationManager::new();
 ///
 /// // Register a message for sending
 /// let (handle, revocation_rx) = manager.register_message().await;
 ///
-/// // In the send task, check for revocation
-/// tokio::select! {
+/// // Simulate sending - check for revocation
+/// let send_result: Result<(), &str> = tokio::select! {
 ///     _ = revocation_rx => {
-///         // Message was revoked, stop sending
-///         return;
+///         // Message was revoked
+///         Err("revoked")
 ///     }
-///     result = send_message() => {
+///     _ = async {
+///         // Simulate message send
+///         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+///         Ok::<(), &str>(())
+///     } => {
 ///         // Message sent successfully
 ///         manager.mark_sent(handle.id()).await;
+///         Ok(())
 ///     }
-/// }
-///
-/// // In another task, revoke the message
-/// handle.revoke().await;
+/// };
+/// # Ok(())
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct RevocationManager {

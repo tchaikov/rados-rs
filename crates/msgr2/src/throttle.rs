@@ -251,9 +251,10 @@ pub struct ThrottleStats {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
 /// use msgr2::throttle::{MessageThrottle, ThrottleConfig};
 ///
+/// # async fn example() {
 /// // Create throttle with 100 messages/sec and 1MB/sec limits
 /// let config = ThrottleConfig::with_limits(100, 1024 * 1024, 50);
 /// let throttle = MessageThrottle::new(config);
@@ -266,6 +267,7 @@ pub struct ThrottleStats {
 ///
 /// // Later, when ACK is received
 /// throttle.record_ack().await;
+/// # }
 /// ```
 #[derive(Debug, Clone)]
 pub struct MessageThrottle {
