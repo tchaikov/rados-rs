@@ -724,6 +724,10 @@ pub struct Connection {
     target_entity_addr: Option<denc::EntityAddr>,
     /// Connection configuration
     config: crate::ConnectionConfig,
+    /// Optional message throttle for rate limiting
+    throttle: Option<crate::throttle::MessageThrottle>,
+    /// Optional revocation manager for canceling in-flight messages
+    revocation_manager: Option<crate::revocation::RevocationManager>,
 }
 
 impl Connection {
@@ -807,11 +811,22 @@ impl Connection {
 
         let state = ConnectionState::new(stream, state_machine);
 
+        // Initialize throttle from config if present
+        let throttle = config
+            .throttle_config
+            .as_ref()
+            .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
+
+        // Initialize revocation manager (always available)
+        let revocation_manager = Some(crate::revocation::RevocationManager::new());
+
         Ok(Self {
             state,
             server_addr: addr,
             target_entity_addr: Some(target_entity_addr),
             config,
+            throttle,
+            revocation_manager,
         })
     }
 
@@ -910,11 +925,22 @@ impl Connection {
 
         let state = ConnectionState::new(stream, state_machine);
 
+        // Initialize throttle from config if present
+        let throttle = config
+            .throttle_config
+            .as_ref()
+            .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
+
+        // Initialize revocation manager (always available)
+        let revocation_manager = Some(crate::revocation::RevocationManager::new());
+
         Ok(Self {
             state,
             server_addr: addr,
             target_entity_addr: None,
             config,
+            throttle,
+            revocation_manager,
         })
     }
 
@@ -1310,6 +1336,14 @@ impl Connection {
         // Replace current state with new reconnected state
         self.state = state;
 
+        // Reinitialize throttle and revocation manager for new connection
+        self.throttle = self
+            .config
+            .throttle_config
+            .as_ref()
+            .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
+        self.revocation_manager = Some(crate::revocation::RevocationManager::new());
+
         tracing::info!("✓ Session state restored, initiating reconnection handshake");
 
         // Run the full session establishment (this will use SESSION_RECONNECT since server_cookie != 0)
@@ -1382,6 +1416,23 @@ impl Connection {
     async fn send_message_inner(&mut self, mut msg: Message) -> Result<()> {
         let msg_type = msg.msg_type();
 
+        // Calculate message size for throttling
+        let msg_size = msg.total_size() as usize;
+
+        // Step 1: Wait for throttle if configured
+        if let Some(throttle) = &self.throttle {
+            throttle.wait_for_send(msg_size).await;
+            tracing::trace!("Throttle check passed for message size {}", msg_size);
+        }
+
+        // Step 2: Register message for revocation if manager is available
+        let revocation_handle = if let Some(manager) = &self.revocation_manager {
+            let (handle, _rx) = manager.register_message().await;
+            Some(handle)
+        } else {
+            None
+        };
+
         // Increment sequence number (pre-increment, like C++ does with ++out_seq)
         self.state.out_seq += 1;
         msg.header.seq = self.state.out_seq;
@@ -1429,14 +1480,27 @@ impl Connection {
             eprintln!("DEBUG:   Segment {}: {} bytes", i, seg.len());
         }
 
-        // Send the frame
+        // Step 3: Send the frame
         self.state.send_frame(&frame).await?;
 
+        // Step 4: Record send with throttle
+        if let Some(throttle) = &self.throttle {
+            throttle.record_send(msg_size).await;
+        }
+
+        // Step 5: Mark message as sent (can no longer be revoked)
+        if let Some(handle) = revocation_handle {
+            if let Some(manager) = &self.revocation_manager {
+                manager.mark_sent(handle.id()).await;
+            }
+        }
+
         tracing::debug!(
-            "Sent message: type={}, seq={}, ack_seq={}",
+            "Sent message: type={}, seq={}, ack_seq={}, size={}",
             msg_type,
             seq,
-            ack_seq
+            ack_seq,
+            msg_size
         );
         Ok(())
     }
@@ -1516,6 +1580,11 @@ impl Connection {
 
                     // Discard acknowledged messages from sent queue (following Ceph's practice)
                     self.state.discard_acknowledged_messages(ack_seq);
+
+                    // Record ACK with throttle to release queue depth slot
+                    if let Some(throttle) = &self.throttle {
+                        throttle.record_ack().await;
+                    }
 
                     // Continue loop to wait for Message frame
                     continue;

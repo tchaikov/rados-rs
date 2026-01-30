@@ -143,6 +143,12 @@ impl Message {
     pub fn total_len(&self) -> usize {
         MsgHeader::LENGTH + self.front.len() + self.middle.len() + self.data.len()
     }
+
+    /// Calculate total message size for throttling purposes
+    /// This includes header + all payload segments
+    pub fn total_size(&self) -> u64 {
+        self.total_len() as u64
+    }
 }
 
 impl fmt::Display for Message {
