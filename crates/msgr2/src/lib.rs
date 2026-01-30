@@ -13,7 +13,9 @@ pub mod frames;
 pub mod header;
 pub mod message;
 pub mod protocol;
+pub mod revocation;
 pub mod state_machine;
+pub mod throttle;
 
 // Re-export working components
 pub use banner::*;
@@ -21,6 +23,8 @@ pub use error::*;
 pub use frames::*;
 pub use header::*;
 pub use message::*;
+pub use revocation::*;
+pub use throttle::*;
 
 // MSGR2 Protocol features (from include/msgr.h)
 /// msgr2.1 protocol revision
