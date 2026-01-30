@@ -173,7 +173,7 @@ impl denc::zerocopy::Decode for FeatureSet {
 /// # Example
 ///
 /// ```rust,no_run
-/// use msgr2::ConnectionConfig;
+/// use msgr2::{ConnectionConfig, AuthMethod};
 /// use auth::MonitorAuthProvider;
 ///
 /// // No authentication (development/testing)
