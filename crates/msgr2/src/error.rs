@@ -28,6 +28,8 @@ pub enum Error {
     Decode(#[from] denc::zerocopy::DecodeError),
     #[error("Compression error: {0}")]
     Compression(String),
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
 }
 
 impl Error {
@@ -49,6 +51,10 @@ impl Error {
 
     pub fn compression_error(msg: &str) -> Self {
         Self::Compression(msg.to_string())
+    }
+
+    pub fn config_error(msg: &str) -> Self {
+        Self::ConfigError(msg.to_string())
     }
 }
 

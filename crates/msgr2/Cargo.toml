@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 denc = { path = "../denc" }
 auth = { path = "../auth" }
+cephconfig = { path = "../cephconfig" }
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros"] }
 bytes = { workspace = true }
 thiserror = { workspace = true }

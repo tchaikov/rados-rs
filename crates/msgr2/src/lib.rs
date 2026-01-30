@@ -232,6 +232,11 @@ pub struct ConnectionConfig {
     /// - 2: MDS
     /// - 16: MGR
     pub service_id: u32,
+
+    /// Optional throttle configuration for this connection
+    /// If None, no throttling is applied (default, matches Ceph client behavior)
+    /// If Some, throttles message sending/receiving according to the config
+    pub throttle_config: Option<ThrottleConfig>,
 }
 
 impl Default for ConnectionConfig {
@@ -257,7 +262,8 @@ impl Default for ConnectionConfig {
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
             auth_provider: None,
-            service_id: 0, // Default to monitor
+            service_id: 0,         // Default to monitor
+            throttle_config: None, // No throttle by default (matches Ceph client)
         }
     }
 }
@@ -375,6 +381,92 @@ impl ConnectionConfig {
 
         Ok(())
     }
+
+    /// Create config from Ceph configuration file
+    /// Reads throttle settings from ceph.conf to match Ceph client behavior
+    ///
+    /// # Example
+    /// ```no_run
+    /// use msgr2::ConnectionConfig;
+    ///
+    /// let config = ConnectionConfig::from_ceph_conf("/etc/ceph/ceph.conf")
+    ///     .expect("Failed to read ceph.conf");
+    /// ```
+    pub fn from_ceph_conf(path: &str) -> Result<Self> {
+        let ceph_config = cephconfig::CephConfig::from_file(path)
+            .map_err(|e| Error::config_error(&format!("Failed to read ceph.conf: {}", e)))?;
+
+        let mut config = Self::default();
+
+        // Read ms_dispatch_throttle_bytes (default: 100MB)
+        // This is the receiver-side throttle that limits messages waiting to be dispatched
+        let sections: Vec<&str> = vec!["global", "client"];
+        if let Some(throttle_bytes_str) =
+            ceph_config.get_with_fallback(&sections, "ms_dispatch_throttle_bytes")
+        {
+            match parse_size(throttle_bytes_str) {
+                Ok(throttle_bytes) => {
+                    config.throttle_config = Some(ThrottleConfig::with_byte_rate(throttle_bytes));
+                    tracing::debug!(
+                        "Set dispatch throttle from ceph.conf: {} bytes",
+                        throttle_bytes
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse ms_dispatch_throttle_bytes: {}", e);
+                }
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Set throttle configuration
+    pub fn with_throttle(mut self, throttle_config: ThrottleConfig) -> Self {
+        self.throttle_config = Some(throttle_config);
+        self
+    }
+
+    /// Set throttle to match Ceph's default (100MB dispatch throttle)
+    pub fn with_ceph_default_throttle(mut self) -> Self {
+        self.throttle_config = Some(ThrottleConfig::with_byte_rate(100 * 1024 * 1024));
+        self
+    }
+}
+
+/// Parse size string from ceph.conf (e.g., "100M", "1G", "512K")
+fn parse_size(s: &str) -> std::result::Result<u64, String> {
+    let s = s.trim();
+
+    // Handle underscore separators (e.g., "100_M")
+    let s = s.replace('_', "");
+
+    // Find where the number ends and unit begins
+    let mut num_end = s.len();
+    for (i, c) in s.chars().enumerate() {
+        if !c.is_ascii_digit() && c != '.' {
+            num_end = i;
+            break;
+        }
+    }
+
+    let num_str = &s[..num_end];
+    let unit = &s[num_end..].to_uppercase();
+
+    let num: f64 = num_str
+        .parse()
+        .map_err(|_| format!("Invalid number: {}", num_str))?;
+
+    let multiplier: u64 = match unit.as_str() {
+        "" | "B" => 1,
+        "K" | "KB" => 1024,
+        "M" | "MB" => 1024 * 1024,
+        "G" | "GB" => 1024 * 1024 * 1024,
+        "T" | "TB" => 1024 * 1024 * 1024 * 1024,
+        _ => return Err(format!("Unknown unit: {}", unit)),
+    };
+
+    Ok((num * multiplier as f64) as u64)
 }
 
 #[cfg(test)]
@@ -390,6 +482,7 @@ mod tests {
             config.preferred_modes,
             vec![ConnectionMode::Secure, ConnectionMode::Crc]
         );
+        assert!(config.throttle_config.is_none());
         assert!(has_msgr2_feature(
             config.supported_features,
             MSGR2_FEATURE_REVISION_1
@@ -398,6 +491,41 @@ mod tests {
             config.supported_features,
             MSGR2_FEATURE_COMPRESSION
         ));
+    }
+
+    #[test]
+    fn test_parse_size() {
+        assert_eq!(parse_size("100").unwrap(), 100);
+        assert_eq!(parse_size("100B").unwrap(), 100);
+        assert_eq!(parse_size("1K").unwrap(), 1024);
+        assert_eq!(parse_size("1KB").unwrap(), 1024);
+        assert_eq!(parse_size("1M").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1MB").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("1G").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size("1GB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size("100_M").unwrap(), 100 * 1024 * 1024);
+        assert_eq!(parse_size("1.5M").unwrap(), (1.5 * 1024.0 * 1024.0) as u64);
+    }
+
+    #[test]
+    fn test_connection_config_with_throttle() {
+        let throttle = ThrottleConfig::with_byte_rate(1024 * 1024);
+        let config = ConnectionConfig::default().with_throttle(throttle);
+        assert!(config.throttle_config.is_some());
+        assert_eq!(
+            config.throttle_config.unwrap().max_bytes_per_sec,
+            1024 * 1024
+        );
+    }
+
+    #[test]
+    fn test_connection_config_with_ceph_default_throttle() {
+        let config = ConnectionConfig::default().with_ceph_default_throttle();
+        assert!(config.throttle_config.is_some());
+        assert_eq!(
+            config.throttle_config.unwrap().max_bytes_per_sec,
+            100 * 1024 * 1024
+        );
     }
 
     #[test]
