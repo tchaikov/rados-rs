@@ -808,6 +808,8 @@ pub struct CompressionConnecting {
     pub server_addr: denc::EntityAddr,
     /// Our own client address
     pub client_addr: denc::EntityAddr,
+    /// Negotiated compression algorithm (set after receiving COMPRESSION_DONE)
+    pub compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
 }
 
 impl CompressionConnecting {
@@ -826,6 +828,7 @@ impl CompressionConnecting {
             global_id,
             server_addr,
             client_addr,
+            compression_algorithm: None,
         }
     }
 }
@@ -862,23 +865,32 @@ impl State for CompressionConnecting {
                         method
                     );
 
-                    // Transition to SESSION_CONNECTING to send CLIENT_IDENT
-                    Ok(StateResult::Transition(Box::new(
-                        SessionConnecting::new_with_encryption(
-                            self.connection_mode,
-                            self.session_key.clone(),
-                            self.connection_secret.clone(),
-                            None, // No expected signature needed anymore
-                            self.global_id,
-                            self.server_addr.clone(),
-                            self.client_addr.clone(),
-                            rand::random(), // client_cookie - will be overridden in apply_result
-                            0,              // server_cookie - will be set in apply_result
-                            0,              // global_seq - will be set in apply_result
-                            0,              // connect_seq - will be set in apply_result
-                            0,              // in_seq - will be set in apply_result
-                        ),
-                    )))
+                    // Store compression algorithm
+                    let compression_algorithm = if is_compress {
+                        crate::compression::CompressionAlgorithm::from_u32(method)
+                            .unwrap_or(crate::compression::CompressionAlgorithm::None)
+                    } else {
+                        crate::compression::CompressionAlgorithm::None
+                    };
+
+                    tracing::debug!(
+                        "Compression negotiation complete: algorithm={:?}",
+                        compression_algorithm
+                    );
+
+                    // Create a new CompressionConnecting state with the algorithm stored
+                    let mut new_state = CompressionConnecting::new_with_encryption(
+                        self.connection_mode,
+                        self.session_key.clone(),
+                        self.connection_secret.clone(),
+                        self.global_id,
+                        self.server_addr.clone(),
+                        self.client_addr.clone(),
+                    );
+                    new_state.compression_algorithm = Some(compression_algorithm);
+
+                    // Return a special result that will trigger compression setup in apply_result
+                    Ok(StateResult::Transition(Box::new(new_state)))
                 } else {
                     Err(Error::protocol_error(
                         "COMPRESSION_DONE frame missing payload",
@@ -1820,6 +1832,8 @@ pub struct StateMachine {
     frame_decryptor: Option<Box<dyn crate::crypto::FrameDecryptor>>,
     /// Frame encryptor for SECURE mode (connection_mode = 2)
     frame_encryptor: Option<Box<dyn crate::crypto::FrameEncryptor>>,
+    /// Compression context for frame compression/decompression
+    compression_ctx: Option<crate::compression::CompressionContext>,
     /// Pre-auth buffer tracking for AUTH_SIGNATURE
     /// Tracks all bytes received before AUTH_DONE for signature verification
     pre_auth_rxbuf: BytesMut,
@@ -1879,6 +1893,7 @@ impl StateMachine {
             is_client: true,
             frame_decryptor: None,
             frame_encryptor: None,
+            compression_ctx: None, // Will be set after compression negotiation
             pre_auth_rxbuf: BytesMut::new(),
             pre_auth_txbuf: BytesMut::new(),
             pre_auth_enabled: true,
@@ -1980,6 +1995,7 @@ impl StateMachine {
             is_client: false,
             frame_decryptor: None,
             frame_encryptor: None,
+            compression_ctx: None, // Will be set after compression negotiation
             pre_auth_rxbuf: BytesMut::new(),
             pre_auth_txbuf: BytesMut::new(),
             pre_auth_enabled: true,
@@ -2100,6 +2116,22 @@ impl StateMachine {
     /// Check if frame encryption is active
     pub fn has_encryption(&self) -> bool {
         self.frame_decryptor.is_some()
+    }
+
+    /// Check if compression is enabled
+    pub fn has_compression(&self) -> bool {
+        self.compression_ctx.is_some()
+    }
+
+    /// Get compression context reference
+    pub fn compression_ctx(&self) -> Option<&crate::compression::CompressionContext> {
+        self.compression_ctx.as_ref()
+    }
+
+    /// Setup compression with the negotiated algorithm
+    pub fn setup_compression(&mut self, algorithm: crate::compression::CompressionAlgorithm) {
+        tracing::info!("Setting up compression with algorithm: {:?}", algorithm);
+        self.compression_ctx = Some(crate::compression::CompressionContext::new(algorithm));
     }
 
     /// Record bytes sent during pre-auth phase (for AUTH_SIGNATURE)
@@ -2318,8 +2350,39 @@ impl StateMachine {
                     let enter_result = self.current_state.enter()?;
                     return self.apply_result(enter_result);
                 } else if new_state.kind() == StateKind::CompressionConnecting {
-                    // Check if compression negotiation is needed (both client and server must support it)
-                    if !self.compression_negotiation_needed() {
+                    // Check if this is after COMPRESSION_DONE (has algorithm set)
+                    let compression_state = new_state
+                        .as_any()
+                        .downcast_ref::<CompressionConnecting>()
+                        .expect("State kind is COMPRESSION_CONNECTING but downcast failed");
+
+                    if let Some(algorithm) = compression_state.compression_algorithm {
+                        // COMPRESSION_DONE received, set up compression and transition to SESSION_CONNECTING
+                        tracing::debug!("Setting up compression with algorithm: {:?}", algorithm);
+                        self.setup_compression(algorithm);
+
+                        // Transition to SESSION_CONNECTING
+                        let new_session_state = Box::new(SessionConnecting::new_with_encryption(
+                            compression_state.connection_mode,
+                            compression_state.session_key.clone(),
+                            compression_state.connection_secret.clone(),
+                            None, // No expected signature needed
+                            compression_state.global_id,
+                            compression_state.server_addr.clone(),
+                            compression_state.client_addr.clone(),
+                            self.client_cookie,
+                            self.server_cookie,
+                            self.global_seq,
+                            self.connect_seq,
+                            self.in_seq,
+                        ));
+
+                        self.global_id = compression_state.global_id;
+                        self.current_state = new_session_state;
+                        let enter_result = self.current_state.enter()?;
+                        return self.apply_result(enter_result);
+                    } else if !self.compression_negotiation_needed() {
+                        // Check if compression negotiation is needed (both client and server must support it)
                         tracing::debug!(
                             "Compression negotiation not needed (our features: 0x{:x}, peer features: 0x{:x}), skipping compression negotiation",
                             self.config.supported_features,
@@ -2327,12 +2390,6 @@ impl StateMachine {
                         );
 
                         // Skip compression negotiation and go directly to SESSION_CONNECTING
-                        // Extract parameters from CompressionConnecting state
-                        let compression_state = new_state
-                            .as_any()
-                            .downcast_ref::<CompressionConnecting>()
-                            .expect("State kind is COMPRESSION_CONNECTING but downcast failed");
-
                         let new_session_state = Box::new(SessionConnecting::new_with_encryption(
                             compression_state.connection_mode,
                             compression_state.session_key.clone(),
@@ -2359,7 +2416,7 @@ impl StateMachine {
                         let enter_result = self.current_state.enter()?;
                         return self.apply_result(enter_result);
                     }
-                    // If peer supports compression, proceed normally
+                    // If peer supports compression and no algorithm set yet, proceed normally (will send COMPRESSION_REQUEST)
                 } else if new_state.kind() == StateKind::SessionConnecting {
                     // Store global_id from SessionConnecting state and fix up addresses
                     let session_state = new_state
