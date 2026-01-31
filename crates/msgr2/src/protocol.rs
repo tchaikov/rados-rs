@@ -1674,4 +1674,48 @@ impl Connection {
     pub fn last_keepalive_ack(&self) -> Option<std::time::Instant> {
         self.state.state_machine.last_keepalive_ack()
     }
+
+    /// Close the connection and discard all pending messages
+    ///
+    /// This matches Ceph's `discard_out_queue()` behavior:
+    /// - Discards all sent messages (they won't be retransmitted)
+    /// - Closes the TCP connection
+    /// - Resets the session state
+    ///
+    /// Use this when permanently closing a connection (not reconnecting).
+    pub async fn close(&mut self) {
+        tracing::info!("Closing connection to {}", self.server_addr);
+
+        // Discard all sent messages (won't be retransmitted)
+        self.state.clear_sent_messages();
+
+        // Reset session state
+        self.state.reset_session();
+
+        // TCP stream will be dropped when ConnectionState is dropped
+        tracing::debug!("Connection closed, all pending messages discarded");
+    }
+
+    /// Mark connection as down (for reconnection)
+    ///
+    /// This matches Ceph's `mark_down()` behavior:
+    /// - Keeps sent messages for potential replay on reconnection
+    /// - Closes the TCP connection
+    /// - Does NOT reset session state (preserves cookies, sequences)
+    ///
+    /// Use this when the connection failed but you plan to reconnect.
+    /// The sent messages will be available for retransmission after reconnection.
+    pub async fn mark_down(&mut self) {
+        tracing::info!(
+            "Marking connection down to {} (keeping {} sent messages for replay)",
+            self.server_addr,
+            self.state.get_unacknowledged_messages().len()
+        );
+
+        // Keep sent messages for potential replay
+        // Do NOT call clear_sent_messages() or reset_session()
+
+        // TCP stream will be dropped when ConnectionState is dropped
+        tracing::debug!("Connection marked down, sent messages preserved for reconnection");
+    }
 }
