@@ -563,22 +563,34 @@ impl OSDClient {
         );
     }
 
-    /// Read data from an object
-    pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<ReadResult> {
-        debug!(
-            "read pool={} oid={} offset={} len={}",
-            pool, oid, offset, len
-        );
-
+    /// Execute an OSD operation with automatic redirect handling
+    ///
+    /// This is the common pattern for all OSD operations:
+    /// 1. Create object ID and calculate hash
+    /// 2. Acquire throttle permit
+    /// 3. Get OSDMap epoch
+    /// 4. Build MOSDOp message
+    /// 5. Redirect retry loop with automatic session management
+    /// 6. Return OpResult for caller to process
+    ///
+    /// # Arguments
+    /// * `pool` - Pool ID
+    /// * `oid` - Object name
+    /// * `ops` - Operations to execute
+    ///
+    /// # Returns
+    /// Returns the OpResult after handling all redirects
+    async fn execute_op(
+        &self,
+        pool: i64,
+        oid: &str,
+        ops: Vec<OSDOp>,
+    ) -> Result<crate::types::OpResult> {
         // Create initial object ID
         let mut object = ObjectId::new(pool, oid);
         object.calculate_hash();
 
-        // Create read operation
-        let ops = vec![OSDOp::read(offset, len)];
-
         // Calculate operation budget and acquire throttle permit
-        // This provides backpressure if too many operations are in-flight
         let budget = calc_op_budget(&ops);
         let _throttle_permit = self.throttle.acquire(budget).await;
         debug!(
@@ -656,33 +668,46 @@ impl OSDClient {
                 continue;
             }
 
-            // No redirect, process result
-            // Check overall result code first
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Read operation failed".into(),
-                });
-            }
+            // No redirect, return result for caller to process
+            return Ok(result);
+        }
+    }
 
-            // Extract read data
-            if result.ops.is_empty() {
-                return Err(OSDClientError::Internal("No operation results".into()));
-            }
+    /// Read data from an object
+    pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<ReadResult> {
+        debug!(
+            "read pool={} oid={} offset={} len={}",
+            pool, oid, offset, len
+        );
 
-            let read_op = &result.ops[0];
-            if read_op.return_code != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: read_op.return_code,
-                    message: "Read operation failed".into(),
-                });
-            }
+        let ops = vec![OSDOp::read(offset, len)];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-            return Ok(ReadResult {
-                data: read_op.outdata.clone(),
-                version: result.version,
+        // Check overall result code
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Read operation failed".into(),
             });
         }
+
+        // Extract read data
+        if result.ops.is_empty() {
+            return Err(OSDClientError::Internal("No operation results".into()));
+        }
+
+        let read_op = &result.ops[0];
+        if read_op.return_code != 0 {
+            return Err(OSDClientError::OSDError {
+                code: read_op.return_code,
+                message: "Read operation failed".into(),
+            });
+        }
+
+        Ok(ReadResult {
+            data: read_op.outdata.clone(),
+            version: result.version,
+        })
     }
 
     /// Sparse read data from an object
@@ -702,174 +727,67 @@ impl OSDClient {
             pool, oid, offset, len
         );
 
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
-        object.calculate_hash();
-
-        // Create sparse read operation
         let ops = vec![OSDOp::sparse_read(offset, len)];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-        // Calculate operation budget and acquire throttle permit
-        let budget = calc_op_budget(&ops);
-        let _throttle_permit = self.throttle.acquire(budget).await;
-        debug!(
-            "Acquired throttle permit: budget={} bytes, current_ops={}, current_bytes={}",
-            budget,
-            self.throttle.current_ops(),
-            self.throttle.current_bytes()
-        );
+        // Check overall result code
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Sparse read operation failed".into(),
+            });
+        }
 
-        // Get OSDMap epoch
-        let osdmap = self
-            .mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+        // Extract sparse read data
+        if result.ops.is_empty() {
+            return Err(OSDClientError::Internal("No operation results".into()));
+        }
 
-        // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0), // Will be set in loop
-            ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
+        let read_op = &result.ops[0];
+        if read_op.return_code != 0 {
+            return Err(OSDClientError::OSDError {
+                code: read_op.return_code,
+                message: "Sparse read operation failed".into(),
+            });
+        }
 
-        // Redirect retry loop
-        loop {
-            // Map to OSDs based on current object
-            let (spgid, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
-            let primary_osd = osds[0];
-            msg.pgid = spgid;
+        // Parse sparse read result from outdata
+        // The outdata contains:
+        // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
+        // 2. Encoded bufferlist (actual data)
+        use crate::types::{SparseExtent, SparseReadResult};
+        use denc::denc::Denc;
 
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Build request ID with fresh TID
-            let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
-
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
-
-            // Wait for result with timeout
-            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-                .await
-                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
-
-            // Check for redirect
-            if let Some(redirect) = result.redirect {
-                debug!(
-                    "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
-                    if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
-                    } else {
-                        redirect.redirect_object.as_str()
-                    }
-                );
-                Self::apply_redirect(&mut msg, &redirect);
-                continue;
-            }
-
-            // No redirect, process result
-            // Check overall result code first
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Sparse read operation failed".into(),
-                });
-            }
-
-            // Extract sparse read data
-            if result.ops.is_empty() {
-                return Err(OSDClientError::Internal("No operation results".into()));
-            }
-
-            let read_op = &result.ops[0];
-            if read_op.return_code != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: read_op.return_code,
-                    message: "Sparse read operation failed".into(),
-                });
-            }
-
-            // Parse sparse read result from outdata
-            // The outdata contains:
-            // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
-            // 2. Encoded bufferlist (actual data)
-            //
-            // From Ceph's PrimaryLogPG::do_sparse_read():
-            //   encode(m, osd_op.outdata);
-            //   ::encode_destructively(data_bl, osd_op.outdata);
-            use crate::types::{SparseExtent, SparseReadResult};
-            use denc::denc::Denc;
-
-            if read_op.outdata.is_empty() {
-                // Empty result
-                return Ok(SparseReadResult {
-                    extents: vec![],
-                    data: bytes::Bytes::new(),
-                    version: result.version,
-                });
-            }
-
-            // Decode extent map from outdata
-            let mut buf = read_op.outdata.clone();
-
-            // Decode map<uint64_t, uint64_t> - extent map
-            // Format: u32 (count) followed by pairs of (u64 offset, u64 length)
-            // Use Denc to decode directly into Vec<SparseExtent>
-            let extents = match Vec::<SparseExtent>::decode(&mut buf, 0) {
-                Ok(extents) => extents,
-                Err(e) => {
-                    return Err(OSDClientError::Internal(format!(
-                        "Failed to decode extent map: {}",
-                        e
-                    )));
-                }
-            };
-
-            // Decode bufferlist (actual data)
-            // Format: u32 (length) followed by data bytes
-            // Use Denc to decode the Bytes (bufferlist)
-            let data = match bytes::Bytes::decode(&mut buf, 0) {
-                Ok(data) => data,
-                Err(e) => {
-                    return Err(OSDClientError::Internal(format!(
-                        "Failed to decode bufferlist data: {}",
-                        e
-                    )));
-                }
-            };
-
-            debug!(
-                "Sparse read decoded: {} extents, {} data bytes",
-                extents.len(),
-                data.len()
-            );
-
+        if read_op.outdata.is_empty() {
             return Ok(SparseReadResult {
-                extents,
-                data,
+                extents: vec![],
+                data: bytes::Bytes::new(),
                 version: result.version,
             });
         }
+
+        let mut buf = read_op.outdata.clone();
+
+        // Decode extent map directly as Vec<SparseExtent>
+        let extents = Vec::<SparseExtent>::decode(&mut buf, 0)
+            .map_err(|e| OSDClientError::Internal(format!("Failed to decode extent map: {}", e)))?;
+
+        // Decode bufferlist (actual data) using Denc
+        let data = bytes::Bytes::decode(&mut buf, 0).map_err(|e| {
+            OSDClientError::Internal(format!("Failed to decode bufferlist data: {}", e))
+        })?;
+
+        debug!(
+            "Sparse read decoded: {} extents, {} data bytes",
+            extents.len(),
+            data.len()
+        );
+
+        Ok(SparseReadResult {
+            extents,
+            data,
+            version: result.version,
+        })
     }
 
     /// Write data to an object
@@ -888,103 +806,19 @@ impl OSDClient {
             data.len()
         );
 
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
-        object.calculate_hash();
-
-        // Create write operation
         let ops = vec![OSDOp::write(offset, data)];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-        // Calculate operation budget and acquire throttle permit
-        let budget = calc_op_budget(&ops);
-        let _throttle_permit = self.throttle.acquire(budget).await;
-        debug!(
-            "Acquired throttle permit: budget={} bytes, current_ops={}, current_bytes={}",
-            budget,
-            self.throttle.current_ops(),
-            self.throttle.current_bytes()
-        );
-
-        // Get OSDMap epoch
-        let osdmap = self
-            .mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-
-        // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0),
-            ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
-
-        // Redirect retry loop
-        loop {
-            // Map to OSDs based on current object
-            let (spgid, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
-            let primary_osd = osds[0];
-            msg.pgid = spgid;
-
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Build request ID with fresh TID
-            let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
-
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
-
-            // Wait for result with timeout
-            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-                .await
-                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
-
-            // Check for redirect
-            if let Some(redirect) = result.redirect {
-                debug!(
-                    "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
-                    if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
-                    } else {
-                        redirect.redirect_object.as_str()
-                    }
-                );
-                Self::apply_redirect(&mut msg, &redirect);
-                continue;
-            }
-
-            // No redirect, process result
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Write operation failed".into(),
-                });
-            }
-
-            return Ok(WriteResult {
-                version: result.version,
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Write operation failed".into(),
             });
         }
+
+        Ok(WriteResult {
+            version: result.version,
+        })
     }
 
     /// Write full object (overwrite)
@@ -996,324 +830,79 @@ impl OSDClient {
     ) -> Result<WriteResult> {
         debug!("write_full pool={} oid={} len={}", pool, oid, data.len());
 
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
-        object.calculate_hash();
-
-        // Create write_full operation
         let ops = vec![OSDOp::write_full(data)];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-        // Calculate operation budget and acquire throttle permit
-        let budget = calc_op_budget(&ops);
-        let _throttle_permit = self.throttle.acquire(budget).await;
-
-        // Get OSDMap epoch
-        let osdmap = self
-            .mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-
-        // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0),
-            ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
-
-        // Redirect retry loop
-        loop {
-            // Map to OSDs based on current object
-            let (spgid, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
-            let primary_osd = osds[0];
-            msg.pgid = spgid;
-
-            eprintln!(
-                "DEBUG write_full: object='{}' mapped to PG={:?}, primary_osd={}, all_osds={:?}",
-                msg.object.oid, spgid, primary_osd, osds
-            );
-
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Build request ID with fresh TID
-            let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
-
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
-
-            // Wait for result with timeout
-            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-                .await
-                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
-
-            // Check for redirect
-            if let Some(redirect) = result.redirect {
-                debug!(
-                    "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
-                    if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
-                    } else {
-                        redirect.redirect_object.as_str()
-                    }
-                );
-                Self::apply_redirect(&mut msg, &redirect);
-                continue;
-            }
-
-            // No redirect, process result
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Write operation failed".into(),
-                });
-            }
-
-            return Ok(WriteResult {
-                version: result.version,
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Write operation failed".into(),
             });
         }
+
+        Ok(WriteResult {
+            version: result.version,
+        })
     }
 
     /// Get object statistics
     pub async fn stat(&self, pool: i64, oid: &str) -> Result<StatResult> {
         debug!("stat pool={} oid={}", pool, oid);
-
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
-        object.calculate_hash();
-
-        // Create stat operation
         let ops = vec![OSDOp::stat()];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-        // Acquire throttle permit (stat has 0 budget)
-        let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await;
-
-        // Get OSDMap epoch
-        let osdmap = self
-            .mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-
-        // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0),
-            ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
-
-        // Redirect retry loop
-        loop {
-            // Map to OSDs based on current object
-            let (spgid, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
-            let primary_osd = osds[0];
-            msg.pgid = spgid;
-
-            eprintln!(
-                "DEBUG stat: object='{}' mapped to PG={:?}, primary_osd={}, all_osds={:?}",
-                msg.object.oid, spgid, primary_osd, osds
-            );
-
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Build request ID with fresh TID
-            let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
-
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
-
-            // Wait for result with timeout
-            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-                .await
-                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
-
-            // Check for redirect
-            if let Some(redirect) = result.redirect {
-                debug!(
-                    "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
-                    if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
-                    } else {
-                        redirect.redirect_object.as_str()
-                    }
-                );
-                Self::apply_redirect(&mut msg, &redirect);
-                continue;
-            }
-
-            // No redirect, process result
-            // Check overall result code first
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Stat operation failed".into(),
-                });
-            }
-
-            // Extract stat data
-            if result.ops.is_empty() {
-                return Err(OSDClientError::Internal("No operation results".into()));
-            }
-
-            let stat_op = &result.ops[0];
-            if stat_op.return_code != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: stat_op.return_code,
-                    message: "Stat operation failed".into(),
-                });
-            }
-
-            // Parse stat data from outdata
-            // Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
-            use denc::Denc;
-            let stat_data = crate::denc_types::OsdStatData::decode(&mut &stat_op.outdata[..], 0)
-                .map_err(|e| {
-                    OSDClientError::Decoding(format!("Failed to decode stat data: {}", e))
-                })?;
-
-            // Convert to SystemTime
-            let mtime = std::time::UNIX_EPOCH
-                + std::time::Duration::new(stat_data.tv_sec as u64, stat_data.tv_nsec);
-
-            return Ok(StatResult {
-                size: stat_data.size,
-                mtime,
+        // Check overall result code first
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Stat operation failed".into(),
             });
         }
+
+        // Extract stat data
+        if result.ops.is_empty() {
+            return Err(OSDClientError::Internal("No operation results".into()));
+        }
+
+        let stat_op = &result.ops[0];
+        if stat_op.return_code != 0 {
+            return Err(OSDClientError::OSDError {
+                code: stat_op.return_code,
+                message: "Stat operation failed".into(),
+            });
+        }
+
+        // Parse stat data from outdata
+        // Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
+        use denc::Denc;
+        let stat_data = crate::denc_types::OsdStatData::decode(&mut &stat_op.outdata[..], 0)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode stat data: {}", e)))?;
+
+        // Convert to SystemTime
+        let mtime = std::time::UNIX_EPOCH
+            + std::time::Duration::new(stat_data.tv_sec as u64, stat_data.tv_nsec);
+
+        Ok(StatResult {
+            size: stat_data.size,
+            mtime,
+        })
     }
 
     /// Delete an object
     pub async fn delete(&self, pool: i64, oid: &str) -> Result<()> {
         debug!("delete pool={} oid={}", pool, oid);
-
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
-        object.calculate_hash();
-
-        // Create delete operation
         let ops = vec![OSDOp::delete()];
+        let result = self.execute_op(pool, oid, ops).await?;
 
-        // Acquire throttle permit (delete has 0 budget)
-        let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await;
-
-        // Get OSDMap epoch
-        let osdmap = self
-            .mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-
-        // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch,
-            flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0),
-            ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
-
-        // Redirect retry loop
-        loop {
-            // Map to OSDs based on current object
-            let (spgid, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
-            let primary_osd = osds[0];
-            msg.pgid = spgid;
-
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Build request ID with fresh TID
-            let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
-
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
-
-            // Wait for result with timeout
-            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
-                .await
-                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
-                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
-
-            // Check for redirect
-            if let Some(redirect) = result.redirect {
-                debug!(
-                    "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
-                    if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
-                    } else {
-                        redirect.redirect_object.as_str()
-                    }
-                );
-                Self::apply_redirect(&mut msg, &redirect);
-                continue;
-            }
-
-            // No redirect, process result
-            if result.result != 0 {
-                return Err(OSDClientError::OSDError {
-                    code: result.result,
-                    message: "Delete operation failed".into(),
-                });
-            }
-
-            return Ok(());
+        // Check overall result code
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "Delete operation failed".into(),
+            });
         }
+
+        Ok(())
     }
 
     /// List objects in a pool
