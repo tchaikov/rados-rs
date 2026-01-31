@@ -818,7 +818,6 @@ impl OSDClient {
             //   encode(m, osd_op.outdata);
             //   ::encode_destructively(data_bl, osd_op.outdata);
             use crate::types::{SparseExtent, SparseReadResult};
-            use bytes::Buf;
             use denc::denc::Denc;
 
             if read_op.outdata.is_empty() {
@@ -870,25 +869,16 @@ impl OSDClient {
 
             // Decode bufferlist (actual data)
             // Format: u32 (length) followed by data bytes
-            let data_length = match u32::decode(&mut buf, 0) {
-                Ok(len) => len,
+            // Use Denc to decode the Bytes (bufferlist)
+            let data = match bytes::Bytes::decode(&mut buf, 0) {
+                Ok(data) => data,
                 Err(e) => {
                     return Err(OSDClientError::Internal(format!(
-                        "Failed to decode data length: {}",
+                        "Failed to decode bufferlist data: {}",
                         e
                     )));
                 }
             };
-
-            if buf.remaining() < data_length as usize {
-                return Err(OSDClientError::Internal(format!(
-                    "Insufficient data: expected {} bytes, got {}",
-                    data_length,
-                    buf.remaining()
-                )));
-            }
-
-            let data = buf.copy_to_bytes(data_length as usize);
 
             debug!(
                 "Sparse read decoded: {} extents, {} data bytes",
