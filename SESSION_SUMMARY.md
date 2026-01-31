@@ -72,10 +72,16 @@ This session focused on implementing the generic Option type system for cephconf
   1. `map<uint64_t, uint64_t>` - extent map (offset -> length pairs)
   2. `bufferlist` - actual data bytes
 - Matches `PrimaryLogPG::do_sparse_read()` encoding behavior
+- Uses Denc consistently for all decoding operations (Vec, tuples, Bytes)
+- Implements Denc trait for SparseExtent to enable direct decoding without intermediate conversions
 
 **Tests**: 8 new unit tests for sparse read and write_full operations
 
-**Commit**: `da9d660` - "Add sparse read and write full support to rados-rs"
+**Commits**:
+- `da9d660` - "Add sparse read and write full support to rados-rs"
+- `87e3b3d` - "Use Denc to decode bufferlist in sparse_read()"
+- `8bb99db` - "Use Denc to decode extent map in sparse_read()"
+- `34d8f74` - "Implement Denc for SparseExtent to enable direct decoding"
 
 ---
 
@@ -116,6 +122,9 @@ cargo clippy:   ✅ No warnings
 ## Commits in This Session
 
 ```
+34d8f74 Implement Denc for SparseExtent to enable direct decoding
+8bb99db Use Denc to decode extent map in sparse_read()
+379e7d9 Update session summary with sparse read implementation
 87e3b3d Use Denc to decode bufferlist in sparse_read()
 da9d660 Add sparse read and write full support to rados-rs
 f2024f4 Add session summary documenting recent improvements
