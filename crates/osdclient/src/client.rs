@@ -685,6 +685,225 @@ impl OSDClient {
         }
     }
 
+    /// Sparse read data from an object
+    ///
+    /// Sparse read returns a map of extents indicating which regions of the object
+    /// contain data, along with the actual data. This is useful for efficiently
+    /// reading sparse objects (e.g., VM disk images with holes).
+    pub async fn sparse_read(
+        &self,
+        pool: i64,
+        oid: &str,
+        offset: u64,
+        len: u64,
+    ) -> Result<crate::types::SparseReadResult> {
+        debug!(
+            "sparse_read pool={} oid={} offset={} len={}",
+            pool, oid, offset, len
+        );
+
+        // Create initial object ID
+        let mut object = ObjectId::new(pool, oid);
+        object.calculate_hash();
+
+        // Create sparse read operation
+        let ops = vec![OSDOp::sparse_read(offset, len)];
+
+        // Calculate operation budget and acquire throttle permit
+        let budget = calc_op_budget(&ops);
+        let _throttle_permit = self.throttle.acquire(budget).await;
+        debug!(
+            "Acquired throttle permit: budget={} bytes, current_ops={}, current_bytes={}",
+            budget,
+            self.throttle.current_ops(),
+            self.throttle.current_bytes()
+        );
+
+        // Get OSDMap epoch
+        let osdmap = self
+            .mon_client
+            .get_osdmap()
+            .await
+            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+
+        // Build initial message
+        let flags = MOSDOp::calculate_flags(&ops);
+        let mut msg = MOSDOp::new(
+            self.config.client_inc,
+            osdmap.epoch,
+            flags,
+            object.clone(),
+            StripedPgId::from_pg(object.pool, 0), // Will be set in loop
+            ops.clone(),
+            crate::types::RequestId::new(
+                &self.config.entity_name,
+                0,
+                self.config.client_inc as i32,
+            ),
+            self.global_id,
+        );
+
+        // Redirect retry loop
+        loop {
+            // Map to OSDs based on current object
+            let (spgid, osds) = self
+                .object_to_osds(msg.object.pool, &msg.object.oid)
+                .await?;
+            let primary_osd = osds[0];
+            msg.pgid = spgid;
+
+            // Get session
+            let session = self.get_or_create_session(primary_osd).await?;
+
+            // Build request ID with fresh TID
+            let tid = session.next_tid();
+            msg.reqid = crate::types::RequestId::new(
+                &self.config.entity_name,
+                tid,
+                self.config.client_inc as i32,
+            );
+
+            // Submit operation
+            let result_rx = session.submit_op(msg.clone()).await?;
+
+            // Wait for result with timeout
+            let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)
+                .await
+                .map_err(|_| OSDClientError::Timeout(self.tracker.operation_timeout()))?
+                .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))??;
+
+            // Check for redirect
+            if let Some(redirect) = result.redirect {
+                debug!(
+                    "Received redirect to pool={}, object={}, retrying",
+                    redirect.redirect_locator.pool,
+                    if redirect.redirect_object.is_empty() {
+                        msg.object.oid.as_str()
+                    } else {
+                        redirect.redirect_object.as_str()
+                    }
+                );
+                Self::apply_redirect(&mut msg, &redirect);
+                continue;
+            }
+
+            // No redirect, process result
+            // Check overall result code first
+            if result.result != 0 {
+                return Err(OSDClientError::OSDError {
+                    code: result.result,
+                    message: "Sparse read operation failed".into(),
+                });
+            }
+
+            // Extract sparse read data
+            if result.ops.is_empty() {
+                return Err(OSDClientError::Internal("No operation results".into()));
+            }
+
+            let read_op = &result.ops[0];
+            if read_op.return_code != 0 {
+                return Err(OSDClientError::OSDError {
+                    code: read_op.return_code,
+                    message: "Sparse read operation failed".into(),
+                });
+            }
+
+            // Parse sparse read result from outdata
+            // The outdata contains:
+            // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
+            // 2. Encoded bufferlist (actual data)
+            //
+            // From Ceph's PrimaryLogPG::do_sparse_read():
+            //   encode(m, osd_op.outdata);
+            //   ::encode_destructively(data_bl, osd_op.outdata);
+            use crate::types::{SparseExtent, SparseReadResult};
+            use bytes::Buf;
+            use denc::denc::Denc;
+
+            if read_op.outdata.is_empty() {
+                // Empty result
+                return Ok(SparseReadResult {
+                    extents: vec![],
+                    data: bytes::Bytes::new(),
+                    version: result.version,
+                });
+            }
+
+            // Decode extent map from outdata
+            let mut buf = read_op.outdata.clone();
+
+            // Decode map<uint64_t, uint64_t> - extent map
+            // Format: u32 (count) followed by pairs of (u64 offset, u64 length)
+            let extent_count = match u32::decode(&mut buf, 0) {
+                Ok(count) => count,
+                Err(e) => {
+                    return Err(OSDClientError::Internal(format!(
+                        "Failed to decode extent count: {}",
+                        e
+                    )));
+                }
+            };
+
+            let mut extents = Vec::with_capacity(extent_count as usize);
+            for _ in 0..extent_count {
+                let extent_offset = match u64::decode(&mut buf, 0) {
+                    Ok(off) => off,
+                    Err(e) => {
+                        return Err(OSDClientError::Internal(format!(
+                            "Failed to decode extent offset: {}",
+                            e
+                        )));
+                    }
+                };
+                let extent_length = match u64::decode(&mut buf, 0) {
+                    Ok(len) => len,
+                    Err(e) => {
+                        return Err(OSDClientError::Internal(format!(
+                            "Failed to decode extent length: {}",
+                            e
+                        )));
+                    }
+                };
+                extents.push(SparseExtent::new(extent_offset, extent_length));
+            }
+
+            // Decode bufferlist (actual data)
+            // Format: u32 (length) followed by data bytes
+            let data_length = match u32::decode(&mut buf, 0) {
+                Ok(len) => len,
+                Err(e) => {
+                    return Err(OSDClientError::Internal(format!(
+                        "Failed to decode data length: {}",
+                        e
+                    )));
+                }
+            };
+
+            if buf.remaining() < data_length as usize {
+                return Err(OSDClientError::Internal(format!(
+                    "Insufficient data: expected {} bytes, got {}",
+                    data_length,
+                    buf.remaining()
+                )));
+            }
+
+            let data = buf.copy_to_bytes(data_length as usize);
+
+            debug!(
+                "Sparse read decoded: {} extents, {} data bytes",
+                extents.len(),
+                data.len()
+            );
+
+            return Ok(SparseReadResult {
+                extents,
+                data,
+                version: result.version,
+            });
+        }
+    }
+
     /// Write data to an object
     pub async fn write(
         &self,

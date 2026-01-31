@@ -26,7 +26,8 @@ pub use client::{OSDClient, OSDClientConfig};
 pub use error::OSDClientError;
 pub use ioctx::IoCtx;
 pub use types::{
-    OSDOp, ObjectId, OpCode, PoolInfo, ReadResult, StatResult, StripedPgId, WriteResult,
+    OSDOp, ObjectId, OpCode, PoolInfo, ReadResult, SparseExtent, SparseReadResult, StatResult,
+    StripedPgId, WriteResult,
 };
 
 pub type Result<T> = std::result::Result<T, OSDClientError>;

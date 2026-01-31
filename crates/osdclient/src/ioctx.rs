@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use crate::client::OSDClient;
 use crate::error::{OSDClientError, Result};
-use crate::types::{ReadResult, StatResult, WriteResult};
+use crate::types::{ReadResult, SparseReadResult, StatResult, WriteResult};
 
 /// Pending write operation
 #[derive(Debug)]
@@ -198,6 +198,56 @@ impl IoCtx {
         );
 
         self.client.read(self.pool_id, oid, offset, length).await
+    }
+
+    /// Sparse read data from an object
+    ///
+    /// Sparse read returns a map of extents indicating which regions of the object
+    /// contain data, along with the actual data. This is useful for efficiently
+    /// reading sparse objects (e.g., VM disk images with holes).
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object name
+    /// * `offset` - Byte offset to start reading from
+    /// * `length` - Number of bytes to read (0 = read to end)
+    ///
+    /// # Returns
+    ///
+    /// Returns the sparse read result with extents and data
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use osdclient::IoCtx;
+    /// # async fn example(ioctx: IoCtx) -> Result<(), Box<dyn std::error::Error>> {
+    /// // Read 1MB starting at offset 0
+    /// let result = ioctx.sparse_read("myobject", 0, 1024*1024).await?;
+    ///
+    /// // Check which regions have data
+    /// for extent in &result.extents {
+    ///     println!("Data at offset {} for {} bytes", extent.offset, extent.length);
+    /// }
+    ///
+    /// // Access the actual data
+    /// println!("Total data bytes: {}", result.data.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn sparse_read(
+        &self,
+        oid: &str,
+        offset: u64,
+        length: u64,
+    ) -> Result<SparseReadResult> {
+        debug!(
+            "Sparse reading from object {} (offset={}, length={})",
+            oid, offset, length
+        );
+
+        self.client
+            .sparse_read(self.pool_id, oid, offset, length)
+            .await
     }
 
     /// Get object metadata (size and mtime)

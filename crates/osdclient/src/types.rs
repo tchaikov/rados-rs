@@ -393,6 +393,8 @@ pub enum OpCode {
     WriteFull = osd_op!(WR, DATA, 2),
     /// Truncate operation: __CEPH_OSD_OP(WR, DATA, 3)
     Truncate = osd_op!(WR, DATA, 3),
+    /// Sparse read operation: __CEPH_OSD_OP(RD, DATA, 5)
+    SparseRead = osd_op!(RD, DATA, 5),
     /// Delete operation: __CEPH_OSD_OP(WR, DATA, 5)
     Delete = osd_op!(WR, DATA, 5),
     /// Create object: __CEPH_OSD_OP(WR, DATA, 13)
@@ -413,16 +415,17 @@ impl OpCode {
     /// Try to convert a u16 to an OpCode
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
-            0x1201 => Some(OpCode::Read),      // RD | DATA | 1
-            0x1202 => Some(OpCode::Stat),      // RD | DATA | 2
-            0x2201 => Some(OpCode::Write),     // WR | DATA | 1
-            0x2202 => Some(OpCode::WriteFull), // WR | DATA | 2
-            0x2203 => Some(OpCode::Truncate),  // WR | DATA | 3
-            0x2205 => Some(OpCode::Delete),    // WR | DATA | 5
-            0x220D => Some(OpCode::Create),    // WR | DATA | 13
-            0x1301 => Some(OpCode::GetXattr),  // RD | ATTR | 1
-            0x2301 => Some(OpCode::SetXattr),  // WR | ATTR | 1
-            0x1501 => Some(OpCode::Pgls),      // RD | PG | 1
+            0x1201 => Some(OpCode::Read),       // RD | DATA | 1
+            0x1202 => Some(OpCode::Stat),       // RD | DATA | 2
+            0x1205 => Some(OpCode::SparseRead), // RD | DATA | 5
+            0x2201 => Some(OpCode::Write),      // WR | DATA | 1
+            0x2202 => Some(OpCode::WriteFull),  // WR | DATA | 2
+            0x2203 => Some(OpCode::Truncate),   // WR | DATA | 3
+            0x2205 => Some(OpCode::Delete),     // WR | DATA | 5
+            0x220D => Some(OpCode::Create),     // WR | DATA | 13
+            0x1301 => Some(OpCode::GetXattr),   // RD | ATTR | 1
+            0x2301 => Some(OpCode::SetXattr),   // WR | ATTR | 1
+            0x1501 => Some(OpCode::Pgls),       // RD | PG | 1
             _ => None,
         }
     }
@@ -539,6 +542,29 @@ impl OSDOp {
         }
     }
 
+    /// Create a sparse_read operation
+    ///
+    /// Sparse read returns a map of extents (offset -> length) indicating
+    /// which regions of the object contain data, along with the actual data.
+    /// This is useful for reading sparse objects efficiently.
+    ///
+    /// # Arguments
+    /// * `offset` - Starting offset to read from
+    /// * `length` - Maximum length to read
+    pub fn sparse_read(offset: u64, length: u64) -> Self {
+        Self {
+            op: OpCode::SparseRead,
+            flags: 0,
+            op_data: OpData::Extent {
+                offset,
+                length,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
+            indata: Bytes::new(),
+        }
+    }
+
     /// Create a delete operation
     pub fn delete() -> Self {
         Self {
@@ -643,6 +669,50 @@ pub struct StatResult {
     pub mtime: SystemTime,
 }
 
+/// Extent information for sparse read
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SparseExtent {
+    /// Offset in the object where data exists
+    pub offset: u64,
+    /// Length of data at this offset
+    pub length: u64,
+}
+
+impl SparseExtent {
+    pub fn new(offset: u64, length: u64) -> Self {
+        Self { offset, length }
+    }
+}
+
+/// Result of a sparse read operation
+///
+/// Sparse read returns a map of extents indicating which regions of the object
+/// contain data, along with the actual data. This is useful for efficiently
+/// reading sparse objects (e.g., VM disk images with holes).
+///
+/// # Example
+/// ```ignore
+/// // Read 1MB starting at offset 0
+/// let result = client.sparse_read("myobject", 0, 1024*1024).await?;
+///
+/// // Check which regions have data
+/// for extent in &result.extents {
+///     println!("Data at offset  for {} bytes", extent.offset, extent.length);
+/// }
+///
+/// // Access the actual data
+/// println!("Total data bytes: {}", result.data.len());
+/// ```
+#[derive(Debug, Clone)]
+pub struct SparseReadResult {
+    /// Map of extents (offset -> length) indicating data regions
+    pub extents: Vec<SparseExtent>,
+    /// Actual data bytes (concatenated from all extents)
+    pub data: Bytes,
+    /// Object version
+    pub version: u64,
+}
+
 /// Generic operation result
 #[derive(Debug, Clone)]
 pub struct OpResult {
@@ -704,4 +774,188 @@ pub struct ListResult {
     pub entries: Vec<ListObjectEntry>,
     /// Continuation cursor for pagination (None if at end)
     pub cursor: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_opcode_sparse_read_encoding() {
+        // Verify SparseRead opcode matches Ceph's encoding
+        // __CEPH_OSD_OP(RD, DATA, 5) = 0x1000 | 0x0200 | 5 = 0x1205
+        assert_eq!(OpCode::SparseRead as u16, 0x1205);
+        assert!(OpCode::SparseRead.is_read());
+        assert!(!OpCode::SparseRead.is_write());
+    }
+
+    #[test]
+    fn test_opcode_write_full_encoding() {
+        // Verify WriteFull opcode matches Ceph's encoding
+        // __CEPH_OSD_OP(WR, DATA, 2) = 0x2000 | 0x0200 | 2 = 0x2202
+        assert_eq!(OpCode::WriteFull as u16, 0x2202);
+        assert!(!OpCode::WriteFull.is_read());
+        assert!(OpCode::WriteFull.is_write());
+    }
+
+    #[test]
+    fn test_opcode_from_u16_sparse_read() {
+        // Test conversion from u16 to OpCode for SparseRead
+        assert_eq!(OpCode::from_u16(0x1205), Some(OpCode::SparseRead));
+    }
+
+    #[test]
+    fn test_opcode_from_u16_write_full() {
+        // Test conversion from u16 to OpCode for WriteFull
+        assert_eq!(OpCode::from_u16(0x2202), Some(OpCode::WriteFull));
+    }
+
+    #[test]
+    fn test_osdop_sparse_read() {
+        // Test creating a sparse read operation
+        let op = OSDOp::sparse_read(1024, 4096);
+
+        assert_eq!(op.op, OpCode::SparseRead);
+        assert_eq!(op.flags, 0);
+        assert!(op.indata.is_empty());
+
+        match op.op_data {
+            OpData::Extent {
+                offset,
+                length,
+                truncate_size,
+                truncate_seq,
+            } => {
+                assert_eq!(offset, 1024);
+                assert_eq!(length, 4096);
+                assert_eq!(truncate_size, 0);
+                assert_eq!(truncate_seq, 0);
+            }
+            _ => panic!("Expected OpData::Extent"),
+        }
+    }
+
+    #[test]
+    fn test_osdop_write_full() {
+        // Test creating a write_full operation
+        let data = Bytes::from(vec![1, 2, 3, 4, 5]);
+        let op = OSDOp::write_full(data.clone());
+
+        assert_eq!(op.op, OpCode::WriteFull);
+        assert_eq!(op.flags, 0);
+        assert_eq!(op.indata, data);
+
+        match op.op_data {
+            OpData::Extent {
+                offset,
+                length,
+                truncate_size,
+                truncate_seq,
+            } => {
+                assert_eq!(offset, 0);
+                assert_eq!(length, 5);
+                assert_eq!(truncate_size, 0);
+                assert_eq!(truncate_seq, 0);
+            }
+            _ => panic!("Expected OpData::Extent"),
+        }
+    }
+
+    #[test]
+    fn test_sparse_extent_creation() {
+        // Test creating a sparse extent
+        let extent = SparseExtent::new(1024, 4096);
+        assert_eq!(extent.offset, 1024);
+        assert_eq!(extent.length, 4096);
+    }
+
+    #[test]
+    fn test_sparse_extent_equality() {
+        // Test sparse extent equality
+        let extent1 = SparseExtent::new(1024, 4096);
+        let extent2 = SparseExtent::new(1024, 4096);
+        let extent3 = SparseExtent::new(2048, 4096);
+
+        assert_eq!(extent1, extent2);
+        assert_ne!(extent1, extent3);
+    }
+
+    #[test]
+    fn test_sparse_read_result() {
+        // Test creating a sparse read result
+        let extents = vec![SparseExtent::new(0, 1024), SparseExtent::new(4096, 2048)];
+        let data = Bytes::from(vec![0u8; 3072]); // 1024 + 2048
+        let version = 42;
+
+        let result = SparseReadResult {
+            extents: extents.clone(),
+            data: data.clone(),
+            version,
+        };
+
+        assert_eq!(result.extents.len(), 2);
+        assert_eq!(result.extents[0].offset, 0);
+        assert_eq!(result.extents[0].length, 1024);
+        assert_eq!(result.extents[1].offset, 4096);
+        assert_eq!(result.extents[1].length, 2048);
+        assert_eq!(result.data.len(), 3072);
+        assert_eq!(result.version, 42);
+    }
+
+    #[test]
+    fn test_calc_op_budget_sparse_read() {
+        // Test budget calculation for sparse read
+        let op = OSDOp::sparse_read(0, 4096);
+        let budget = calc_op_budget(&[op]);
+
+        // Sparse read is a read operation, so budget should be the expected response size
+        assert_eq!(budget, 4096);
+    }
+
+    #[test]
+    fn test_calc_op_budget_write_full() {
+        // Test budget calculation for write_full
+        let data = Bytes::from(vec![0u8; 1024]);
+        let op = OSDOp::write_full(data);
+        let budget = calc_op_budget(&[op]);
+
+        // Write operations contribute indata size
+        assert_eq!(budget, 1024);
+    }
+
+    #[test]
+    fn test_object_id_creation() {
+        // Test creating an ObjectId
+        let obj = ObjectId::new(1, "test-object");
+        assert_eq!(obj.pool, 1);
+        assert_eq!(obj.oid, "test-object");
+        assert_eq!(obj.snap, SNAP_HEAD);
+        assert_eq!(obj.hash, 0);
+        assert!(obj.namespace.is_empty());
+        assert!(obj.key.is_empty());
+    }
+
+    #[test]
+    fn test_object_id_with_namespace() {
+        // Test creating an ObjectId with namespace
+        let obj = ObjectId::with_namespace(1, "test-object", "test-ns");
+        assert_eq!(obj.pool, 1);
+        assert_eq!(obj.oid, "test-object");
+        assert_eq!(obj.namespace, "test-ns");
+        assert_eq!(obj.snap, SNAP_HEAD);
+    }
+
+    #[test]
+    fn test_list_object_entry() {
+        // Test creating a ListObjectEntry
+        let entry = ListObjectEntry::new(
+            "namespace".to_string(),
+            "object-name".to_string(),
+            "locator".to_string(),
+        );
+
+        assert_eq!(entry.nspace, "namespace");
+        assert_eq!(entry.oid, "object-name");
+        assert_eq!(entry.locator, "locator");
+    }
 }
