@@ -834,9 +834,9 @@ impl OSDClient {
 
             // Decode map<uint64_t, uint64_t> - extent map
             // Format: u32 (count) followed by pairs of (u64 offset, u64 length)
-            // Use Denc to decode Vec<(u64, u64)>
-            let extent_pairs = match Vec::<(u64, u64)>::decode(&mut buf, 0) {
-                Ok(pairs) => pairs,
+            // Use Denc to decode directly into Vec<SparseExtent>
+            let extents = match Vec::<SparseExtent>::decode(&mut buf, 0) {
+                Ok(extents) => extents,
                 Err(e) => {
                     return Err(OSDClientError::Internal(format!(
                         "Failed to decode extent map: {}",
@@ -844,12 +844,6 @@ impl OSDClient {
                     )));
                 }
             };
-
-            // Convert to SparseExtent
-            let extents: Vec<SparseExtent> = extent_pairs
-                .into_iter()
-                .map(|(offset, length)| SparseExtent::new(offset, length))
-                .collect();
 
             // Decode bufferlist (actual data)
             // Format: u32 (length) followed by data bytes

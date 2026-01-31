@@ -684,6 +684,32 @@ impl SparseExtent {
     }
 }
 
+// Implement Denc for SparseExtent to enable direct decoding
+impl denc::denc::Denc for SparseExtent {
+    fn encode<B: bytes::BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+    ) -> std::result::Result<(), denc::RadosError> {
+        // Encode as tuple (offset, length)
+        denc::denc::Denc::encode(&(self.offset, self.length), buf, features)
+    }
+
+    fn decode<B: bytes::Buf>(
+        buf: &mut B,
+        features: u64,
+    ) -> std::result::Result<Self, denc::RadosError> {
+        // Decode as tuple (offset, length)
+        let (offset, length) = <(u64, u64) as denc::denc::Denc>::decode(buf, features)?;
+        Ok(Self::new(offset, length))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Size is same as tuple (offset, length)
+        denc::denc::Denc::encoded_size(&(self.offset, self.length), features)
+    }
+}
+
 /// Result of a sparse read operation
 ///
 /// Sparse read returns a map of extents indicating which regions of the object
