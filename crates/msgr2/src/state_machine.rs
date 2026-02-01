@@ -1970,6 +1970,8 @@ pub struct StateMachine {
     config: crate::ConnectionConfig,
     /// Preserved auth provider (kept across state transitions)
     preserved_auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    /// Server-side auth handler (for server connections only)
+    server_auth_handler: Option<auth::CephXServerHandler>,
     /// Global ID assigned by the server during authentication
     /// Used to uniquely identify this client session
     global_id: u64,
@@ -2019,9 +2021,10 @@ impl StateMachine {
             peer_supported_features: 0, // Will be set after banner exchange
             config,
             preserved_auth_provider,
-            global_id: 0,                  // Will be set during authentication
+            server_auth_handler: None, // Client doesn't use server auth handler
+            global_id: 0,              // Will be set during authentication
             client_cookie: rand::random(), // Generate random client cookie
-            server_cookie: 0,              // Will be assigned by server
+            server_cookie: 0,          // Will be assigned by server
             global_seq: 0,
             connect_seq: 0,
             in_seq: 0,
@@ -2106,6 +2109,11 @@ impl StateMachine {
 
     /// Create a new state machine for server connection
     pub fn new_server() -> Self {
+        Self::new_server_with_auth(None)
+    }
+
+    /// Create a new state machine for server connection with optional auth handler
+    pub fn new_server_with_auth(auth_handler: Option<auth::CephXServerHandler>) -> Self {
         Self {
             current_state: Box::new(HelloAccepting),
             is_client: false,
@@ -2121,6 +2129,7 @@ impl StateMachine {
             peer_supported_features: 0, // Will be set after banner exchange
             config: crate::ConnectionConfig::default(),
             preserved_auth_provider: None, // Server doesn't use auth provider
+            server_auth_handler: auth_handler,
             global_id: 0, // Server doesn't have a global_id (it assigns them to clients)
             client_cookie: 0, // Will be received from client
             server_cookie: rand::random(), // Generate random server cookie
@@ -2584,7 +2593,18 @@ impl StateMachine {
             }
             StateResult::SendFrame { frame, next_state } => {
                 if let Some(new_state) = next_state {
-                    self.current_state = new_state;
+                    // Check if transitioning to AuthAccepting and inject auth handler
+                    if new_state.kind() == StateKind::AuthAccepting {
+                        // Take the auth handler from StateMachine and pass it to AuthAccepting
+                        if let Some(auth_handler) = self.server_auth_handler.take() {
+                            self.current_state =
+                                Box::new(AuthAccepting::with_handler(auth_handler));
+                        } else {
+                            self.current_state = new_state;
+                        }
+                    } else {
+                        self.current_state = new_state;
+                    }
                 }
                 Ok(StateResult::SendFrame {
                     frame,

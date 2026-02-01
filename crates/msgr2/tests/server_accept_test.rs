@@ -29,8 +29,10 @@ async fn test_server_accept_basic() {
         // Create server config with no authentication for simplicity
         let server_config = ConnectionConfig::with_no_auth();
 
-        // Accept the connection
-        let mut server_conn = Connection::accept(stream, server_config).await.unwrap();
+        // Accept the connection (no auth handler for this test)
+        let mut server_conn = Connection::accept(stream, server_config, None)
+            .await
+            .unwrap();
         tracing::info!("Server: Banner exchange complete");
 
         // Complete the handshake
@@ -110,8 +112,10 @@ async fn test_server_accept_with_auth() {
         // Note: This test requires proper auth provider setup
         let server_config = ConnectionConfig::prefer_secure_mode();
 
-        // Accept the connection
-        let mut server_conn = Connection::accept(stream, server_config).await.unwrap();
+        // Accept the connection (no auth handler for this test)
+        let mut server_conn = Connection::accept(stream, server_config, None)
+            .await
+            .unwrap();
         tracing::info!("Server: Banner exchange complete");
 
         // Complete the handshake

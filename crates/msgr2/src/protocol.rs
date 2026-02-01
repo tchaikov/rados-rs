@@ -1068,7 +1068,12 @@ impl Connection {
     /// # Arguments
     /// * `stream` - The accepted TCP stream from TcpListener
     /// * `config` - Connection configuration (features and connection modes)
-    pub async fn accept(stream: TcpStream, config: crate::ConnectionConfig) -> Result<Self> {
+    /// * `auth_handler` - Optional server-side authentication handler
+    pub async fn accept(
+        stream: TcpStream,
+        config: crate::ConnectionConfig,
+        auth_handler: Option<auth::CephXServerHandler>,
+    ) -> Result<Self> {
         let peer_addr = stream.peer_addr()?;
         let local_addr = stream.local_addr()?;
 
@@ -1084,7 +1089,7 @@ impl Connection {
 
         // Create state machine for server BEFORE banner exchange
         // This is important because we need to track banner bytes in pre-auth buffers
-        let mut state_machine = StateMachine::new_server();
+        let mut state_machine = StateMachine::new_server_with_auth(auth_handler);
 
         // Set the client address (peer) for SERVER_IDENT
         let mut client_entity_addr = denc::EntityAddr::new();
