@@ -375,18 +375,110 @@ impl ConnectionConfig {
         }
     }
 
-    /// Validate configuration
+    /// Validate configuration for semantic correctness
+    ///
+    /// Checks that configuration values make sense and are internally consistent.
+    /// This catches configuration errors early before attempting connection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any of these conditions are violated:
+    /// - Empty auth methods or connection modes
+    /// - Unknown/invalid auth methods or modes
+    /// - Auth provider inconsistencies
+    /// - Required features not supported
+    /// - Invalid service ID
+    /// - Unimplemented features
     pub fn validate(&self) -> std::result::Result<(), String> {
+        // Validate auth methods
         if self.supported_auth_methods.is_empty() {
             return Err("supported_auth_methods cannot be empty".to_string());
+        }
+
+        if self.supported_auth_methods.contains(&AuthMethod::Unknown) {
+            return Err("supported_auth_methods contains AuthMethod::Unknown".to_string());
         }
 
         if self.supported_auth_methods.contains(&AuthMethod::Gss) {
             return Err("AuthMethod::Gss not yet implemented".to_string());
         }
 
+        // Validate connection modes
         if self.preferred_modes.is_empty() {
             return Err("preferred_modes cannot be empty".to_string());
+        }
+
+        if self.preferred_modes.contains(&ConnectionMode::Unknown) {
+            return Err("preferred_modes contains ConnectionMode::Unknown".to_string());
+        }
+
+        // Validate auth provider consistency
+        if self.auth_provider.is_some() {
+            if !self.supported_auth_methods.contains(&AuthMethod::Cephx) {
+                return Err(
+                    "auth_provider is set but supported_auth_methods doesn't include Cephx"
+                        .to_string(),
+                );
+            }
+        } else if self.supported_auth_methods.contains(&AuthMethod::Cephx) {
+            return Err(
+                "supported_auth_methods includes Cephx but auth_provider is None".to_string(),
+            );
+        }
+
+        // Validate feature consistency
+        if (self.required_features & self.supported_features) != self.required_features {
+            return Err(format!(
+                "required_features (0x{:x}) must be a subset of supported_features (0x{:x})",
+                self.required_features, self.supported_features
+            ));
+        }
+
+        // Validate service ID is a known value
+        // Known values from Ceph: 0=Mon, 2=MDS, 4=OSD, 16=MGR
+        const VALID_SERVICE_IDS: &[u32] = &[0, 2, 4, 16];
+        if !VALID_SERVICE_IDS.contains(&self.service_id) {
+            return Err(format!(
+                "Invalid service_id {}. Valid values: 0 (Mon), 2 (MDS), 4 (OSD), 16 (MGR)",
+                self.service_id
+            ));
+        }
+
+        // Validate throttle config if present
+        if let Some(ref throttle) = self.throttle_config {
+            if throttle.max_bytes_per_sec == 0
+                && throttle.max_messages_per_sec == 0
+                && throttle.max_dispatch_queue_depth == 0
+            {
+                return Err(
+                    "throttle_config is set but all limits are zero (throttle has no effect)"
+                        .to_string(),
+                );
+            }
+
+            // Check for unreasonably small byte rates (likely configuration error)
+            if throttle.max_bytes_per_sec > 0 && throttle.max_bytes_per_sec < 1024 {
+                return Err(format!(
+                    "throttle max_bytes_per_sec ({}) is unreasonably small (< 1KB/s)",
+                    throttle.max_bytes_per_sec
+                ));
+            }
+
+            // Check for unreasonably small message rates
+            if throttle.max_messages_per_sec > 0 && throttle.max_messages_per_sec < 10 {
+                return Err(format!(
+                    "throttle max_messages_per_sec ({}) is unreasonably small (< 10 msg/s)",
+                    throttle.max_messages_per_sec
+                ));
+            }
+
+            // Check for unreasonably small queue depth
+            if throttle.max_dispatch_queue_depth > 0 && throttle.max_dispatch_queue_depth < 10 {
+                return Err(format!(
+                    "throttle max_dispatch_queue_depth ({}) is unreasonably small (< 10 messages)",
+                    throttle.max_dispatch_queue_depth
+                ));
+            }
         }
 
         Ok(())
@@ -542,5 +634,185 @@ mod tests {
         assert_eq!(config.supported_features, 0x1);
         assert_eq!(config.required_features, 0x0);
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Crc]);
+    }
+
+    #[test]
+    fn test_connection_config_validate_success() {
+        let config = ConnectionConfig::default();
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_connection_config_validate_empty_auth_methods() {
+        let mut config = ConnectionConfig::default();
+        config.supported_auth_methods = vec![];
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("supported_auth_methods cannot be empty"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_unknown_auth_method() {
+        let mut config = ConnectionConfig::default();
+        config.supported_auth_methods = vec![AuthMethod::Unknown, AuthMethod::None];
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("AuthMethod::Unknown"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_gss_not_implemented() {
+        let mut config = ConnectionConfig::default();
+        config.supported_auth_methods = vec![AuthMethod::Gss];
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("AuthMethod::Gss not yet implemented"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_empty_modes() {
+        let mut config = ConnectionConfig::default();
+        config.preferred_modes = vec![];
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("preferred_modes cannot be empty"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_unknown_mode() {
+        let mut config = ConnectionConfig::default();
+        config.preferred_modes = vec![ConnectionMode::Unknown];
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("ConnectionMode::Unknown"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_auth_provider_mismatch() {
+        let mut config = ConnectionConfig::with_no_auth();
+        // Manually create an inconsistent state
+        use auth::MonitorAuthProvider;
+        let mon_auth =
+            MonitorAuthProvider::new("client.admin".to_string()).expect("Failed to create auth");
+        config.auth_provider = Some(Box::new(mon_auth));
+        // supported_auth_methods is still [None] but provider is set
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("auth_provider is set but supported_auth_methods doesn't include Cephx"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_cephx_without_provider() {
+        let mut config = ConnectionConfig::default();
+        config.supported_auth_methods = vec![AuthMethod::Cephx];
+        config.auth_provider = None;
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("supported_auth_methods includes Cephx but auth_provider is None"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_required_features_not_supported() {
+        let mut config = ConnectionConfig::default();
+        config.supported_features = MSGR2_FEATURE_REVISION_1; // Only revision 1
+        config.required_features = MSGR2_FEATURE_COMPRESSION; // Require compression
+        assert!(config.validate().is_err());
+        assert!(config.validate().unwrap_err().contains("required_features"));
+        assert!(config.validate().unwrap_err().contains("subset"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_invalid_service_id() {
+        let mut config = ConnectionConfig::with_no_auth();
+        config.service_id = 999; // Invalid service ID
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("Invalid service_id"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_valid_service_ids() {
+        // Test all valid service IDs
+        for &service_id in &[0, 2, 4, 16] {
+            let mut config = ConnectionConfig::with_no_auth();
+            config.service_id = service_id;
+            assert!(
+                config.validate().is_ok(),
+                "Service ID {} should be valid",
+                service_id
+            );
+        }
+    }
+
+    #[test]
+    fn test_connection_config_validate_throttle_all_zeros() {
+        let mut config = ConnectionConfig::default();
+        config.throttle_config = Some(ThrottleConfig {
+            max_bytes_per_sec: 0,
+            max_messages_per_sec: 0,
+            max_dispatch_queue_depth: 0,
+            rate_window: std::time::Duration::from_secs(1),
+        });
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("all limits are zero"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_throttle_bytes_too_small() {
+        let mut config = ConnectionConfig::default();
+        config.throttle_config = Some(ThrottleConfig::with_byte_rate(512)); // < 1KB
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("unreasonably small"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_throttle_messages_too_small() {
+        let mut config = ConnectionConfig::default();
+        config.throttle_config = Some(ThrottleConfig::with_message_rate(5)); // < 10
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("unreasonably small"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_throttle_queue_too_small() {
+        let mut config = ConnectionConfig::default();
+        config.throttle_config = Some(ThrottleConfig::with_queue_depth(5)); // < 10
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("unreasonably small"));
+    }
+
+    #[test]
+    fn test_connection_config_validate_throttle_valid() {
+        let mut config = ConnectionConfig::default();
+        config.throttle_config = Some(ThrottleConfig::with_byte_rate(1024 * 1024)); // 1MB/s
+        assert!(config.validate().is_ok());
     }
 }
