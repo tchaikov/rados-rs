@@ -203,6 +203,29 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 
 ---
 
+### 7. MonConnection Close Implementation ✅
+
+**Implementation**: `crates/monclient/src/connection.rs`
+
+**Problem**: The `close()` method was a stub with a TODO comment.
+
+**Solution**: Implemented proper connection closing that:
+- Marks the session as closed by clearing `has_session` and `auth_state`
+- Properly closes the underlying msgr2 connection
+- Follows the pattern used in `reopen_session()`
+
+**Implementation Details**:
+- Updates session state to reflect closed connection
+- Takes ownership of the msgr2 Connection and drops it
+- Logs the closure for debugging
+- Matches the behavior of the official MonClient shutdown logic
+
+**Tests**: All monclient tests passing
+
+**Commit**: `0cf19a9` - "Implement proper connection closing in MonConnection"
+
+---
+
 ## Test Results
 
 ### All Tests Passing ✅
