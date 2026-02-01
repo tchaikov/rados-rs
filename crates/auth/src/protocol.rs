@@ -31,19 +31,24 @@ impl Denc for CephXServiceTicketRequest {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        buf.put_u8(1); // struct_v
-        buf.put_u32_le(self.keys);
+        1u8.encode(buf, 0)?; // struct_v
+        self.keys.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 5 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXServiceTicketRequest".to_string(),
-            ));
-        }
-        let _struct_v = buf.get_u8();
-        let keys = buf.get_u32_le();
+        let _struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXServiceTicketRequest: {}",
+                e
+            ))
+        })?;
+        let keys = u32::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode keys for CephXServiceTicketRequest: {}",
+                e
+            ))
+        })?;
         Ok(Self { keys })
     }
 
@@ -112,17 +117,17 @@ impl Denc for CephXRequestHeader {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        buf.put_u16_le(self.request_type);
+        self.request_type.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 2 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for request header".to_string(),
-            ));
-        }
-        let request_type = buf.get_u16_le();
+        let request_type = u16::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode request_type for CephXRequestHeader: {}",
+                e
+            ))
+        })?;
         Ok(Self { request_type })
     }
 
@@ -152,19 +157,24 @@ impl Denc for CephXResponseHeader {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        buf.put_u16_le(self.request_type);
-        buf.put_i32_le(self.status);
+        self.request_type.encode(buf, 0)?;
+        self.status.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 6 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for response header (need 6 bytes)".to_string(),
-            ));
-        }
-        let request_type = buf.get_u16_le();
-        let status = buf.get_i32_le();
+        let request_type = u16::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode request_type for CephXResponseHeader: {}",
+                e
+            ))
+        })?;
+        let status = i32::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode status for CephXResponseHeader: {}",
+                e
+            ))
+        })?;
         Ok(Self {
             request_type,
             status,
@@ -199,32 +209,31 @@ pub struct CephXAuthenticate {
 impl Denc for CephXAuthenticate {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         // Encode struct version (must be first!)
-        buf.put_u8(3); // struct_v = 3
+        3u8.encode(buf, 0)?; // struct_v = 3
 
         // Encode client_challenge
-        buf.put_u64_le(self.client_challenge);
+        self.client_challenge.encode(buf, 0)?;
 
         // Encode key (as u64, not a buffer)
-        buf.put_u64_le(self.key);
+        self.key.encode(buf, 0)?;
 
         // Encode old_ticket
         self.old_ticket.encode(buf, features)?;
 
         // Encode other_keys
-        buf.put_u32_le(self.other_keys);
+        self.other_keys.encode(buf, 0)?;
 
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for struct_v".to_string(),
-            ));
-        }
-
         // Decode struct version
-        let struct_v = buf.get_u8();
+        let struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXAuthenticate: {}",
+                e
+            ))
+        })?;
         if !(1..=3).contains(&struct_v) {
             return Err(RadosError::Protocol(format!(
                 "Unsupported CephXAuthenticate version: {}",
@@ -232,26 +241,27 @@ impl Denc for CephXAuthenticate {
             )));
         }
 
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for auth data".to_string(),
-            ));
-        }
+        let client_challenge = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode client_challenge for CephXAuthenticate: {}",
+                e
+            ))
+        })?;
 
-        let client_challenge = buf.get_u64_le();
-
-        let key = buf.get_u64_le();
+        let key = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!("Failed to decode key for CephXAuthenticate: {}", e))
+        })?;
 
         let old_ticket = CephXTicketBlob::decode(buf, features)?;
 
         // other_keys was added in v2
         let other_keys = if struct_v >= 2 {
-            if buf.remaining() < 4 {
-                return Err(RadosError::Protocol(
-                    "Insufficient bytes for other_keys".to_string(),
-                ));
-            }
-            buf.get_u32_le()
+            u32::decode(buf, 0).map_err(|e| {
+                RadosError::Protocol(format!(
+                    "Failed to decode other_keys for CephXAuthenticate: {}",
+                    e
+                ))
+            })?
         } else {
             0
         };
@@ -289,18 +299,18 @@ impl Denc for CephXServerChallenge {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        buf.put_u64_le(self.server_challenge);
+        self.server_challenge.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 9 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXServerChallenge (need 9 bytes: 1 struct_v + 8 challenge)".to_string(),
-            ));
-        }
         // Read and validate struct_v
-        let struct_v = buf.get_u8();
+        let struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXServerChallenge: {}",
+                e
+            ))
+        })?;
         if struct_v != 1 {
             return Err(RadosError::Protocol(format!(
                 "Unsupported CephXServerChallenge version: {}",
@@ -308,7 +318,12 @@ impl Denc for CephXServerChallenge {
             )));
         }
         // Read server challenge
-        let server_challenge = buf.get_u64_le();
+        let server_challenge = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode server_challenge for CephXServerChallenge: {}",
+                e
+            ))
+        })?;
         Ok(Self { server_challenge })
     }
 
@@ -335,19 +350,24 @@ impl Denc for CephXChallengeBlob {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        buf.put_u64_le(self.server_challenge);
-        buf.put_u64_le(self.client_challenge);
+        self.server_challenge.encode(buf, 0)?;
+        self.client_challenge.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for challenge blob".to_string(),
-            ));
-        }
-        let server_challenge = buf.get_u64_le();
-        let client_challenge = buf.get_u64_le();
+        let server_challenge = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode server_challenge for CephXChallengeBlob: {}",
+                e
+            ))
+        })?;
+        let client_challenge = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode client_challenge for CephXChallengeBlob: {}",
+                e
+            ))
+        })?;
         Ok(Self {
             server_challenge,
             client_challenge,
@@ -386,26 +406,27 @@ impl CephXRequest {
 
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::new();
-        buf.put_u16_le(self.request_type);
-        buf.put_u32_le(self.keys.len() as u32);
+        // Note: Using direct encoding since this is not a Denc impl
+        self.request_type.encode(&mut buf, 0).unwrap();
+        (self.keys.len() as u32).encode(&mut buf, 0).unwrap();
 
         for &key in &self.keys {
-            buf.put_u32_le(key);
+            key.encode(&mut buf, 0).unwrap();
         }
 
-        buf.put_u8(if self.other_keys { 1 } else { 0 });
+        (if self.other_keys { 1u8 } else { 0u8 })
+            .encode(&mut buf, 0)
+            .unwrap();
         buf.freeze()
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 7 {
-            return Err(CephXError::ProtocolError(
-                "Insufficient request data".into(),
-            ));
-        }
-
-        let request_type = data.get_u16_le();
-        let keys_len = data.get_u32_le() as usize;
+        let request_type = u16::decode(&mut data, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode request_type: {}", e))
+        })?;
+        let keys_len = u32::decode(&mut data, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode keys_len: {}", e)))?
+            as usize;
 
         if data.remaining() < keys_len * 4 + 1 {
             return Err(CephXError::ProtocolError("Insufficient key data".into()));
@@ -413,10 +434,15 @@ impl CephXRequest {
 
         let mut keys = Vec::with_capacity(keys_len);
         for _ in 0..keys_len {
-            keys.push(data.get_u32_le());
+            let key = u32::decode(&mut data, 0)
+                .map_err(|e| CephXError::ProtocolError(format!("Failed to decode key: {}", e)))?;
+            keys.push(key);
         }
 
-        let other_keys = data.get_u8() != 0;
+        let other_keys_byte = u8::decode(&mut data, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode other_keys: {}", e))
+        })?;
+        let other_keys = other_keys_byte != 0;
 
         Ok(Self {
             request_type,
@@ -459,15 +485,23 @@ impl CephXReply {
 
     pub fn encode(&self) -> Result<Bytes> {
         let mut buf = BytesMut::new();
-        buf.put_i32_le(self.status);
-        buf.put_u32_le(self.tickets.len() as u32);
+        self.status
+            .encode(&mut buf, 0)
+            .map_err(|e| CephXError::EncodingError(format!("Failed to encode status: {}", e)))?;
+        (self.tickets.len() as u32)
+            .encode(&mut buf, 0)
+            .map_err(|e| {
+                CephXError::EncodingError(format!("Failed to encode tickets length: {}", e))
+            })?;
 
         for ticket in &self.tickets {
             let mut ticket_buf = BytesMut::new();
             ticket
                 .encode(&mut ticket_buf, 0)
                 .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            buf.put_u32_le(ticket_buf.len() as u32);
+            (ticket_buf.len() as u32).encode(&mut buf, 0).map_err(|e| {
+                CephXError::EncodingError(format!("Failed to encode ticket length: {}", e))
+            })?;
             buf.extend_from_slice(&ticket_buf);
         }
 
@@ -477,7 +511,9 @@ impl CephXReply {
                     .map_err(|e| CephXError::EncodingError(e.to_string()))?;
             }
             None => {
-                buf.put_u32_le(0);
+                0u32.encode(&mut buf, 0).map_err(|e| {
+                    CephXError::EncodingError(format!("Failed to encode empty session key: {}", e))
+                })?;
             }
         }
 
@@ -485,22 +521,18 @@ impl CephXReply {
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 8 {
-            return Err(CephXError::ProtocolError("Insufficient reply data".into()));
-        }
-
-        let status = data.get_i32_le();
-        let tickets_len = data.get_u32_le() as usize;
+        let status = i32::decode(&mut data, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode status: {}", e)))?;
+        let tickets_len = u32::decode(&mut data, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode tickets_len: {}", e))
+        })? as usize;
 
         let mut tickets = Vec::with_capacity(tickets_len);
         for _ in 0..tickets_len {
-            if data.remaining() < 4 {
-                return Err(CephXError::ProtocolError(
-                    "Insufficient ticket length data".into(),
-                ));
-            }
+            let ticket_len = u32::decode(&mut data, 0).map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode ticket length: {}", e))
+            })? as usize;
 
-            let ticket_len = data.get_u32_le() as usize;
             if data.remaining() < ticket_len {
                 return Err(CephXError::ProtocolError("Insufficient ticket data".into()));
             }
@@ -563,25 +595,35 @@ impl CephXAuthorizeA {
 impl Denc for CephXAuthorizeA {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         // struct_v = 1
-        buf.put_u8(1);
+        1u8.encode(buf, 0)?;
         // global_id
-        buf.put_u64_le(self.global_id);
+        self.global_id.encode(buf, 0)?;
         // service_id
-        buf.put_u32_le(self.service_id);
+        self.service_id.encode(buf, 0)?;
         // ticket_blob (includes struct_v, secret_id, blob)
         self.ticket_blob.encode(buf, features)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 13 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXAuthorizeA".to_string(),
-            ));
-        }
-        let _struct_v = buf.get_u8();
-        let global_id = buf.get_u64_le();
-        let service_id = buf.get_u32_le();
+        let _struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXAuthorizeA: {}",
+                e
+            ))
+        })?;
+        let global_id = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode global_id for CephXAuthorizeA: {}",
+                e
+            ))
+        })?;
+        let service_id = u32::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode service_id for CephXAuthorizeA: {}",
+                e
+            ))
+        })?;
         let ticket_blob = CephXTicketBlob::decode(buf, features)?;
         Ok(Self {
             global_id,
@@ -632,32 +674,40 @@ impl Denc for CephXAuthorizeB {
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
         // struct_v = 2 (per Linux kernel implementation)
-        buf.put_u8(2);
+        2u8.encode(buf, 0)?;
         // nonce
-        buf.put_u64_le(self.nonce);
+        self.nonce.encode(buf, 0)?;
         // have_challenge
-        buf.put_u8(if self.have_challenge { 1 } else { 0 });
+        (if self.have_challenge { 1u8 } else { 0u8 }).encode(buf, 0)?;
         // server_challenge_plus_one (always encode, even if 0)
-        buf.put_u64_le(self.server_challenge_plus_one);
+        self.server_challenge_plus_one.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 10 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXAuthorizeB".to_string(),
-            ));
-        }
-        let _struct_v = buf.get_u8();
-        let nonce = buf.get_u64_le();
-        let have_challenge = buf.get_u8() != 0;
+        let _struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXAuthorizeB: {}",
+                e
+            ))
+        })?;
+        let nonce = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!("Failed to decode nonce for CephXAuthorizeB: {}", e))
+        })?;
+        let have_challenge_byte = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode have_challenge for CephXAuthorizeB: {}",
+                e
+            ))
+        })?;
+        let have_challenge = have_challenge_byte != 0;
         let server_challenge_plus_one = if have_challenge {
-            if buf.remaining() < 8 {
-                return Err(RadosError::Protocol(
-                    "Insufficient bytes for server_challenge_plus_one".to_string(),
-                ));
-            }
-            buf.get_u64_le()
+            u64::decode(buf, 0).map_err(|e| {
+                RadosError::Protocol(format!(
+                    "Failed to decode server_challenge_plus_one for CephXAuthorizeB: {}",
+                    e
+                ))
+            })?
         } else {
             0
         };
@@ -691,20 +741,25 @@ impl Denc for CephXAuthorizeReply {
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
         // struct_v = 1
-        buf.put_u8(1);
+        1u8.encode(buf, 0)?;
         // nonce_plus_one
-        buf.put_u64_le(self.nonce_plus_one);
+        self.nonce_plus_one.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 9 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXAuthorizeReply".to_string(),
-            ));
-        }
-        let _struct_v = buf.get_u8();
-        let nonce_plus_one = buf.get_u64_le();
+        let _struct_v = u8::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode struct_v for CephXAuthorizeReply: {}",
+                e
+            ))
+        })?;
+        let nonce_plus_one = u64::decode(buf, 0).map_err(|e| {
+            RadosError::Protocol(format!(
+                "Failed to decode nonce_plus_one for CephXAuthorizeReply: {}",
+                e
+            ))
+        })?;
         Ok(Self { nonce_plus_one })
     }
 
