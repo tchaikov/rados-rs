@@ -239,13 +239,13 @@ impl FrameIO {
             );
         }
 
-        eprintln!(
+        tracing::debug!(
             "DEBUG: About to write_all {} bytes for frame tag={:?}",
             final_bytes.len(),
             frame.preamble.tag
         );
         if frame.preamble.tag == Tag::ClientIdent {
-            eprintln!(
+            tracing::debug!(
                 "DEBUG: CLIENT_IDENT hex (first 128 bytes): {}",
                 final_bytes
                     .iter()
@@ -256,9 +256,9 @@ impl FrameIO {
             );
         }
         self.stream.write_all(&final_bytes).await?;
-        eprintln!("DEBUG: write_all succeeded, flushing...");
+        tracing::debug!("DEBUG: write_all succeeded, flushing...");
         self.stream.flush().await?;
-        eprintln!("DEBUG: flush succeeded for tag={:?}", frame.preamble.tag);
+        tracing::debug!("DEBUG: flush succeeded for tag={:?}", frame.preamble.tag);
         Ok(())
     }
 
@@ -272,9 +272,9 @@ impl FrameIO {
     /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
     /// - Reads remaining encrypted payload if needed
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
-        eprintln!("DEBUG: recv_frame called");
+        tracing::debug!("DEBUG: recv_frame called");
         let has_encryption = state_machine.has_encryption();
-        eprintln!("DEBUG: recv_frame: has_encryption={}", has_encryption);
+        tracing::debug!("DEBUG: recv_frame: has_encryption={}", has_encryption);
 
         // Read preamble block
         let preamble_block_size = if has_encryption {
@@ -299,7 +299,7 @@ impl FrameIO {
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
                 tracing::debug!("Successfully read preamble block");
-                eprintln!(
+                tracing::debug!(
                     "DEBUG: recv_frame read {} bytes, has_encryption={}, first 32 bytes: {}",
                     preamble_block_buf.len(),
                     has_encryption,
@@ -355,9 +355,11 @@ impl FrameIO {
             .collect::<Vec<_>>()
             .join("");
         tracing::debug!("Raw preamble hex: {}", preamble_hex);
-        eprintln!(
+        tracing::debug!(
             "DEBUG: Decoded preamble: tag={:?} (raw=0x{:02x}), num_segments={}",
-            preamble.tag, preamble_bytes[0], preamble.num_segments
+            preamble.tag,
+            preamble_bytes[0],
+            preamble.num_segments
         );
         tracing::debug!(
             "Preamble: tag={:?} (raw={}), num_segments={}, segments={:?}",
@@ -784,9 +786,10 @@ impl Connection {
         target_entity_addr: denc::EntityAddr,
         config: crate::ConnectionConfig,
     ) -> Result<Self> {
-        eprintln!(
+        tracing::debug!(
             "DEBUG: Connection::connect_with_target() called with addr: {}, target nonce: {}",
-            addr, target_entity_addr.nonce
+            addr,
+            target_entity_addr.nonce
         );
 
         // Validate config
@@ -794,11 +797,11 @@ impl Connection {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
-        eprintln!("DEBUG: About to TcpStream::connect({})", addr);
+        tracing::debug!("DEBUG: About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
         let peer_addr = stream.peer_addr()?;
-        eprintln!(
+        tracing::debug!(
             "DEBUG: ✓ TCP connection established - peer: {}, local: {}",
             peer_addr,
             stream.local_addr()?
@@ -849,18 +852,18 @@ impl Connection {
     /// * `addr` - The server address to connect to
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
-        eprintln!("DEBUG: Connection::connect() called with addr: {}", addr);
+        tracing::debug!("DEBUG: Connection::connect() called with addr: {}", addr);
 
         // Validate config
         if let Err(e) = config.validate() {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
-        eprintln!("DEBUG: About to TcpStream::connect({})", addr);
+        tracing::debug!("DEBUG: About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
         let peer_addr = stream.peer_addr()?;
-        eprintln!(
+        tracing::debug!(
             "DEBUG: ✓ TCP connection established - peer: {}, local: {}",
             peer_addr,
             stream.local_addr()?
@@ -1679,7 +1682,7 @@ impl Connection {
 
         let version = msg.header.version;
         let compat_version = msg.header.compat_version;
-        eprintln!(
+        tracing::debug!(
             "DEBUG: send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
             msg_type,
             seq,
@@ -1706,12 +1709,12 @@ impl Connection {
         // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message);
 
-        eprintln!(
+        tracing::debug!(
             "DEBUG: Created frame with {} segments",
             frame.segments.len()
         );
         for (i, seg) in frame.segments.iter().enumerate() {
-            eprintln!("DEBUG:   Segment {}: {} bytes", i, seg.len());
+            tracing::debug!("DEBUG:   Segment {}: {} bytes", i, seg.len());
         }
 
         // Send the frame

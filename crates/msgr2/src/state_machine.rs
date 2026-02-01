@@ -489,7 +489,7 @@ impl State for AuthConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!(
+        tracing::debug!(
             "DEBUG: AuthConnecting received frame tag: {:?}",
             frame.preamble.tag
         );
@@ -506,9 +506,12 @@ impl State for AuthConnecting {
                 let allowed_methods = Vec::<u32>::decode(&mut payload, 0)?;
                 let allowed_modes = Vec::<u32>::decode(&mut payload, 0)?;
 
-                eprintln!(
+                tracing::debug!(
                     "DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
-                    rejected_method, result, allowed_methods, allowed_modes
+                    rejected_method,
+                    result,
+                    allowed_methods,
+                    allowed_modes
                 );
                 tracing::debug!(
                     "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
@@ -572,8 +575,8 @@ impl State for AuthConnecting {
                 // Handle CephX multi-round auth
                 if let Some(provider) = &mut self.auth_provider {
                     if let Some(payload) = frame.segments.first() {
-                        eprintln!("DEBUG: AUTH_REPLY_MORE payload length: {}", payload.len());
-                        eprintln!(
+                        tracing::debug!("DEBUG: AUTH_REPLY_MORE payload length: {}", payload.len());
+                        tracing::debug!(
                             "DEBUG: AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
                             payload
                                 .iter()
@@ -619,8 +622,8 @@ impl State for AuthConnecting {
             Tag::AuthDone => {
                 // Parse AUTH_DONE frame to get global_id and connection mode
                 if let Some(segment) = frame.segments.first() {
-                    eprintln!("DEBUG: AUTH_DONE frame segment length: {}", segment.len());
-                    eprintln!(
+                    tracing::debug!("DEBUG: AUTH_DONE frame segment length: {}", segment.len());
+                    tracing::debug!(
                         "DEBUG: AUTH_DONE frame segment hex (first 64 bytes): {}",
                         segment
                             .iter()
@@ -641,10 +644,10 @@ impl State for AuthConnecting {
                         Error::protocol_error(&format!("Failed to decode auth_payload: {:?}", e))
                     })?;
 
-                    eprintln!("DEBUG: Decoded from AUTH_DONE frame:");
-                    eprintln!("DEBUG:   global_id: {}", global_id);
-                    eprintln!("DEBUG:   con_mode: {}", con_mode);
-                    eprintln!("DEBUG:   auth_payload length: {}", auth_payload.len());
+                    tracing::debug!("DEBUG: Decoded from AUTH_DONE frame:");
+                    tracing::debug!("DEBUG:   global_id: {}", global_id);
+                    tracing::debug!("DEBUG:   con_mode: {}", con_mode);
+                    tracing::debug!("DEBUG:   auth_payload length: {}", auth_payload.len());
 
                     tracing::info!(
                         "Authentication completed successfully - global_id: {}, connection_mode: {}",
@@ -976,13 +979,13 @@ impl State for AuthConnectingSign {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!(
+        tracing::debug!(
             "DEBUG: AuthConnectingSign::handle_frame received tag: {:?}",
             frame.preamble.tag
         );
         match frame.preamble.tag {
             Tag::AuthSignature => {
-                eprintln!("DEBUG: Received AUTH_SIGNATURE from server");
+                tracing::debug!("DEBUG: Received AUTH_SIGNATURE from server");
                 // Verify server's AUTH_SIGNATURE
                 if let Some(ref expected_sig) = self.expected_server_signature {
                     // Extract server's signature from frame payload
@@ -1019,7 +1022,7 @@ impl State for AuthConnectingSign {
                 }
 
                 // After verification, transition based on compression support
-                eprintln!(
+                tracing::debug!(
                     "DEBUG: peer_supported_features = 0x{:x}",
                     self.peer_supported_features
                 );
@@ -1030,7 +1033,7 @@ impl State for AuthConnectingSign {
                     tracing::debug!(
                         "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
-                    eprintln!(
+                    tracing::debug!(
                         "DEBUG: Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
                     Ok(StateResult::Transition(Box::new(
@@ -1045,7 +1048,7 @@ impl State for AuthConnectingSign {
                     )))
                 } else {
                     tracing::debug!("Peer does not support COMPRESSION, transitioning directly to SESSION_CONNECTING");
-                    eprintln!("DEBUG: Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
+                    tracing::debug!("DEBUG: Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
                     Ok(StateResult::Transition(Box::new(
                         SessionConnecting::new_with_encryption(
                             self.connection_mode,
@@ -1073,12 +1076,12 @@ impl State for AuthConnectingSign {
 
     fn enter(&mut self) -> Result<StateResult> {
         // Send AUTH_SIGNATURE frame with pre-computed HMAC-SHA256 signature
-        eprintln!("DEBUG: AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
-        eprintln!(
+        tracing::debug!("DEBUG: AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
+        tracing::debug!(
             "DEBUG:   signature length: {} bytes",
             self.our_signature.len()
         );
-        eprintln!(
+        tracing::debug!(
             "DEBUG:   signature hex (first 32 bytes): {}",
             self.our_signature
                 .iter()
@@ -1225,7 +1228,7 @@ impl State for SessionConnecting {
     }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        eprintln!(
+        tracing::debug!(
             "DEBUG: SessionConnecting::handle_frame received tag: {:?}",
             frame.preamble.tag
         );
@@ -1400,7 +1403,7 @@ impl State for SessionConnecting {
                         server_connect_seq,
                         self.connect_seq
                     );
-                    eprintln!(
+                    tracing::debug!(
                         "DEBUG: SESSION_RETRY received, incrementing connect_seq and retrying"
                     );
 
@@ -1426,7 +1429,7 @@ impl State for SessionConnecting {
                         server_global_seq,
                         self.global_seq
                     );
-                    eprintln!(
+                    tracing::debug!(
                         "DEBUG: SESSION_RETRY_GLOBAL received, updating global_seq and retrying"
                     );
 
@@ -1453,7 +1456,7 @@ impl State for SessionConnecting {
                         "Server sent SESSION_RESET (full={}). Resetting session and sending CLIENT_IDENT",
                         full
                     );
-                    eprintln!(
+                    tracing::debug!(
                         "DEBUG: SESSION_RESET received (full={}), resetting session",
                         full
                     );
@@ -1481,12 +1484,12 @@ impl State for SessionConnecting {
     }
 
     fn enter(&mut self) -> Result<StateResult> {
-        eprintln!("DEBUG: SessionConnecting::enter() called");
-        eprintln!("DEBUG:   our_global_id={}", self.our_global_id);
-        eprintln!("DEBUG:   connection_mode={}", self.connection_mode);
-        eprintln!("DEBUG:   client_cookie={}", self.client_cookie);
-        eprintln!("DEBUG:   server_cookie={}", self.server_cookie);
-        eprintln!(
+        tracing::debug!("DEBUG: SessionConnecting::enter() called");
+        tracing::debug!("DEBUG:   our_global_id={}", self.our_global_id);
+        tracing::debug!("DEBUG:   connection_mode={}", self.connection_mode);
+        tracing::debug!("DEBUG:   client_cookie={}", self.client_cookie);
+        tracing::debug!("DEBUG:   server_cookie={}", self.server_cookie);
+        tracing::debug!(
             "DEBUG:   has_connection_secret={}",
             self.connection_secret.is_some()
         );
@@ -1516,13 +1519,13 @@ impl State for SessionConnecting {
 
             let frame = create_frame_from_trait(&reconnect, Tag::SessionReconnect);
 
-            eprintln!("DEBUG: Created SESSION_RECONNECT frame");
-            eprintln!("DEBUG:   addrs: {:?}", addrs);
-            eprintln!("DEBUG:   client_cookie: {}", self.client_cookie);
-            eprintln!("DEBUG:   server_cookie: {}", self.server_cookie);
-            eprintln!("DEBUG:   global_seq: {}", self.global_seq);
-            eprintln!("DEBUG:   connect_seq: {}", self.connect_seq);
-            eprintln!("DEBUG:   in_seq (msg_seq): {}", self.in_seq);
+            tracing::debug!("DEBUG: Created SESSION_RECONNECT frame");
+            tracing::debug!("DEBUG:   addrs: {:?}", addrs);
+            tracing::debug!("DEBUG:   client_cookie: {}", self.client_cookie);
+            tracing::debug!("DEBUG:   server_cookie: {}", self.server_cookie);
+            tracing::debug!("DEBUG:   global_seq: {}", self.global_seq);
+            tracing::debug!("DEBUG:   connect_seq: {}", self.connect_seq);
+            tracing::debug!("DEBUG:   in_seq (msg_seq): {}", self.in_seq);
 
             Ok(StateResult::SendAndWait {
                 frame,
@@ -1571,19 +1574,19 @@ impl State for SessionConnecting {
             );
             let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
 
-            eprintln!(
+            tracing::debug!(
                 "DEBUG: Created CLIENT_IDENT frame, {} segments",
                 frame.segments.len()
             );
-            eprintln!("DEBUG: CLIENT_IDENT values:");
-            eprintln!("DEBUG:   addrs: {:?}", addrs);
-            eprintln!("DEBUG:   target_addr: {:?}", target_addr);
-            eprintln!("DEBUG:   gid: {}", gid);
-            eprintln!("DEBUG:   global_seq: {}", self.global_seq);
-            eprintln!("DEBUG:   features_supported: 0x{:x}", features_supported);
-            eprintln!("DEBUG:   features_required: 0x{:x}", features_required);
-            eprintln!("DEBUG:   flags: 0x{:x}", flags);
-            eprintln!("DEBUG:   cookie: {}", self.client_cookie);
+            tracing::debug!("DEBUG: CLIENT_IDENT values:");
+            tracing::debug!("DEBUG:   addrs: {:?}", addrs);
+            tracing::debug!("DEBUG:   target_addr: {:?}", target_addr);
+            tracing::debug!("DEBUG:   gid: {}", gid);
+            tracing::debug!("DEBUG:   global_seq: {}", self.global_seq);
+            tracing::debug!("DEBUG:   features_supported: 0x{:x}", features_supported);
+            tracing::debug!("DEBUG:   features_required: 0x{:x}", features_required);
+            tracing::debug!("DEBUG:   flags: 0x{:x}", flags);
+            tracing::debug!("DEBUG:   cookie: {}", self.client_cookie);
 
             if !frame.segments.is_empty() {
                 let payload_bytes = &frame.segments[0];
@@ -2201,13 +2204,13 @@ impl StateMachine {
 
     /// Decrypt frame data if in SECURE mode
     pub fn decrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
-        eprintln!(
+        tracing::debug!(
             "DEBUG: decrypt_frame_data called, has_decryptor={}, data_len={}",
             self.frame_decryptor.is_some(),
             data.len()
         );
         if let Some(decryptor) = &mut self.frame_decryptor {
-            eprintln!(
+            tracing::debug!(
                 "DEBUG: Attempting AES-GCM decryption of {} bytes",
                 data.len()
             );
@@ -2215,9 +2218,9 @@ impl StateMachine {
                 .decrypt(data)
                 .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)));
             if let Err(ref e) = result {
-                eprintln!("DEBUG: Decryption FAILED: {:?}", e);
+                tracing::debug!("DEBUG: Decryption FAILED: {:?}", e);
             } else {
-                eprintln!("DEBUG: Decryption SUCCESS");
+                tracing::debug!("DEBUG: Decryption SUCCESS");
             }
             result
         } else {
