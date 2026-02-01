@@ -133,7 +133,7 @@ impl AuthProvider for MonitorAuthProvider {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use bytes::Buf;
+        use denc::Denc;
 
         // Lock the handler to handle auth response
         let mut handler = self
@@ -149,7 +149,12 @@ impl AuthProvider for MonitorAuthProvider {
         let mut peek = payload.clone();
         if peek.len() >= 2 {
             // Read first u16 to check if it's the request_type
-            let first_u16 = peek.get_u16_le();
+            let first_u16 = u16::decode(&mut peek, 0).map_err(|e| {
+                crate::error::CephXError::ProtocolError(format!(
+                    "Failed to decode first_u16: {}",
+                    e
+                ))
+            })?;
 
             if first_u16 == crate::protocol::CEPHX_GET_AUTH_SESSION_KEY {
                 // This is AUTH_DONE - handle final authentication
@@ -367,10 +372,13 @@ impl AuthProvider for ServiceAuthProvider {
             // The payload is encrypted with the session key we got from the ticket
             if let Some(ref sess_key) = session_key {
                 use bytes::Buf;
+                use denc::Denc;
                 let mut buf = payload.clone();
 
                 // Read encrypted length
-                let encrypted_len = buf.get_u32_le() as usize;
+                let encrypted_len = u32::decode(&mut buf, 0).map_err(|e| {
+                    CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
+                })? as usize;
                 if buf.remaining() >= encrypted_len {
                     let encrypted_data = buf.copy_to_bytes(encrypted_len);
 
@@ -416,7 +424,12 @@ impl AuthProvider for ServiceAuthProvider {
                             } else {
                                 // Skip encryption header (struct_v + magic)
                                 let enc_struct_v = dec_buf.get_u8();
-                                let magic = dec_buf.get_u64_le();
+                                let magic = u64::decode(&mut dec_buf, 0).map_err(|e| {
+                                    CephXError::ProtocolError(format!(
+                                        "Failed to decode magic: {}",
+                                        e
+                                    ))
+                                })?;
                                 eprintln!(
                                     "DEBUG: Encryption header: struct_v={}, magic=0x{:016x}",
                                     enc_struct_v, magic
@@ -440,14 +453,27 @@ impl AuthProvider for ServiceAuthProvider {
                                     None
                                 } else {
                                     let struct_v = dec_buf.get_u8();
-                                    let nonce_plus_one = dec_buf.get_u64_le();
+                                    let nonce_plus_one =
+                                        u64::decode(&mut dec_buf, 0).map_err(|e| {
+                                            CephXError::ProtocolError(format!(
+                                                "Failed to decode nonce_plus_one: {}",
+                                                e
+                                            ))
+                                        })?;
 
                                     eprintln!("DEBUG: CephXAuthorizeReply: struct_v={}, nonce_plus_one=0x{:016x}", struct_v, nonce_plus_one);
 
                                     // Try to extract connection_secret even if struct_v < 2
                                     // Some servers might still include it
                                     if dec_buf.remaining() >= 4 {
-                                        let con_secret_len = dec_buf.get_u32_le() as usize;
+                                        let con_secret_len =
+                                            u32::decode(&mut dec_buf, 0).map_err(|e| {
+                                                CephXError::ProtocolError(format!(
+                                                    "Failed to decode con_secret_len: {}",
+                                                    e
+                                                ))
+                                            })?
+                                                as usize;
                                         eprintln!(
                                             "DEBUG: connection_secret length: {} (struct_v={})",
                                             con_secret_len, struct_v

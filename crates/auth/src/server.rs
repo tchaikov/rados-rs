@@ -302,10 +302,13 @@ impl CephXServerHandler {
         _session_key: &CryptoKey,
         service_tickets: Bytes,
     ) -> Result<Bytes> {
+        use denc::Denc;
         let mut response = BytesMut::new();
 
         // 1. global_id
-        response.put_u64_le(global_id);
+        global_id
+            .encode(&mut response, 0)
+            .map_err(|e| CephXError::EncodingError(format!("Failed to encode global_id: {}", e)))?;
 
         // 2. connection_mode
         response.put_u8(connection_mode);

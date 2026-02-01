@@ -97,7 +97,9 @@ impl CephXClientHandler {
         let entity_name_len = self.entity_name.encoded_size(0).unwrap_or(0);
 
         // 3. global_id (u64)
-        payload.put_u64_le(global_id);
+        global_id
+            .encode(&mut payload, 0)
+            .map_err(|e| CephXError::EncodingError(format!("Failed to encode global_id: {}", e)))?;
 
         // 4. build_initial_request() is empty for CephX (no payload)
 
@@ -212,7 +214,9 @@ impl CephXClientHandler {
 
         // AUTH_ENC_MAGIC = 0xff009cad8826aa55ULL
         let magic: u64 = 0xff009cad8826aa55;
-        bl.put_u64_le(magic);
+        magic
+            .encode(&mut bl, 0)
+            .map_err(|e| CephXError::EncodingError(format!("Failed to encode magic: {}", e)))?;
         debug!("Step 2: Added AUTH_ENC_MAGIC = 0x{:016x}", magic);
 
         // Encode the challenge blob itself
@@ -290,7 +294,9 @@ impl CephXClientHandler {
         // before XOR folding. We need to replicate this behavior.
         // Create a buffer with: [u32 length][encrypted data]
         let mut folding_buffer = BytesMut::with_capacity(4 + ciphertext.len());
-        folding_buffer.put_u32_le(ciphertext.len() as u32);
+        (ciphertext.len() as u32)
+            .encode(&mut folding_buffer, 0)
+            .map_err(|e| CephXError::EncodingError(format!("Failed to encode length: {}", e)))?;
         folding_buffer.extend_from_slice(ciphertext);
         let folding_data = folding_buffer.freeze();
 
@@ -362,13 +368,14 @@ impl CephXClientHandler {
 
             // AUTH_REPLY_MORE has a u32 length prefix before the actual CephXServerChallenge
             // Format: [u32 length][u8 struct_v][u64 server_challenge]
-            use bytes::Buf;
             if response.len() < 4 {
                 return Err(CephXError::ProtocolError(
                     "AUTH_REPLY_MORE too short".into(),
                 ));
             }
-            let payload_len = response.get_u32_le() as usize;
+            let payload_len = u32::decode(&mut response, 0).map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode payload_len: {}", e))
+            })? as usize;
             debug!(
                 "AUTH_REPLY_MORE: length_prefix={}, remaining={} bytes",
                 payload_len,
@@ -412,7 +419,7 @@ impl CephXClientHandler {
         secret_key: &CryptoKey,
     ) -> Result<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> {
         use crate::protocol::AUTH_ENC_MAGIC;
-        use bytes::Buf;
+        use bytes::Buf; // Keep for get_u8() calls
 
         // Read service_id
         if auth_payload.len() < 4 {
@@ -420,7 +427,9 @@ impl CephXClientHandler {
                 "Insufficient data for service_id".into(),
             ));
         }
-        let service_id = auth_payload.get_u32_le();
+        let service_id = u32::decode(auth_payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode service_id: {}", e))
+        })?;
         eprintln!(
             "DEBUG: parse_service_ticket: Parsing ticket for service_id: {} (0x{:08x})",
             service_id, service_id
@@ -445,7 +454,9 @@ impl CephXClientHandler {
                 "Insufficient data for encrypted ticket length".into(),
             ));
         }
-        let encrypted_len = auth_payload.get_u32_le() as usize;
+        let encrypted_len = u32::decode(auth_payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
+        })? as usize;
         debug!("encrypted ticket length: {}", encrypted_len);
 
         if auth_payload.len() < encrypted_len {
@@ -468,7 +479,8 @@ impl CephXClientHandler {
         }
 
         let _struct_v = decrypted_data.get_u8();
-        let magic = decrypted_data.get_u64_le();
+        let magic = u64::decode(&mut decrypted_data, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode magic: {}", e)))?;
 
         if magic != AUTH_ENC_MAGIC {
             return Err(CephXError::CryptographicError(format!(
@@ -543,7 +555,9 @@ impl CephXClientHandler {
                 "Insufficient data for ticket blob length".into(),
             ));
         }
-        let ticket_blob_len = auth_payload.get_u32_le() as usize;
+        let ticket_blob_len = u32::decode(auth_payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode ticket_blob_len: {}", e))
+        })? as usize;
         debug!("ticket_blob_len: {}", ticket_blob_len);
 
         if auth_payload.len() < ticket_blob_len {
@@ -559,8 +573,11 @@ impl CephXClientHandler {
             return Err(CephXError::ProtocolError("Ticket blob too short".into()));
         }
         let _blob_struct_v = ticket_data.get_u8();
-        let secret_id = ticket_data.get_u64_le();
-        let blob_len = ticket_data.get_u32_le() as usize;
+        let secret_id = u64::decode(&mut ticket_data, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode secret_id: {}", e)))?;
+        let blob_len = u32::decode(&mut ticket_data, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode blob_len: {}", e)))?
+            as usize;
 
         if ticket_data.len() < blob_len {
             return Err(CephXError::ProtocolError(
@@ -666,7 +683,9 @@ impl CephXClientHandler {
         eprintln!("DEBUG: service_ticket_reply_v: {}", service_ticket_reply_v);
         debug!("service_ticket_reply_v: {}", service_ticket_reply_v);
 
-        let num_tickets = auth_payload.get_u32_le();
+        let num_tickets = u32::decode(&mut auth_payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode num_tickets: {}", e))
+        })?;
         eprintln!("DEBUG: num_tickets: {}", num_tickets);
         debug!("num_tickets: {}", num_tickets);
 
@@ -703,7 +722,9 @@ impl CephXClientHandler {
         // Check for connection_secret blob (encrypted with session_key) and extra_tickets
         let mut connection_secret_bytes = None;
         if auth_payload.len() >= 4 {
-            let cbl_len = auth_payload.get_u32_le() as usize;
+            let cbl_len = u32::decode(&mut auth_payload, 0).map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode cbl_len: {}", e))
+            })? as usize;
             debug!("connection_secret blob length: {}", cbl_len);
 
             if cbl_len > 0 && auth_payload.len() >= cbl_len {
@@ -717,7 +738,9 @@ impl CephXClientHandler {
                 if encrypted_secret_bl.len() < 4 {
                     debug!("connection_secret bufferlist too short for inner length");
                 } else {
-                    let inner_len = encrypted_secret_bl.get_u32_le() as usize;
+                    let inner_len = u32::decode(&mut encrypted_secret_bl, 0).map_err(|e| {
+                        CephXError::ProtocolError(format!("Failed to decode inner_len: {}", e))
+                    })? as usize;
                     debug!("Inner encrypted data length: {}", inner_len);
 
                     if encrypted_secret_bl.len() >= inner_len {
@@ -747,7 +770,13 @@ impl CephXClientHandler {
                                 // Parse: [struct_v:u8][magic:u64][connection_secret:string]
                                 if decrypted_secret.len() >= 9 {
                                     let struct_v = decrypted_secret.get_u8();
-                                    let magic = decrypted_secret.get_u64_le();
+                                    let magic =
+                                        u64::decode(&mut decrypted_secret, 0).map_err(|e| {
+                                            CephXError::ProtocolError(format!(
+                                                "Failed to decode magic: {}",
+                                                e
+                                            ))
+                                        })?;
                                     debug!(
                                         "Connection secret struct_v: {}, magic: 0x{:016x}",
                                         struct_v, magic
@@ -756,7 +785,14 @@ impl CephXClientHandler {
                                     if magic == AUTH_ENC_MAGIC {
                                         // Read length-prefixed string
                                         if decrypted_secret.len() >= 4 {
-                                            let secret_len = decrypted_secret.get_u32_le() as usize;
+                                            let secret_len = u32::decode(&mut decrypted_secret, 0)
+                                                .map_err(|e| {
+                                                CephXError::ProtocolError(format!(
+                                                    "Failed to decode secret_len: {}",
+                                                    e
+                                                ))
+                                            })?
+                                                as usize;
                                             // Only set connection_secret if length > 0 (CRC mode has 0-length secret)
                                             if secret_len > 0
                                                 && decrypted_secret.len() >= secret_len
@@ -792,7 +828,9 @@ impl CephXClientHandler {
             auth_payload.len()
         );
         if auth_payload.len() >= 4 {
-            let extra_tickets_len = auth_payload.get_u32_le() as usize;
+            let extra_tickets_len = u32::decode(&mut auth_payload, 0).map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode extra_tickets_len: {}", e))
+            })? as usize;
             eprintln!("DEBUG: extra_tickets blob length: {}", extra_tickets_len);
 
             if extra_tickets_len > 0 && auth_payload.len() >= extra_tickets_len {
@@ -815,7 +853,12 @@ impl CephXClientHandler {
                 // Let's try parsing it as such: struct_v (u8) + num_tickets (u32) + tickets
                 if extra_tickets_bl.len() >= 5 {
                     let extra_v = extra_tickets_bl.get_u8();
-                    let extra_num_tickets = extra_tickets_bl.get_u32_le();
+                    let extra_num_tickets = u32::decode(&mut extra_tickets_bl, 0).map_err(|e| {
+                        CephXError::ProtocolError(format!(
+                            "Failed to decode extra_num_tickets: {}",
+                            e
+                        ))
+                    })?;
                     eprintln!(
                         "DEBUG: extra_tickets struct_v: {}, num_tickets: {}",
                         extra_v, extra_num_tickets
@@ -950,7 +993,9 @@ impl CephXClientHandler {
                 "Challenge payload too short".into(),
             ));
         }
-        let encrypted_len = buf.get_u32_le() as usize;
+        let encrypted_len = u32::decode(&mut buf, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
+        })? as usize;
         eprintln!("DEBUG: encrypted_len: {}", encrypted_len);
 
         if buf.remaining() < encrypted_len {
@@ -984,7 +1029,8 @@ impl CephXClientHandler {
                 "Decrypted data too short for magic".into(),
             ));
         }
-        let magic = dec_buf.get_u64_le();
+        let magic = u64::decode(&mut dec_buf, 0)
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode magic: {}", e)))?;
         eprintln!("DEBUG: magic: 0x{:016x}", magic);
 
         if magic != AUTH_ENC_MAGIC {
@@ -1008,7 +1054,9 @@ impl CephXClientHandler {
                 "No server_challenge in reply".into(),
             ));
         }
-        let server_challenge = dec_buf.get_u64_le();
+        let server_challenge = u64::decode(&mut dec_buf, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode server_challenge: {}", e))
+        })?;
         eprintln!(
             "DEBUG: Extracted server_challenge: 0x{:016x}",
             server_challenge
@@ -1248,7 +1296,11 @@ impl CephXClientHandler {
         // Prepare encryption envelope: [struct_v:u8][magic:u64][plaintext]
         let mut envelope = BytesMut::new();
         envelope.put_u8(1); // struct_v
-        envelope.put_u64_le(crate::protocol::AUTH_ENC_MAGIC);
+        crate::protocol::AUTH_ENC_MAGIC
+            .encode(&mut envelope, 0)
+            .map_err(|e| {
+                CephXError::EncodingError(format!("Failed to encode AUTH_ENC_MAGIC: {}", e))
+            })?;
         envelope.extend_from_slice(plaintext);
 
         debug!(
@@ -1297,7 +1349,11 @@ impl CephXClientHandler {
 
         // Add length prefix
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
-        result.put_u32_le(ciphertext.len() as u32);
+        (ciphertext.len() as u32)
+            .encode(&mut result, 0)
+            .map_err(|e| {
+                CephXError::EncodingError(format!("Failed to encode ciphertext length: {}", e))
+            })?;
         result.extend_from_slice(ciphertext);
 
         debug!("Encrypted result: {} bytes total", result.len());

@@ -123,10 +123,10 @@ impl Denc for EntityName {
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
         // Encode type (u32)
-        buf.put_u32_le(self.entity_type);
+        self.entity_type.encode(buf, 0)?;
 
         // Encode id (string with length prefix)
-        buf.put_u32_le(self.id.len() as u32);
+        (self.id.len() as u32).encode(buf, 0)?;
         buf.put_slice(self.id.as_bytes());
 
         Ok(())
@@ -139,9 +139,9 @@ impl Denc for EntityName {
             ));
         }
 
-        let entity_type = buf.get_u32_le();
+        let entity_type = u32::decode(buf, 0)?;
 
-        let id_len = buf.get_u32_le() as usize;
+        let id_len = u32::decode(buf, 0)? as usize;
         if buf.remaining() < id_len {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for EntityName id".to_string(),
@@ -356,13 +356,13 @@ impl CryptoKey {
 impl Denc for CryptoKey {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         // Encode type (u16)
-        buf.put_u16_le(self.crypto_type);
+        self.crypto_type.encode(buf, 0)?;
 
         // Encode created time using SystemTime's Denc implementation
         self.created.encode(buf, features)?;
 
         // Encode secret length (u16) + secret data
-        buf.put_u16_le(self.secret.len() as u16);
+        (self.secret.len() as u16).encode(buf, 0)?;
         buf.put_slice(&self.secret);
         Ok(())
     }
@@ -375,12 +375,12 @@ impl Denc for CryptoKey {
             ));
         }
 
-        let crypto_type = buf.get_u16_le();
+        let crypto_type = u16::decode(buf, 0)?;
 
         // Decode created time using SystemTime's Denc implementation
         let created = SystemTime::decode(buf, features)?;
 
-        let secret_len = buf.get_u16_le() as usize;
+        let secret_len = u16::decode(buf, 0)? as usize;
         if buf.remaining() < secret_len {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for secret".to_string(),
@@ -462,7 +462,7 @@ impl Denc for CephXTicketBlob {
         buf.put_u8(1);
 
         // Encode secret_id
-        buf.put_u64_le(self.secret_id);
+        self.secret_id.encode(buf, 0)?;
 
         // Encode blob with length prefix
         self.blob.encode(buf, features)?;
@@ -485,7 +485,7 @@ impl Denc for CephXTicketBlob {
             ));
         }
 
-        let secret_id = buf.get_u64_le();
+        let secret_id = u64::decode(buf, 0)?;
         let blob = Bytes::decode(buf, features)?;
 
         Ok(Self { secret_id, blob })
@@ -536,10 +536,10 @@ impl Denc for AuthTicket {
         self.name.encode(buf, features)?;
 
         // Encode global_id
-        buf.put_u64_le(self.global_id);
+        self.global_id.encode(buf, 0)?;
 
         // Encode old_auid (always CEPH_AUTH_UID_DEFAULT = -1)
-        buf.put_u64_le(u64::MAX);
+        u64::MAX.encode(buf, 0)?;
 
         // Encode created time using SystemTime's Denc implementation
         self.created.encode(buf, features)?;
@@ -551,7 +551,7 @@ impl Denc for AuthTicket {
         self.caps.encode(buf, features)?;
 
         // Encode flags
-        buf.put_u32_le(self.flags);
+        self.flags.encode(buf, 0)?;
 
         Ok(())
     }
@@ -566,11 +566,11 @@ impl Denc for AuthTicket {
         let struct_v = buf.get_u8();
 
         let name = EntityName::decode(buf, features)?;
-        let global_id = buf.get_u64_le();
+        let global_id = u64::decode(buf, 0)?;
 
         // Decode old_auid if struct_v >= 2
         if struct_v >= 2 {
-            let _old_auid = buf.get_u64_le();
+            let _old_auid = u64::decode(buf, 0)?;
         }
 
         // Decode created time using SystemTime's Denc implementation
@@ -580,7 +580,7 @@ impl Denc for AuthTicket {
         let expires = SystemTime::decode(buf, features)?;
 
         let caps = AuthCapsInfo::decode(buf, features)?;
-        let flags = buf.get_u32_le();
+        let flags = u32::decode(buf, 0)?;
 
         Ok(Self {
             name,
@@ -679,7 +679,7 @@ impl Denc for AuthCapsInfo {
         buf.put_u8(1);
 
         // Encode caps as a map
-        buf.put_u32_le(self.caps.len() as u32);
+        (self.caps.len() as u32).encode(buf, 0)?;
         for (key, value) in &self.caps {
             key.encode(buf, features)?;
             value.encode(buf, features)?;
@@ -703,7 +703,7 @@ impl Denc for AuthCapsInfo {
             ));
         }
 
-        let count = buf.get_u32_le();
+        let count = u32::decode(buf, 0)?;
         let mut caps = HashMap::new();
 
         for _ in 0..count {
@@ -748,39 +748,46 @@ impl CephXAuthenticator {
             nonce: rng.next_u64(),
         }
     }
+}
 
-    pub fn encode(&self) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
-        buf.put_u64_le(self.client_challenge);
-        buf.put_u64_le(self.server_challenge);
-        buf.put_u64_le(self.global_id);
-        buf.put_u32_le(self.service_id);
+impl Denc for CephXAuthenticator {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        self.client_challenge.encode(buf, 0)?;
+        self.server_challenge.encode(buf, 0)?;
+        self.global_id.encode(buf, 0)?;
+        self.service_id.encode(buf, 0)?;
 
+        // Encode timestamp as u64 seconds + u32 nanoseconds (12 bytes)
         let timestamp = self
             .timestamp
             .duration_since(UNIX_EPOCH)
-            .map_err(|e| CephXError::TimeError(format!("Time error: {}", e)))?;
-        buf.put_u64_le(timestamp.as_secs());
-        buf.put_u32_le(timestamp.subsec_nanos());
-        buf.put_u64_le(self.nonce);
+            .map_err(|e| RadosError::Protocol(format!("Time error: {}", e)))?;
+        timestamp.as_secs().encode(buf, 0)?;
+        timestamp.subsec_nanos().encode(buf, 0)?;
 
-        Ok(buf.freeze())
+        self.nonce.encode(buf, 0)?;
+
+        Ok(())
     }
 
-    pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 44 {
-            return Err(CephXError::ProtocolError(
-                "Insufficient authenticator data".into(),
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 44 {
+            return Err(RadosError::Protocol(
+                "Insufficient authenticator data".to_string(),
             ));
         }
 
-        let client_challenge = data.get_u64_le();
-        let server_challenge = data.get_u64_le();
-        let global_id = data.get_u64_le();
-        let service_id = data.get_u32_le();
-        let timestamp_secs = data.get_u64_le();
-        let timestamp_nanos = data.get_u32_le();
-        let nonce = data.get_u64_le();
+        let client_challenge = u64::decode(buf, 0)?;
+        let server_challenge = u64::decode(buf, 0)?;
+        let global_id = u64::decode(buf, 0)?;
+        let service_id = u32::decode(buf, 0)?;
+        let timestamp_secs = u64::decode(buf, 0)?;
+        let timestamp_nanos = u32::decode(buf, 0)?;
+        let nonce = u64::decode(buf, 0)?;
 
         let timestamp = UNIX_EPOCH
             + Duration::from_secs(timestamp_secs)
@@ -794,6 +801,10 @@ impl CephXAuthenticator {
             timestamp,
             nonce,
         })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8 + 8 + 8 + 4 + 8 + 4 + 8) // 44 bytes total
     }
 }
 
@@ -913,7 +924,11 @@ impl CephXSession {
     }
 
     pub fn sign_authenticator(&self, auth: &CephXAuthenticator) -> Result<Bytes> {
-        let auth_data = auth.encode()?;
-        self.session_key.sign(&auth_data)
+        use denc::Denc;
+        let mut buf = BytesMut::new();
+        auth.encode(&mut buf, 0).map_err(|e| {
+            CephXError::EncodingError(format!("Failed to encode authenticator: {}", e))
+        })?;
+        self.session_key.sign(&buf.freeze())
     }
 }
