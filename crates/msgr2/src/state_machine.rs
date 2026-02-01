@@ -1722,14 +1722,17 @@ impl State for SessionAccepting {
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
             Tag::ClientIdent => {
-                // Send SERVER_IDENT and complete handshake
+                // Parse CLIENT_IDENT to get client information
+                // For now, just send a default SERVER_IDENT response
                 let addrs = denc::EntityAddrvec::with_addr(denc::EntityAddr::default());
                 let server_ident = ServerIdentFrame::new(addrs, 0, 0, 0, 0, 0, 0);
                 let response_frame = create_frame_from_trait(&server_ident, Tag::ServerIdent);
 
+                // After sending SERVER_IDENT, transition to Ready state
+                // The state machine will handle the transition after the frame is sent
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
-                    next_state: None, // Transition to READY handled by state machine
+                    next_state: Some(Box::new(Ready)),
                 })
             }
             _ => Err(Error::protocol_error(&format!(
@@ -2486,6 +2489,16 @@ impl StateMachine {
                 // Update last_keepalive_ack timestamp
                 self.last_keepalive_ack = Some(timestamp);
                 Ok(StateResult::Continue)
+            }
+            StateResult::Ready => {
+                // Transition to Ready state
+                self.current_state = Box::new(Ready);
+                Ok(StateResult::Ready)
+            }
+            StateResult::ReconnectReady { msg_seq } => {
+                // Transition to Ready state after reconnection
+                self.current_state = Box::new(Ready);
+                Ok(StateResult::ReconnectReady { msg_seq })
             }
             other => Ok(other),
         }

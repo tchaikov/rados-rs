@@ -934,7 +934,9 @@ impl Connection {
         })
     }
 
-    /// Perform msgr2 banner exchange
+    /// Perform msgr2 banner exchange (client-side)
+    ///
+    /// Client sends banner first, then receives server banner.
     async fn exchange_banner(
         stream: &mut TcpStream,
         state_machine: &mut StateMachine,
@@ -995,7 +997,253 @@ impl Connection {
         Ok(())
     }
 
-    /// Establish a session by completing the full msgr2 handshake
+    /// Perform msgr2 banner exchange (server-side)
+    ///
+    /// Server receives client banner first, then sends server banner.
+    async fn exchange_banner_server(
+        stream: &mut TcpStream,
+        state_machine: &mut StateMachine,
+        config: &crate::ConnectionConfig,
+    ) -> Result<()> {
+        // Read client banner first
+        // Banner is "ceph v2\n" (8 bytes) + length (2 bytes) + payload (16 bytes) = 26 bytes total
+        let mut buf = vec![0u8; 26];
+        stream.read_exact(&mut buf).await?;
+
+        // Record received banner bytes for pre-auth signature
+        state_machine.record_received(&buf);
+        tracing::debug!("Pre-auth: recorded received banner {} bytes", buf.len());
+
+        let mut bytes = BytesMut::from(&buf[..]);
+        let client_banner = Banner::decode(&mut bytes)?;
+
+        tracing::info!(
+            "✓ Received client banner: supported={:x}, required={:x}",
+            client_banner.supported_features.value(),
+            client_banner.required_features.value()
+        );
+
+        // Check if we can meet client requirements
+        let our_features = FeatureSet::new(config.supported_features);
+        let missing = client_banner.required_features & !our_features;
+        if !missing.is_empty() {
+            return Err(Error::Protocol(format!(
+                "Missing required features: {:x}",
+                missing.value()
+            )));
+        }
+
+        // Store peer's supported features for later use (e.g., compression negotiation)
+        state_machine.set_peer_supported_features(client_banner.supported_features.value());
+
+        // Send our banner response
+        let banner = Banner::new_with_features(
+            FeatureSet::new(config.supported_features),
+            FeatureSet::new(config.required_features),
+        );
+
+        let mut buf = BytesMut::with_capacity(64);
+        banner.encode(&mut buf);
+
+        // Record sent banner bytes for pre-auth signature
+        state_machine.record_sent(&buf);
+        tracing::debug!("Pre-auth: recorded sent banner {} bytes", buf.len());
+
+        stream.write_all(&buf).await?;
+        stream.flush().await?;
+        tracing::info!(
+            "✓ Sent msgr2 banner with features: supported={:x}, required={:x}",
+            banner.supported_features.value(),
+            banner.required_features.value()
+        );
+
+        Ok(())
+    }
+
+    /// Accept an incoming msgr2 connection (server-side)
+    ///
+    /// This accepts a TCP connection from a client and performs the msgr2 banner exchange.
+    /// After this, call `accept_session()` to complete the handshake.
+    ///
+    /// # Arguments
+    /// * `stream` - The accepted TCP stream from TcpListener
+    /// * `config` - Connection configuration (features and connection modes)
+    pub async fn accept(stream: TcpStream, config: crate::ConnectionConfig) -> Result<Self> {
+        let peer_addr = stream.peer_addr()?;
+        let local_addr = stream.local_addr()?;
+
+        tracing::info!("✓ Accepting connection from {}", peer_addr);
+        tracing::debug!("Local address: {}", local_addr);
+
+        // Validate config
+        if let Err(e) = config.validate() {
+            return Err(Error::Protocol(format!("Invalid config: {}", e)));
+        }
+
+        let mut stream = stream;
+
+        // Create state machine for server BEFORE banner exchange
+        // This is important because we need to track banner bytes in pre-auth buffers
+        let mut state_machine = StateMachine::new_server();
+
+        // Set the client address (peer) for SERVER_IDENT
+        let mut client_entity_addr = denc::EntityAddr::new();
+        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+        match peer_addr {
+            SocketAddr::V4(v4) => {
+                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
+                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
+                data.extend_from_slice(&v4.ip().octets()); // IP address
+                data.extend_from_slice(&[0u8; 8]); // padding
+                client_entity_addr.sockaddr_data = data;
+            }
+            SocketAddr::V6(v6) => {
+                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
+                let mut data = Vec::with_capacity(28);
+                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
+                data.extend_from_slice(&v6.port().to_be_bytes());
+                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
+                data.extend_from_slice(&v6.ip().octets());
+                data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                client_entity_addr.sockaddr_data = data;
+            }
+        }
+        state_machine.set_client_addr(client_entity_addr);
+
+        // Set our local server address for SERVER_IDENT
+        let mut server_entity_addr = denc::EntityAddr::new();
+        server_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+        match local_addr {
+            SocketAddr::V4(v4) => {
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
+                data.extend_from_slice(&v4.port().to_be_bytes());
+                data.extend_from_slice(&v4.ip().octets());
+                data.extend_from_slice(&[0u8; 8]); // padding
+                server_entity_addr.sockaddr_data = data;
+            }
+            SocketAddr::V6(v6) => {
+                let mut data = Vec::with_capacity(28);
+                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
+                data.extend_from_slice(&v6.port().to_be_bytes());
+                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
+                data.extend_from_slice(&v6.ip().octets());
+                data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                server_entity_addr.sockaddr_data = data;
+            }
+        }
+        state_machine.set_server_addr(server_entity_addr);
+
+        tracing::debug!("✓ Created server state machine");
+
+        // Perform msgr2 banner exchange (server-side: receive first, then send)
+        Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
+
+        let state = ConnectionState::new(stream, state_machine);
+
+        // Initialize throttle from config if present
+        let throttle = config
+            .throttle_config
+            .as_ref()
+            .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
+
+        Ok(Self {
+            state,
+            server_addr: local_addr, // For server, this is our local address
+            target_entity_addr: None,
+            config,
+            throttle,
+        })
+    }
+
+    /// Accept a session by completing the full msgr2 handshake (server-side)
+    ///
+    /// This goes through:
+    /// 1. Receive HELLO from client, send HELLO response
+    /// 2. Receive AUTH_REQUEST, send AUTH_DONE
+    /// 3. Receive CLIENT_IDENT, send SERVER_IDENT
+    ///
+    /// Returns when the connection is ready for message exchange.
+    pub async fn accept_session(&mut self) -> Result<()> {
+        tracing::info!("Accepting msgr2 session...");
+
+        // Server starts by waiting for HELLO from client
+        tracing::debug!("Waiting for HELLO frame from client...");
+        let hello_frame = self.state.recv_frame().await?;
+        tracing::debug!(
+            "✓ Received HELLO frame (tag: {:?})",
+            hello_frame.preamble.tag
+        );
+
+        // Process HELLO and send response
+        match self.state.handle_frame(hello_frame)? {
+            StateResult::SendFrame { frame, .. } => {
+                tracing::debug!("✓ Sending HELLO response");
+                self.state.send_frame(&frame).await?;
+            }
+            result => {
+                return Err(Error::Protocol(format!(
+                    "Unexpected HELLO processing result: {:?}",
+                    result
+                )));
+            }
+        }
+
+        // Wait for AUTH_REQUEST
+        tracing::debug!("Waiting for AUTH_REQUEST from client...");
+        let auth_request = self.state.recv_frame().await?;
+        tracing::debug!(
+            "✓ Received AUTH_REQUEST (tag: {:?})",
+            auth_request.preamble.tag
+        );
+
+        // Process AUTH_REQUEST and send AUTH_DONE
+        match self.state.handle_frame(auth_request)? {
+            StateResult::SendFrame { frame, .. } => {
+                tracing::debug!("✓ Sending AUTH_DONE");
+                self.state.send_frame(&frame).await?;
+            }
+            result => {
+                return Err(Error::Protocol(format!(
+                    "Unexpected AUTH processing result: {:?}",
+                    result
+                )));
+            }
+        }
+
+        // Wait for CLIENT_IDENT
+        tracing::debug!("Waiting for CLIENT_IDENT from client...");
+        let client_ident = self.state.recv_frame().await?;
+        tracing::debug!(
+            "✓ Received CLIENT_IDENT (tag: {:?})",
+            client_ident.preamble.tag
+        );
+
+        // Process CLIENT_IDENT and send SERVER_IDENT
+        match self.state.handle_frame(client_ident)? {
+            StateResult::SendFrame { frame, .. } => {
+                tracing::debug!("✓ Sending SERVER_IDENT");
+                self.state.send_frame(&frame).await?;
+            }
+            StateResult::Ready => {
+                tracing::info!("✓ Session established (server-side)");
+                return Ok(());
+            }
+            result => {
+                return Err(Error::Protocol(format!(
+                    "Unexpected SESSION processing result: {:?}",
+                    result
+                )));
+            }
+        }
+
+        tracing::info!("✓ Session established (server-side)");
+        Ok(())
+    }
+
+    /// Establish a session by completing the full msgr2 handshake (client-side)
     ///
     /// This goes through:
     /// 1. HELLO exchange
@@ -1673,6 +1921,16 @@ impl Connection {
     /// This can be used to detect connection timeouts.
     pub fn last_keepalive_ack(&self) -> Option<std::time::Instant> {
         self.state.state_machine.last_keepalive_ack()
+    }
+
+    /// Get the current state name
+    pub fn current_state_name(&self) -> &str {
+        self.state.current_state_name()
+    }
+
+    /// Get the current state kind
+    pub fn current_state_kind(&self) -> StateKind {
+        self.state.current_state_kind()
     }
 
     /// Close the connection and discard all pending messages
