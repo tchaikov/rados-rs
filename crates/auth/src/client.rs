@@ -1312,6 +1312,85 @@ impl CephXClientHandler {
         self.session.as_mut()
     }
 
+    /// Build ticket renewal request (CEPHX_GET_PRINCIPAL_SESSION_KEY)
+    ///
+    /// This builds a request to renew service tickets (OSD, MDS, MGR, etc.)
+    /// The request includes:
+    /// 1. CephXRequestHeader with CEPHX_GET_PRINCIPAL_SESSION_KEY
+    /// 2. An authorizer built from the AUTH ticket handler
+    /// 3. CephXServiceTicketRequest with the needed service keys bitmask
+    ///
+    /// # Arguments
+    /// * `global_id` - Global ID assigned by monitor
+    /// * `needed_keys` - Bitmask of service types that need renewal (MON|OSD|MDS|MGR)
+    ///
+    /// # Returns
+    /// Returns the encoded ticket renewal request payload
+    pub fn build_ticket_renewal_request(
+        &mut self,
+        global_id: u64,
+        needed_keys: u32,
+    ) -> Result<Bytes> {
+        debug!(
+            "Building ticket renewal request for global_id={}, needed_keys=0x{:x}",
+            global_id, needed_keys
+        );
+
+        // Get the session (must be authenticated first)
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
+
+        // Build the request payload
+        let mut payload = BytesMut::new();
+
+        // 1. Encode request header
+        let header = crate::protocol::CephXRequestHeader {
+            request_type: crate::protocol::CEPHX_GET_PRINCIPAL_SESSION_KEY,
+        };
+        header.encode(&mut payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to encode request header: {:?}", e))
+        })?;
+
+        // 2. Build and encode authorizer from AUTH ticket handler
+        // The authorizer proves we have a valid AUTH ticket
+        let auth_ticket_handler = session
+            .ticket_handlers
+            .get(&crate::types::service_id::AUTH)
+            .ok_or_else(|| {
+                CephXError::AuthenticationFailed("No AUTH ticket handler available".into())
+            })?;
+
+        if !auth_ticket_handler.have_key {
+            return Err(CephXError::AuthenticationFailed(
+                "AUTH ticket handler has no key".into(),
+            ));
+        }
+
+        // Build authorizer using the AUTH ticket
+        // The authorizer proves we have a valid AUTH ticket
+        let authorizer = self.build_authorizer(
+            crate::types::service_id::AUTH,
+            global_id,
+            None, // No server challenge for ticket renewal
+        )?;
+
+        payload.extend_from_slice(&authorizer);
+
+        // 3. Encode service ticket request with needed keys
+        let ticket_request = crate::protocol::CephXServiceTicketRequest { keys: needed_keys };
+        ticket_request.encode(&mut payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to encode ticket request: {:?}", e))
+        })?;
+
+        debug!(
+            "Built ticket renewal request: {} bytes (header + authorizer + ticket_request)",
+            payload.len()
+        );
+        Ok(payload.freeze())
+    }
+
     /// Reset the handler for a new authentication attempt
     pub fn reset(&mut self) {
         debug!("Resetting CephX client handler");

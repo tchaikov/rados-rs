@@ -11,6 +11,47 @@ pub const CEPHX_GET_AUTH_SESSION_KEY: u16 = 0x0100;
 pub const CEPHX_GET_PRINCIPAL_SESSION_KEY: u16 = 0x0200;
 pub const CEPHX_GET_ROTATING_KEY: u16 = 0x0400;
 
+/// CephX service ticket request structure
+///
+/// Corresponds to C++ `struct CephXServiceTicketRequest` in `/src/auth/cephx/CephxProtocol.h`
+///
+/// C++ encoding format:
+/// - `__u8 struct_v` - Structure version (currently 1)
+/// - `uint32_t keys` - Bitmask of service types (MON|OSD|MDS|MGR)
+///
+/// This structure is used to request service tickets from the monitor.
+#[derive(Debug, Clone)]
+pub struct CephXServiceTicketRequest {
+    pub keys: u32,
+}
+
+impl Denc for CephXServiceTicketRequest {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        buf.put_u8(1); // struct_v
+        buf.put_u32_le(self.keys);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 5 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for CephXServiceTicketRequest".to_string(),
+            ));
+        }
+        let _struct_v = buf.get_u8();
+        let keys = buf.get_u32_le();
+        Ok(Self { keys })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(5) // 1 byte struct_v + 4 bytes keys
+    }
+}
+
 /// Authentication modes
 /// From src/auth/Auth.h
 // Auth modes for different Ceph services

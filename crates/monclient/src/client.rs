@@ -950,7 +950,9 @@ impl MonClient {
 
         // Check if auth tickets need renewal
         // This matches the official MonClient::_check_auth_tickets() behavior
-        if let Some(auth_provider) = active_con.get_auth_provider() {
+        if let Some(auth_provider_arc) = active_con.get_auth_provider() {
+            // Lock the auth provider to check if tickets need renewal
+            let auth_provider = auth_provider_arc.lock().await;
             if let Some(session) = auth_provider.handler().get_session() {
                 // Check each ticket handler to see if any need renewal
                 let mut needs_renewal = false;
@@ -971,18 +973,72 @@ impl MonClient {
                 }
 
                 if needs_renewal {
-                    // TODO: Implement ticket renewal by sending MAuth request
-                    // The official implementation:
-                    // 1. Calls auth->prepare_build_request() to validate tickets
-                    // 2. Calls auth->build_request() to build MAuth payload
-                    // 3. Sends MAuth message to monitor
-                    // 4. Handles AUTH_REPLY_MORE/AUTH_DONE responses
-                    //
-                    // For now, we log the need for renewal. Full implementation requires:
-                    // - Adding build_ticket_renewal_request() to CephXClientHandler
-                    // - Sending MAuth message via active_con
-                    // - Handling the auth response in the message dispatch loop
-                    warn!("Service tickets need renewal but ticket renewal is not yet implemented");
+                    // Implement ticket renewal by sending MAuth request
+                    // This matches the official MonClient::_check_auth_tickets() behavior
+
+                    // Collect the bitmask of services that need renewal
+                    let mut needed_keys = 0u32;
+                    for (service_id, handler) in &session.ticket_handlers {
+                        if handler.need_key() {
+                            needed_keys |= *service_id;
+                        }
+                    }
+
+                    debug!(
+                        "Building ticket renewal request for services: 0x{:x}",
+                        needed_keys
+                    );
+
+                    // Get the global_id from the session
+                    let global_id = session.global_id;
+
+                    // Drop the references before getting mutable access to auth_provider
+                    // (references are automatically dropped when they go out of scope)
+
+                    // Get mutable access to build the ticket renewal request
+                    let mut auth_provider_mut = auth_provider_arc.lock().await;
+                    match auth_provider_mut
+                        .handler_mut()
+                        .build_ticket_renewal_request(global_id, needed_keys)
+                    {
+                        Ok(auth_payload) => {
+                            debug!("Built ticket renewal request: {} bytes", auth_payload.len());
+
+                            // Create MAuth message with CEPHX protocol (2)
+                            let mauth = msgr2::ceph_message::MAuth::new(2, auth_payload);
+
+                            // Convert to CephMessage and then to Message
+                            let ceph_msg = msgr2::ceph_message::CephMessage::from_payload(
+                                &mauth,
+                                0, // features
+                                msgr2::ceph_message::CrcFlags::ALL,
+                            )
+                            .map_err(|e| {
+                                MonClientError::Other(format!(
+                                    "Failed to create MAuth message: {:?}",
+                                    e
+                                ))
+                            })?;
+
+                            let msg = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+                            // Drop the lock before sending the message
+                            drop(auth_provider_mut);
+
+                            // Send the MAuth message to the monitor
+                            if let Err(e) = active_con.send_message(msg).await {
+                                warn!("Failed to send ticket renewal request: {:?}", e);
+                            } else {
+                                info!(
+                                    "Sent ticket renewal request for services: 0x{:x}",
+                                    needed_keys
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!("Failed to build ticket renewal request: {:?}", e);
+                        }
+                    }
                 }
             }
         }
@@ -1846,10 +1902,11 @@ impl MonClient {
     /// ```
     pub async fn get_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
         let state = self.state.read().await;
-        state
-            .active_con
-            .as_ref()
-            .and_then(|conn| conn.create_service_auth_provider())
+        if let Some(conn) = state.active_con.as_ref() {
+            conn.create_service_auth_provider().await
+        } else {
+            None
+        }
     }
 
     /// Get the number of monitors

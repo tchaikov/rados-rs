@@ -61,7 +61,8 @@ pub struct MonConnection {
     state: Arc<Mutex<ConnectionState>>,
 
     /// Authentication provider (stored for creating service auth providers)
-    auth_provider: Option<auth::MonitorAuthProvider>,
+    /// Wrapped in Mutex to allow mutable access for ticket renewal
+    auth_provider: Option<Arc<Mutex<auth::MonitorAuthProvider>>>,
 
     /// Channel for sending messages (to avoid deadlock with receive loop)
     send_tx: mpsc::UnboundedSender<msgr2::message::Message>,
@@ -282,7 +283,7 @@ impl MonConnection {
                 global_id, // Use the global_id from authentication
                 has_session: true,
             })),
-            auth_provider,
+            auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             recv_rx: Arc::new(Mutex::new(recv_rx)),
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
@@ -415,8 +416,8 @@ impl MonConnection {
     /// Get a reference to the authentication provider
     ///
     /// Returns None if no authentication was used (no-auth cluster).
-    pub fn get_auth_provider(&self) -> Option<&auth::MonitorAuthProvider> {
-        self.auth_provider.as_ref()
+    pub fn get_auth_provider(&self) -> Option<Arc<Mutex<auth::MonitorAuthProvider>>> {
+        self.auth_provider.as_ref().map(Arc::clone)
     }
 
     /// Reopen the session after a timeout
@@ -457,15 +458,20 @@ impl MonConnection {
     /// This creates an authorizer-based auth provider using the service tickets
     /// obtained during monitor authentication. Returns None if no authentication
     /// was used (no-auth cluster).
-    pub fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
+    pub async fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
         eprintln!(
             "DEBUG: create_service_auth_provider called, auth_provider.is_some() = {}",
             self.auth_provider.is_some()
         );
-        self.auth_provider.as_ref().map(|mon_auth| {
+        if let Some(mon_auth_arc) = &self.auth_provider {
+            let mon_auth = mon_auth_arc.lock().await;
             eprintln!("DEBUG: Creating ServiceAuthProvider from MonitorAuthProvider");
-            auth::ServiceAuthProvider::from_authenticated_handler(mon_auth.handler().clone())
-        })
+            Some(auth::ServiceAuthProvider::from_authenticated_handler(
+                mon_auth.handler().clone(),
+            ))
+        } else {
+            None
+        }
     }
 }
 
