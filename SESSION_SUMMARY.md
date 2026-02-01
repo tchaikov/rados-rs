@@ -4,7 +4,7 @@
 
 ## Overview
 
-This session focused on code quality improvements: refactoring OSDClient to eliminate duplication and fixing TODOs in MonClient.
+This session focused on code quality improvements and server-side implementation: refactoring OSDClient to eliminate duplication, fixing TODOs in MonClient, implementing ticket renewal mechanism, and adding complete server-side connection acceptance for msgr2 protocol.
 
 ## Completed Work
 
@@ -343,6 +343,98 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 **Tests**: All tests passing (auth: 1, monclient: 15, osdclient: 40)
 
 **Commit**: `1ec0148` - "Refactor auth providers to use shared handler for automatic ticket renewal"
+
+---
+
+### 10. Server-Side Connection Acceptance ✅
+
+**Implementation**: Multiple files
+
+**Problem**: The msgr2 protocol implementation only supported client-side connections. There was no way to accept incoming connections and act as a server, which limited testing capabilities and prevented building Ceph-compatible services.
+
+**Solution**: Implemented complete server-side connection acceptance and session establishment:
+
+**Changes**:
+
+1. **Added Connection::accept() method** (`crates/msgr2/src/protocol.rs`):
+   - Takes an existing TcpStream from TcpListener
+   - Takes ConnectionConfig for server configuration
+   - Creates server state machine with `StateMachine::new_server()`
+   - Performs server-side banner exchange (receive first, then send)
+   - Returns Connection ready for session establishment
+
+2. **Added accept_session() method** (`crates/msgr2/src/protocol.rs`):
+   - Server-side equivalent of establish_session()
+   - Waits for HELLO from client, sends HELLO response
+   - Waits for AUTH_REQUEST, sends AUTH_DONE
+   - Waits for CLIENT_IDENT, sends SERVER_IDENT
+   - Transitions to Ready state
+
+3. **Added exchange_banner_server() method** (`crates/msgr2/src/protocol.rs`):
+   - Server-side banner exchange (reversed order from client)
+   - Receives client banner first
+   - Validates client requirements
+   - Sends server banner response
+   - Records all bytes in pre-auth buffers for signatures
+
+4. **Fixed SessionAccepting state** (`crates/msgr2/src/state_machine.rs`):
+   - Changed to transition to Ready state after sending SERVER_IDENT
+   - Previously had `next_state: None` which left server in SessionAccepting
+
+5. **Fixed StateMachine::apply_result()** (`crates/msgr2/src/state_machine.rs`):
+   - Added explicit handling for `StateResult::Ready`
+   - Added explicit handling for `StateResult::ReconnectReady`
+   - Both now properly transition state machine to Ready state
+   - Previously just passed through without state transition
+
+6. **Added public state inspection methods** (`crates/msgr2/src/protocol.rs`):
+   - `current_state_name()` - Get current state name as string
+   - `current_state_kind()` - Get current state kind as enum
+   - Enables testing and debugging of state transitions
+
+**Implementation Details**:
+
+- **Banner Exchange Order**:
+  - Client: send banner → receive banner
+  - Server: receive banner → send banner
+
+- **Session Establishment Flow**:
+  - Server waits for frames from client
+  - Server responds to each frame appropriately
+  - Server transitions to Ready after sending SERVER_IDENT
+
+- **State Machine Fix**: The critical bug was in `apply_result()` which had:
+  ```rust
+  other => Ok(other),  // Just passed through StateResult::Ready
+  ```
+
+  Fixed to:
+  ```rust
+  StateResult::Ready => {
+      self.current_state = Box::new(Ready);
+      Ok(StateResult::Ready)
+  }
+  ```
+
+**Testing**:
+
+- Created comprehensive server acceptance test (`crates/msgr2/tests/server_accept_test.rs`)
+- Test spawns both server and client tasks concurrently
+- Verifies full handshake: banner → hello → auth → session
+- Confirms both sides reach Ready state
+- Test passes with no external dependencies
+
+**Benefits**:
+
+1. **Self-Contained Testing**: Can test msgr2 protocol without external Ceph cluster
+2. **Bidirectional Support**: Full client and server role implementation
+3. **Service Development**: Enables building Ceph-compatible services in Rust
+4. **Protocol Verification**: Can verify protocol correctness by testing both sides
+5. **Debugging**: Easier to debug protocol issues with controlled test environment
+
+**Tests**: All 65 msgr2 tests passing (51 unit + 14 integration + 5 doctests)
+
+**Commit**: `5d9d216` - "Implement server-side connection acceptance for msgr2 protocol"
 
 ---
 
