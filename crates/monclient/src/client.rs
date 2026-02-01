@@ -951,93 +951,102 @@ impl MonClient {
         // Check if auth tickets need renewal
         // This matches the official MonClient::_check_auth_tickets() behavior
         if let Some(auth_provider_arc) = active_con.get_auth_provider() {
-            // Lock the auth provider to check if tickets need renewal
+            // Lock the auth provider to get the handler reference
             let auth_provider = auth_provider_arc.lock().await;
-            if let Some(session) = auth_provider.handler().get_session() {
-                // Check each ticket handler to see if any need renewal
-                let mut needs_renewal = false;
-                for (service_id, handler) in &session.ticket_handlers {
-                    if handler.need_key() {
-                        debug!(
-                            "Service ticket for {} needs renewal (renew_after reached)",
-                            match *service_id {
-                                auth::service_id::MON => "MON",
-                                auth::service_id::OSD => "OSD",
-                                auth::service_id::MDS => "MDS",
-                                auth::service_id::MGR => "MGR",
-                                _ => "UNKNOWN",
-                            }
-                        );
-                        needs_renewal = true;
-                    }
-                }
+            let handler_arc = std::sync::Arc::clone(auth_provider.handler());
+            drop(auth_provider); // Release the tokio mutex early
 
-                if needs_renewal {
-                    // Implement ticket renewal by sending MAuth request
-                    // This matches the official MonClient::_check_auth_tickets() behavior
+            // Check if tickets need renewal and collect needed keys
+            let renewal_info = {
+                // Lock the handler to check if tickets need renewal
+                let handler = handler_arc
+                    .lock()
+                    .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
 
-                    // Collect the bitmask of services that need renewal
+                if let Some(session) = handler.get_session() {
+                    // Check each ticket handler to see if any need renewal
+                    let mut needs_renewal = false;
                     let mut needed_keys = 0u32;
-                    for (service_id, handler) in &session.ticket_handlers {
-                        if handler.need_key() {
+
+                    for (service_id, ticket_handler) in &session.ticket_handlers {
+                        if ticket_handler.need_key() {
+                            debug!(
+                                "Service ticket for {} needs renewal (renew_after reached)",
+                                match *service_id {
+                                    auth::service_id::MON => "MON",
+                                    auth::service_id::OSD => "OSD",
+                                    auth::service_id::MDS => "MDS",
+                                    auth::service_id::MGR => "MGR",
+                                    _ => "UNKNOWN",
+                                }
+                            );
+                            needs_renewal = true;
                             needed_keys |= *service_id;
                         }
                     }
 
-                    debug!(
-                        "Building ticket renewal request for services: 0x{:x}",
-                        needed_keys
-                    );
+                    if needs_renewal {
+                        Some((session.global_id, needed_keys))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+                // handler guard is dropped here
+            };
 
-                    // Get the global_id from the session
-                    let global_id = session.global_id;
+            // If renewal is needed, build and send the request
+            if let Some((global_id, needed_keys)) = renewal_info {
+                debug!(
+                    "Building ticket renewal request for services: 0x{:x}",
+                    needed_keys
+                );
 
-                    // Drop the references before getting mutable access to auth_provider
-                    // (references are automatically dropped when they go out of scope)
+                // Lock the handler again (mutably) to build the ticket renewal request
+                let auth_payload = {
+                    let mut handler_mut = handler_arc.lock().map_err(|e| {
+                        MonClientError::Other(format!("Failed to lock handler: {}", e))
+                    })?;
 
-                    // Get mutable access to build the ticket renewal request
-                    let mut auth_provider_mut = auth_provider_arc.lock().await;
-                    match auth_provider_mut
-                        .handler_mut()
-                        .build_ticket_renewal_request(global_id, needed_keys)
-                    {
-                        Ok(auth_payload) => {
-                            debug!("Built ticket renewal request: {} bytes", auth_payload.len());
+                    handler_mut.build_ticket_renewal_request(global_id, needed_keys)
+                    // handler_mut guard is dropped here
+                };
 
-                            // Create MAuth message with CEPHX protocol (2)
-                            let mauth = msgr2::ceph_message::MAuth::new(2, auth_payload);
+                match auth_payload {
+                    Ok(auth_payload) => {
+                        debug!("Built ticket renewal request: {} bytes", auth_payload.len());
 
-                            // Convert to CephMessage and then to Message
-                            let ceph_msg = msgr2::ceph_message::CephMessage::from_payload(
-                                &mauth,
-                                0, // features
-                                msgr2::ceph_message::CrcFlags::ALL,
-                            )
-                            .map_err(|e| {
-                                MonClientError::Other(format!(
-                                    "Failed to create MAuth message: {:?}",
-                                    e
-                                ))
-                            })?;
+                        // Create MAuth message with CEPHX protocol (2)
+                        let mauth = msgr2::ceph_message::MAuth::new(2, auth_payload);
 
-                            let msg = msgr2::message::Message::from_ceph_message(ceph_msg);
+                        // Convert to CephMessage and then to Message
+                        let ceph_msg = msgr2::ceph_message::CephMessage::from_payload(
+                            &mauth,
+                            0, // features
+                            msgr2::ceph_message::CrcFlags::ALL,
+                        )
+                        .map_err(|e| {
+                            MonClientError::Other(format!(
+                                "Failed to create MAuth message: {:?}",
+                                e
+                            ))
+                        })?;
 
-                            // Drop the lock before sending the message
-                            drop(auth_provider_mut);
+                        let msg = msgr2::message::Message::from_ceph_message(ceph_msg);
 
-                            // Send the MAuth message to the monitor
-                            if let Err(e) = active_con.send_message(msg).await {
-                                warn!("Failed to send ticket renewal request: {:?}", e);
-                            } else {
-                                info!(
-                                    "Sent ticket renewal request for services: 0x{:x}",
-                                    needed_keys
-                                );
-                            }
+                        // Send the MAuth message to the monitor
+                        if let Err(e) = active_con.send_message(msg).await {
+                            warn!("Failed to send ticket renewal request: {:?}", e);
+                        } else {
+                            info!(
+                                "Sent ticket renewal request for services: 0x{:x}",
+                                needed_keys
+                            );
                         }
-                        Err(e) => {
-                            warn!("Failed to build ticket renewal request: {:?}", e);
-                        }
+                    }
+                    Err(e) => {
+                        warn!("Failed to build ticket renewal request: {:?}", e);
                     }
                 }
             }

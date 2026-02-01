@@ -56,9 +56,13 @@ impl Clone for Box<dyn AuthProvider> {
 ///
 /// Used for connecting to monitors. Performs full challenge-response
 /// authentication and obtains service tickets.
+///
+/// The handler is wrapped in Arc<Mutex<>> so it can be shared with
+/// ServiceAuthProviders. When tickets are renewed, all ServiceAuthProviders
+/// automatically see the updated tickets.
 #[derive(Debug, Clone)]
 pub struct MonitorAuthProvider {
-    handler: crate::client::CephXClientHandler,
+    handler: std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>>,
 }
 
 impl MonitorAuthProvider {
@@ -66,47 +70,60 @@ impl MonitorAuthProvider {
     pub fn new(entity_name: String) -> Result<Self> {
         let handler =
             crate::client::CephXClientHandler::new(entity_name, crate::protocol::AuthMode::Mon)?;
-        Ok(Self { handler })
+        Ok(Self {
+            handler: std::sync::Arc::new(std::sync::Mutex::new(handler)),
+        })
     }
 
     /// Set the secret key from base64 string
     pub fn set_secret_key_from_base64(&mut self, key_str: &str) -> Result<()> {
-        self.handler.set_secret_key_from_base64(key_str)
+        let mut handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        handler.set_secret_key_from_base64(key_str)
     }
 
     /// Set the secret key from keyring file
     pub fn set_secret_key_from_keyring(&mut self, keyring_path: &str) -> Result<()> {
         use crate::keyring::Keyring;
         let keyring = Keyring::from_file(keyring_path)?;
-        let entity_str = format!("client.{}", self.handler.entity_name.id);
+
+        let mut handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+
+        let entity_str = format!("client.{}", handler.entity_name.id);
         let key = keyring.get_key(&entity_str).ok_or_else(|| {
             crate::error::CephXError::InvalidKey(format!("Key not found for {}", entity_str))
         })?;
-        self.handler.set_secret_key(key.clone());
+        handler.set_secret_key(key.clone());
         Ok(())
     }
 
-    /// Get the underlying CephX handler (for accessing session and tickets)
-    pub fn handler(&self) -> &crate::client::CephXClientHandler {
+    /// Get a reference to the shared handler
+    pub fn handler(&self) -> &std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>> {
         &self.handler
-    }
-
-    /// Get mutable reference to the underlying CephX handler
-    pub fn handler_mut(&mut self) -> &mut crate::client::CephXClientHandler {
-        &mut self.handler
     }
 }
 
 impl AuthProvider for MonitorAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, _service_id: u32) -> Result<Bytes> {
+        // Lock the handler to build auth payload
+        let handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+
         // For monitors, do full CephX authentication
         // Check if we've received server challenge
-        if self.handler.server_challenge.is_some() {
+        if handler.server_challenge.is_some() {
             // Second round - send authenticate request with challenge response
-            self.handler.build_authenticate_request()
+            handler.build_authenticate_request()
         } else {
             // First round - send initial request
-            self.handler.build_initial_request(global_id)
+            handler.build_initial_request(global_id)
         }
     }
 
@@ -117,6 +134,12 @@ impl AuthProvider for MonitorAuthProvider {
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
         use bytes::Buf;
+
+        // Lock the handler to handle auth response
+        let mut handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
 
         // Distinguish between AUTH_REPLY_MORE (server challenge) and AUTH_DONE (final result)
         // AUTH_REPLY_MORE: starts with u32 length prefix followed by CephXServerChallenge
@@ -130,10 +153,10 @@ impl AuthProvider for MonitorAuthProvider {
 
             if first_u16 == crate::protocol::CEPHX_GET_AUTH_SESSION_KEY {
                 // This is AUTH_DONE - handle final authentication
-                self.handler.handle_auth_done(payload, global_id, con_mode)
+                handler.handle_auth_done(payload, global_id, con_mode)
             } else {
                 // This is AUTH_REPLY_MORE - handle server challenge
-                self.handler.handle_auth_response(payload)?;
+                handler.handle_auth_response(payload)?;
                 // Return (None, None) since AUTH_REPLY_MORE doesn't provide keys
                 Ok((None, None))
             }
@@ -162,9 +185,13 @@ impl AuthProvider for MonitorAuthProvider {
 ///
 /// Used for connecting to OSDs, MDSs, MGRs. Presents authorizers
 /// obtained from monitor authentication instead of doing full CephX.
+///
+/// This provider shares the CephXClientHandler with MonClient via Arc<Mutex<>>,
+/// so when MonClient renews tickets, all ServiceAuthProviders automatically
+/// see the updated tickets.
 #[derive(Debug, Clone)]
 pub struct ServiceAuthProvider {
-    handler: crate::client::CephXClientHandler,
+    handler: std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>>,
     /// Track if we've already sent an authorizer (to avoid sending twice)
     authorizer_sent: bool,
     /// Pending server challenge (if received)
@@ -174,37 +201,14 @@ pub struct ServiceAuthProvider {
 }
 
 impl ServiceAuthProvider {
-    /// Create a new service auth provider from an authenticated monitor session
+    /// Create a new service auth provider from a shared authenticated handler
     ///
     /// The handler should already have completed authentication with the monitor
-    /// and obtained service tickets.
-    pub fn from_authenticated_handler(handler: crate::client::CephXClientHandler) -> Self {
-        use tracing::debug;
-        let has_session = handler.get_session().is_some();
-        let ticket_count = handler
-            .get_session()
-            .map(|s| s.ticket_handlers.len())
-            .unwrap_or(0);
-        eprintln!(
-            "DEBUG: ServiceAuthProvider::from_authenticated_handler: has_session={}, ticket_count={}",
-            has_session, ticket_count
-        );
-        debug!(
-            "ServiceAuthProvider::from_authenticated_handler: has_session={}, ticket_count={}",
-            has_session, ticket_count
-        );
-        if let Some(session) = handler.get_session() {
-            for (sid, handler) in &session.ticket_handlers {
-                eprintln!(
-                    "DEBUG:   Handler has ticket for service {}: have_key={}",
-                    sid, handler.have_key
-                );
-                debug!(
-                    "  Handler has ticket for service {}: have_key={}",
-                    sid, handler.have_key
-                );
-            }
-        }
+    /// and obtained service tickets. The handler is shared via Arc<Mutex<>> so
+    /// that ticket renewals are automatically visible to all ServiceAuthProviders.
+    pub fn from_shared_handler(
+        handler: std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>>,
+    ) -> Self {
         Self {
             handler,
             authorizer_sent: false,
@@ -213,24 +217,15 @@ impl ServiceAuthProvider {
         }
     }
 
-    /// Get the underlying CephX handler
-    pub fn handler(&self) -> &crate::client::CephXClientHandler {
+    /// Get a reference to the shared handler
+    pub fn handler(&self) -> &std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>> {
         &self.handler
-    }
-
-    /// Get mutable reference to the underlying CephX handler
-    pub fn handler_mut(&mut self) -> &mut crate::client::CephXClientHandler {
-        &mut self.handler
     }
 }
 
 impl AuthProvider for ServiceAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, service_id: u32) -> Result<Bytes> {
         use tracing::debug;
-        eprintln!(
-            "DEBUG: ServiceAuthProvider::build_auth_payload called with service_id={}, global_id={}, authorizer_sent={}, has_challenge={}",
-            service_id, global_id, self.authorizer_sent, self.server_challenge.is_some()
-        );
         debug!(
             "ServiceAuthProvider::build_auth_payload called with service_id={}, global_id={}",
             service_id, global_id
@@ -239,14 +234,18 @@ impl AuthProvider for ServiceAuthProvider {
         // Store service_id for later use in handle_auth_response
         self.service_id = Some(service_id);
 
-        // Build authorizer from existing tickets, including server_challenge if we have it
-        let result = self
+        // Lock the handler to build authorizer from existing tickets
+        // This is a very fast operation (just crypto operations)
+        let mut handler = self
             .handler
-            .build_authorizer(service_id, global_id, self.server_challenge);
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let result = handler.build_authorizer(service_id, global_id, self.server_challenge);
+
         if let Err(ref e) = result {
-            eprintln!("DEBUG: build_authorizer failed: {:?}", e);
+            debug!("build_authorizer failed: {:?}", e);
         } else {
-            eprintln!("DEBUG: build_authorizer succeeded");
+            debug!("build_authorizer succeeded");
             self.authorizer_sent = true;
         }
         result
@@ -292,11 +291,14 @@ impl AuthProvider for ServiceAuthProvider {
                 CephXError::ProtocolError("No service_id set in ServiceAuthProvider".into())
             })?;
 
-            // Decrypt and extract server_challenge
-            match self
+            // Lock the handler to decrypt the challenge
+            let handler = self
                 .handler
-                .decrypt_authorize_challenge(service_id, &payload)
-            {
+                .lock()
+                .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+
+            // Decrypt and extract server_challenge
+            match handler.decrypt_authorize_challenge(service_id, &payload) {
                 Ok(server_challenge) => {
                     eprintln!(
                         "DEBUG: Successfully extracted server_challenge: 0x{:016x}",
@@ -327,8 +329,14 @@ impl AuthProvider for ServiceAuthProvider {
             global_id, con_mode
         );
 
+        // Lock the handler to get the session key
+        let handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+
         // Get the session key for this service from the ticket handler
-        let session_key = if let Some(session) = self.handler.get_session() {
+        let session_key = if let Some(session) = handler.get_session() {
             // Get the OSD ticket handler (service_id = 4)
             session
                 .ticket_handlers
@@ -513,8 +521,13 @@ impl AuthProvider for ServiceAuthProvider {
     }
 
     fn has_valid_ticket(&self, service_id: u32) -> bool {
-        if let Some(session) = self.handler.get_session() {
-            session.has_valid_ticket(service_id)
+        // Lock the handler to check ticket validity
+        if let Ok(handler) = self.handler.lock() {
+            if let Some(session) = handler.get_session() {
+                session.has_valid_ticket(service_id)
+            } else {
+                false
+            }
         } else {
             false
         }

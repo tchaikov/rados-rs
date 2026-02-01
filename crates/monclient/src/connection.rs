@@ -456,18 +456,16 @@ impl MonConnection {
     /// Create a ServiceAuthProvider for OSD/MDS/MGR connections
     ///
     /// This creates an authorizer-based auth provider using the service tickets
-    /// obtained during monitor authentication. Returns None if no authentication
-    /// was used (no-auth cluster).
+    /// obtained during monitor authentication. The handler is shared via Arc<Mutex<>>
+    /// so that when MonClient renews tickets, all ServiceAuthProviders automatically
+    /// see the updated tickets. Returns None if no authentication was used (no-auth cluster).
     pub async fn create_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
-        eprintln!(
-            "DEBUG: create_service_auth_provider called, auth_provider.is_some() = {}",
-            self.auth_provider.is_some()
-        );
         if let Some(mon_auth_arc) = &self.auth_provider {
             let mon_auth = mon_auth_arc.lock().await;
-            eprintln!("DEBUG: Creating ServiceAuthProvider from MonitorAuthProvider");
-            Some(auth::ServiceAuthProvider::from_authenticated_handler(
-                mon_auth.handler().clone(),
+            // Share the handler with ServiceAuthProvider via Arc<Mutex<>>
+            // This ensures ticket renewals are automatically visible
+            Some(auth::ServiceAuthProvider::from_shared_handler(
+                std::sync::Arc::clone(mon_auth.handler()),
             ))
         } else {
             None
