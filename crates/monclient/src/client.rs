@@ -144,16 +144,22 @@ pub enum MapEvent {
     MdsMapUpdated { epoch: u64 },
 }
 
-/// TODO: Keepalive state tracking (for future implementation)
+/// Keepalive state tracking
 ///
-/// The official MonClient tracks keepalive state to detect connection timeouts.
-/// Our current architecture needs refactoring to properly support this:
-/// - The msgr2::Connection is in a background task, not directly accessible
-/// - Need to add either: command channel, move to background task, or refactor architecture
+/// Keepalive is implemented at the msgr2 protocol layer via MonConnection.
+/// The MonConnection background task:
+/// - Sends Keepalive2 frames at the configured interval
+/// - Monitors for keepalive ACKs with timeout checking
+/// - Notifies the tick loop via timeout_rx channel when keepalive timeout occurs
+///
+/// The tick loop (lines 919-943) handles keepalive timeouts by:
+/// - Checking try_recv_timeout() on the active connection
+/// - Triggering hunting for a new monitor if timeout detected
 #[derive(Default)]
 #[allow(dead_code)]
 struct KeepaliveState {
     /// Last time we sent a keepalive (Keepalive2 frame)
+    /// Note: Actual keepalive sending is handled by msgr2 protocol layer
     last_sent: Option<std::time::Instant>,
 }
 
@@ -943,12 +949,42 @@ impl MonClient {
         }
 
         // Check if auth tickets need renewal
+        // This matches the official MonClient::_check_auth_tickets() behavior
         if let Some(auth_provider) = active_con.get_auth_provider() {
-            // Check if service tickets are about to expire
-            // TODO: Implement actual ticket expiry checking
-            // For now, just log that we have an auth provider
-            trace!("Auth provider available for ticket renewal check");
-            let _ = auth_provider; // Suppress unused variable warning
+            if let Some(session) = auth_provider.handler().get_session() {
+                // Check each ticket handler to see if any need renewal
+                let mut needs_renewal = false;
+                for (service_id, handler) in &session.ticket_handlers {
+                    if handler.need_key() {
+                        debug!(
+                            "Service ticket for {} needs renewal (renew_after reached)",
+                            match *service_id {
+                                auth::service_id::MON => "MON",
+                                auth::service_id::OSD => "OSD",
+                                auth::service_id::MDS => "MDS",
+                                auth::service_id::MGR => "MGR",
+                                _ => "UNKNOWN",
+                            }
+                        );
+                        needs_renewal = true;
+                    }
+                }
+
+                if needs_renewal {
+                    // TODO: Implement ticket renewal by sending MAuth request
+                    // The official implementation:
+                    // 1. Calls auth->prepare_build_request() to validate tickets
+                    // 2. Calls auth->build_request() to build MAuth payload
+                    // 3. Sends MAuth message to monitor
+                    // 4. Handles AUTH_REPLY_MORE/AUTH_DONE responses
+                    //
+                    // For now, we log the need for renewal. Full implementation requires:
+                    // - Adding build_ticket_renewal_request() to CephXClientHandler
+                    // - Sending MAuth message via active_con
+                    // - Handling the auth response in the message dispatch loop
+                    warn!("Service tickets need renewal but ticket renewal is not yet implemented");
+                }
+            }
         }
 
         trace!("Tick completed");
