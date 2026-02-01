@@ -15,6 +15,7 @@ use crate::header::MsgHeader;
 use crate::message::Message;
 use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, StateResult};
 use crate::FeatureSet;
+use std::borrow::Cow;
 
 /// Action to take after successful reconnection in retry_with_reconnect
 enum ReconnectAction<T> {
@@ -58,25 +59,27 @@ impl FrameIO {
         state_machine: &mut StateMachine,
     ) -> Result<()> {
         // Step 1: Apply compression if enabled
-        let frame_to_send = if let Some(ctx) = state_machine.compression_ctx() {
+        // Use Cow to avoid cloning in the common case where compression fails/disabled
+        let frame_to_send: Cow<Frame> = if let Some(ctx) = state_machine.compression_ctx() {
             match frame.compress(ctx) {
-                Ok(compressed_frame) => {
-                    if compressed_frame.preamble.is_compressed() {
-                        tracing::debug!(
-                            "Frame compressed: tag={:?}, algorithm={:?}",
-                            frame.preamble.tag,
-                            ctx.algorithm()
-                        );
-                    }
-                    compressed_frame
+                Ok(compressed_frame) if compressed_frame.preamble.is_compressed() => {
+                    tracing::debug!(
+                        "Frame compressed: tag={:?}, algorithm={:?}",
+                        frame.preamble.tag,
+                        ctx.algorithm()
+                    );
+                    Cow::Owned(compressed_frame)
                 }
-                Err(e) => {
-                    tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
-                    frame.clone()
+                Ok(_) | Err(_) => {
+                    // Compression didn't help or failed, borrow original
+                    if let Err(e) = frame.compress(ctx) {
+                        tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
+                    }
+                    Cow::Borrowed(frame)
                 }
             }
         } else {
-            frame.clone()
+            Cow::Borrowed(frame)
         };
 
         // Step 2: Convert to wire format with proper preamble, segments, epilogue, and CRCs
