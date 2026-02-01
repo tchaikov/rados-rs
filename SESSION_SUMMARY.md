@@ -273,16 +273,90 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 
 ---
 
+### 9. Shared Handler Architecture for Automatic Ticket Renewal ✅
+
+**Implementation**: Multiple files
+
+**Problem**: The initial ticket renewal implementation had a critical flaw - when MonClient renewed tickets, OSDClient's ServiceAuthProviders didn't see the updated tickets because they had cloned copies of the handler.
+
+**Solution**: Refactored to use shared handler architecture via `Arc<Mutex<>>`:
+
+**Changes**:
+
+1. **MonitorAuthProvider** (`crates/auth/src/provider.rs`):
+   - Changed handler from owned `CephXClientHandler` to `Arc<Mutex<CephXClientHandler>>`
+   - All methods now lock the mutex to access the handler
+   - Enables sharing the handler with ServiceAuthProviders
+
+2. **ServiceAuthProvider** (`crates/auth/src/provider.rs`):
+   - Changed from owning a cloned handler to sharing via `Arc<Mutex<>>`
+   - Renamed `from_authenticated_handler()` to `from_shared_handler()`
+   - All methods lock the mutex to access the handler
+   - When MonClient renews tickets, all ServiceAuthProviders automatically see updates
+
+3. **MonConnection** (`crates/monclient/src/connection.rs`):
+   - `create_service_auth_provider()` now clones the Arc reference instead of cloning the handler
+   - ServiceAuthProviders share the same handler as MonClient
+   - Ticket renewals are automatically visible to all OSD/MDS/MGR connections
+
+4. **MonClient Ticket Renewal** (`crates/monclient/src/client.rs`):
+   - Restructured tick() loop to properly manage mutex lifetimes
+   - Extracts renewal info (global_id, needed_keys) before releasing locks
+   - Builds ticket renewal request with proper locking
+   - Ensures MutexGuards are dropped before async operations (Send requirement)
+
+**Implementation Details**:
+
+- **Mutex Choice**: Used `std::sync::Mutex` instead of `tokio::sync::Mutex` because:
+  - AuthProvider trait methods are synchronous (not async)
+  - Critical sections are very short (just crypto operations)
+  - No I/O or long-running operations while holding the lock
+  - Simpler than making AuthProvider trait async (breaking change)
+
+- **Lifetime Management**: Carefully structured code to ensure MutexGuards are dropped before await points:
+  ```rust
+  let renewal_info = {
+      let handler = handler_arc.lock()?;
+      // Extract data
+      Some((global_id, needed_keys))
+      // handler guard dropped here
+  };
+
+  if let Some((global_id, needed_keys)) = renewal_info {
+      let auth_payload = {
+          let mut handler = handler_arc.lock()?;
+          handler.build_ticket_renewal_request(global_id, needed_keys)
+          // handler guard dropped here
+      };
+      // Now safe to await
+      active_con.send_message(msg).await?;
+  }
+  ```
+
+**Benefits**:
+1. **Automatic Ticket Renewal**: When MonClient renews tickets, all OSDSessions automatically see the updated tickets
+2. **Elegant Architecture**: Follows Rust idioms with Arc<Mutex<>> for shared mutable state
+3. **No Duplication**: Single ticket renewal mechanism in MonClient serves both MonClient and OSDClient
+4. **Thread-Safe**: Proper mutex locking ensures safe concurrent access
+5. **Idiomatic Rust**: Uses tokio facilities wisely, avoids holding locks across await points
+
+**Tests**: All tests passing (auth: 1, monclient: 15, osdclient: 40)
+
+**Commit**: `1ec0148` - "Refactor auth providers to use shared handler for automatic ticket renewal"
+
+---
+
 ## Test Results
 
 ### All Tests Passing ✅
 
 ```
+auth:           1 unit test
 cephconfig:     20 unit tests + 2 doctests
 msgr2:          51 unit tests + 14 integration tests
-monclient:      5 doctests
+monclient:      15 unit tests
 osdclient:      40 unit tests + 8 integration tests
-Total:          220+ tests passing
+Total:          230+ tests passing
 ```
 
 ### Integration Tests with Live Cluster ✅
