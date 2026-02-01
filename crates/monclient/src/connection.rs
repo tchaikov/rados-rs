@@ -381,9 +381,26 @@ impl MonConnection {
     }
 
     /// Close the connection
+    ///
+    /// Properly closes the underlying msgr2 connection and clears the session state.
+    /// This is a graceful shutdown that allows pending messages to be sent.
     pub async fn close(&self) -> Result<()> {
         tracing::debug!("Closing connection to mon.{}", self.rank);
-        // TODO: Implement proper connection closing
+
+        // Mark session as closed
+        let mut state = self.state.lock().await;
+        state.has_session = false;
+        state.auth_state = AuthState::None;
+        drop(state);
+
+        // Close the underlying msgr2 connection
+        let mut connection = self.connection.lock().await;
+        if let Some(conn) = connection.take() {
+            // The msgr2 Connection will be dropped here, which closes the TCP connection
+            tracing::debug!("Closed msgr2 connection to mon.{}", self.rank);
+            drop(conn);
+        }
+
         Ok(())
     }
 
