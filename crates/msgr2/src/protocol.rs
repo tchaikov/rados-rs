@@ -53,10 +53,7 @@ impl FrameIO {
         let frame_to_send = if let Some(ctx) = state_machine.compression_ctx() {
             match frame.compress(ctx) {
                 Ok(compressed_frame) => {
-                    if (compressed_frame.preamble.flags
-                        & crate::frames::FRAME_EARLY_DATA_COMPRESSED)
-                        != 0
-                    {
+                    if compressed_frame.preamble.is_compressed() {
                         tracing::debug!(
                             "Frame compressed: tag={:?}, algorithm={:?}",
                             frame.preamble.tag,
@@ -496,7 +493,7 @@ impl FrameIO {
         let mut frame = Frame { preamble, segments };
 
         // Step 4: Apply decompression if frame is compressed
-        if (frame.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0 {
+        if frame.preamble.is_compressed() {
             if let Some(ctx) = state_machine.compression_ctx() {
                 // Calculate original size from all segment lengths
                 // For compressed frames, we need to know the original uncompressed size

@@ -22,6 +22,64 @@ pub const FRAME_CRC_SIZE: usize = 4;
 // Frame flags
 pub const FRAME_EARLY_DATA_COMPRESSED: u8 = 0x01;
 
+/// Type-safe wrapper for frame flags
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FrameFlags(u8);
+
+impl FrameFlags {
+    /// Create new flags with all bits cleared
+    pub fn new() -> Self {
+        Self(0)
+    }
+
+    /// Create from raw u8 value
+    pub fn from_raw(val: u8) -> Self {
+        Self(val)
+    }
+
+    /// Get the raw u8 value
+    pub fn raw(self) -> u8 {
+        self.0
+    }
+
+    /// Check if compression flag is set
+    pub fn is_compressed(self) -> bool {
+        (self.0 & FRAME_EARLY_DATA_COMPRESSED) != 0
+    }
+
+    /// Set the compression flag
+    pub fn set_compressed(&mut self) {
+        self.0 |= FRAME_EARLY_DATA_COMPRESSED;
+    }
+
+    /// Clear the compression flag
+    pub fn clear_compressed(&mut self) {
+        self.0 &= !FRAME_EARLY_DATA_COMPRESSED;
+    }
+
+    /// Set or clear the compression flag based on boolean
+    pub fn with_compressed(mut self, compressed: bool) -> Self {
+        if compressed {
+            self.set_compressed();
+        } else {
+            self.clear_compressed();
+        }
+        self
+    }
+}
+
+impl From<u8> for FrameFlags {
+    fn from(val: u8) -> Self {
+        Self(val)
+    }
+}
+
+impl From<FrameFlags> for u8 {
+    fn from(flags: FrameFlags) -> Self {
+        flags.0
+    }
+}
+
 // Late status constants for msgr2.1
 pub const FRAME_LATE_STATUS_ABORTED: u8 = 0x1;
 pub const FRAME_LATE_STATUS_COMPLETE: u8 = 0xe;
@@ -96,7 +154,7 @@ impl Frame {
     pub fn to_wire(&self, is_rev1: bool) -> Bytes {
         let mut assembler = FrameAssembler::new(is_rev1);
         // Copy compression flag from preamble if set
-        if (self.preamble.flags & FRAME_EARLY_DATA_COMPRESSED) != 0 {
+        if self.preamble.is_compressed() {
             assembler.set_compression(true);
         }
         let alignments: Vec<u16> = self.preamble.segments[..self.preamble.num_segments as usize]
@@ -146,7 +204,7 @@ impl Frame {
 
         // Create new frame with compressed data
         let mut new_preamble = self.preamble.clone();
-        new_preamble.flags |= FRAME_EARLY_DATA_COMPRESSED;
+        new_preamble.set_compressed();
         new_preamble.num_segments = 1;
         new_preamble.segments[0] = SegmentDescriptor {
             logical_len: compressed.len() as u32,
@@ -169,7 +227,7 @@ impl Frame {
         original_size: usize,
     ) -> Result<Self, RadosError> {
         // Check if frame is compressed
-        if (self.preamble.flags & FRAME_EARLY_DATA_COMPRESSED) == 0 {
+        if !self.preamble.is_compressed() {
             // Not compressed, return as-is
             return Ok(self.clone());
         }
@@ -195,7 +253,7 @@ impl Frame {
 
         // Create new frame with decompressed data
         let mut new_preamble = self.preamble.clone();
-        new_preamble.flags &= !FRAME_EARLY_DATA_COMPRESSED;
+        new_preamble.clear_compressed();
         new_preamble.num_segments = 1;
         new_preamble.segments[0] = SegmentDescriptor {
             logical_len: decompressed.len() as u32,
@@ -250,6 +308,25 @@ pub struct Preamble {
 }
 
 impl Preamble {
+    /// Check if the compression flag is set
+    pub fn is_compressed(&self) -> bool {
+        FrameFlags::from(self.flags).is_compressed()
+    }
+
+    /// Set the compression flag
+    pub fn set_compressed(&mut self) {
+        let mut flags = FrameFlags::from(self.flags);
+        flags.set_compressed();
+        self.flags = flags.raw();
+    }
+
+    /// Clear the compression flag
+    pub fn clear_compressed(&mut self) {
+        let mut flags = FrameFlags::from(self.flags);
+        flags.clear_compressed();
+        self.flags = flags.raw();
+    }
+
     pub fn encode(&self) -> Bytes {
         let mut buf = BytesMut::with_capacity(PREAMBLE_SIZE);
 
