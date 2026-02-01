@@ -537,18 +537,37 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 
 Priority improvements identified for future work:
 
-| Priority | Improvement | File | Impact | Effort |
-|----------|-------------|------|--------|--------|
-| High | Unified retry logic with generic policy | protocol.rs | Maintainability | High |
-| High | Reconnection logic simplification | protocol.rs | Maintenance | High |
-| Medium | Excessive cloning in hot paths (use Cow) | protocol.rs | Performance | Medium |
-| Medium | Socket addr duplication in reconnect() | protocol.rs | Maintenance | Medium |
-| Low | Type-safe FrameFlags instead of u8 | frames.rs | Type safety | Low |
-| Low | Error handling with recovery categories | error.rs | Debugging | Low |
-| Low | State pattern boilerplate reduction | protocol.rs | Code clarity | Low |
-| Low | Configuration semantic validation | lib.rs | Error detection | Low |
-| Very Low | Replace eprintln! with tracing::debug! | protocol.rs, state_machine.rs | Production code | Very Low |
-| Very Low | Packed field access helpers | protocol.rs | Safety | Very Low |
+| Priority | Improvement | File | Impact | Effort | Status |
+|----------|-------------|------|--------|--------|--------|
+| High | Unified retry logic with generic policy | protocol.rs | Maintainability | High | Pending |
+| High | Reconnection logic simplification | protocol.rs | Maintenance | High | Pending |
+| Medium | Excessive cloning in hot paths (use Cow) | protocol.rs | Performance | Medium | Pending |
+| Medium | Socket addr duplication in reconnect() | protocol.rs | Maintenance | Medium | Pending |
+| Low | Type-safe FrameFlags instead of u8 | frames.rs | Type safety | Low | ✅ **Done** |
+| Low | Error handling with recovery categories | error.rs | Debugging | Low | ✅ **Done** |
+| Low | State pattern boilerplate reduction | protocol.rs | Code clarity | Low | Pending |
+| Low | Configuration semantic validation | lib.rs | Error detection | Low | Pending |
+| Very Low | Replace eprintln! with tracing::debug! | protocol.rs, state_machine.rs | Production code | Very Low | Deferred |
+| Very Low | Packed field access helpers | protocol.rs | Safety | Very Low | Pending |
+
+**Improvements Completed** (Commits `12ff1d7`, `3c026ff`, `4bf2092`):
+
+1. **Socket Address Conversion Helper** ✅
+   - Extracted `socket_to_entity_addr()` function
+   - Eliminated 36 lines of duplication
+   - Single source of truth for SocketAddr → EntityAddr conversion
+
+2. **Type-Safe FrameFlags** ✅
+   - Created FrameFlags wrapper type with type-safe methods
+   - Added `is_compressed()`, `set_compressed()`, `clear_compressed()` methods
+   - Updated all frame handling code to use new API
+   - Impossible to use wrong flag values
+
+3. **Error Categorization** ✅
+   - Added `is_recoverable()` method for retry logic
+   - Added `is_fatal()` method to identify non-retryable errors
+   - Added `category()` method for human-readable classification
+   - Simplified error handling throughout codebase
 
 **Tests**: All 99 msgr2 tests passing + 8 integration tests passing
 
@@ -613,6 +632,9 @@ cargo clippy:   ✅ No warnings
 ## Commits in This Session
 
 ```
+4bf2092 Add error categorization methods for better error handling
+3c026ff Add type-safe FrameFlags wrapper for better type safety
+d2aa768 Update session summary with integration tests, code review, and refactoring work
 12ff1d7 Refactor: extract socket_to_entity_addr helper to eliminate code duplication
 9f9e765 Complete server-side authentication by adding optional CephXServerHandler parameter to Connection::accept
 1a08fdd Integrate CephXServerHandler into msgr2 AuthAccepting state
@@ -653,6 +675,8 @@ c608b57 Implement generic Option type system for cephconfig
 7. ✅ **Ticket Renewal Mechanism**: Complete implementation with shared functionality for MonClient and OSDClient
 8. ✅ **Server-Side Implementation**: Full server-side connection acceptance with CephX authentication
 9. ✅ **Integration Testing**: All client and server tests passing with live Ceph cluster
-10. ✅ **Code Review & Refactoring**: Comprehensive review and extracted socket address helper
-11. ✅ **Documentation**: Clear documentation of design and implementation
-12. ✅ **Ceph Compliance**: Verified implementation matches official Ceph ProtocolV2 design
+10. ✅ **Code Review & Refactoring**: Comprehensive review with 3 improvements implemented
+11. ✅ **Type-Safe Frame Flags**: Wrapped flag manipulation in type-safe API
+12. ✅ **Error Categorization**: Added recovery/fatal categorization for better error handling
+13. ✅ **Documentation**: Clear documentation of design and implementation
+14. ✅ **Ceph Compliance**: Verified implementation matches official Ceph ProtocolV2 design
