@@ -771,6 +771,33 @@ impl Connection {
         entity_addr
     }
 
+    /// Configure a state machine with server and client addresses
+    ///
+    /// This helper is used by both connect() and reconnect() to set up
+    /// the state machine with proper EntityAddr values.
+    ///
+    /// # Arguments
+    /// * `state_machine` - The state machine to configure
+    /// * `server_addr` - The server's TCP address
+    /// * `local_addr` - The local TCP address
+    /// * `target_entity_addr` - Optional target EntityAddr (for OSD connections with nonce)
+    fn configure_state_machine_addresses(
+        state_machine: &mut StateMachine,
+        server_addr: SocketAddr,
+        local_addr: SocketAddr,
+        target_entity_addr: Option<&denc::EntityAddr>,
+    ) {
+        // Set server address
+        if let Some(target_addr) = target_entity_addr {
+            state_machine.set_server_addr(target_addr.clone());
+        } else {
+            state_machine.set_server_addr(Self::socket_to_entity_addr(server_addr));
+        }
+
+        // Set client address
+        state_machine.set_client_addr(Self::socket_to_entity_addr(local_addr));
+    }
+
     /// Connect to a Ceph server with a specific target EntityAddr
     ///
     /// This establishes a TCP connection and performs the msgr2 banner exchange.
@@ -816,11 +843,13 @@ impl Connection {
         // This is important because we need to track banner bytes in pre-auth buffers
         let mut state_machine = StateMachine::new_client(config.clone());
 
-        // Use the provided target_entity_addr directly (preserving nonce)
-        state_machine.set_server_addr(target_entity_addr.clone());
-
-        // Set our local client address for CLIENT_IDENT
-        state_machine.set_client_addr(Self::socket_to_entity_addr(local_addr));
+        // Configure addresses
+        Self::configure_state_machine_addresses(
+            &mut state_machine,
+            addr,
+            local_addr,
+            Some(&target_entity_addr),
+        );
 
         tracing::debug!("✓ Created client state machine");
 
@@ -878,11 +907,8 @@ impl Connection {
         // This is important because we need to track banner bytes in pre-auth buffers
         let mut state_machine = StateMachine::new_client(config.clone());
 
-        // Set the server address for CLIENT_IDENT
-        state_machine.set_server_addr(Self::socket_to_entity_addr(addr));
-
-        // Set our local client address for CLIENT_IDENT
-        state_machine.set_client_addr(Self::socket_to_entity_addr(local_addr));
+        // Configure addresses
+        Self::configure_state_machine_addresses(&mut state_machine, addr, local_addr, None);
 
         tracing::debug!("✓ Created client state machine");
 
@@ -1485,57 +1511,12 @@ impl Connection {
         );
 
         // Set server and client addresses
-        if let Some(ref target_addr) = self.target_entity_addr {
-            state_machine.set_server_addr(target_addr.clone());
-        } else {
-            // Reconstruct server EntityAddr from SocketAddr
-            let mut server_entity_addr = denc::EntityAddr::new();
-            server_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-            match self.server_addr {
-                SocketAddr::V4(v4) => {
-                    let mut data = Vec::with_capacity(16);
-                    data.extend_from_slice(&2u16.to_le_bytes());
-                    data.extend_from_slice(&v4.port().to_be_bytes());
-                    data.extend_from_slice(&v4.ip().octets());
-                    data.extend_from_slice(&[0u8; 8]);
-                    server_entity_addr.sockaddr_data = data;
-                }
-                SocketAddr::V6(v6) => {
-                    let mut data = Vec::with_capacity(28);
-                    data.extend_from_slice(&10u16.to_le_bytes());
-                    data.extend_from_slice(&v6.port().to_be_bytes());
-                    data.extend_from_slice(&0u32.to_be_bytes());
-                    data.extend_from_slice(&v6.ip().octets());
-                    data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                    server_entity_addr.sockaddr_data = data;
-                }
-            }
-            state_machine.set_server_addr(server_entity_addr);
-        }
-
-        // Set client address
-        let mut client_entity_addr = denc::EntityAddr::new();
-        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        match local_addr {
-            SocketAddr::V4(v4) => {
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes());
-                data.extend_from_slice(&v4.port().to_be_bytes());
-                data.extend_from_slice(&v4.ip().octets());
-                data.extend_from_slice(&[0u8; 8]);
-                client_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes());
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes());
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                client_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_client_addr(client_entity_addr);
+        Self::configure_state_machine_addresses(
+            &mut state_machine,
+            self.server_addr,
+            local_addr,
+            self.target_entity_addr.as_ref(),
+        );
 
         // Perform banner exchange
         Self::exchange_banner(&mut stream, &mut state_machine, &self.config).await?;
