@@ -190,6 +190,32 @@ pub trait State: Debug + Send {
     fn as_any(&self) -> &dyn std::any::Any;
 }
 
+/// Macro to implement boilerplate State trait methods
+///
+/// This macro eliminates the repetitive implementation of `kind()`, `expected_frames()`,
+/// and `as_any()` methods that are identical across all State implementations.
+///
+/// # Example
+/// ```ignore
+/// impl_state_boilerplate!(BannerConnecting, StateKind::BannerConnecting, &[]);
+/// impl_state_boilerplate!(HelloConnecting, StateKind::HelloConnecting, &[Tag::Hello]);
+/// ```
+macro_rules! impl_state_boilerplate {
+    ($state_type:ty, $state_kind:expr, $expected_frames:expr) => {
+        fn kind(&self) -> StateKind {
+            $state_kind
+        }
+
+        fn expected_frames(&self) -> &[Tag] {
+            $expected_frames
+        }
+
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
+    };
+}
+
 /// Connection establishment states (client-side)
 
 #[derive(Clone)]
@@ -218,18 +244,7 @@ impl std::fmt::Debug for BannerConnecting {
 }
 
 impl State for BannerConnecting {
-    fn kind(&self) -> StateKind {
-        StateKind::BannerConnecting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
-        // Banner exchange happens outside frame protocol
-        &[]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    impl_state_boilerplate!(BannerConnecting, StateKind::BannerConnecting, &[]);
 
     fn handle_frame(&mut self, _frame: Frame) -> Result<StateResult> {
         Err(Error::protocol_error(
@@ -289,17 +304,7 @@ impl HelloConnecting {
 }
 
 impl State for HelloConnecting {
-    fn kind(&self) -> StateKind {
-        StateKind::HelloConnecting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
-        &[Tag::Hello]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    impl_state_boilerplate!(HelloConnecting, StateKind::HelloConnecting, &[Tag::Hello]);
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
@@ -476,17 +481,11 @@ impl AuthConnecting {
 }
 
 impl State for AuthConnecting {
-    fn kind(&self) -> StateKind {
-        StateKind::AuthConnecting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        AuthConnecting,
+        StateKind::AuthConnecting,
         &[Tag::AuthBadMethod, Tag::AuthReplyMore, Tag::AuthDone]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
@@ -838,17 +837,11 @@ impl CompressionConnecting {
 }
 
 impl State for CompressionConnecting {
-    fn kind(&self) -> StateKind {
-        StateKind::CompressionConnecting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        CompressionConnecting,
+        StateKind::CompressionConnecting,
         &[Tag::CompressionDone]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
@@ -966,17 +959,11 @@ impl AuthConnectingSign {
 }
 
 impl State for AuthConnectingSign {
-    fn kind(&self) -> StateKind {
-        StateKind::AuthConnectingSign
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        AuthConnectingSign,
+        StateKind::AuthConnectingSign,
         &[Tag::AuthSignature]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
@@ -1206,11 +1193,9 @@ impl SessionConnecting {
 }
 
 impl State for SessionConnecting {
-    fn kind(&self) -> StateKind {
-        StateKind::SessionConnecting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        SessionConnecting,
+        StateKind::SessionConnecting,
         &[
             Tag::ServerIdent,
             Tag::IdentMissingFeatures,
@@ -1221,11 +1206,7 @@ impl State for SessionConnecting {
             Tag::SessionRetryGlobal,
             Tag::SessionReset,
         ]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
@@ -1611,17 +1592,7 @@ impl State for SessionConnecting {
 pub struct HelloAccepting;
 
 impl State for HelloAccepting {
-    fn kind(&self) -> StateKind {
-        StateKind::HelloAccepting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
-        &[Tag::Hello]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    impl_state_boilerplate!(HelloAccepting, StateKind::HelloAccepting, &[Tag::Hello]);
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
@@ -1685,17 +1656,7 @@ impl AuthAccepting {
 }
 
 impl State for AuthAccepting {
-    fn kind(&self) -> StateKind {
-        StateKind::AuthAccepting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
-        &[Tag::AuthRequest]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    impl_state_boilerplate!(AuthAccepting, StateKind::AuthAccepting, &[Tag::AuthRequest]);
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
@@ -1823,17 +1784,11 @@ impl SessionAccepting {
 }
 
 impl State for SessionAccepting {
-    fn kind(&self) -> StateKind {
-        StateKind::SessionAccepting
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        SessionAccepting,
+        StateKind::SessionAccepting,
         &[Tag::ClientIdent]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
@@ -1863,17 +1818,11 @@ impl State for SessionAccepting {
 pub struct Ready;
 
 impl State for Ready {
-    fn kind(&self) -> StateKind {
-        StateKind::Ready
-    }
-
-    fn expected_frames(&self) -> &[Tag] {
+    impl_state_boilerplate!(
+        Ready,
+        StateKind::Ready,
         &[Tag::Message, Tag::Keepalive2, Tag::Keepalive2Ack, Tag::Ack]
-    }
-
-    fn as_any(&self) -> &dyn std::any::Any {
-        self
-    }
+    );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
