@@ -1662,10 +1662,9 @@ impl Connection {
         msg.header.ack_seq = self.state.in_seq;
 
         let seq = msg.seq();
-        let ack_seq = msg.header.ack_seq; // Copy to avoid packed field reference
-
-        let version = msg.header.version;
-        let compat_version = msg.header.compat_version;
+        let ack_seq = msg.header.get_ack_seq(); // Safe accessor for packed field
+        let version = msg.header.get_version();
+        let compat_version = msg.header.get_compat_version();
         tracing::debug!(
             "DEBUG: send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
             msg_type,
@@ -1792,9 +1791,9 @@ impl Connection {
                     let middle = frame.segments.get(2).cloned().unwrap_or_default();
                     let data = frame.segments.get(3).cloned().unwrap_or_default();
 
-                    // Copy header fields to avoid packed field references
-                    let msg_seq = header.seq;
-                    let ack_seq = header.ack_seq;
+                    // Use safe accessors for packed field values
+                    let msg_seq = header.get_seq();
+                    let ack_seq = header.get_ack_seq();
 
                     let msg = Message {
                         header: header.clone(),
