@@ -729,6 +729,41 @@ pub struct Connection {
 }
 
 impl Connection {
+    /// Convert a SocketAddr to an EntityAddr in sockaddr_storage format
+    ///
+    /// This helper function converts Rust's SocketAddr type to Ceph's EntityAddr
+    /// format, which uses the sockaddr_storage binary representation.
+    ///
+    /// # Format
+    /// - IPv4: ss_family (2 bytes LE) + port (2 bytes BE) + IP (4 bytes) + padding (8 bytes)
+    /// - IPv6: ss_family (2 bytes LE) + port (2 bytes BE) + flowinfo (4 bytes BE) + IP (16 bytes) + scope_id (4 bytes BE)
+    fn socket_to_entity_addr(addr: SocketAddr) -> denc::EntityAddr {
+        let mut entity_addr = denc::EntityAddr::new();
+        entity_addr.addr_type = denc::EntityAddrType::Msgr2;
+
+        match addr {
+            SocketAddr::V4(v4) => {
+                let mut data = Vec::with_capacity(16);
+                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
+                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
+                data.extend_from_slice(&v4.ip().octets()); // IP address
+                data.extend_from_slice(&[0u8; 8]); // padding
+                entity_addr.sockaddr_data = data;
+            }
+            SocketAddr::V6(v6) => {
+                let mut data = Vec::with_capacity(28);
+                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
+                data.extend_from_slice(&v6.port().to_be_bytes());
+                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
+                data.extend_from_slice(&v6.ip().octets());
+                data.extend_from_slice(&v6.scope_id().to_be_bytes());
+                entity_addr.sockaddr_data = data;
+            }
+        }
+
+        entity_addr
+    }
+
     /// Connect to a Ceph server with a specific target EntityAddr
     ///
     /// This establishes a TCP connection and performs the msgr2 banner exchange.
@@ -777,30 +812,7 @@ impl Connection {
         state_machine.set_server_addr(target_entity_addr.clone());
 
         // Set our local client address for CLIENT_IDENT
-        let mut client_entity_addr = denc::EntityAddr::new();
-        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        match local_addr {
-            SocketAddr::V4(v4) => {
-                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2 (native byte order)
-                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
-                data.extend_from_slice(&v4.ip().octets()); // IP address
-                data.extend_from_slice(&[0u8; 8]); // padding
-                client_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10 (native byte order)
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                client_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_client_addr(client_entity_addr);
+        state_machine.set_client_addr(Self::socket_to_entity_addr(local_addr));
 
         tracing::debug!("✓ Created client state machine");
 
@@ -859,58 +871,10 @@ impl Connection {
         let mut state_machine = StateMachine::new_client(config.clone());
 
         // Set the server address for CLIENT_IDENT
-        // Convert SocketAddr to EntityAddr with proper sockaddr_storage format
-        let mut server_entity_addr = denc::EntityAddr::new();
-        server_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        // Store the socket address in sockaddr_storage format
-        match addr {
-            SocketAddr::V4(v4) => {
-                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2 (native byte order)
-                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
-                data.extend_from_slice(&v4.ip().octets()); // IP address
-                data.extend_from_slice(&[0u8; 8]); // padding
-                server_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10 (native byte order)
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                server_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_server_addr(server_entity_addr);
+        state_machine.set_server_addr(Self::socket_to_entity_addr(addr));
 
         // Set our local client address for CLIENT_IDENT
-        let mut client_entity_addr = denc::EntityAddr::new();
-        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        match local_addr {
-            SocketAddr::V4(v4) => {
-                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2 (native byte order)
-                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
-                data.extend_from_slice(&v4.ip().octets()); // IP address
-                data.extend_from_slice(&[0u8; 8]); // padding
-                client_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10 (native byte order)
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                client_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_client_addr(client_entity_addr);
+        state_machine.set_client_addr(Self::socket_to_entity_addr(local_addr));
 
         tracing::debug!("✓ Created client state machine");
 
