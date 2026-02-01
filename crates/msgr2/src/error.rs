@@ -56,6 +56,64 @@ impl Error {
     pub fn config_error(msg: &str) -> Self {
         Self::ConfigError(msg.to_string())
     }
+
+    /// Check if this error represents a recoverable connection issue
+    ///
+    /// Recoverable errors are transient network issues that might succeed on retry,
+    /// such as connection resets, broken pipes, or timeouts.
+    pub fn is_recoverable(&self) -> bool {
+        match self {
+            // Network errors that can be retried
+            Error::Io(io_err) => matches!(
+                io_err.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::ConnectionAborted
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::TimedOut
+                    | std::io::ErrorKind::Interrupted
+            ),
+            // Timeouts can be retried
+            Error::Timeout => true,
+            // Connection errors might be retryable (depends on context)
+            Error::Connection(_) => true,
+            // All other errors are not recoverable
+            _ => false,
+        }
+    }
+
+    /// Check if this is a fatal error that should not be retried
+    ///
+    /// Fatal errors include protocol violations, authentication failures,
+    /// and configuration errors that won't be fixed by retrying.
+    pub fn is_fatal(&self) -> bool {
+        !self.is_recoverable()
+            || matches!(
+                self,
+                Error::Protocol(_)
+                    | Error::Auth(_)
+                    | Error::CephX(_)
+                    | Error::ConfigError(_)
+                    | Error::InvalidData(_)
+            )
+    }
+
+    /// Get a human-readable category for this error
+    pub fn category(&self) -> &'static str {
+        match self {
+            Error::Protocol(_) => "Protocol",
+            Error::Io(_) => "I/O",
+            Error::Denc(_) => "Encoding",
+            Error::Auth(_) | Error::CephX(_) => "Authentication",
+            Error::Connection(_) => "Connection",
+            Error::Timeout => "Timeout",
+            Error::InvalidData(_) => "InvalidData",
+            Error::Serialization | Error::Deserialization(_) => "Serialization",
+            Error::Encode(_) | Error::Decode(_) => "Codec",
+            Error::Compression(_) => "Compression",
+            Error::ConfigError(_) => "Configuration",
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;

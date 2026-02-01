@@ -1558,17 +1558,10 @@ impl Connection {
     }
 
     /// Check if an error is a connection error that warrants reconnection
+    /// Check if error might be recoverable with reconnection
+    /// This is now a wrapper around Error::is_recoverable()
     fn is_connection_error(err: &Error) -> bool {
-        match err {
-            Error::Io(io_err) => matches!(
-                io_err.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::ConnectionAborted
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::UnexpectedEof
-            ),
-            _ => false,
-        }
+        err.is_recoverable()
     }
 
     /// Send a Ceph message over the established session
