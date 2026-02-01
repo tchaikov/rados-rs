@@ -226,6 +226,53 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 
 ---
 
+### 8. Ticket Renewal Mechanism ✅
+
+**Implementation**: Multiple files
+
+**Problem**: The ticket expiry checking in MonClient only detected when tickets needed renewal but didn't actually renew them. This was replacing one TODO with another instead of implementing the full functionality.
+
+**Solution**: Implemented a complete ticket renewal mechanism that can be shared between MonClient and OSDClient:
+
+**Changes**:
+
+1. **Added CephXServiceTicketRequest structure** (`crates/auth/src/protocol.rs`):
+   - Represents ticket renewal requests with service keys bitmask
+   - Implements Denc trait for encoding/decoding
+   - Matches C++ `CephXServiceTicketRequest` format: `[struct_v:u8][keys:u32]`
+   - Note: Uses simpler versioned format (not VersionedEncode trait)
+
+2. **Added build_ticket_renewal_request() method** (`crates/auth/src/client.rs`):
+   - Builds complete MAuth request for ticket renewal
+   - Includes `CephXRequestHeader` with `CEPHX_GET_PRINCIPAL_SESSION_KEY` (0x0200)
+   - Includes authorizer from AUTH ticket handler
+   - Includes `CephXServiceTicketRequest` with needed keys bitmask
+   - Can be used by both MonClient and OSDClient (shared mechanism)
+
+3. **Updated MonConnection for interior mutability** (`crates/monclient/src/connection.rs`):
+   - Wrapped `auth_provider` in `Arc<Mutex<>>` for mutable access
+   - Updated `get_auth_provider()` to return `Option<Arc<Mutex<MonitorAuthProvider>>>`
+   - Made `create_service_auth_provider()` async to lock mutex properly
+   - Enables ticket renewal to get mutable access to auth handler
+
+4. **Implemented ticket renewal in MonClient** (`crates/monclient/src/client.rs`):
+   - Checks ticket handlers in `tick()` loop using `need_key()`
+   - Collects bitmask of services needing renewal (MON|OSD|MDS|MGR)
+   - Builds and sends MAuth message to monitor
+   - Response handled by existing message dispatch logic
+
+**Implementation Details**:
+- Follows official Ceph `MonClient::_check_auth_tickets()` behavior
+- Uses async mutex locking to avoid blocking
+- Proper scope management to avoid deadlocks
+- Shared mechanism works for both MonClient and OSDClient
+
+**Tests**: All monclient and auth tests passing
+
+**Commit**: `43edb20` - "Implement ticket renewal mechanism for CephX authentication"
+
+---
+
 ## Test Results
 
 ### All Tests Passing ✅
@@ -278,6 +325,10 @@ cargo clippy:   ✅ No warnings
 ## Commits in This Session
 
 ```
+43edb20 Implement ticket renewal mechanism for CephX authentication
+f0bd6f8 Update session summary with MonConnection close implementation
+0cf19a9 Implement proper connection closing in MonConnection
+a26a963 Update session summary with OSDClient refactoring and MonClient TODO fixes
 f2c2e0a Fix TODOs in MonClient: update keepalive docs and implement ticket expiry checking
 037084c Refactor OSDClient operations to eliminate code duplication
 3f35f3f Update session summary with SparseExtent Denc implementation
@@ -301,6 +352,8 @@ c608b57 Implement generic Option type system for cephconfig
 3. ✅ **Sparse Read Support**: Full CEPH_OSD_OP_SPARSE_READ implementation with proper extent map parsing
 4. ✅ **Code Quality**: Reduced duplication by 33% in OSDClient (577 lines eliminated)
 5. ✅ **MonClient TODO Fixes**: Updated keepalive docs and implemented ticket expiry checking
-6. ✅ **Test Coverage**: Comprehensive tests for all new features (220+ tests passing)
-7. ✅ **Integration Testing**: All 8 integration tests passing with live Ceph cluster
-8. ✅ **Documentation**: Clear documentation of design and implementation
+6. ✅ **MonConnection Close**: Implemented proper connection closing
+7. ✅ **Ticket Renewal Mechanism**: Complete implementation with shared functionality for MonClient and OSDClient
+8. ✅ **Test Coverage**: Comprehensive tests for all new features (220+ tests passing)
+9. ✅ **Integration Testing**: All 8 integration tests passing with live Ceph cluster
+10. ✅ **Documentation**: Clear documentation of design and implementation
