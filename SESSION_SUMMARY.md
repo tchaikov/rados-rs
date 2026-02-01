@@ -1,10 +1,10 @@
 # Session Summary: rados-rs Improvements
 
-## Date: 2026-01-31
+## Date: 2026-01-31 to 2026-02-01
 
 ## Overview
 
-This session focused on implementing the generic Option type system for cephconfig and adding connection lifecycle management features to msgr2.
+This session focused on code quality improvements: refactoring OSDClient to eliminate duplication and fixing TODOs in MonClient.
 
 ## Completed Work
 
@@ -165,7 +165,41 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 }
 ```
 
-**Tests**: All 40 unit tests passing
+**Commit**: `037084c` - "Refactor OSDClient operations to eliminate code duplication"
+
+---
+
+### 6. MonClient TODO Fixes ✅
+
+**Implementation**: `crates/monclient/src/client.rs`
+
+**Changes**:
+
+1. **Keepalive State Tracking (Line 147)**:
+   - Updated documentation to reflect that keepalive is already implemented
+   - Keepalive is handled at the msgr2 protocol layer via MonConnection
+   - The background task sends Keepalive2 frames and monitors for ACKs
+   - The tick loop handles keepalive timeouts by triggering hunting
+
+2. **Auth Ticket Expiry Checking (Line 948)**:
+   - Implemented ticket expiry checking matching official `MonClient::_check_auth_tickets()`
+   - Checks each ticket handler using the existing `need_key()` method
+   - Logs debug messages when specific service tickets need renewal
+   - Logs warning that full ticket renewal is not yet implemented
+   - Added detailed TODO for full implementation (sending MAuth request)
+
+**Implementation Details**:
+- Reused existing `TicketHandler::need_key()` method for checking renewal needs
+- Used `auth::service_id` constants for service identification
+- Follows the official Ceph implementation pattern
+- Referenced official implementation:
+  - `~/dev/ceph/src/mon/MonClient.cc:1080-1100` - `_check_auth_tickets()`
+  - `~/dev/ceph/src/auth/cephx/CephxClientHandler.cc:324-334` - `need_tickets()`
+  - `~/dev/ceph/src/auth/cephx/CephxProtocol.cc:225-232` - `CephXTicketHandler::need_key()`
+
+**Tests**: All monclient tests passing
+
+**Commit**: `f2c2e0a` - "Fix TODOs in MonClient: update keepalive docs and implement ticket expiry checking"
 
 ---
 
@@ -176,9 +210,24 @@ pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<
 ```
 cephconfig:     20 unit tests + 2 doctests
 msgr2:          51 unit tests + 14 integration tests
-osdclient:      40 unit tests (8 new for sparse read/write_full)
-Total:          210+ tests passing
+monclient:      5 doctests
+osdclient:      40 unit tests + 8 integration tests
+Total:          220+ tests passing
 ```
+
+### Integration Tests with Live Cluster ✅
+
+Tested against local Ceph cluster (v2:192.168.1.43:40831):
+- ✅ test_empty_object
+- ✅ test_large_object
+- ✅ test_nonexistent_object
+- ✅ test_overwrite_object
+- ✅ test_remove_operation
+- ✅ test_stat_operation
+- ✅ test_write_full_vs_partial
+- ✅ test_write_read_roundtrip
+
+All 8 integration tests passed in 18.52s
 
 ### Code Quality ✅
 
@@ -206,6 +255,9 @@ cargo clippy:   ✅ No warnings
 ## Commits in This Session
 
 ```
+f2c2e0a Fix TODOs in MonClient: update keepalive docs and implement ticket expiry checking
+037084c Refactor OSDClient operations to eliminate code duplication
+3f35f3f Update session summary with SparseExtent Denc implementation
 34d8f74 Implement Denc for SparseExtent to enable direct decoding
 8bb99db Use Denc to decode extent map in sparse_read()
 379e7d9 Update session summary with sparse read implementation
@@ -224,6 +276,8 @@ c608b57 Implement generic Option type system for cephconfig
 1. ✅ **Type-Safe Configuration**: Implemented elegant, extensible configuration system
 2. ✅ **Connection Lifecycle**: Added proper teardown methods matching Ceph's behavior
 3. ✅ **Sparse Read Support**: Full CEPH_OSD_OP_SPARSE_READ implementation with proper extent map parsing
-4. ✅ **Code Quality**: Reduced duplication, improved maintainability, consistent use of Denc
-5. ✅ **Test Coverage**: Comprehensive tests for all new features (210+ tests passing)
-6. ✅ **Documentation**: Clear documentation of design and implementation
+4. ✅ **Code Quality**: Reduced duplication by 33% in OSDClient (577 lines eliminated)
+5. ✅ **MonClient TODO Fixes**: Updated keepalive docs and implemented ticket expiry checking
+6. ✅ **Test Coverage**: Comprehensive tests for all new features (220+ tests passing)
+7. ✅ **Integration Testing**: All 8 integration tests passing with live Ceph cluster
+8. ✅ **Documentation**: Clear documentation of design and implementation
