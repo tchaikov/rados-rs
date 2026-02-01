@@ -8,6 +8,7 @@ use crate::frames::{
     CompressionRequestFrame, Frame, FrameTrait, HelloFrame, Keepalive2AckFrame, ServerIdentFrame,
     Tag,
 };
+use auth::EntityName;
 use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use std::fmt::Debug;
@@ -1643,7 +1644,16 @@ impl State for HelloAccepting {
 }
 
 #[derive(Debug)]
-pub struct AuthAccepting;
+pub struct AuthAccepting {
+    /// Server-side authentication handler
+    auth_handler: Option<auth::CephXServerHandler>,
+    /// Entity name from initial request
+    entity_name: Option<EntityName>,
+    /// Global ID assigned to client
+    global_id: Option<u64>,
+    /// Authentication phase (0 = initial, 1 = challenge response)
+    phase: u8,
+}
 
 impl Default for AuthAccepting {
     fn default() -> Self {
@@ -1653,7 +1663,21 @@ impl Default for AuthAccepting {
 
 impl AuthAccepting {
     pub fn new() -> Self {
-        Self
+        Self {
+            auth_handler: None,
+            entity_name: None,
+            global_id: None,
+            phase: 0,
+        }
+    }
+
+    pub fn with_handler(auth_handler: auth::CephXServerHandler) -> Self {
+        Self {
+            auth_handler: Some(auth_handler),
+            entity_name: None,
+            global_id: None,
+            phase: 0,
+        }
     }
 }
 
@@ -1673,15 +1697,104 @@ impl State for AuthAccepting {
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
             Tag::AuthRequest => {
-                // Process auth request and send AUTH_DONE
-                let auth_done =
-                    AuthDoneFrame::new(1001, crate::ConnectionMode::Crc.as_u32(), Bytes::new()); // global_id=1001
-                let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+                // Extract payload from frame
+                // AUTH_REQUEST frame has payload in segment 0
+                let payload = if !frame.segments.is_empty() {
+                    &frame.segments[0]
+                } else {
+                    return Err(Error::protocol_error("AUTH_REQUEST frame has no payload"));
+                };
 
-                Ok(StateResult::SendFrame {
-                    frame: response_frame,
-                    next_state: Some(Box::new(SessionAccepting::new())),
-                })
+                if self.phase == 0 {
+                    // Phase 1: Initial authentication request
+                    // Client sends: auth_mode + entity_name + global_id
+                    // Server responds with: server_challenge
+
+                    if let Some(ref mut handler) = self.auth_handler {
+                        let (entity_name, global_id, challenge_payload) = handler
+                            .handle_initial_request(payload)
+                            .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
+
+                        tracing::debug!(
+                            "Server: Initial auth request from {}, assigned global_id {}",
+                            entity_name,
+                            global_id
+                        );
+
+                        // Store for next phase
+                        self.entity_name = Some(entity_name);
+                        self.global_id = Some(global_id);
+                        self.phase = 1;
+
+                        // Send AUTH_REPLY_MORE with server challenge
+                        let auth_more = AuthRequestMoreFrame::new(challenge_payload);
+                        let response_frame =
+                            create_frame_from_trait(&auth_more, Tag::AuthReplyMore);
+
+                        Ok(StateResult::SendFrame {
+                            frame: response_frame,
+                            next_state: None, // Stay in AuthAccepting for phase 2
+                        })
+                    } else {
+                        // No auth handler - send AUTH_DONE with no authentication
+                        tracing::warn!(
+                            "Server: No auth handler configured, skipping authentication"
+                        );
+                        let auth_done = AuthDoneFrame::new(
+                            1001,
+                            crate::ConnectionMode::Crc.as_u32(),
+                            Bytes::new(),
+                        );
+                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+
+                        Ok(StateResult::SendFrame {
+                            frame: response_frame,
+                            next_state: Some(Box::new(SessionAccepting::new())),
+                        })
+                    }
+                } else {
+                    // Phase 2: Challenge response
+                    // Client sends: CephXRequestHeader + CephXAuthenticate
+                    // Server responds with: session_key + service_tickets
+
+                    if let (Some(ref mut handler), Some(ref entity_name), Some(global_id)) =
+                        (&mut self.auth_handler, &self.entity_name, self.global_id)
+                    {
+                        let (session_key, auth_payload) = handler
+                            .handle_authenticate(entity_name, global_id, payload)
+                            .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
+
+                        tracing::info!("Server: Client {} authenticated successfully", entity_name);
+
+                        // Build AUTH_DONE response
+                        let auth_done_payload = handler
+                            .build_auth_done_response(
+                                global_id,
+                                crate::ConnectionMode::Crc.as_u32() as u8,
+                                &session_key,
+                                auth_payload,
+                            )
+                            .map_err(|e| {
+                                Error::protocol_error(&format!("Failed to build AUTH_DONE: {}", e))
+                            })?;
+
+                        let auth_done = AuthDoneFrame::new(
+                            global_id,
+                            crate::ConnectionMode::Crc.as_u32(),
+                            auth_done_payload,
+                        );
+                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+
+                        Ok(StateResult::SendFrame {
+                            frame: response_frame,
+                            next_state: Some(Box::new(SessionAccepting::new())),
+                        })
+                    } else {
+                        Err(Error::protocol_error(
+                            "Invalid auth state - missing handler or entity info",
+                        ))
+                    }
+                }
             }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in AUTH_ACCEPTING state",

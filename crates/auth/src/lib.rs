@@ -41,5 +41,6 @@ pub use provider::*;
 pub use server::*;
 pub use types::{
     entity_type, service_id, AuthCapsInfo, AuthTicket, CephXAuthenticator, CephXServiceTicketInfo,
-    CephXSession, CephXTicketBlob, CryptoKey, TicketHandler, CEPH_CRYPTO_AES, CEPH_CRYPTO_NONE,
+    CephXSession, CephXTicketBlob, CryptoKey, EntityName, TicketHandler, CEPH_CRYPTO_AES,
+    CEPH_CRYPTO_NONE,
 };
