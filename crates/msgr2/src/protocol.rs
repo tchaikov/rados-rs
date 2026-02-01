@@ -16,6 +16,14 @@ use crate::message::Message;
 use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, StateResult};
 use crate::FeatureSet;
 
+/// Action to take after successful reconnection in retry_with_reconnect
+enum ReconnectAction<T> {
+    /// Return success immediately with the given value
+    ReturnSuccess(T),
+    /// Continue retrying the operation
+    Retry,
+}
+
 /// Frame I/O layer - handles encryption-aware frame send/recv
 pub struct FrameIO {
     stream: TcpStream,
@@ -1558,25 +1566,43 @@ impl Connection {
     }
 
     /// Check if an error is a connection error that warrants reconnection
-    /// Check if error might be recoverable with reconnection
-    /// This is now a wrapper around Error::is_recoverable()
-    fn is_connection_error(err: &Error) -> bool {
-        err.is_recoverable()
-    }
-
-    /// Send a Ceph message over the established session
+    /// Execute an operation with automatic retry and reconnection on recoverable errors
     ///
-    /// This method automatically handles connection failures by attempting
-    /// reconnection and message replay according to the msgr2 protocol.
-    pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+    /// This generic method handles the common pattern of:
+    /// 1. Try the operation
+    /// 2. If it fails with a recoverable error, attempt reconnection
+    /// 3. Retry the operation after successful reconnection
+    /// 4. Repeat up to MAX_RECONNECT_ATTEMPTS times
+    ///
+    /// # Arguments
+    /// * `operation` - The async operation to execute
+    /// * `operation_name` - Name of the operation for logging (e.g., "send", "receive")
+    /// * `on_reconnect` - Callback after successful reconnection, returns whether to continue retrying
+    ///
+    /// # Returns
+    /// The result of the operation, or an error if all retries are exhausted
+    async fn retry_with_reconnect<F, T, R>(
+        &mut self,
+        mut operation: F,
+        operation_name: &str,
+        on_reconnect: R,
+    ) -> Result<T>
+    where
+        F: FnMut(
+            &mut Self,
+        )
+            -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<T>> + Send + '_>>,
+        R: Fn() -> ReconnectAction<T>,
+    {
         const MAX_RECONNECT_ATTEMPTS: usize = 3;
 
         for attempt in 0..MAX_RECONNECT_ATTEMPTS {
-            match self.send_message_inner(msg.clone()).await {
-                Ok(()) => return Ok(()),
-                Err(e) if Self::is_connection_error(&e) && self.state.can_reconnect() => {
+            match operation(self).await {
+                Ok(result) => return Ok(result),
+                Err(e) if e.is_recoverable() && self.state.can_reconnect() => {
                     tracing::warn!(
-                        "Send failed due to connection error (attempt {}/{}): {}",
+                        "{} failed due to connection error (attempt {}/{}): {}",
+                        operation_name,
                         attempt + 1,
                         MAX_RECONNECT_ATTEMPTS,
                         e
@@ -1593,19 +1619,39 @@ impl Connection {
                         continue;
                     }
 
-                    tracing::info!("Reconnection successful, message will be replayed");
-                    // Message is already in sent_messages queue and will be replayed
-                    // during reconnection, so we can return success
-                    return Ok(());
+                    tracing::info!("Reconnection successful after {}", operation_name);
+
+                    // Let caller decide what to do after reconnection
+                    match on_reconnect() {
+                        ReconnectAction::ReturnSuccess(value) => return Ok(value),
+                        ReconnectAction::Retry => continue,
+                    }
                 }
                 Err(e) => return Err(e),
             }
         }
 
         Err(Error::Protocol(format!(
-            "Failed to send message after {} attempts",
-            MAX_RECONNECT_ATTEMPTS
+            "Failed to {} after {} attempts",
+            operation_name, MAX_RECONNECT_ATTEMPTS
         )))
+    }
+
+    /// Send a Ceph message over the established session
+    ///
+    /// This method automatically handles connection failures by attempting
+    /// reconnection and message replay according to the msgr2 protocol.
+    pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+        self.retry_with_reconnect(
+            |conn| Box::pin(conn.send_message_inner(msg.clone())),
+            "send",
+            || {
+                // After reconnection, the message will be replayed automatically
+                // from the sent_messages queue, so we can return success immediately
+                ReconnectAction::ReturnSuccess(())
+            },
+        )
+        .await
     }
 
     /// Internal implementation of send_message without reconnection logic
@@ -1691,42 +1737,15 @@ impl Connection {
     /// This method automatically handles connection failures by attempting
     /// reconnection according to the msgr2 protocol.
     pub async fn recv_message(&mut self) -> Result<Message> {
-        const MAX_RECONNECT_ATTEMPTS: usize = 3;
-
-        for attempt in 0..MAX_RECONNECT_ATTEMPTS {
-            match self.recv_message_inner().await {
-                Ok(msg) => return Ok(msg),
-                Err(e) if Self::is_connection_error(&e) && self.state.can_reconnect() => {
-                    tracing::warn!(
-                        "Receive failed due to connection error (attempt {}/{}): {}",
-                        attempt + 1,
-                        MAX_RECONNECT_ATTEMPTS,
-                        e
-                    );
-
-                    // Attempt reconnection
-                    if let Err(reconnect_err) = self.reconnect().await {
-                        tracing::error!("Reconnection failed: {}", reconnect_err);
-                        // If this was the last attempt, return the reconnection error
-                        if attempt + 1 == MAX_RECONNECT_ATTEMPTS {
-                            return Err(reconnect_err);
-                        }
-                        // Otherwise, continue to next attempt
-                        continue;
-                    }
-
-                    tracing::info!("Reconnection successful, retrying receive");
-                    // Retry the receive after successful reconnection
-                    continue;
-                }
-                Err(e) => return Err(e),
-            }
-        }
-
-        Err(Error::Protocol(format!(
-            "Failed to receive message after {} attempts",
-            MAX_RECONNECT_ATTEMPTS
-        )))
+        self.retry_with_reconnect(
+            |conn| Box::pin(conn.recv_message_inner()),
+            "receive",
+            || {
+                // After reconnection, we need to retry receiving the message
+                ReconnectAction::Retry
+            },
+        )
+        .await
     }
 
     /// Internal implementation of recv_message without reconnection logic
