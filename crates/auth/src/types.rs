@@ -293,6 +293,64 @@ impl CryptoKey {
 
         Ok(Bytes::copy_from_slice(plaintext))
     }
+
+    /// Encrypt data using AES-128-CBC
+    /// This corresponds to CryptoKey::encrypt() in C++
+    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Bytes> {
+        use aes::Aes128;
+        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
+        use cbc::Encryptor;
+
+        if self.crypto_type != CEPH_CRYPTO_AES {
+            return Err(CephXError::CryptographicError(format!(
+                "Unsupported crypto type: {}",
+                self.crypto_type
+            )));
+        }
+
+        // Extract the AES key from the secret
+        const CRYPTO_KEY_HEADER_SIZE: usize = std::mem::size_of::<u16>()  // crypto_type
+            + std::mem::size_of::<u32>()  // created.sec
+            + std::mem::size_of::<u32>()  // created.nsec
+            + std::mem::size_of::<u16>(); // secret_length
+
+        let secret_bytes = self.get_secret();
+
+        let key_bytes = if secret_bytes.len() == 16 {
+            // Raw 16-byte AES key (e.g., session key from CephXServiceTicket)
+            secret_bytes
+        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + 16 {
+            // Skip the 12-byte header to get to the actual key material
+            let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
+            &secret_bytes[actual_key_start..actual_key_start + 16]
+        } else {
+            return Err(CephXError::CryptographicError(format!(
+                "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
+                secret_bytes.len()
+            )));
+        };
+
+        // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
+        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+
+        // Encrypt with AES-128-CBC using Pkcs7 padding
+        type Aes128CbcEnc = Encryptor<Aes128>;
+        let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
+
+        // Calculate padded length (must be multiple of 16)
+        let block_size = 16;
+        let padded_len = ((plaintext.len() / block_size) + 1) * block_size;
+        let mut buffer = vec![0u8; padded_len];
+        buffer[..plaintext.len()].copy_from_slice(plaintext);
+
+        let ciphertext = cipher
+            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, plaintext.len())
+            .map_err(|e| {
+                CephXError::CryptographicError(format!("AES encryption failed: {:?}", e))
+            })?;
+
+        Ok(Bytes::copy_from_slice(ciphertext))
+    }
 }
 
 impl Denc for CryptoKey {
@@ -423,14 +481,20 @@ impl Denc for CephXTicketBlob {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 9 {
-            // u8 + u64 minimum
+        if buf.remaining() < 1 {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for CephXTicketBlob".to_string(),
             ));
         }
 
-        let _struct_v = buf.get_u8(); // version, currently ignored
+        let _struct_v = buf.get_u8();
+
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for secret_id".to_string(),
+            ));
+        }
+
         let secret_id = buf.get_u64_le();
         let blob = Bytes::decode(buf, features)?;
 
@@ -439,6 +503,253 @@ impl Denc for CephXTicketBlob {
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
         Some(1 + 8 + self.blob.encoded_size(features)?)
+    }
+}
+
+/// Authentication ticket containing authorization information
+///
+/// Corresponds to C++ `AuthTicket` struct in `/src/auth/Auth.h`
+#[derive(Debug, Clone)]
+pub struct AuthTicket {
+    pub name: EntityName,
+    pub global_id: u64,
+    pub created: SystemTime,
+    pub expires: SystemTime,
+    pub caps: AuthCapsInfo,
+    pub flags: u32,
+}
+
+impl AuthTicket {
+    pub fn new(name: EntityName, global_id: u64) -> Self {
+        Self {
+            name,
+            global_id,
+            created: SystemTime::now(),
+            expires: SystemTime::now(),
+            caps: AuthCapsInfo::default(),
+            flags: 0,
+        }
+    }
+
+    pub fn set_validity(&mut self, created_secs: u64, expires_secs: u64) {
+        self.created = UNIX_EPOCH + Duration::from_secs(created_secs);
+        self.expires = UNIX_EPOCH + Duration::from_secs(expires_secs);
+    }
+}
+
+impl Denc for AuthTicket {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
+        // Encode struct version
+        buf.put_u8(2);
+
+        // Encode entity name
+        self.name.encode(buf, features)?;
+
+        // Encode global_id
+        buf.put_u64_le(self.global_id);
+
+        // Encode old_auid (always CEPH_AUTH_UID_DEFAULT = -1)
+        buf.put_u64_le(u64::MAX);
+
+        // Encode created time
+        let created_duration = self
+            .created
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RadosError::Protocol("Invalid created timestamp".to_string()))?;
+        buf.put_u32_le(created_duration.as_secs() as u32);
+        buf.put_u32_le(created_duration.subsec_nanos());
+
+        // Encode expires time
+        let expires_duration = self
+            .expires
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RadosError::Protocol("Invalid expires timestamp".to_string()))?;
+        buf.put_u32_le(expires_duration.as_secs() as u32);
+        buf.put_u32_le(expires_duration.subsec_nanos());
+
+        // Encode caps
+        self.caps.encode(buf, features)?;
+
+        // Encode flags
+        buf.put_u32_le(self.flags);
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for AuthTicket".to_string(),
+            ));
+        }
+
+        let struct_v = buf.get_u8();
+
+        let name = EntityName::decode(buf, features)?;
+        let global_id = buf.get_u64_le();
+
+        // Decode old_auid if struct_v >= 2
+        if struct_v >= 2 {
+            let _old_auid = buf.get_u64_le();
+        }
+
+        // Decode created time
+        let created_sec = buf.get_u32_le();
+        let created_nsec = buf.get_u32_le();
+        let created = UNIX_EPOCH
+            + Duration::from_secs(created_sec as u64)
+            + Duration::from_nanos(created_nsec as u64);
+
+        // Decode expires time
+        let expires_sec = buf.get_u32_le();
+        let expires_nsec = buf.get_u32_le();
+        let expires = UNIX_EPOCH
+            + Duration::from_secs(expires_sec as u64)
+            + Duration::from_nanos(expires_nsec as u64);
+
+        let caps = AuthCapsInfo::decode(buf, features)?;
+        let flags = buf.get_u32_le();
+
+        Ok(Self {
+            name,
+            global_id,
+            created,
+            expires,
+            caps,
+            flags,
+        })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            1 + // struct_v
+            self.name.encoded_size(features)? +
+            8 + // global_id
+            8 + // old_auid
+            4 + 4 + // created time
+            4 + 4 + // expires time
+            self.caps.encoded_size(features)? +
+            4, // flags
+        )
+    }
+}
+
+/// Service ticket information containing authorization ticket and session key
+///
+/// Corresponds to C++ `CephXServiceTicketInfo` struct in `/src/auth/cephx/CephxProtocol.h`
+#[derive(Debug, Clone)]
+pub struct CephXServiceTicketInfo {
+    pub ticket: AuthTicket,
+    pub session_key: CryptoKey,
+}
+
+impl CephXServiceTicketInfo {
+    pub fn new(ticket: AuthTicket, session_key: CryptoKey) -> Self {
+        Self {
+            ticket,
+            session_key,
+        }
+    }
+}
+
+impl Denc for CephXServiceTicketInfo {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
+        // Encode struct version
+        buf.put_u8(1);
+
+        // Encode ticket
+        self.ticket.encode(buf, features)?;
+
+        // Encode session_key
+        self.session_key.encode(buf, features)?;
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for CephXServiceTicketInfo".to_string(),
+            ));
+        }
+
+        let _struct_v = buf.get_u8();
+
+        let ticket = AuthTicket::decode(buf, features)?;
+        let session_key = CryptoKey::decode(buf, features)?;
+
+        Ok(Self {
+            ticket,
+            session_key,
+        })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            1 + // struct_v
+            self.ticket.encoded_size(features)? +
+            self.session_key.encoded_size(features)?,
+        )
+    }
+}
+
+/// Authentication capabilities information
+///
+/// Corresponds to C++ `AuthCapsInfo` struct in `/src/auth/Auth.h`
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AuthCapsInfo {
+    pub caps: HashMap<String, String>,
+}
+
+impl Denc for AuthCapsInfo {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
+        // Encode struct version
+        buf.put_u8(1);
+
+        // Encode caps as a map
+        buf.put_u32_le(self.caps.len() as u32);
+        for (key, value) in &self.caps {
+            key.encode(buf, features)?;
+            value.encode(buf, features)?;
+        }
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for AuthCapsInfo".to_string(),
+            ));
+        }
+
+        let _struct_v = buf.get_u8();
+
+        if buf.remaining() < 4 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for caps count".to_string(),
+            ));
+        }
+
+        let count = buf.get_u32_le();
+        let mut caps = HashMap::new();
+
+        for _ in 0..count {
+            let key = String::decode(buf, features)?;
+            let value = String::decode(buf, features)?;
+            caps.insert(key, value);
+        }
+
+        Ok(Self { caps })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        let mut size = 1 + 4; // struct_v + count
+        for (key, value) in &self.caps {
+            size += key.encoded_size(features)?;
+            size += value.encoded_size(features)?;
+        }
+        Some(size)
     }
 }
 
