@@ -872,19 +872,14 @@ impl OSDClient {
             });
         }
 
-        // Parse stat data from outdata
-        // Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
+        // Parse stat data from outdata using OsdStatData's Denc implementation
         use denc::Denc;
         let stat_data = crate::denc_types::OsdStatData::decode(&mut &stat_op.outdata[..], 0)
             .map_err(|e| OSDClientError::Decoding(format!("Failed to decode stat data: {}", e)))?;
 
-        // Convert to SystemTime
-        let mtime = std::time::UNIX_EPOCH
-            + std::time::Duration::new(stat_data.tv_sec as u64, stat_data.tv_nsec);
-
         Ok(StatResult {
             size: stat_data.size,
-            mtime,
+            mtime: stat_data.mtime,
         })
     }
 

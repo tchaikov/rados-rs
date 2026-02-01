@@ -354,21 +354,12 @@ impl CryptoKey {
 }
 
 impl Denc for CryptoKey {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         // Encode type (u16)
         buf.put_u16_le(self.crypto_type);
 
-        // Encode created time as utime_t (sec + nsec)
-        let duration = self
-            .created
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RadosError::Protocol("Invalid timestamp".to_string()))?;
-        buf.put_u32_le(duration.as_secs() as u32);
-        buf.put_u32_le(duration.subsec_nanos());
+        // Encode created time using SystemTime's Denc implementation
+        self.created.encode(buf, features)?;
 
         // Encode secret length (u16) + secret data
         buf.put_u16_le(self.secret.len() as u16);
@@ -376,19 +367,18 @@ impl Denc for CryptoKey {
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
         if buf.remaining() < 10 {
-            // u16 + u32 + u32 + u16 minimum
+            // u16 + 8 (SystemTime) + u16 minimum
             return Err(RadosError::Protocol(
                 "Insufficient bytes for CryptoKey".to_string(),
             ));
         }
 
         let crypto_type = buf.get_u16_le();
-        let sec = buf.get_u32_le();
-        let nsec = buf.get_u32_le();
-        let created =
-            UNIX_EPOCH + Duration::from_secs(sec as u64) + Duration::from_nanos(nsec as u64);
+
+        // Decode created time using SystemTime's Denc implementation
+        let created = SystemTime::decode(buf, features)?;
 
         let secret_len = buf.get_u16_le() as usize;
         if buf.remaining() < secret_len {
@@ -551,21 +541,11 @@ impl Denc for AuthTicket {
         // Encode old_auid (always CEPH_AUTH_UID_DEFAULT = -1)
         buf.put_u64_le(u64::MAX);
 
-        // Encode created time
-        let created_duration = self
-            .created
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RadosError::Protocol("Invalid created timestamp".to_string()))?;
-        buf.put_u32_le(created_duration.as_secs() as u32);
-        buf.put_u32_le(created_duration.subsec_nanos());
+        // Encode created time using SystemTime's Denc implementation
+        self.created.encode(buf, features)?;
 
-        // Encode expires time
-        let expires_duration = self
-            .expires
-            .duration_since(UNIX_EPOCH)
-            .map_err(|_| RadosError::Protocol("Invalid expires timestamp".to_string()))?;
-        buf.put_u32_le(expires_duration.as_secs() as u32);
-        buf.put_u32_le(expires_duration.subsec_nanos());
+        // Encode expires time using SystemTime's Denc implementation
+        self.expires.encode(buf, features)?;
 
         // Encode caps
         self.caps.encode(buf, features)?;
@@ -593,19 +573,11 @@ impl Denc for AuthTicket {
             let _old_auid = buf.get_u64_le();
         }
 
-        // Decode created time
-        let created_sec = buf.get_u32_le();
-        let created_nsec = buf.get_u32_le();
-        let created = UNIX_EPOCH
-            + Duration::from_secs(created_sec as u64)
-            + Duration::from_nanos(created_nsec as u64);
+        // Decode created time using SystemTime's Denc implementation
+        let created = SystemTime::decode(buf, features)?;
 
-        // Decode expires time
-        let expires_sec = buf.get_u32_le();
-        let expires_nsec = buf.get_u32_le();
-        let expires = UNIX_EPOCH
-            + Duration::from_secs(expires_sec as u64)
-            + Duration::from_nanos(expires_nsec as u64);
+        // Decode expires time using SystemTime's Denc implementation
+        let expires = SystemTime::decode(buf, features)?;
 
         let caps = AuthCapsInfo::decode(buf, features)?;
         let flags = buf.get_u32_le();

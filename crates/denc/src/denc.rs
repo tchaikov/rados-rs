@@ -239,6 +239,141 @@ impl<T: FixedSize, const N: usize> FixedSize for [T; N] {
     const SIZE: usize = T::SIZE * N;
 }
 
+// ============= std::time Type Implementations =============
+
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+/// Denc implementation for std::time::Duration
+///
+/// Encodes as Ceph's utime_t format: u32 seconds + u32 nanoseconds (8 bytes total)
+///
+/// # Wire Format
+/// ```text
+/// [u32_le sec][u32_le nsec]
+/// ```
+///
+/// # Limitations
+/// - Maximum duration: ~136 years (u32::MAX seconds)
+/// - Durations exceeding u32::MAX seconds will be truncated
+///
+/// # Examples
+/// ```rust
+/// use std::time::Duration;
+/// use denc::Denc;
+/// use bytes::BytesMut;
+///
+/// let duration = Duration::new(12345, 678901234);
+/// let mut buf = BytesMut::new();
+/// duration.encode(&mut buf, 0).unwrap();
+///
+/// let decoded = Duration::decode(&mut buf, 0).unwrap();
+/// assert_eq!(duration, decoded);
+/// ```
+impl Denc for Duration {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for Duration: need 8, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        // Truncate to u32::MAX seconds if necessary (matches Ceph behavior)
+        let sec = self.as_secs().min(u32::MAX as u64) as u32;
+        let nsec = self.subsec_nanos();
+        buf.put_u32_le(sec);
+        buf.put_u32_le(nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for Duration: need 8, have {}",
+                buf.remaining()
+            )));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
+        Ok(Duration::new(sec as u64, nsec))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl FixedSize for Duration {
+    const SIZE: usize = 8;
+}
+
+/// Denc implementation for std::time::SystemTime
+///
+/// Encodes as Ceph's utime_t format: u32 seconds + u32 nanoseconds since UNIX_EPOCH
+///
+/// # Wire Format
+/// ```text
+/// [u32_le sec][u32_le nsec]
+/// ```
+///
+/// # Limitations
+/// - Maximum timestamp: ~2106-02-07 (u32::MAX seconds since epoch)
+/// - Timestamps before UNIX_EPOCH will error
+/// - Timestamps after 2106 will be truncated to u32::MAX
+///
+/// # Examples
+/// ```rust
+/// use std::time::{SystemTime, Duration, UNIX_EPOCH};
+/// use denc::Denc;
+/// use bytes::BytesMut;
+///
+/// let time = UNIX_EPOCH + Duration::new(1234567890, 123456789);
+/// let mut buf = BytesMut::new();
+/// time.encode(&mut buf, 0).unwrap();
+///
+/// let decoded = SystemTime::decode(&mut buf, 0).unwrap();
+/// // Note: precision is limited to nanoseconds
+/// assert_eq!(time, decoded);
+/// ```
+impl Denc for SystemTime {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        if buf.remaining_mut() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient buffer space for SystemTime: need 8, have {}",
+                buf.remaining_mut()
+            )));
+        }
+        let duration = self
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RadosError::Protocol("SystemTime before UNIX_EPOCH".to_string()))?;
+        // Truncate to u32::MAX seconds if necessary (matches Ceph's 2106 limit)
+        let sec = duration.as_secs().min(u32::MAX as u64) as u32;
+        let nsec = duration.subsec_nanos();
+        buf.put_u32_le(sec);
+        buf.put_u32_le(nsec);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for SystemTime: need 8, have {}",
+                buf.remaining()
+            )));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
+        Ok(UNIX_EPOCH + Duration::new(sec as u64, nsec))
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+impl FixedSize for SystemTime {
+    const SIZE: usize = 8;
+}
+
 // ============= Integration with zerocopy module =============
 
 use crate::zerocopy;
@@ -870,5 +1005,129 @@ mod tests {
         t5.encode(&mut buf, 0).unwrap();
         let decoded5 = <(u32, u64, u16, u8, i32)>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded5, t5);
+    }
+
+    #[test]
+    fn test_duration_roundtrip() {
+        use std::time::Duration;
+
+        let mut buf = BytesMut::new();
+
+        // Test basic duration
+        let d1 = Duration::new(1234567890, 123456789);
+        d1.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+
+        let decoded = Duration::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, d1);
+
+        // Test zero duration
+        let d2 = Duration::ZERO;
+        d2.encode(&mut buf, 0).unwrap();
+        let decoded2 = Duration::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded2, d2);
+
+        // Test duration with max nanoseconds
+        let d3 = Duration::new(100, 999_999_999);
+        d3.encode(&mut buf, 0).unwrap();
+        let decoded3 = Duration::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded3, d3);
+    }
+
+    #[test]
+    fn test_duration_fixed_size() {
+        use std::time::Duration;
+
+        assert_eq!(Duration::SIZE, 8);
+        assert_eq!(Duration::new(0, 0).encoded_size(0), Some(8));
+        assert_eq!(Duration::new(999999, 123456).encoded_size(0), Some(8));
+    }
+
+    #[test]
+    fn test_duration_truncation() {
+        use std::time::Duration;
+
+        let mut buf = BytesMut::new();
+
+        // Duration exceeding u32::MAX seconds should be truncated
+        let large_duration = Duration::new(u64::MAX, 123456789);
+        large_duration.encode(&mut buf, 0).unwrap();
+
+        let decoded = Duration::decode(&mut buf, 0).unwrap();
+        // Should be truncated to u32::MAX seconds
+        assert_eq!(decoded.as_secs(), u32::MAX as u64);
+        assert_eq!(decoded.subsec_nanos(), 123456789);
+    }
+
+    #[test]
+    fn test_systemtime_roundtrip() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let mut buf = BytesMut::new();
+
+        // Test basic SystemTime
+        let t1 = UNIX_EPOCH + Duration::new(1234567890, 123456789);
+        t1.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), 8);
+
+        let decoded = SystemTime::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded, t1);
+
+        // Test epoch
+        let t2 = UNIX_EPOCH;
+        t2.encode(&mut buf, 0).unwrap();
+        let decoded2 = SystemTime::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded2, t2);
+
+        // Test with max nanoseconds
+        let t3 = UNIX_EPOCH + Duration::new(1000000, 999_999_999);
+        t3.encode(&mut buf, 0).unwrap();
+        let decoded3 = SystemTime::decode(&mut buf, 0).unwrap();
+        assert_eq!(decoded3, t3);
+    }
+
+    #[test]
+    fn test_systemtime_fixed_size() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        assert_eq!(SystemTime::SIZE, 8);
+        assert_eq!((UNIX_EPOCH + Duration::new(0, 0)).encoded_size(0), Some(8));
+        assert_eq!(
+            (UNIX_EPOCH + Duration::new(999999, 123456)).encoded_size(0),
+            Some(8)
+        );
+    }
+
+    #[test]
+    fn test_systemtime_before_epoch() {
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+        let mut buf = BytesMut::new();
+
+        // SystemTime before UNIX_EPOCH should error
+        let before_epoch = UNIX_EPOCH - Duration::new(100, 0);
+        let result = before_epoch.encode(&mut buf, 0);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("before UNIX_EPOCH"));
+    }
+
+    #[test]
+    fn test_systemtime_year_2106_limit() {
+        use std::time::{Duration, UNIX_EPOCH};
+
+        let mut buf = BytesMut::new();
+
+        // SystemTime at u32::MAX seconds (year 2106) should work
+        let year_2106 = UNIX_EPOCH + Duration::new(u32::MAX as u64, 999_999_999);
+        year_2106.encode(&mut buf, 0).unwrap();
+
+        let decoded = std::time::SystemTime::decode(&mut buf, 0).unwrap();
+        let duration = decoded.duration_since(UNIX_EPOCH).unwrap();
+        // Should match exactly at the limit
+        assert_eq!(duration.as_secs(), u32::MAX as u64);
+        assert_eq!(duration.subsec_nanos(), 999_999_999);
     }
 }

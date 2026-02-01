@@ -688,25 +688,23 @@ impl Denc for OSDOp {
 /// Result data from CEPH_OSD_OP_STAT operation
 ///
 /// This contains the object size and modification time returned by the OSD.
-/// Format: u64 size + u32 tv_sec + u32 tv_nsec (utime_t)
+/// Format: u64 size + SystemTime (u32 sec + u32 nsec as utime_t)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OsdStatData {
     pub size: u64,
-    pub tv_sec: u32,
-    pub tv_nsec: u32,
+    pub mtime: std::time::SystemTime,
 }
 
 impl Denc for OsdStatData {
     const USES_VERSIONING: bool = false;
 
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         buf.put_u64_le(self.size);
-        buf.put_u32_le(self.tv_sec);
-        buf.put_u32_le(self.tv_nsec);
+        self.mtime.encode(buf, features)?;
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 16 {
             return Err(RadosError::Protocol(format!(
                 "Insufficient bytes for OsdStatData: need 16, have {}",
@@ -714,11 +712,10 @@ impl Denc for OsdStatData {
             )));
         }
 
-        Ok(Self {
-            size: buf.get_u64_le(),
-            tv_sec: buf.get_u32_le(),
-            tv_nsec: buf.get_u32_le(),
-        })
+        let size = buf.get_u64_le();
+        let mtime = std::time::SystemTime::decode(buf, features)?;
+
+        Ok(Self { size, mtime })
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -1135,12 +1132,10 @@ mod tests {
     #[test]
     fn test_osd_stat_data_roundtrip() {
         use bytes::BytesMut;
+        use std::time::{Duration, UNIX_EPOCH};
 
-        let original = OsdStatData {
-            size: 12345,
-            tv_sec: 1234567890,
-            tv_nsec: 123456789,
-        };
+        let mtime = UNIX_EPOCH + Duration::new(1234567890, 123456789);
+        let original = OsdStatData { size: 12345, mtime };
 
         let mut buf = BytesMut::new();
         original.encode(&mut buf, 0).unwrap();
@@ -1148,8 +1143,7 @@ mod tests {
 
         let decoded = OsdStatData::decode(&mut &buf[..], 0).unwrap();
         assert_eq!(decoded.size, original.size);
-        assert_eq!(decoded.tv_sec, original.tv_sec);
-        assert_eq!(decoded.tv_nsec, original.tv_nsec);
+        assert_eq!(decoded.mtime, original.mtime);
     }
 
     #[test]

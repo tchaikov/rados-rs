@@ -497,12 +497,14 @@ impl CephXClientHandler {
             session_key.len()
         );
 
-        // Decode validity (utime_t: u32 sec + u32 nsec)
+        // Decode validity using Duration's Denc implementation
         let validity_duration = if decrypted_data.len() >= 8 {
-            let validity_sec = decrypted_data.get_u32_le();
-            let validity_nsec = decrypted_data.get_u32_le();
-            debug!("Validity: {}s {}ns", validity_sec, validity_nsec);
-            Duration::from_secs(validity_sec as u64) + Duration::from_nanos(validity_nsec as u64)
+            use denc::Denc;
+            let duration = Duration::decode(&mut decrypted_data, 0).map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode validity: {}", e))
+            })?;
+            debug!("Validity: {:?}", duration);
+            duration
         } else {
             // Default validity if not specified
             Duration::from_secs(3600) // 1 hour
