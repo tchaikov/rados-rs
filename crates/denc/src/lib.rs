@@ -37,4 +37,4 @@ pub use zerocopy::*;
 pub use crush::{CrushBucket, CrushMap, CrushRule};
 
 // Re-export derive macros
-pub use denc_derive::{DencMut, ZeroCopyDecode, ZeroCopyDencode, ZeroCopyEncode};
+pub use denc_derive::{DencMut, ZeroCopyDencode};

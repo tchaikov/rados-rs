@@ -151,11 +151,7 @@ pub struct ServiceTicketInfo {
 }
 
 impl Denc for ServiceTicketInfo {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-    ) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         self.service_id.encode(buf, 0)?;
         self.encrypted_service_ticket.encode(buf, features)?;
         self.ticket_enc.encode(buf, 0)?;
@@ -233,11 +229,7 @@ pub struct ServiceTicketReply {
 }
 
 impl Denc for ServiceTicketReply {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-    ) -> std::result::Result<(), RadosError> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
         self.struct_v.encode(buf, 0)?;
         // Encode Vec length as u32
         (self.tickets.len() as u32).encode(buf, 0)?;

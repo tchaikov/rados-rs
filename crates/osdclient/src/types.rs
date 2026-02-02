@@ -119,7 +119,8 @@ impl StripedPgId {
 /// Entity name (corresponds to entity_name_t in Ceph)
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
 pub struct EntityName {
     /// Entity type (CEPH_ENTITY_TYPE_*)
     pub entity_type: u8,
@@ -193,7 +194,8 @@ impl RequestId {
 ///
 /// Used for distributed tracing with Zipkin/Jaeger.
 /// In most cases, all fields are 0 (tracing disabled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
 pub struct BlkinTraceInfo {
     pub trace_id: u64,
     pub span_id: u64,

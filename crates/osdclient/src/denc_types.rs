@@ -8,9 +8,12 @@ use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
 
 use crate::types::{
-    BlkinTraceInfo, EntityName, JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PgId,
-    RequestRedirect, StripedPgId,
+    EntityName, JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PgId, RequestRedirect,
+    StripedPgId,
 };
+
+#[cfg(test)]
+use crate::types::BlkinTraceInfo;
 
 // Re-export types for convenience
 pub use crate::types::{
@@ -23,6 +26,12 @@ pub use crate::types::{
     CEPH_ENTITY_TYPE_AUTH, CEPH_ENTITY_TYPE_CLIENT, CEPH_ENTITY_TYPE_MDS, CEPH_ENTITY_TYPE_MGR,
     CEPH_ENTITY_TYPE_MON, CEPH_ENTITY_TYPE_OSD,
 };
+
+// ============= Encoding Size Constants =============
+
+/// Size of versioned encoding header: struct_v (1) + struct_compat (1) + len (4)
+const VERSION_HEADER_SIZE: usize =
+    std::mem::size_of::<u8>() + std::mem::size_of::<u8>() + std::mem::size_of::<u32>();
 
 // ============= PgId (pg_t) =============
 
@@ -55,7 +64,13 @@ impl Denc for PgId {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(1 + 8 + 4 + 4) // version + pool + seed + preferred = 17 bytes
+        // version + pool + seed + preferred
+        Some(
+            1u8.encoded_size(0)? // version
+                + self.pool.encoded_size(0)?
+                + self.seed.encoded_size(0)?
+                + (-1i32).encoded_size(0)?, // preferred (deprecated, always -1)
+        )
     }
 }
 
@@ -120,33 +135,13 @@ impl Denc for StripedPgId {
         Self::decode_versioned(buf, features)
     }
 
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
-        // Content: pgid (17) + shard (1) = 18 bytes
-        // Total: 6 + 18 = 24 bytes
-        Some(6 + 17 + 1)
-    }
-}
-
-// ============= EntityName (entity_name_t) =============
-
-impl Denc for EntityName {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // entity_name_t encoding: type (u8) + num (u64)
-        self.entity_type.encode(buf, 0)?;
-        self.num.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let entity_type = u8::decode(buf, 0)?;
-        let num = u64::decode(buf, 0)?;
-
-        Ok(EntityName { entity_type, num })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(1 + 8) // type + num = 9 bytes
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Version header + pg_t + shard
+        let pgid = PgId {
+            pool: self.pool,
+            seed: self.seed,
+        };
+        Some(VERSION_HEADER_SIZE + pgid.encoded_size(features)? + self.shard.encoded_size(0)?)
     }
 }
 
@@ -219,41 +214,18 @@ impl Denc for OsdReqId {
         Self::decode_versioned(buf, features)
     }
 
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
-        // Content: entity_name (9) + tid (8) + inc (4) = 21 bytes
-        // Total: 6 + 21 = 27 bytes
-        Some(6 + 9 + 8 + 4)
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // Version header + entity_name + tid + inc
+        Some(
+            VERSION_HEADER_SIZE
+                + self.name.encoded_size(features)?
+                + self.tid.encoded_size(0)?
+                + self.inc.encoded_size(0)?,
+        )
     }
 }
 
 // ============= BlkinTraceInfo =============
-
-impl Denc for BlkinTraceInfo {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // blkin_trace_info encoding: 3 x u64
-        self.trace_id.encode(buf, 0)?;
-        self.span_id.encode(buf, 0)?;
-        self.parent_span_id.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let trace_id = u64::decode(buf, 0)?;
-        let span_id = u64::decode(buf, 0)?;
-        let parent_span_id = u64::decode(buf, 0)?;
-
-        Ok(BlkinTraceInfo {
-            trace_id,
-            span_id,
-            parent_span_id,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(24) // 3 x u64 = 24 bytes
-    }
-}
 
 // ============= JaegerSpanContext (jspan_context) =============
 
@@ -301,10 +273,8 @@ impl Denc for JaegerSpanContext {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
-        // Content: is_valid (1) = 1 byte
-        // Total: 6 + 1 = 7 bytes
-        Some(6 + 1)
+        // Version header + is_valid flag
+        Some(VERSION_HEADER_SIZE + (if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)?)
     }
 }
 
@@ -388,9 +358,14 @@ impl Denc for ObjectLocator {
         // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
         // Content: pool (8) + preferred (4) + key + nspace + hash (8)
         // Key and nspace are variable-length strings
-        let key_size = self.key.encoded_size(features)?;
-        let nspace_size = self.nspace.encoded_size(features)?;
-        Some(6 + 8 + 4 + key_size + nspace_size + 8)
+        Some(
+            VERSION_HEADER_SIZE
+                + self.pool.encoded_size(0)? // pool (i64)
+                + (-1i32).encoded_size(0)? // preferred (deprecated, always -1)
+                + self.key.encoded_size(features)?
+                + self.nspace.encoded_size(features)?
+                + self.hash.encoded_size(0)?, // hash (i64)
+        )
     }
 }
 
@@ -459,9 +434,12 @@ impl Denc for RequestRedirect {
     fn encoded_size(&self, features: u64) -> Option<usize> {
         // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
         // Content: redirect_locator + redirect_object + legacy (4)
-        let locator_size = self.redirect_locator.encoded_size(features)?;
-        let object_size = self.redirect_object.encoded_size(features)?;
-        Some(6 + locator_size + object_size + 4)
+        Some(
+            VERSION_HEADER_SIZE
+                + self.redirect_locator.encoded_size(features)?
+                + self.redirect_object.encoded_size(features)?
+                + 0u32.encoded_size(0)?, // legacy (always 0)
+        )
     }
 }
 
@@ -617,7 +595,12 @@ impl Denc for OSDOp {
     fn encoded_size(&self, _features: u64) -> Option<usize> {
         // Fixed size: 38 bytes
         // op (2) + flags (4) + union (28) + payload_len (4) = 38
-        Some(38)
+        Some(
+            std::mem::size_of::<u16>() // op
+                + std::mem::size_of::<u32>() // flags
+                + 28 // union (fixed size regardless of variant)
+                + std::mem::size_of::<u32>(), // payload_len
+        )
     }
 }
 
@@ -637,20 +620,23 @@ impl Denc for OsdStatData {
     const USES_VERSIONING: bool = false;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        buf.put_u64_le(self.size);
+        self.size.encode(buf, features)?;
         self.mtime.encode(buf, features)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let size = buf.get_u64_le();
+        let size = u64::decode(buf, features)?;
         let mtime = std::time::SystemTime::decode(buf, features)?;
 
         Ok(Self { size, mtime })
     }
 
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(16) // u64 + u32 + u32
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        // u64 size + SystemTime (u32 sec + u32 nsec)
+        let size_bytes = self.size.encoded_size(features)?;
+        let mtime_bytes = self.mtime.encoded_size(features)?;
+        Some(size_bytes + mtime_bytes)
     }
 }
 
@@ -660,7 +646,8 @@ impl Denc for OsdStatData {
 ///
 /// Represents time with second and nanosecond precision.
 /// Wire format: u32 tv_sec + u32 tv_nsec
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
 pub struct UTime {
     pub tv_sec: u32,
     pub tv_nsec: u32,
@@ -678,27 +665,6 @@ impl UTime {
     /// Create a new UTime from seconds and nanoseconds
     pub const fn new(tv_sec: u32, tv_nsec: u32) -> Self {
         Self { tv_sec, tv_nsec }
-    }
-}
-
-impl Denc for UTime {
-    const USES_VERSIONING: bool = false;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u32_le(self.tv_sec);
-        buf.put_u32_le(self.tv_nsec);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        Ok(Self {
-            tv_sec: buf.get_u32_le(),
-            tv_nsec: buf.get_u32_le(),
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8) // u32 + u32
     }
 }
 
@@ -760,8 +726,11 @@ mod tests {
         assert_eq!(buf.len(), 9);
 
         let decoded = EntityName::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.entity_type, 0x08);
-        assert_eq!(decoded.num, 0);
+        // Copy values to avoid taking references to packed struct fields
+        let entity_type = decoded.entity_type;
+        let num = decoded.num;
+        assert_eq!(entity_type, 0x08);
+        assert_eq!(num, 0);
     }
 
     #[test]
@@ -777,8 +746,12 @@ mod tests {
         assert_eq!(buf.len(), 27);
 
         let decoded = OsdReqId::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.name.entity_type, 0x08);
-        assert_eq!(decoded.name.num, 0);
+        // Copy EntityName to avoid taking references to packed struct fields
+        let name = decoded.name;
+        let entity_type = name.entity_type;
+        let num = name.num;
+        assert_eq!(entity_type, 0x08);
+        assert_eq!(num, 0);
         assert_eq!(decoded.tid, 1);
         assert_eq!(decoded.inc, 1);
     }
@@ -792,9 +765,13 @@ mod tests {
         assert_eq!(buf.len(), 24);
 
         let decoded = BlkinTraceInfo::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.trace_id, 0);
-        assert_eq!(decoded.span_id, 0);
-        assert_eq!(decoded.parent_span_id, 0);
+        // Copy values to avoid taking references to packed struct fields
+        let trace_id = decoded.trace_id;
+        let span_id = decoded.span_id;
+        let parent_span_id = decoded.parent_span_id;
+        assert_eq!(trace_id, 0);
+        assert_eq!(span_id, 0);
+        assert_eq!(parent_span_id, 0);
     }
 
     #[test]
@@ -1081,12 +1058,19 @@ mod tests {
         assert_eq!(buf.len(), 8);
 
         let decoded = UTime::decode(&mut &buf[..], 0).unwrap();
-        assert_eq!(decoded.tv_sec, original.tv_sec);
-        assert_eq!(decoded.tv_nsec, original.tv_nsec);
+        // Copy values to avoid taking references to packed struct fields
+        let decoded_sec = decoded.tv_sec;
+        let decoded_nsec = decoded.tv_nsec;
+        let original_sec = original.tv_sec;
+        let original_nsec = original.tv_nsec;
+        assert_eq!(decoded_sec, original_sec);
+        assert_eq!(decoded_nsec, original_nsec);
 
         // Test zero
         let zero = UTime::zero();
-        assert_eq!(zero.tv_sec, 0);
-        assert_eq!(zero.tv_nsec, 0);
+        let zero_sec = zero.tv_sec;
+        let zero_nsec = zero.tv_nsec;
+        assert_eq!(zero_sec, 0);
+        assert_eq!(zero_nsec, 0);
     }
 }

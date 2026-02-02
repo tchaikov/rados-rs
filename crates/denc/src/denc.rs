@@ -352,34 +352,9 @@ impl FixedSize for SystemTime {
 }
 
 // ============= Integration with zerocopy module =============
+// ZeroCopyDencode types now get Denc implementations directly from the derive macro.
+// No blanket impl is needed.
 
-use crate::zerocopy;
-
-/// Blanket implementation: ZeroCopyDencode types automatically get Denc
-impl<T: zerocopy::ZeroCopyDencode> Denc for T {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        zerocopy::Encode::encode(self, buf).map_err(|e| RadosError::Denc(e.to_string()))
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        zerocopy::Decode::decode(buf).map_err(|e| RadosError::Denc(e.to_string()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(zerocopy::Encode::encoded_size(self))
-    }
-}
-
-// ============= Backward Compatibility Bridge =============
-
-/// Bridge implementation: Denc types automatically get Denc trait
-///
-/// This allows gradual migration - existing code using `Denc` trait will work
-/// with new `Denc` types without changes.
-///
-/// Note: This implementation has a conflict with the blanket impl for ZeroCopyDencode,
-/// so we need to be careful about which types get which implementation.
-/// For now, we'll implement this manually for specific types rather than as a blanket impl.
 // ============= Versioned Encoding =============
 /// Trait for types that add version metadata during encoding
 /// Follows Ceph's ENCODE_START/DECODE_START pattern
@@ -1077,7 +1052,7 @@ mod tests {
 
     #[test]
     fn test_systemtime_before_epoch() {
-        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        use std::time::Duration;
 
         let mut buf = BytesMut::new();
 

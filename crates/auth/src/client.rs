@@ -388,11 +388,10 @@ impl CephXClientHandler {
         let mut decrypted_data = decrypted;
 
         // Decode using CephXEncryptedEnvelope<CephXServiceTicket>
-        let envelope =
-            CephXEncryptedEnvelope::<crate::protocol::CephXServiceTicket>::decode(
-                &mut decrypted_data,
-                0,
-            )?;
+        let envelope = CephXEncryptedEnvelope::<crate::protocol::CephXServiceTicket>::decode(
+            &mut decrypted_data,
+            0,
+        )?;
 
         let service_ticket = envelope.payload;
         Ok((service_ticket.session_key, service_ticket.validity))
@@ -406,7 +405,7 @@ impl CephXClientHandler {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use crate::protocol::{CephXResponseHeader, CephXEncryptedEnvelope};
+        use crate::protocol::{CephXEncryptedEnvelope, CephXResponseHeader};
         use bytes::Buf;
         use denc::Denc;
 
@@ -527,7 +526,10 @@ impl CephXClientHandler {
 
                 if cbl_len > 0 && auth_payload.remaining() >= cbl_len {
                     let mut encrypted_secret_bl = auth_payload.split_to(cbl_len);
-                    debug!("connection_secret bufferlist: {} bytes", encrypted_secret_bl.len());
+                    debug!(
+                        "connection_secret bufferlist: {} bytes",
+                        encrypted_secret_bl.len()
+                    );
 
                     // The bufferlist contains another nested length prefix for the actual encrypted data
                     if let Ok(inner_len) = u32::decode(&mut encrypted_secret_bl, 0) {
@@ -536,7 +538,10 @@ impl CephXClientHandler {
 
                         if encrypted_secret_bl.remaining() >= inner_len {
                             let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
-                            trace!("Encrypted connection_secret: {} bytes", encrypted_secret.len());
+                            trace!(
+                                "Encrypted connection_secret: {} bytes",
+                                encrypted_secret.len()
+                            );
                             trace!(
                                 "Session key for decryption - type: {}, secret length: {}",
                                 first_ticket_session_key.get_type(),
@@ -544,20 +549,31 @@ impl CephXClientHandler {
                             );
 
                             // Decrypt connection_secret using the session_key we just extracted
-                            if let Ok(mut decrypted_secret) = first_ticket_session_key.decrypt(&encrypted_secret) {
+                            if let Ok(mut decrypted_secret) =
+                                first_ticket_session_key.decrypt(&encrypted_secret)
+                            {
                                 // Decode using CephXEncryptedEnvelope<Bytes>
-                                match CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0) {
+                                match CephXEncryptedEnvelope::<Bytes>::decode(
+                                    &mut decrypted_secret,
+                                    0,
+                                ) {
                                     Ok(envelope) => {
                                         let secret_data = envelope.payload;
-                                        if secret_data.len() > 0 {
-                                            debug!("Connection secret: {} bytes", secret_data.len());
+                                        if !secret_data.is_empty() {
+                                            debug!(
+                                                "Connection secret: {} bytes",
+                                                secret_data.len()
+                                            );
                                             connection_secret_bytes = Some(secret_data);
                                         } else {
                                             debug!("Connection secret length is 0 (CRC mode), leaving as None");
                                         }
                                     }
                                     Err(e) => {
-                                        debug!("Failed to decode connection_secret envelope: {:?}", e);
+                                        debug!(
+                                            "Failed to decode connection_secret envelope: {:?}",
+                                            e
+                                        );
                                     }
                                 }
                             } else {
@@ -661,7 +677,8 @@ impl CephXClientHandler {
             for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
                 trace!(
                     "Storing ticket for service {} (secret_id={})",
-                    service_id, secret_id
+                    service_id,
+                    secret_id
                 );
                 let handler = session.get_ticket_handler(service_id);
                 handler.update(session_key, secret_id, ticket_blob, validity);
@@ -854,7 +871,10 @@ impl CephXClientHandler {
 
         debug!(
             "Building authorizer: global_id={}, service_id={}, secret_id={}, session_key_len={}",
-            actual_global_id, service_id, secret_id, session_key.get_secret().len()
+            actual_global_id,
+            service_id,
+            secret_id,
+            session_key.get_secret().len()
         );
 
         // Build CephXAuthorizeA
@@ -882,7 +902,11 @@ impl CephXClientHandler {
             CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeA: {:?}", e))
         })?;
 
-        trace!("nonce: 0x{:016x}, base_bl length: {}", nonce, authorizer_buf.len());
+        trace!(
+            "nonce: 0x{:016x}, base_bl length: {}",
+            nonce,
+            authorizer_buf.len()
+        );
 
         // Encrypt authorize_b with session key (envelope wrapping happens inside)
         let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b)?;

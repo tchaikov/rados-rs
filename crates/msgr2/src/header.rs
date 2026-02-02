@@ -32,12 +32,12 @@ impl MsgHeader {
     pub const LENGTH: usize = size_of::<Self>();
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        <Self as denc::zerocopy::Encode>::encode(self, dst)?;
+        <Self as denc::Denc>::encode(self, dst, 0)?;
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        Ok(<Self as denc::zerocopy::Decode>::decode(src)?)
+        Ok(<Self as denc::Denc>::decode(src, 0)?)
     }
 
     pub fn new_default(msg_type: u16, priority: u16) -> Self {

@@ -4,9 +4,12 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
 /// Derive macro for zero-copy encoding/decoding of POD types
 ///
-/// This generates implementations of both Encode and Decode traits, as well as
-/// the ZeroCopyDencode marker trait. For repr(C, packed) structs, it uses direct
-/// memory copy on little-endian systems and field-by-field encoding on big-endian.
+/// This generates implementations of the Denc trait. For repr(C, packed) structs,
+/// it uses direct memory copy on little-endian systems and field-by-field encoding
+/// on big-endian. Types are marked with the ZeroCopyDencode trait to indicate they
+/// are safe for zero-copy operations.
+///
+/// All fields must implement the Denc trait.
 #[proc_macro_derive(ZeroCopyDencode)]
 pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -27,21 +30,17 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
         false
     });
 
-    let (encode_impl, decode_impl) = match &input.data {
+    let denc_impl = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
             Fields::Named(fields) => {
                 let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
 
                 if has_repr_c_packed {
-                    // Zero-copy path for repr(C, packed) structs
-                    let encode = generate_packed_encode(name, &field_names);
-                    let decode = generate_packed_decode(name, &fields.named);
-                    (encode, decode)
+                    // Zero-copy path for repr(C, packed) structs - generate single Denc impl
+                    generate_packed_denc(name, &field_names, &fields.named)
                 } else {
-                    // Standard field-by-field encoding
-                    let encode = generate_standard_encode(name, &field_names);
-                    let decode = generate_standard_decode(name, &fields.named);
-                    (encode, decode)
+                    // Standard field-by-field encoding - generate single Denc impl
+                    generate_standard_denc(name, &field_names, &fields.named)
                 }
             }
             _ => panic!("ZeroCopyDencode only supports named fields"),
@@ -50,8 +49,7 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     };
 
     let expanded = quote! {
-        #encode_impl
-        #decode_impl
+        #denc_impl
 
         // Implement the marker trait
         impl denc::zerocopy::ZeroCopyDencode for #name {}
@@ -60,22 +58,39 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn generate_packed_encode(
+fn generate_packed_denc(
     name: &syn::Ident,
     field_names: &[&Option<syn::Ident>],
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> proc_macro2::TokenStream {
+    let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+
+    let decode_fields = fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+
+        quote! {
+            #field_name: <#field_type as denc::Denc>::decode(buf, 0)?
+        }
+    });
+
     quote! {
-        impl denc::zerocopy::Encode for #name {
+        impl denc::Denc for #name
+        where
+            #(#field_types: denc::zerocopy::ZeroCopyDencode,)*
+        {
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
-            ) -> ::std::result::Result<(), denc::zerocopy::EncodeError> {
+                _features: u64,
+            ) -> ::std::result::Result<(), denc::RadosError> {
                 let size = ::std::mem::size_of::<Self>();
                 if buf.remaining_mut() < size {
-                    return ::std::result::Result::Err(denc::zerocopy::EncodeError::InsufficientSpace {
-                        required: size,
-                        available: buf.remaining_mut(),
-                    });
+                    return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
+                        "Insufficient buffer space: need {} bytes, have {}",
+                        size,
+                        buf.remaining_mut()
+                    )));
                 }
 
                 // Zero-copy for little-endian systems
@@ -97,7 +112,7 @@ fn generate_packed_encode(
                     unsafe {
                         #(
                             let field_val = ::std::ptr::addr_of!(self.#field_names).read_unaligned();
-                            denc::zerocopy::Encode::encode(&field_val, buf)?;
+                            denc::Denc::encode(&field_val, buf, 0)?;
                         )*
                     }
                 }
@@ -105,37 +120,20 @@ fn generate_packed_encode(
                 ::std::result::Result::Ok(())
             }
 
-            fn encoded_size(&self) -> usize {
-                ::std::mem::size_of::<Self>()
-            }
-        }
-    }
-}
-
-fn generate_packed_decode(
-    name: &syn::Ident,
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-) -> proc_macro2::TokenStream {
-    let decode_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-
-        quote! {
-            #field_name: <#field_type as denc::zerocopy::Decode>::decode(buf)?
-        }
-    });
-
-    quote! {
-        impl denc::zerocopy::Decode for #name {
             fn decode<B: bytes::Buf>(
                 buf: &mut B,
-            ) -> ::std::result::Result<Self, denc::zerocopy::DecodeError> {
+                _features: u64,
+            ) -> ::std::result::Result<Self, denc::RadosError>
+            where
+                Self: Sized,
+            {
                 let size = ::std::mem::size_of::<Self>();
                 if buf.remaining() < size {
-                    return ::std::result::Result::Err(denc::zerocopy::DecodeError::UnexpectedEof {
-                        expected: size,
-                        available: buf.remaining(),
-                    });
+                    return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
+                        "Insufficient bytes: need {} bytes, have {}",
+                        size,
+                        buf.remaining()
+                    )));
                 }
 
                 // Zero-copy for little-endian systems
@@ -160,256 +158,67 @@ fn generate_packed_decode(
                     })
                 }
             }
+
+            fn encoded_size(&self, _features: u64) -> ::std::option::Option<usize> {
+                ::std::option::Option::Some(::std::mem::size_of::<Self>())
+            }
         }
     }
 }
 
-fn generate_standard_encode(
+fn generate_standard_denc(
     name: &syn::Ident,
     field_names: &[&Option<syn::Ident>],
-) -> proc_macro2::TokenStream {
-    quote! {
-        impl denc::zerocopy::Encode for #name {
-            fn encode<B: bytes::BufMut>(
-                &self,
-                buf: &mut B,
-            ) -> ::std::result::Result<(), denc::zerocopy::EncodeError> {
-                #(
-                    denc::zerocopy::Encode::encode(&self.#field_names, buf)?;
-                )*
-                ::std::result::Result::Ok(())
-            }
-
-            fn encoded_size(&self) -> usize {
-                let mut size = 0;
-                #(
-                    size += self.#field_names.encoded_size();
-                )*
-                size
-            }
-        }
-    }
-}
-
-fn generate_standard_decode(
-    name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> proc_macro2::TokenStream {
+    let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
+
     let decode_fields = fields.iter().map(|f| {
         let field_name = &f.ident;
         let field_type = &f.ty;
 
         quote! {
-            #field_name: <#field_type as denc::zerocopy::Decode>::decode(buf)?
+            #field_name: <#field_type as denc::Denc>::decode(buf, 0)?
         }
     });
 
     quote! {
-        impl denc::zerocopy::Decode for #name {
+        impl denc::Denc for #name
+        where
+            #(#field_types: denc::zerocopy::ZeroCopyDencode,)*
+        {
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                _features: u64,
+            ) -> ::std::result::Result<(), denc::RadosError> {
+                #(
+                    denc::Denc::encode(&self.#field_names, buf, 0)?;
+                )*
+                ::std::result::Result::Ok(())
+            }
+
             fn decode<B: bytes::Buf>(
                 buf: &mut B,
-            ) -> ::std::result::Result<Self, denc::zerocopy::DecodeError> {
+                _features: u64,
+            ) -> ::std::result::Result<Self, denc::RadosError>
+            where
+                Self: Sized,
+            {
                 ::std::result::Result::Ok(Self {
                     #(#decode_fields,)*
                 })
             }
+
+            fn encoded_size(&self, _features: u64) -> ::std::option::Option<usize> {
+                let mut size = 0;
+                #(
+                    size += self.#field_names.encoded_size(0)?;
+                )*
+                ::std::option::Option::Some(size)
+            }
         }
     }
-}
-
-/// Derive macro for encoding structs to network byte order (little endian)
-///
-/// This generates an implementation that directly copies memory on little-endian systems
-/// for repr(C, packed) structs with only primitive types.
-#[proc_macro_derive(ZeroCopyEncode)]
-pub fn derive_zerocopy_encode(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-
-    // Check for repr(C, packed)
-    let has_repr_c_packed = input.attrs.iter().any(|attr| {
-        if attr.path().is_ident("repr") {
-            // Try parsing as MetaList first
-            if let Ok(list) = attr.parse_args::<syn::MetaList>() {
-                let tokens = list.tokens.to_string();
-                return tokens.contains("C") && tokens.contains("packed");
-            }
-            // Also try parsing the tokens directly
-            let tokens = attr.meta.to_token_stream().to_string();
-            return tokens.contains("C") && tokens.contains("packed");
-        }
-        false
-    });
-
-    let encode_impl = match &input.data {
-        Data::Struct(data_struct) => match &data_struct.fields {
-            Fields::Named(fields) => {
-                let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
-
-                if has_repr_c_packed {
-                    // Zero-copy path for repr(C, packed) structs on little-endian
-                    quote! {
-                        impl denc::zerocopy::Encode for #name {
-                            fn encode<B: bytes::BufMut>(&self, buf: &mut B) -> ::std::result::Result<(), denc::zerocopy::EncodeError> {
-                                let size = ::std::mem::size_of::<Self>();
-                                if buf.remaining_mut() < size {
-                                    return ::std::result::Result::Err(denc::zerocopy::EncodeError::InsufficientSpace {
-                                        required: size,
-                                        available: buf.remaining_mut(),
-                                    });
-                                }
-
-                                // Zero-copy for little-endian systems
-                                #[cfg(target_endian = "little")]
-                                {
-                                    // SAFETY: Type is repr(C, packed) with primitive types,
-                                    // and we're on little-endian where memory layout matches wire format
-                                    unsafe {
-                                        let src_ptr = self as *const Self as *const u8;
-                                        let src_slice = ::std::slice::from_raw_parts(src_ptr, size);
-                                        buf.put_slice(src_slice);
-                                    }
-                                }
-
-                                // Field-by-field for big-endian
-                                // Use read_unaligned to safely read from packed struct fields
-                                #[cfg(not(target_endian = "little"))]
-                                {
-                                    unsafe {
-                                        #(
-                                            let field_val = ::std::ptr::addr_of!(self.#field_names).read_unaligned();
-                                            denc::zerocopy::Encode::encode(&field_val, buf)?;
-                                        )*
-                                    }
-                                }
-
-                                ::std::result::Result::Ok(())
-                            }
-
-                            fn encoded_size(&self) -> usize {
-                                ::std::mem::size_of::<Self>()
-                            }
-                        }
-                    }
-                } else {
-                    // Standard field-by-field encoding
-                    quote! {
-                        impl denc::zerocopy::Encode for #name {
-                            fn encode<B: bytes::BufMut>(&self, buf: &mut B) -> ::std::result::Result<(), denc::zerocopy::EncodeError> {
-                                #(
-                                    denc::zerocopy::Encode::encode(&self.#field_names, buf)?;
-                                )*
-                                ::std::result::Result::Ok(())
-                            }
-
-                            fn encoded_size(&self) -> usize {
-                                let mut size = 0;
-                                #(
-                                    size += self.#field_names.encoded_size();
-                                )*
-                                size
-                            }
-                        }
-                    }
-                }
-            }
-            _ => panic!("ZeroCopyEncode only supports named fields"),
-        },
-        _ => panic!("ZeroCopyEncode can only be derived for structs"),
-    };
-
-    TokenStream::from(encode_impl)
-}
-
-/// Derive macro for decoding structs from network byte order (little endian)
-#[proc_macro_derive(ZeroCopyDecode)]
-pub fn derive_zerocopy_decode(input: TokenStream) -> TokenStream {
-    let input = parse_macro_input!(input as DeriveInput);
-    let name = &input.ident;
-
-    // Check for repr(C, packed)
-    let has_repr_c_packed = input.attrs.iter().any(|attr| {
-        if attr.path().is_ident("repr") {
-            // Try parsing as MetaList first
-            if let Ok(list) = attr.parse_args::<syn::MetaList>() {
-                let tokens = list.tokens.to_string();
-                return tokens.contains("C") && tokens.contains("packed");
-            }
-            // Also try parsing the tokens directly
-            let tokens = attr.meta.to_token_stream().to_string();
-            return tokens.contains("C") && tokens.contains("packed");
-        }
-        false
-    });
-
-    let decode_impl = match &input.data {
-        Data::Struct(data_struct) => match &data_struct.fields {
-            Fields::Named(fields) => {
-                let decode_fields = fields.named.iter().map(|f| {
-                    let field_name = &f.ident;
-                    let field_type = &f.ty;
-
-                    quote! {
-                        #field_name: <#field_type as denc::zerocopy::Decode>::decode(buf)?
-                    }
-                });
-
-                if has_repr_c_packed {
-                    // Zero-copy path for repr(C, packed) structs
-                    quote! {
-                        impl denc::zerocopy::Decode for #name {
-                            fn decode<B: bytes::Buf>(buf: &mut B) -> ::std::result::Result<Self, denc::zerocopy::DecodeError> {
-                                let size = ::std::mem::size_of::<Self>();
-                                if buf.remaining() < size {
-                                    return ::std::result::Result::Err(denc::zerocopy::DecodeError::UnexpectedEof {
-                                        expected: size,
-                                        available: buf.remaining(),
-                                    });
-                                }
-
-                                // Zero-copy for little-endian systems
-                                #[cfg(target_endian = "little")]
-                                {
-                                    // SAFETY: Type is repr(C, packed) with primitive types,
-                                    // and we're on little-endian where memory layout matches wire format
-                                    unsafe {
-                                        let mut value = ::std::mem::MaybeUninit::<Self>::uninit();
-                                        let dst_ptr = value.as_mut_ptr() as *mut u8;
-                                        let dst_slice = ::std::slice::from_raw_parts_mut(dst_ptr, size);
-                                        buf.copy_to_slice(dst_slice);
-                                        ::std::result::Result::Ok(value.assume_init())
-                                    }
-                                }
-
-                                // Field-by-field for big-endian
-                                #[cfg(not(target_endian = "little"))]
-                                {
-                                    ::std::result::Result::Ok(Self {
-                                        #(#decode_fields,)*
-                                    })
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // Standard field-by-field decoding
-                    quote! {
-                        impl denc::zerocopy::Decode for #name {
-                            fn decode<B: bytes::Buf>(buf: &mut B) -> ::std::result::Result<Self, denc::zerocopy::DecodeError> {
-                                ::std::result::Result::Ok(Self {
-                                    #(#decode_fields,)*
-                                })
-                            }
-                        }
-                    }
-                }
-            }
-            _ => panic!("ZeroCopyDecode only supports named fields"),
-        },
-        _ => panic!("ZeroCopyDecode can only be derived for structs"),
-    };
-
-    TokenStream::from(decode_impl)
 }
 
 /// Derive macro for efficient buffer-based encoding/decoding

@@ -147,6 +147,107 @@ impl Denc for PgId {
 }
 ```
 
+### Zero-Copy Encoding with ZeroCopyDencode
+
+For POD (Plain Old Data) types where **all fields are encoded/decoded in order**, use `#[derive(ZeroCopyDencode)]` instead of manual Denc implementation.
+
+#### When to Use ZeroCopyDencode
+
+Use `#[derive(ZeroCopyDencode)]` when a type meets ALL these criteria:
+
+1. **All fields are primitives or other ZeroCopyDencode types**
+   - Primitives: `u8`, `u16`, `u32`, `u64`, `i8`, `i16`, `i32`, `i64`
+   - Fixed arrays: `[u8; N]`
+   - Other types with `#[derive(ZeroCopyDencode)]`
+
+2. **No variable-length fields**
+   - ❌ `String`, `Vec<T>`, `Bytes`
+   - ✅ Only fixed-size types
+
+3. **No version headers**
+   - Wire format matches struct layout exactly
+   - No `ENCODE_START`/`DECODE_START` wrapping
+   - No extra metadata bytes prepended
+
+4. **Fields encode/decode in declaration order**
+   - Wire format: field1 bytes, then field2 bytes, then field3 bytes
+   - No special encoding logic or reordering
+
+#### ✅ GOOD: ZeroCopyDencode Examples
+
+```rust
+// Simple POD type - u8 + u64
+#[derive(Debug, Clone, PartialEq, Eq, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
+pub struct EntityName {
+    pub entity_type: u8,
+    pub num: u64,
+}
+
+// Multiple u64 fields
+#[derive(Debug, Clone, Copy, PartialEq, Eq, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
+pub struct BlkinTraceInfo {
+    pub trace_id: u64,
+    pub span_id: u64,
+    pub parent_span_id: u64,
+}
+
+// Nested ZeroCopyDencode types
+#[derive(Debug, Clone, denc::ZeroCopyDencode)]
+#[repr(C, packed)]
+pub struct RequestHeader {
+    pub entity: EntityName,  // EntityName is ZeroCopyDencode
+    pub sequence: u64,
+    pub flags: u32,
+}
+```
+
+**Benefits:**
+- Automatic `Denc` implementation using `mem::size_of::<Self>()`
+- Zero-copy memory transfer on little-endian systems
+- Compile-time verification that all fields are zero-copy safe
+- Field reordering protection via `#[repr(C, packed)]`
+
+#### ❌ BAD: When NOT to Use ZeroCopyDencode
+
+```rust
+// BAD: Has version header (not part of struct)
+struct PgId {
+    pool: i64,
+    seed: u32,
+}
+// Wire format: version byte + pool + seed + preferred
+// Manual Denc needed to encode version header
+
+// BAD: Variable-length String field
+struct ObjectLocator {
+    pool: i64,
+    key: String,  // Variable length!
+}
+
+// BAD: Contains SystemTime (not a primitive)
+struct OsdStatData {
+    size: u64,
+    mtime: SystemTime,  // Complex type, not POD
+}
+```
+
+**For these cases:** Implement `Denc` manually.
+
+#### Packed Struct Alignment in Tests
+
+When testing types with `#[repr(C, packed)]`, avoid taking references to fields:
+
+```rust
+// BAD: Creates unaligned reference
+assert_eq!(decoded.entity_type, 0x08);  // ❌ UB!
+
+// GOOD: Copy value first
+let entity_type = decoded.entity_type;
+assert_eq!(entity_type, 0x08);  // ✅ Safe
+```
+
 ---
 
 ## Bad Smells to Avoid

@@ -22,10 +22,6 @@ pub enum Error {
     Serialization,
     #[error("Deserialization error: {0}")]
     Deserialization(String),
-    #[error("Encode error: {0}")]
-    Encode(#[from] denc::zerocopy::EncodeError),
-    #[error("Decode error: {0}")]
-    Decode(#[from] denc::zerocopy::DecodeError),
     #[error("Compression error: {0}")]
     Compression(String),
     #[error("Configuration error: {0}")]
@@ -109,7 +105,6 @@ impl Error {
             Error::Timeout => "Timeout",
             Error::InvalidData(_) => "InvalidData",
             Error::Serialization | Error::Deserialization(_) => "Serialization",
-            Error::Encode(_) | Error::Decode(_) => "Codec",
             Error::Compression(_) => "Compression",
             Error::ConfigError(_) => "Configuration",
         }
