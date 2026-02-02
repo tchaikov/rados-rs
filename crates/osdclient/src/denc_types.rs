@@ -39,12 +39,6 @@ impl Denc for PgId {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 17 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for pg_t".to_string(),
-            ));
-        }
-
         let version = buf.get_u8();
         if version != 1 {
             return Err(RadosError::Protocol(format!(
@@ -105,11 +99,6 @@ impl VersionedEncode for StripedPgId {
         let pgid = PgId::decode(buf, features)?;
 
         // Decode shard (i8)
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for spg_t shard".to_string(),
-            ));
-        }
         let shard = buf.get_i8();
 
         Ok(StripedPgId {
@@ -150,12 +139,6 @@ impl Denc for EntityName {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 9 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for entity_name_t".to_string(),
-            ));
-        }
-
         let entity_type = buf.get_u8();
         let num = buf.get_u64_le();
 
@@ -216,11 +199,6 @@ impl VersionedEncode for OsdReqId {
         let name = EntityName::decode(buf, features)?;
 
         // Decode tid (u64)
-        if buf.remaining() < 12 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for osd_reqid_t tid and inc".to_string(),
-            ));
-        }
         let tid = buf.get_u64_le();
 
         // Decode inc (i32)
@@ -261,12 +239,6 @@ impl Denc for BlkinTraceInfo {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 24 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for blkin_trace_info".to_string(),
-            ));
-        }
-
         let trace_id = buf.get_u64_le();
         let span_id = buf.get_u64_le();
         let parent_span_id = buf.get_u64_le();
@@ -311,12 +283,6 @@ impl VersionedEncode for JaegerSpanContext {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for jspan_context".to_string(),
-            ));
-        }
-
         let is_valid = buf.get_u8() != 0;
 
         Ok(JaegerSpanContext { is_valid })
@@ -384,19 +350,9 @@ impl VersionedEncode for ObjectLocator {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Decode pool (i64)
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for object_locator_t pool".to_string(),
-            ));
-        }
         let pool = buf.get_i64_le();
 
         // Decode preferred (i32, deprecated)
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for object_locator_t preferred".to_string(),
-            ));
-        }
         let _preferred = buf.get_i32_le();
 
         // Decode key (String)
@@ -406,11 +362,6 @@ impl VersionedEncode for ObjectLocator {
         let nspace = String::decode(buf, features)?;
 
         // Decode hash (i64)
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for object_locator_t hash".to_string(),
-            ));
-        }
         let hash = buf.get_i64_le();
 
         Ok(ObjectLocator {
@@ -485,11 +436,6 @@ impl VersionedEncode for RequestRedirect {
         let redirect_object = String::decode(buf, features)?;
 
         // Decode legacy field (u32, ignore)
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for request_redirect_t legacy field".to_string(),
-            ));
-        }
         let _legacy = buf.get_u32_le();
 
         Ok(RequestRedirect {
@@ -596,14 +542,6 @@ impl Denc for OSDOp {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        // Need at least 38 bytes for ceph_osd_op
-        if buf.remaining() < 38 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for ceph_osd_op: need 38, have {}",
-                buf.remaining()
-            )));
-        }
-
         // 1. op (u16)
         let op_code = buf.get_u16_le();
         let op = OpCode::from_u16(op_code).ok_or_else(|| {
@@ -705,13 +643,6 @@ impl Denc for OsdStatData {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for OsdStatData: need 16, have {}",
-                buf.remaining()
-            )));
-        }
-
         let size = buf.get_u64_le();
         let mtime = std::time::SystemTime::decode(buf, features)?;
 
@@ -760,13 +691,6 @@ impl Denc for UTime {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for UTime: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-
         Ok(Self {
             tv_sec: buf.get_u32_le(),
             tv_nsec: buf.get_u32_le(),
