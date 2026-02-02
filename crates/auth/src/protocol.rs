@@ -108,20 +108,15 @@ pub struct CephXEncryptedEnvelope<T> {
 
 impl<T: Denc> Denc for CephXEncryptedEnvelope<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // struct_v = 1
         1u8.encode(buf, 0)?;
-        // magic
         AUTH_ENC_MAGIC.encode(buf, 0)?;
-        // payload
         self.payload.encode(buf, features)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)
-            .map_err(|e| RadosError::Protocol(format!("Failed to decode struct_v: {}", e)))?;
-        let magic = u64::decode(buf, 0)
-            .map_err(|e| RadosError::Protocol(format!("Failed to decode magic: {}", e)))?;
+        let _struct_v = u8::decode(buf, 0)?;
+        let magic = u64::decode(buf, 0)?;
         if magic != AUTH_ENC_MAGIC {
             return Err(RadosError::Protocol(format!(
                 "Invalid magic: expected 0x{:016x}, got 0x{:016x}",
