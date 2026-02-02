@@ -32,3 +32,117 @@
 - do not start from scratch.
 - always fix existing code
 - test encoding using dencoder in this project, and verify it using ceph-dencoder with the corpus fro ceph project
+
+## Denc Coding Principles
+
+### Always Use Denc Trait
+
+- **NEVER** manually encode/decode primitive types with `get_u*_le()`/`put_u*_le()`
+- **ALWAYS** use the Denc trait: `u32::decode(&mut buf, 0)?` and `value.encode(&mut buf, 0)?`
+- **ALWAYS** use `Bytes::decode()` for length-prefixed data instead of manual length extraction
+
+### Error Handling
+
+- **Keep it simple**: Use `?` operator directly instead of `.map_err()` for each field
+- If underlying types have proper Denc support, error handling should be minimal
+- Only add custom error messages when providing additional context is truly helpful
+- Let the Denc trait errors propagate naturally
+
+### Constants and Shared Definitions
+
+- **Define once, use everywhere**: Magic numbers, IVs, and constants should be defined in a single location
+- Example: `CEPH_AES_IV` and `AUTH_ENC_MAGIC` are defined in `protocol.rs` and reused
+- **NEVER** duplicate constant definitions across files
+
+### Generic Wrappers for Common Patterns
+
+- Create reusable generic types for common encoding patterns
+- Example: `CephXEncryptedEnvelope<T>` wraps any `T: Denc` with encryption envelope
+- Promotes code reuse and maintains consistency
+
+### Function Signatures
+
+- Use `Bytes` instead of `&[u8]` for encoded data when working with Denc
+- Use `&mut Bytes` or `impl Buf` for decoding to leverage Denc trait directly
+- Avoid converting between types unnecessarily
+
+## Code Smells (Bad Patterns to Avoid)
+
+### ❌ Manual Buffer Length Checking in High-Level Functions
+
+```rust
+// BAD: Manual length checking
+if buf.remaining() < 4 {
+    return Err(...);
+}
+let value = buf.get_u32_le();
+
+// GOOD: Let Denc handle it
+let value = u32::decode(&mut buf, 0)?;
+```
+
+### ❌ Manual Primitive Decoding
+
+```rust
+// BAD: Manual byte manipulation
+let mut chunk_val = 0u64;
+for (i, &byte) in chunk.iter().enumerate() {
+    chunk_val |= (byte as u64) << (i * 8);
+}
+
+// GOOD: Use Denc
+let chunk_val = u64::decode(&mut buf, 0)?;
+```
+
+### ❌ Manual Length Prefix Encoding
+
+```rust
+// BAD: Manual length + data
+buf.put_u32_le(data.len() as u32);
+buf.extend_from_slice(&data);
+
+// GOOD: Use Bytes::encode()
+let bytes = Bytes::from(data);
+bytes.encode(&mut buf, 0)?;
+```
+
+### ❌ Duplicate Constants
+
+```rust
+// BAD: Defined in multiple places
+const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";  // In file A
+const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";  // In file B
+
+// GOOD: Define once, import everywhere
+use crate::protocol::CEPH_AES_IV;
+```
+
+### ❌ Manual Struct Encoding When Denc Could Be Used
+
+```rust
+// BAD: Manual field-by-field encoding
+buf.put_u8(1);  // struct_v
+buf.put_u64_le(magic);
+payload.encode(&mut buf, 0)?;
+
+// GOOD: Implement Denc for a wrapper struct
+let envelope = CephXEncryptedEnvelope { payload };
+envelope.encode(&mut buf, 0)?;
+```
+
+### When to Investigate for Denc Usage
+
+If you see any of these patterns, consider refactoring to use Denc:
+
+1. Manual `if buf.remaining() < N` checks
+2. Manual `get_u*_le()` or `put_u*_le()` calls
+3. Manual byte slicing and length prefix handling
+4. Repeated encoding patterns across functions
+5. Duplicate constant definitions
+6. Custom error handling for every primitive field
+
+### Exceptions
+
+- Helper functions in `crush` crate use manual decoding to avoid circular dependency
+- Low-level AES encryption/decryption may need raw bytes
+- Test code may use manual encoding for specific test scenarios
