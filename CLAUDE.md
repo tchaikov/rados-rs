@@ -54,12 +54,17 @@ Msgr2 protocol implemented in:
 ### Incremental Development Process
 
 **CRITICAL:** After EVERY code change:
-1. Run full integration test suite: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored --test-threads=1`
-2. If ALL tests pass → commit immediately with descriptive message
-3. If ANY test fails → revert the change and investigate
-4. Move to next change
+1. Run full unit test suite: `cargo test --workspace --lib`
+2. Run integration test suite (with cluster running):
+   - MonClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored --test-threads=1`
+   - OSDClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p osdclient --test integration_test`
+3. If ALL tests pass → commit immediately with descriptive message
+4. If ANY test fails → revert the change and investigate
+5. Move to next change
 
 **Never** accumulate multiple changes in one commit. This makes it easy to identify which specific change caused a regression.
+
+**Note**: Integration tests MUST only use `CEPH_CONF` environment variable. Do not use `CEPH_MON_ADDR` or other individual settings - always load configuration from ceph.conf file.
 
 ---
 
