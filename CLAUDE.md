@@ -130,6 +130,32 @@ let envelope = CephXEncryptedEnvelope { payload };
 envelope.encode(&mut buf, 0)?;
 ```
 
+### ❌ Custom Error Handling for Each Field in Denc Implementations
+
+```rust
+// BAD: Wrapping every field's error with .map_err()
+fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    let field1 = u32::decode(buf, 0).map_err(|e| {
+        RadosError::Protocol(format!("Failed to decode field1: {}", e))
+    })?;
+    let field2 = String::decode(buf, 0).map_err(|e| {
+        RadosError::Protocol(format!("Failed to decode field2: {}", e))
+    })?;
+    Ok(Self { field1, field2 })
+}
+
+// GOOD: Just use ? operator and let Denc's error handling propagate
+fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    let field1 = u32::decode(buf, 0)?;
+    let field2 = String::decode(buf, 0)?;
+    Ok(Self { field1, field2 })
+}
+```
+
+The Denc trait already provides descriptive error messages. Adding custom error
+handling for each field creates noise and doesn't add value. The stack trace
+will show which decode() call failed.
+
 ### When to Investigate for Denc Usage
 
 If you see any of these patterns, consider refactoring to use Denc:
