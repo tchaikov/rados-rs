@@ -407,6 +407,7 @@ impl CephXClientHandler {
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
         use crate::protocol::{CephXResponseHeader, CephXEncryptedEnvelope};
+        use bytes::Buf;
         use denc::Denc;
 
         debug!(
@@ -518,48 +519,32 @@ impl CephXClientHandler {
 
         // Check for connection_secret blob (encrypted with session_key) and extra_tickets
         let mut connection_secret_bytes = None;
-        if auth_payload.len() >= 4 {
-            let cbl_len = u32::decode(&mut auth_payload, 0)? as usize;
-            debug!("connection_secret blob length: {}", cbl_len);
+        // Try to read outer length-prefixed bufferlist for connection_secret
+        if auth_payload.remaining() > 0 {
+            if let Ok(cbl_len) = u32::decode(&mut auth_payload, 0) {
+                let cbl_len = cbl_len as usize;
+                debug!("connection_secret blob length: {}", cbl_len);
 
-            if cbl_len > 0 && auth_payload.len() >= cbl_len {
-                let mut encrypted_secret_bl = auth_payload.split_to(cbl_len);
-                debug!(
-                    "connection_secret bufferlist: {} bytes",
-                    encrypted_secret_bl.len()
-                );
+                if cbl_len > 0 && auth_payload.remaining() >= cbl_len {
+                    let mut encrypted_secret_bl = auth_payload.split_to(cbl_len);
+                    debug!("connection_secret bufferlist: {} bytes", encrypted_secret_bl.len());
 
-                // The bufferlist contains another nested length prefix for the actual encrypted data
-                if encrypted_secret_bl.len() < 4 {
-                    debug!("connection_secret bufferlist too short for inner length");
-                } else {
-                    let inner_len = u32::decode(&mut encrypted_secret_bl, 0)? as usize;
-                    debug!("Inner encrypted data length: {}", inner_len);
+                    // The bufferlist contains another nested length prefix for the actual encrypted data
+                    if let Ok(inner_len) = u32::decode(&mut encrypted_secret_bl, 0) {
+                        let inner_len = inner_len as usize;
+                        debug!("Inner encrypted data length: {}", inner_len);
 
-                    if encrypted_secret_bl.len() >= inner_len {
-                        let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
-                        debug!(
-                            "Encrypted connection_secret: {} bytes",
-                            encrypted_secret.len()
-                        );
-                        debug!(
-                            "Encrypted connection_secret hex (first 64 bytes): {}",
-                            encrypted_secret
-                                .iter()
-                                .take(64)
-                                .map(|b| format!("{:02x}", b))
-                                .collect::<Vec<_>>()
-                                .join("")
-                        );
-                        debug!(
-                            "Session key for decryption - type: {}, secret length: {}",
-                            first_ticket_session_key.get_type(),
-                            first_ticket_session_key.get_secret().len()
-                        );
+                        if encrypted_secret_bl.remaining() >= inner_len {
+                            let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
+                            trace!("Encrypted connection_secret: {} bytes", encrypted_secret.len());
+                            trace!(
+                                "Session key for decryption - type: {}, secret length: {}",
+                                first_ticket_session_key.get_type(),
+                                first_ticket_session_key.get_secret().len()
+                            );
 
-                        // Decrypt connection_secret using the session_key we just extracted
-                        match first_ticket_session_key.decrypt(&encrypted_secret) {
-                            Ok(mut decrypted_secret) => {
+                            // Decrypt connection_secret using the session_key we just extracted
+                            if let Ok(mut decrypted_secret) = first_ticket_session_key.decrypt(&encrypted_secret) {
                                 // Decode using CephXEncryptedEnvelope<Bytes>
                                 match CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0) {
                                     Ok(envelope) => {
@@ -575,9 +560,8 @@ impl CephXClientHandler {
                                         debug!("Failed to decode connection_secret envelope: {:?}", e);
                                     }
                                 }
-                            }
-                            Err(e) => {
-                                debug!("Failed to decrypt connection_secret: {:?}", e);
+                            } else {
+                                debug!("Failed to decrypt connection_secret");
                             }
                         }
                     }
@@ -588,69 +572,71 @@ impl CephXClientHandler {
         // Parse extra_tickets if any remain in the payload
         trace!(
             "After connection_secret, auth_payload remaining: {} bytes",
-            auth_payload.len()
+            auth_payload.remaining()
         );
-        if auth_payload.len() >= 4 {
-            let extra_tickets_len = u32::decode(&mut auth_payload, 0)? as usize;
-            debug!("extra_tickets blob length: {}", extra_tickets_len);
+        if auth_payload.remaining() > 0 {
+            if let Ok(extra_tickets_len) = u32::decode(&mut auth_payload, 0) {
+                let extra_tickets_len = extra_tickets_len as usize;
+                debug!("extra_tickets blob length: {}", extra_tickets_len);
 
-            if extra_tickets_len > 0 && auth_payload.len() >= extra_tickets_len {
-                let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
-                trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
+                if extra_tickets_len > 0 && auth_payload.remaining() >= extra_tickets_len {
+                    let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
+                    trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
 
-                // Parse extra_tickets using ServiceTicketReply (same format as main tickets)
-                // Extra tickets are encrypted with the AUTH session key (from first ticket)
-                let auth_session_key = ticket_handlers
-                    .first()
-                    .map(|(_, session_key, _, _, _)| session_key.clone())
-                    .ok_or_else(|| {
-                        CephXError::ProtocolError(
-                            "No AUTH ticket to decrypt extra tickets".into(),
-                        )
-                    })?;
+                    // Parse extra_tickets using ServiceTicketReply (same format as main tickets)
+                    // Extra tickets are encrypted with the AUTH session key (from first ticket)
+                    let auth_session_key = ticket_handlers
+                        .first()
+                        .map(|(_, session_key, _, _, _)| session_key.clone())
+                        .ok_or_else(|| {
+                            CephXError::ProtocolError(
+                                "No AUTH ticket to decrypt extra tickets".into(),
+                            )
+                        })?;
 
-                match crate::protocol::ServiceTicketReply::decode(&mut extra_tickets_bl, 0) {
-                    Ok(extra_ticket_reply) => {
-                        trace!(
-                            "extra_tickets struct_v: {}, num_tickets: {}",
-                            extra_ticket_reply.struct_v,
-                            extra_ticket_reply.tickets.len()
-                        );
+                    match crate::protocol::ServiceTicketReply::decode(&mut extra_tickets_bl, 0) {
+                        Ok(extra_ticket_reply) => {
+                            trace!(
+                                "extra_tickets struct_v: {}, num_tickets: {}",
+                                extra_ticket_reply.struct_v,
+                                extra_ticket_reply.tickets.len()
+                            );
 
-                        // Process each extra ticket
-                        for ticket_info in &extra_ticket_reply.tickets {
-                            match self.decrypt_service_ticket(
-                                &ticket_info.encrypted_service_ticket,
-                                &auth_session_key,
-                            ) {
-                                Ok((session_key, validity)) => {
-                                    debug!(
-                                        "Extra ticket for service {}: session_key type={}, validity={:?}",
-                                        ticket_info.service_id,
-                                        session_key.get_type(),
-                                        validity
-                                    );
-                                    ticket_handlers.push((
-                                        ticket_info.service_id,
-                                        session_key,
-                                        ticket_info.ticket_blob.secret_id,
-                                        ticket_info.ticket_blob.clone(),
-                                        validity,
-                                    ));
-                                }
-                                Err(e) => {
-                                    // It's normal for extra tickets to have dummy/placeholder data
-                                    debug!(
-                                        "Failed to decrypt extra ticket for service {}: {:?}",
-                                        ticket_info.service_id, e
-                                    );
+                            // Process each extra ticket
+                            for ticket_info in &extra_ticket_reply.tickets {
+                                match self.decrypt_service_ticket(
+                                    &ticket_info.encrypted_service_ticket,
+                                    &auth_session_key,
+                                ) {
+                                    Ok((session_key, validity)) => {
+                                        debug!(
+                                            "Extra ticket for service {}: session_key type={}, validity={:?}",
+                                            ticket_info.service_id,
+                                            session_key.get_type(),
+                                            validity
+                                        );
+                                        ticket_handlers.push((
+                                            ticket_info.service_id,
+                                            session_key,
+                                            ticket_info.ticket_blob.secret_id,
+                                            ticket_info.ticket_blob.clone(),
+                                            validity,
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        // It's normal for extra tickets to have dummy/placeholder data
+                                        debug!(
+                                            "Failed to decrypt extra ticket for service {}: {:?}",
+                                            ticket_info.service_id, e
+                                        );
+                                    }
                                 }
                             }
                         }
-                    }
-                    Err(e) => {
-                        // It's normal for extra_tickets to be malformed or empty
-                        debug!("Failed to parse extra_tickets: {:?}", e);
+                        Err(e) => {
+                            // It's normal for extra_tickets to be malformed or empty
+                            debug!("Failed to parse extra_tickets: {:?}", e);
+                        }
                     }
                 }
             }
