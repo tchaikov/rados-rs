@@ -100,22 +100,17 @@ impl VersionedEncode for crush::ObjectLocator {
             hash,
         })
     }
-}
 
-/// Implement Denc for crush::ObjectLocator by delegating to VersionedEncode
-impl Denc for crush::ObjectLocator {
-    const USES_VERSIONING: bool = true;
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // pool_id (i64) + preferred (i32) + key + namespace + hash (i64)
+        let pool_size = 8;
+        let preferred_size = 4;
+        let key_size = self.key.encoded_size(features)?;
+        let namespace_size = self.namespace.encoded_size(features)?;
+        let hash_size = 8;
 
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Variable size due to strings
-        None
+        Some(pool_size + preferred_size + key_size + namespace_size + hash_size)
     }
 }
+
+crate::impl_denc_for_versioned!(crush::ObjectLocator);

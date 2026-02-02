@@ -470,7 +470,13 @@ impl VersionedEncode for ExplicitHashHitSetParams {
         // No parameters to decode for ExplicitHash
         Ok(ExplicitHashHitSetParams)
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        Some(0) // No content
+    }
 }
+
+crate::impl_denc_for_versioned!(ExplicitHashHitSetParams);
 
 /// Explicit Object HitSet parameters - no additional parameters needed
 #[derive(Debug, Clone, Default, Serialize)]
@@ -503,7 +509,13 @@ impl VersionedEncode for ExplicitObjectHitSetParams {
         // No parameters to decode for ExplicitObject
         Ok(ExplicitObjectHitSetParams)
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        Some(0) // No content
+    }
 }
+
+crate::impl_denc_for_versioned!(ExplicitObjectHitSetParams);
 
 /// BloomHitSet parameters - separate VersionedEncode implementation
 #[derive(Debug, Clone, Default, Serialize)]
@@ -558,7 +570,13 @@ impl VersionedEncode for BloomHitSetParams {
             seed,
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        Some(4 + 8 + 8) // fpp_micro (u32) + target_size (u64) + seed (u64)
+    }
 }
+
+crate::impl_denc_for_versioned!(BloomHitSetParams);
 
 /// HitSet parameter types - using dedicated types for each variant
 #[derive(Debug, Clone, Default)]
@@ -673,29 +691,20 @@ impl VersionedEncode for HitSetParams {
             ))),
         }
     }
-}
-// Manual Denc implementation for HitSetParams (uses VersionedEncode)
-impl crate::denc::Denc for HitSetParams {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <HitSetParams as VersionedEncode>::FEATURE_DEPENDENT;
 
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
-        }
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        let mut size = 1; // type byte
+        size += match self {
+            HitSetParams::None => 0,
+            HitSetParams::ExplicitHash(params) => params.encoded_size(features)?,
+            HitSetParams::ExplicitObject(params) => params.encoded_size(features)?,
+            HitSetParams::Bloom(params) => params.encoded_size(features)?,
+        };
+        Some(size)
     }
 }
+
+crate::impl_denc_for_versioned!(HitSetParams);
 
 /// Ceph UUID type (uuid_d in C++)
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -921,29 +930,36 @@ impl VersionedEncode for OsdXInfo {
 
         Ok(xinfo)
     }
-}
-// Manual Denc implementation for OsdXInfo (uses VersionedEncode)
-impl crate::denc::Denc for OsdXInfo {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <OsdXInfo as VersionedEncode>::FEATURE_DEPENDENT;
 
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
+    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
+        let mut size = 0;
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
+        // Version 1+ fields
+        size += self.down_stamp.encoded_size(features)?; // UTime
+        size += 4; // laggy_probability (u32)
+        size += 4; // laggy_interval (u32)
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
+        // Version 2+ fields
+        if version >= 2 {
+            size += 8; // features (u64)
         }
+
+        // Version 3+ fields
+        if version >= 3 {
+            size += 4; // old_weight (u32)
+        }
+
+        // Version 4+ fields
+        if version >= 4 {
+            size += self.last_purged_snaps_scrub.encoded_size(features)?; // UTime
+            size += 4; // dead_epoch (u32)
+        }
+
+        Some(size)
     }
 }
+
+crate::impl_denc_for_versioned!(OsdXInfo);
 
 /// OSD information structure (osd_info_t in C++)
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1332,6 +1348,10 @@ impl VersionedEncode for PoolSnapInfo {
             stamp,
             name,
         })
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 // Manual Denc implementation for PoolSnapInfo (uses VersionedEncode)
@@ -2035,6 +2055,10 @@ impl VersionedEncode for PgPool {
 
         Ok(pool)
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 // Manual Denc implementation for PgPool (uses VersionedEncode)
 impl crate::denc::Denc for PgPool {
@@ -2177,6 +2201,10 @@ impl VersionedEncode for PgMergeMeta {
             extra_field,
             extra_padding,
         })
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 // Manual Denc implementation for PgMergeMeta (uses VersionedEncode)
@@ -2469,6 +2497,10 @@ impl VersionedEncode for OSDMapIncremental {
         Err(RadosError::Protocol(
             "Use decode_versioned for OSDMapIncremental".into(),
         ))
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 
     fn decode_versioned<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
@@ -3230,6 +3262,10 @@ impl VersionedEncode for OSDMap {
         }
 
         Ok(map)
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 

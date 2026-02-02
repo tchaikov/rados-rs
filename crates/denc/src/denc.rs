@@ -390,6 +390,23 @@ pub trait VersionedEncode: Sized {
         compat_version: u8,
     ) -> Result<Self, RadosError>;
 
+    /// Calculate encoded size of content (without version header)
+    ///
+    /// This should return the size that would be written by encode_content.
+    /// The total encoded size including version header is:
+    /// VERSION_HEADER_SIZE (6 bytes) + encoded_size_content()
+    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize>;
+
+    /// Calculate total encoded size including version header
+    ///
+    /// Default implementation adds VERSION_HEADER_SIZE to content size.
+    fn encoded_size_versioned(&self, features: u64) -> Option<usize> {
+        const VERSION_HEADER_SIZE: usize = 6; // struct_v (1) + struct_compat (1) + len (4)
+        let version = self.encoding_version(features);
+        let content_size = self.encoded_size_content(features, version)?;
+        Some(VERSION_HEADER_SIZE + content_size)
+    }
+
     /// Encode with version metadata (ENCODE_START pattern)
     fn encode_versioned<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         let version = self.encoding_version(features);
@@ -445,8 +462,62 @@ pub trait VersionedEncode: Sized {
 
 // Note: We cannot provide a blanket implementation for VersionedEncode types
 // because it would conflict with the blanket impl for ZeroCopyDencode.
-// Types that implement VersionedEncode should manually implement Denc by calling
-// encode_versioned/decode_versioned, or use a derive macro.
+// Use the impl_denc_for_versioned! macro below to generate Denc impl.
+
+/// Macro to implement Denc for types that implement VersionedEncode
+///
+/// This macro generates the boilerplate Denc implementation that delegates to
+/// the VersionedEncode methods. This eliminates repetitive code for versioned types.
+///
+/// # Example
+///
+/// ```ignore
+/// impl VersionedEncode for MyType {
+///     fn encoding_version(&self, _features: u64) -> u8 { 1 }
+///     fn compat_version(&self, _features: u64) -> u8 { 1 }
+///     fn encode_content<B: BufMut>(&self, buf: &mut B, features: u64, _version: u8) -> Result<(), RadosError> {
+///         self.field.encode(buf, features)?;
+///         Ok(())
+///     }
+///     fn decode_content<B: Buf>(buf: &mut B, features: u64, _version: u8, _compat: u8) -> Result<Self, RadosError> {
+///         let field = Denc::decode(buf, features)?;
+///         Ok(Self { field })
+///     }
+///     fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+///         Some(self.field.encoded_size(features)?)
+///     }
+/// }
+///
+/// // Instead of manually implementing Denc, use the macro:
+/// impl_denc_for_versioned!(MyType);
+/// ```
+#[macro_export]
+macro_rules! impl_denc_for_versioned {
+    ($type:ty) => {
+        impl $crate::denc::Denc for $type {
+            const USES_VERSIONING: bool = true;
+
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+            ) -> std::result::Result<(), $crate::error::RadosError> {
+                <Self as $crate::denc::VersionedEncode>::encode_versioned(self, buf, features)
+            }
+
+            fn decode<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+            ) -> std::result::Result<Self, $crate::error::RadosError> {
+                <Self as $crate::denc::VersionedEncode>::decode_versioned(buf, features)
+            }
+
+            fn encoded_size(&self, features: u64) -> Option<usize> {
+                <Self as $crate::denc::VersionedEncode>::encoded_size_versioned(self, features)
+            }
+        }
+    };
+}
 
 // ============= Variable-Size Type Implementations =============
 use bytes::Bytes;

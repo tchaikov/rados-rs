@@ -20,14 +20,6 @@ pub struct MonFeature {
     pub features: u64,
 }
 
-// Version header constants for ENCODE_START/DECODE_START format
-// These match the encoding in VersionedEncode::encode_versioned()
-const VERSION_HEADER_VERSION_SIZE: usize = std::mem::size_of::<u8>(); // version byte
-const VERSION_HEADER_COMPAT_SIZE: usize = std::mem::size_of::<u8>(); // compat byte
-const VERSION_HEADER_LENGTH_SIZE: usize = std::mem::size_of::<u32>(); // length field
-const VERSION_HEADER_SIZE: usize =
-    VERSION_HEADER_VERSION_SIZE + VERSION_HEADER_COMPAT_SIZE + VERSION_HEADER_LENGTH_SIZE;
-
 // MonFeature content size - directly tied to the field type
 const MON_FEATURE_CONTENT_SIZE: usize = std::mem::size_of::<u64>(); // features field
 
@@ -73,26 +65,13 @@ impl VersionedEncode for MonFeature {
             features: buf.get_u64_le(),
         })
     }
-}
 
-// Manual Denc implementation for MonFeature (uses VersionedEncode)
-impl Denc for MonFeature {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <MonFeature as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Versioned encoding: version header + content
-        Some(VERSION_HEADER_SIZE + MON_FEATURE_CONTENT_SIZE)
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        Some(MON_FEATURE_CONTENT_SIZE)
     }
 }
+
+crate::impl_denc_for_versioned!(MonFeature);
 
 /// Ceph release version for MonMap (ceph_release_t in C++)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -340,30 +319,41 @@ impl VersionedEncode for MonInfo {
             time_added,
         })
     }
-}
 
-// Manual Denc implementation for MonInfo (uses VersionedEncode)
-impl Denc for MonInfo {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <MonInfo as VersionedEncode>::FEATURE_DEPENDENT;
+    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
+        let mut size = 0;
 
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
+        // name (string)
+        size += self.name.encoded_size(features)?;
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
+        // public_addrs (entity_addrvec_t)
+        size += self.public_addrs.encoded_size(features)?;
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
+        // priority (v2+, u16)
+        if version >= 2 {
+            size += 2;
         }
+
+        // weight (v4+, u16)
+        if version >= 4 {
+            size += 2;
+        }
+
+        // crush_loc (v5+, map)
+        if version >= 5 {
+            size += self.crush_loc.encoded_size(features)?;
+        }
+
+        // time_added (v6+, UTime)
+        if version >= 6 {
+            size += self.time_added.encoded_size(features)?;
+        }
+
+        Some(size)
     }
 }
+
+crate::impl_denc_for_versioned!(MonInfo);
 
 /// Monitor map (MonMap in C++)
 /// Version 9 encoding format
@@ -631,30 +621,65 @@ impl VersionedEncode for MonMap {
             stretch_marked_down_mons,
         })
     }
-}
 
-// Manual Denc implementation for MonMap (uses VersionedEncode)
-impl Denc for MonMap {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <MonMap as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
+    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
+        if version < 6 {
+            // Legacy versions not supported
+            return None;
         }
+
+        let mut size = 0;
+
+        // fsid (raw 16 bytes)
+        size += 16;
+
+        // epoch (u32)
+        size += 4;
+
+        // timestamps (UTime each)
+        size += self.last_changed.encoded_size(features)?;
+        size += self.created.encoded_size(features)?;
+
+        // features (v4+)
+        if version >= 4 {
+            size += self.persistent_features.encoded_size(features)?;
+            size += self.optional_features.encoded_size(features)?;
+        }
+
+        // mon_info (v5+)
+        if version >= 5 {
+            size += self.mon_info.encoded_size(features)?;
+        }
+
+        // ranks (v6+)
+        if version >= 6 {
+            size += self.ranks.encoded_size(features)?;
+        }
+
+        // min_mon_release (v7+)
+        if version >= 7 {
+            size += 1; // MonCephRelease is u8
+        }
+
+        // removed_ranks and strategy (v8+)
+        if version >= 8 {
+            size += self.removed_ranks.encoded_size(features)?;
+            size += 1; // ElectionStrategy is u8
+            size += self.disallowed_leaders.encoded_size(features)?;
+        }
+
+        // stretch mode fields (v9+)
+        if version >= 9 {
+            size += 1; // bool
+            size += self.tiebreaker_mon.encoded_size(features)?;
+            size += self.stretch_marked_down_mons.encoded_size(features)?;
+        }
+
+        Some(size)
     }
 }
+
+crate::impl_denc_for_versioned!(MonMap);
 
 #[cfg(test)]
 mod tests {

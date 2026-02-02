@@ -164,6 +164,10 @@ impl VersionedEncode for StoreStatfs {
             internal_metadata: buf.get_i64_le(),
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for StoreStatfs {
@@ -432,6 +436,10 @@ impl VersionedEncode for ObjectStatSum {
             num_objects_repaired,
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for ObjectStatSum {
@@ -507,6 +515,10 @@ impl VersionedEncode for ObjectStatCollection {
         let _dummy = buf.get_u32_le(); // Ignore legacy field
 
         Ok(ObjectStatCollection { sum })
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 
@@ -629,6 +641,10 @@ impl VersionedEncode for PoolStat {
             num_store_stats,
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for PoolStat {
@@ -730,6 +746,10 @@ impl VersionedEncode for Pow2Hist {
         let values = Vec::<i32>::decode(buf, features)?;
         Ok(Pow2Hist { values })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for Pow2Hist {
@@ -830,6 +850,10 @@ impl VersionedEncode for ObjectstorePerfStat {
                 os_apply_latency_ns: apply_ms as u64 * 1_000_000,
             })
         }
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 
@@ -1161,6 +1185,10 @@ impl VersionedEncode for OsdStat {
             num_per_pool_omap_osds,
             hb_pingtime,
         })
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 
@@ -1742,6 +1770,10 @@ impl VersionedEncode for PgShard {
         let shard = ShardId::decode(buf, features)?;
         Ok(PgShard { osd, shard })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for PgShard {
@@ -2125,6 +2157,10 @@ impl VersionedEncode for PgStat {
             manifest_stats_invalid,
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for PgStat {
@@ -2290,6 +2326,10 @@ impl VersionedEncode for PgMapDigest {
             pool_pg_unavailable_map,
         })
     }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
+    }
 }
 
 impl Denc for PgMapDigest {
@@ -2381,6 +2421,10 @@ impl VersionedEncode for PgMap {
             stamp,
             pool_statfs,
         })
+    }
+
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        None // Complex type - size computed by encoding
     }
 }
 

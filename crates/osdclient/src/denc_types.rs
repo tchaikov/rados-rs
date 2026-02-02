@@ -27,12 +27,6 @@ pub use crate::types::{
     CEPH_ENTITY_TYPE_MON, CEPH_ENTITY_TYPE_OSD,
 };
 
-// ============= Encoding Size Constants =============
-
-/// Size of versioned encoding header: struct_v (1) + struct_compat (1) + len (4)
-const VERSION_HEADER_SIZE: usize =
-    std::mem::size_of::<u8>() + std::mem::size_of::<u8>() + std::mem::size_of::<u32>();
-
 // ============= PgId (pg_t) =============
 
 impl Denc for PgId {
@@ -122,28 +116,18 @@ impl VersionedEncode for StripedPgId {
             shard,
         })
     }
-}
 
-impl Denc for StripedPgId {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header + pg_t + shard
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // pg_t + shard
         let pgid = PgId {
             pool: self.pool,
             seed: self.seed,
         };
-        Some(VERSION_HEADER_SIZE + pgid.encoded_size(features)? + self.shard.encoded_size(0)?)
+        Some(pgid.encoded_size(features)? + self.shard.encoded_size(0)?)
     }
 }
+
+denc::impl_denc_for_versioned!(StripedPgId);
 
 // ============= OsdReqId (osd_reqid_t) =============
 
@@ -201,29 +185,18 @@ impl VersionedEncode for OsdReqId {
 
         Ok(OsdReqId { name, tid, inc })
     }
-}
 
-impl Denc for OsdReqId {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header + entity_name + tid + inc
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // entity_name + tid + inc
         Some(
-            VERSION_HEADER_SIZE
-                + self.name.encoded_size(features)?
+            self.name.encoded_size(features)?
                 + self.tid.encoded_size(0)?
                 + self.inc.encoded_size(0)?,
         )
     }
 }
+
+denc::impl_denc_for_versioned!(OsdReqId);
 
 // ============= BlkinTraceInfo =============
 
@@ -259,24 +232,14 @@ impl VersionedEncode for JaegerSpanContext {
 
         Ok(JaegerSpanContext { is_valid })
     }
-}
 
-impl Denc for JaegerSpanContext {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Version header + is_valid flag
-        Some(VERSION_HEADER_SIZE + (if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)?)
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        // Just is_valid flag
+        Some((if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)?)
     }
 }
+
+denc::impl_denc_for_versioned!(JaegerSpanContext);
 
 // ============= ObjectLocator (object_locator_t) =============
 
@@ -341,26 +304,11 @@ impl VersionedEncode for ObjectLocator {
             hash,
         })
     }
-}
 
-impl Denc for ObjectLocator {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
-        // Content: pool (8) + preferred (4) + key + nspace + hash (8)
-        // Key and nspace are variable-length strings
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // pool + preferred + key + nspace + hash
         Some(
-            VERSION_HEADER_SIZE
-                + self.pool.encoded_size(0)? // pool (i64)
+            self.pool.encoded_size(0)? // pool (i64)
                 + (-1i32).encoded_size(0)? // preferred (deprecated, always -1)
                 + self.key.encoded_size(features)?
                 + self.nspace.encoded_size(features)?
@@ -368,6 +316,8 @@ impl Denc for ObjectLocator {
         )
     }
 }
+
+denc::impl_denc_for_versioned!(ObjectLocator);
 
 // ============= RequestRedirect (request_redirect_t) =============
 
@@ -418,30 +368,18 @@ impl VersionedEncode for RequestRedirect {
             redirect_object,
         })
     }
-}
 
-impl Denc for RequestRedirect {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header: struct_v (1) + struct_compat (1) + len (4) = 6 bytes
-        // Content: redirect_locator + redirect_object + legacy (4)
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // redirect_locator + redirect_object + legacy
         Some(
-            VERSION_HEADER_SIZE
-                + self.redirect_locator.encoded_size(features)?
+            self.redirect_locator.encoded_size(features)?
                 + self.redirect_object.encoded_size(features)?
                 + 0u32.encoded_size(0)?, // legacy (always 0)
         )
     }
 }
+
+denc::impl_denc_for_versioned!(RequestRedirect);
 
 // ============= OSDOp (ceph_osd_op) =============
 

@@ -134,24 +134,8 @@ impl VersionedEncode for PgNlsResponse {
 
         Ok(Self { handle, entries })
     }
-}
 
-impl Denc for PgNlsResponse {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <PgNlsResponse as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header: 1 byte (struct_v) + 1 byte (compat_v) + 4 bytes (len) = 6 bytes
-        let header_size = 6;
-
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
         // Handle size
         let handle_size = self.handle.encoded_size(features)?;
 
@@ -166,9 +150,11 @@ impl Denc for PgNlsResponse {
             entries_size += entry.locator.encoded_size(features)?;
         }
 
-        Some(header_size + handle_size + count_size + entries_size)
+        Some(handle_size + count_size + entries_size)
     }
 }
+
+crate::impl_denc_for_versioned!(PgNlsResponse);
 
 #[cfg(test)]
 mod tests {

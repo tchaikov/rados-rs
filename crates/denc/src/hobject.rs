@@ -243,25 +243,9 @@ impl VersionedEncode for HObject {
             pool,
         })
     }
-}
 
-impl Denc for HObject {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <HObject as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Version header: 1 byte (struct_v) + 1 byte (compat_v) + 4 bytes (len) = 6 bytes
-        let header_size = 6;
-
-        // Content size calculation
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // Content size calculation (without VERSION_HEADER_SIZE)
         let key_size = self.key.encoded_size(features)?;
         let oid_size = self.oid.encoded_size(features)?;
         let snap_size = 8; // u64
@@ -270,18 +254,11 @@ impl Denc for HObject {
         let nspace_size = self.nspace.encoded_size(features)?;
         let pool_size = 8; // i64
 
-        Some(
-            header_size
-                + key_size
-                + oid_size
-                + snap_size
-                + hash_size
-                + max_size
-                + nspace_size
-                + pool_size,
-        )
+        Some(key_size + oid_size + snap_size + hash_size + max_size + nspace_size + pool_size)
     }
 }
+
+crate::impl_denc_for_versioned!(HObject);
 
 #[cfg(test)]
 mod tests {
