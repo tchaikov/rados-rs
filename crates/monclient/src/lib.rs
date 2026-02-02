@@ -49,6 +49,10 @@ pub mod types;
 
 pub use client::{MonClient, MonClientConfig};
 pub use error::{MonClientError, Result};
+pub use messages::{
+    MAuth, MAuthReply, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply, MMonMap,
+    MMonSubscribe, MMonSubscribeAck, MOSDMap, MPoolOp, MPoolOpReply,
+};
 pub use monmap::{MonInfo, MonMap};
 pub use subscription::{MonSub, SubscribeItem, CEPH_SUBSCRIBE_ONETIME};
 pub use types::{CommandResult, EntityName};

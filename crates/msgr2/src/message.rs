@@ -207,30 +207,23 @@ impl MsgFooter {
     }
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        if dst.remaining_mut() < Self::LENGTH {
-            return Err(Error::Serialization);
-        }
-
-        dst.put_u32_le(self.front_crc);
-        dst.put_u32_le(self.middle_crc);
-        dst.put_u32_le(self.data_crc);
-        dst.put_u64_le(self.sig);
-        dst.put_u8(self.flags);
-
+        use denc::Denc;
+        self.front_crc.encode(dst, 0)?;
+        self.middle_crc.encode(dst, 0)?;
+        self.data_crc.encode(dst, 0)?;
+        self.sig.encode(dst, 0)?;
+        self.flags.encode(dst, 0)?;
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        if src.remaining() < Self::LENGTH {
-            return Err(Error::Deserialization("Incomplete footer".into()));
-        }
-
+        use denc::Denc;
         Ok(Self {
-            front_crc: src.get_u32_le(),
-            middle_crc: src.get_u32_le(),
-            data_crc: src.get_u32_le(),
-            sig: src.get_u64_le(),
-            flags: src.get_u8(),
+            front_crc: u32::decode(src, 0)?,
+            middle_crc: u32::decode(src, 0)?,
+            data_crc: u32::decode(src, 0)?,
+            sig: u64::decode(src, 0)?,
+            flags: u8::decode(src, 0)?,
         })
     }
 }

@@ -950,7 +950,7 @@ impl Connection {
         );
 
         let mut buf = BytesMut::with_capacity(64);
-        banner.encode(&mut buf);
+        banner.encode(&mut buf)?;
 
         // Record sent banner bytes for pre-auth signature
         state_machine.record_sent(&buf);
@@ -1044,7 +1044,7 @@ impl Connection {
         );
 
         let mut buf = BytesMut::with_capacity(64);
-        banner.encode(&mut buf);
+        banner.encode(&mut buf)?;
 
         // Record sent banner bytes for pre-auth signature
         state_machine.record_sent(&buf);

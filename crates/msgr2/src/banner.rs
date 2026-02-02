@@ -33,7 +33,8 @@ impl Banner {
         }
     }
 
-    pub fn encode(&self, dst: &mut BytesMut) {
+    pub fn encode(&self, dst: &mut BytesMut) -> Result<()> {
+        use denc::Denc;
         // Correct banner format based on our discoveries:
         // 1. "ceph v2\n" (8 bytes)
         // 2. payload length (2 bytes) - always 16 for features
@@ -45,19 +46,23 @@ impl Banner {
         dst.extend_from_slice(&self.banner);
 
         // Send newline
-        dst.put_u8(b'\n');
+        b'\n'.encode(dst, 0)?;
 
         // Payload size (always 16 bytes for the two 8-byte feature fields)
-        dst.put_u16_le(16);
+        16u16.encode(dst, 0)?;
 
         // Supported features (8 bytes, little-endian)
-        dst.put_u64_le(self.supported_features.value());
+        self.supported_features.value().encode(dst, 0)?;
 
         // Required features (8 bytes, little-endian)
-        dst.put_u64_le(self.required_features.value());
+        self.required_features.value().encode(dst, 0)?;
+
+        Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
+        use denc::Denc;
+
         if src.remaining() < CEPH_BANNER_LEN + 1 {
             // +1 for newline
             return Err(Error::invalid_data("Incomplete banner prefix"));
@@ -75,7 +80,7 @@ impl Banner {
         }
 
         // Read newline
-        let newline = src.get_u8();
+        let newline = u8::decode(src, 0)?;
         if newline != b'\n' {
             return Err(Error::Protocol(format!(
                 "Expected newline after banner, got: {}",
@@ -84,10 +89,7 @@ impl Banner {
         }
 
         // Read payload size (uint16_t)
-        if src.remaining() < 2 {
-            return Err(Error::invalid_data("Missing payload size"));
-        }
-        let payload_size = src.get_u16_le() as usize;
+        let payload_size = u16::decode(src, 0)? as usize;
 
         // Read payload
         if src.remaining() < payload_size {
@@ -112,8 +114,8 @@ impl Banner {
             if payload_size > 16 {
                 src.advance(payload_size - 16);
             }
-            let supported_features = FeatureSet::new(src.get_u64_le());
-            let required_features = FeatureSet::new(src.get_u64_le());
+            let supported_features = FeatureSet::new(u64::decode(src, 0)?);
+            let required_features = FeatureSet::new(u64::decode(src, 0)?);
             Ok(Self {
                 banner: Bytes::from(banner_bytes),
                 supported_features,
@@ -226,38 +228,34 @@ impl ConnectReplyMessage {
     }
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        if dst.remaining_mut() < Self::LENGTH {
-            return Err(Error::invalid_data("Serialization error"));
-        }
-
-        dst.put_u8(self.tag);
-        dst.put_u64_le(self.features.value());
-        dst.put_u32_le(self.global_seq);
-        dst.put_u32_le(self.connect_seq);
-        dst.put_u32_le(self.protocol_version);
-        dst.put_u32_le(self.authorizer_len);
-        dst.put_u8(self.flags);
-        dst.put_u8(0); // padding
-        dst.put_u8(0); // padding
+        use denc::Denc;
+        self.tag.encode(dst, 0)?;
+        self.features.value().encode(dst, 0)?;
+        self.global_seq.encode(dst, 0)?;
+        self.connect_seq.encode(dst, 0)?;
+        self.protocol_version.encode(dst, 0)?;
+        self.authorizer_len.encode(dst, 0)?;
+        self.flags.encode(dst, 0)?;
+        // padding
+        0u8.encode(dst, 0)?;
+        0u8.encode(dst, 0)?;
 
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        if src.remaining() < Self::LENGTH {
-            return Err(Error::invalid_data("Incomplete connect reply message"));
-        }
-
-        let tag = src.get_u8();
-        let features = FeatureSet::new(src.get_u64_le());
-        let global_seq = src.get_u32_le();
-        let connect_seq = src.get_u32_le();
-        let protocol_version = src.get_u32_le();
-        let authorizer_len = src.get_u32_le();
-        let flags = src.get_u8();
+        use denc::Denc;
+        let tag = u8::decode(src, 0)?;
+        let features = FeatureSet::new(u64::decode(src, 0)?);
+        let global_seq = u32::decode(src, 0)?;
+        let connect_seq = u32::decode(src, 0)?;
+        let protocol_version = u32::decode(src, 0)?;
+        let authorizer_len = u32::decode(src, 0)?;
+        let flags = u8::decode(src, 0)?;
 
         // Skip padding
-        src.advance(2);
+        let _pad1 = u8::decode(src, 0)?;
+        let _pad2 = u8::decode(src, 0)?;
 
         Ok(Self {
             tag,

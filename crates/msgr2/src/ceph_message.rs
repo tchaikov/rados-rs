@@ -34,28 +34,21 @@ impl CephMsgFooterOld {
     pub const FLAG_NOCRC: u8 = 2;
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        if dst.remaining_mut() < Self::LENGTH {
-            return Err(Error::Serialization);
-        }
-
-        dst.put_u32_le(self.front_crc);
-        dst.put_u32_le(self.middle_crc);
-        dst.put_u32_le(self.data_crc);
-        dst.put_u8(self.flags);
-
+        use denc::Denc;
+        self.front_crc.encode(dst, 0)?;
+        self.middle_crc.encode(dst, 0)?;
+        self.data_crc.encode(dst, 0)?;
+        self.flags.encode(dst, 0)?;
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        if src.remaining() < Self::LENGTH {
-            return Err(Error::Deserialization("Incomplete footer".into()));
-        }
-
+        use denc::Denc;
         Ok(Self {
-            front_crc: src.get_u32_le(),
-            middle_crc: src.get_u32_le(),
-            data_crc: src.get_u32_le(),
-            flags: src.get_u8(),
+            front_crc: u32::decode(src, 0)?,
+            middle_crc: u32::decode(src, 0)?,
+            data_crc: u32::decode(src, 0)?,
+            flags: u8::decode(src, 0)?,
         })
     }
 }
@@ -103,68 +96,64 @@ impl CephMsgHeader {
     }
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
-        if dst.remaining_mut() < Self::LENGTH {
-            return Err(Error::Serialization);
-        }
-
-        dst.put_u64_le(self.seq);
-        dst.put_u64_le(self.tid);
-        dst.put_u16_le(self.msg_type);
-        dst.put_u16_le(self.priority);
-        dst.put_u16_le(self.version);
-        dst.put_u32_le(self.front_len);
-        dst.put_u32_le(self.middle_len);
-        dst.put_u32_le(self.data_len);
-        dst.put_u16_le(self.data_off);
+        use denc::Denc;
+        self.seq.encode(dst, 0)?;
+        self.tid.encode(dst, 0)?;
+        self.msg_type.encode(dst, 0)?;
+        self.priority.encode(dst, 0)?;
+        self.version.encode(dst, 0)?;
+        self.front_len.encode(dst, 0)?;
+        self.middle_len.encode(dst, 0)?;
+        self.data_len.encode(dst, 0)?;
+        self.data_off.encode(dst, 0)?;
         // ceph_entity_name: type (u8) + num (u64)
-        dst.put_u8(self.src_type);
-        dst.put_u64_le(self.src_num);
-        dst.put_u16_le(self.compat_version);
-        dst.put_u16_le(self.reserved);
-        dst.put_u32_le(self.crc);
-
+        self.src_type.encode(dst, 0)?;
+        self.src_num.encode(dst, 0)?;
+        self.compat_version.encode(dst, 0)?;
+        self.reserved.encode(dst, 0)?;
+        self.crc.encode(dst, 0)?;
         Ok(())
     }
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
-        if src.remaining() < Self::LENGTH {
-            return Err(Error::Deserialization("Incomplete header".into()));
-        }
-
+        use denc::Denc;
         Ok(Self {
-            seq: src.get_u64_le(),
-            tid: src.get_u64_le(),
-            msg_type: src.get_u16_le(),
-            priority: src.get_u16_le(),
-            version: src.get_u16_le(),
-            front_len: src.get_u32_le(),
-            middle_len: src.get_u32_le(),
-            data_len: src.get_u32_le(),
-            data_off: src.get_u16_le(),
-            src_type: src.get_u8(),
-            src_num: src.get_u64_le(),
-            compat_version: src.get_u16_le(),
-            reserved: src.get_u16_le(),
-            crc: src.get_u32_le(),
+            seq: u64::decode(src, 0)?,
+            tid: u64::decode(src, 0)?,
+            msg_type: u16::decode(src, 0)?,
+            priority: u16::decode(src, 0)?,
+            version: u16::decode(src, 0)?,
+            front_len: u32::decode(src, 0)?,
+            middle_len: u32::decode(src, 0)?,
+            data_len: u32::decode(src, 0)?,
+            data_off: u16::decode(src, 0)?,
+            src_type: u8::decode(src, 0)?,
+            src_num: u64::decode(src, 0)?,
+            compat_version: u16::decode(src, 0)?,
+            reserved: u16::decode(src, 0)?,
+            crc: u32::decode(src, 0)?,
         })
     }
 
     /// Calculate header CRC (excluding the crc field itself)
     pub fn calc_crc(&self) -> u32 {
+        use denc::Denc;
         let mut buf = BytesMut::with_capacity(Self::LENGTH - 4);
-        buf.put_u64_le(self.seq);
-        buf.put_u64_le(self.tid);
-        buf.put_u16_le(self.msg_type);
-        buf.put_u16_le(self.priority);
-        buf.put_u16_le(self.version);
-        buf.put_u32_le(self.front_len);
-        buf.put_u32_le(self.middle_len);
-        buf.put_u32_le(self.data_len);
-        buf.put_u16_le(self.data_off);
-        buf.put_u8(self.src_type);
-        buf.put_u64_le(self.src_num);
-        buf.put_u16_le(self.compat_version);
-        buf.put_u16_le(self.reserved);
+        // Use Denc for all fields (CRC calculation is special case, keep manual encoding here is fine
+        // but using Denc is more consistent)
+        self.seq.encode(&mut buf, 0).unwrap();
+        self.tid.encode(&mut buf, 0).unwrap();
+        self.msg_type.encode(&mut buf, 0).unwrap();
+        self.priority.encode(&mut buf, 0).unwrap();
+        self.version.encode(&mut buf, 0).unwrap();
+        self.front_len.encode(&mut buf, 0).unwrap();
+        self.middle_len.encode(&mut buf, 0).unwrap();
+        self.data_len.encode(&mut buf, 0).unwrap();
+        self.data_off.encode(&mut buf, 0).unwrap();
+        self.src_type.encode(&mut buf, 0).unwrap();
+        self.src_num.encode(&mut buf, 0).unwrap();
+        self.compat_version.encode(&mut buf, 0).unwrap();
+        self.reserved.encode(&mut buf, 0).unwrap();
         crc32c(&buf)
     }
 }
@@ -412,141 +401,6 @@ impl CephMessagePayload for MPingAck {
     }
 }
 
-/// MAuth - Authentication request message
-/// Note: This is for CEPH_MSG_AUTH (0x0011), which is different from
-/// the msgr2 AUTH_REQUEST frame. This message type is used in the legacy
-/// messenger protocol and some monitor communications.
-#[derive(Debug, Clone)]
-pub struct MAuth {
-    pub protocol: u32,
-    pub auth_payload: Bytes,
-}
-
-impl MAuth {
-    pub fn new(protocol: u32, auth_payload: Bytes) -> Self {
-        Self {
-            protocol,
-            auth_payload,
-        }
-    }
-}
-
-impl CephMessagePayload for MAuth {
-    fn msg_type() -> u16 {
-        CEPH_MSG_AUTH
-    }
-
-    fn msg_version() -> u16 {
-        1
-    }
-
-    fn encode_payload(&self, _features: u64) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
-        buf.put_u32_le(self.protocol);
-        buf.put_u32_le(self.auth_payload.len() as u32);
-        buf.put_slice(&self.auth_payload);
-        Ok(buf.freeze())
-    }
-
-    fn decode_payload(
-        _header: &CephMsgHeader,
-        front: &[u8],
-        _middle: &[u8],
-        _data: &[u8],
-    ) -> Result<Self> {
-        if front.len() < 8 {
-            return Err(Error::Deserialization("MAuth too short".into()));
-        }
-
-        let mut buf = front;
-        let protocol = buf.get_u32_le();
-        let payload_len = buf.get_u32_le() as usize;
-
-        if buf.remaining() < payload_len {
-            return Err(Error::Deserialization("MAuth payload incomplete".into()));
-        }
-
-        let auth_payload = Bytes::copy_from_slice(&buf[..payload_len]);
-
-        Ok(Self {
-            protocol,
-            auth_payload,
-        })
-    }
-}
-
-/// MAuthReply - Authentication reply message
-#[derive(Debug, Clone)]
-pub struct MAuthReply {
-    pub protocol: u32,
-    pub result: i32,
-    pub global_id: u64,
-    pub auth_payload: Bytes,
-}
-
-impl MAuthReply {
-    pub fn new(protocol: u32, result: i32, global_id: u64, auth_payload: Bytes) -> Self {
-        Self {
-            protocol,
-            result,
-            global_id,
-            auth_payload,
-        }
-    }
-}
-
-impl CephMessagePayload for MAuthReply {
-    fn msg_type() -> u16 {
-        CEPH_MSG_AUTH_REPLY
-    }
-
-    fn msg_version() -> u16 {
-        1
-    }
-
-    fn encode_payload(&self, _features: u64) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
-        buf.put_u32_le(self.protocol);
-        buf.put_i32_le(self.result);
-        buf.put_u64_le(self.global_id);
-        buf.put_u32_le(self.auth_payload.len() as u32);
-        buf.put_slice(&self.auth_payload);
-        Ok(buf.freeze())
-    }
-
-    fn decode_payload(
-        _header: &CephMsgHeader,
-        front: &[u8],
-        _middle: &[u8],
-        _data: &[u8],
-    ) -> Result<Self> {
-        if front.len() < 20 {
-            return Err(Error::Deserialization("MAuthReply too short".into()));
-        }
-
-        let mut buf = front;
-        let protocol = buf.get_u32_le();
-        let result = buf.get_i32_le();
-        let global_id = buf.get_u64_le();
-        let payload_len = buf.get_u32_le() as usize;
-
-        if buf.remaining() < payload_len {
-            return Err(Error::Deserialization(
-                "MAuthReply payload incomplete".into(),
-            ));
-        }
-
-        let auth_payload = Bytes::copy_from_slice(&buf[..payload_len]);
-
-        Ok(Self {
-            protocol,
-            result,
-            global_id,
-            auth_payload,
-        })
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -581,41 +435,5 @@ mod tests {
         // Encode to bytes
         let encoded = msg.encode().unwrap();
         assert!(!encoded.is_empty());
-    }
-
-    #[test]
-    fn test_mauth_message_encoding() {
-        let auth_payload = Bytes::from(vec![1, 2, 3, 4]);
-        let mauth = MAuth::new(2, auth_payload.clone()); // protocol 2 = CEPHX
-
-        let msg = CephMessage::from_payload(&mauth, 0, CrcFlags::ALL).unwrap();
-
-        assert_eq!(msg.header.msg_type, CEPH_MSG_AUTH);
-        assert_eq!(msg.header.version, 1);
-        assert!(!msg.front.is_empty());
-
-        // Decode and verify
-        let decoded: MAuth = msg.decode_payload().unwrap();
-        assert_eq!(decoded.protocol, 2);
-        assert_eq!(decoded.auth_payload, auth_payload);
-    }
-
-    #[test]
-    fn test_mauth_reply_message_encoding() {
-        let auth_payload = Bytes::from(vec![5, 6, 7, 8]);
-        let reply = MAuthReply::new(2, 0, 12345, auth_payload.clone());
-
-        let msg = CephMessage::from_payload(&reply, 0, CrcFlags::ALL).unwrap();
-
-        assert_eq!(msg.header.msg_type, CEPH_MSG_AUTH_REPLY);
-        assert_eq!(msg.header.version, 1);
-        assert!(!msg.front.is_empty());
-
-        // Decode and verify
-        let decoded: MAuthReply = msg.decode_payload().unwrap();
-        assert_eq!(decoded.protocol, 2);
-        assert_eq!(decoded.result, 0);
-        assert_eq!(decoded.global_id, 12345);
-        assert_eq!(decoded.auth_payload, auth_payload);
     }
 }

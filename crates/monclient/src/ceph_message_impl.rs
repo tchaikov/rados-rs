@@ -7,6 +7,7 @@ use crate::messages::*;
 use crate::paxos_service_message::PaxosServiceMessage;
 use bytes::Bytes;
 use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+use msgr2::message::{CEPH_MSG_AUTH, CEPH_MSG_AUTH_REPLY};
 
 /// MMonSubscribe message version
 const MMON_SUBSCRIBE_VERSION: u16 = 3;
@@ -282,6 +283,57 @@ impl CephMessagePayload for MPoolOpReply {
     ) -> std::result::Result<Self, msgr2::Error> {
         PaxosServiceMessage::decode(front)
             .map_err(|_e| msgr2::Error::Deserialization("MPoolOpReply decode failed".into()))
+    }
+}
+
+// MAuth implementation
+impl CephMessagePayload for MAuth {
+    fn msg_type() -> u16 {
+        CEPH_MSG_AUTH
+    }
+
+    fn msg_version() -> u16 {
+        1
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MAuth decode failed".into()))
+    }
+}
+
+// MAuthReply implementation
+impl CephMessagePayload for MAuthReply {
+    fn msg_type() -> u16 {
+        CEPH_MSG_AUTH_REPLY
+    }
+
+    fn msg_version() -> u16 {
+        1
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        let mut data = front;
+        Self::decode(&mut data)
+            .map_err(|_e| msgr2::Error::Deserialization("MAuthReply decode failed".into()))
     }
 }
 

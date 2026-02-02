@@ -5,8 +5,8 @@
 use crate::error::{MonClientError, Result};
 use crate::paxos_service_message::{PaxosFields, PaxosServiceMessage};
 use crate::subscription::SubscribeItem;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
-use denc::{Denc, UuidD};
+use bytes::{Buf, Bytes, BytesMut};
+use denc::UuidD;
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -53,14 +53,13 @@ impl MMonSubscribe {
         use denc::Denc;
         let mut buf = BytesMut::new();
 
-        // Encode map size
-        buf.put_u32_le(self.what.len() as u32);
+        // Encode map size using Denc
+        (self.what.len() as u32).encode(&mut buf, 0)?;
 
         // Encode each subscription
         for (name, item) in &self.what {
             // Encode name using Denc
-            name.encode(&mut buf, 0)
-                .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
+            name.encode(&mut buf, 0)?;
             tracing::debug!(
                 "  📝 Subscription: '{}' start={} flags={}",
                 name,
@@ -68,15 +67,13 @@ impl MMonSubscribe {
                 item.flags
             );
 
-            // Encode subscribe item
-            buf.put_u64_le(item.start);
-            buf.put_u8(item.flags);
+            // Encode subscribe item using Denc
+            item.start.encode(&mut buf, 0)?;
+            item.flags.encode(&mut buf, 0)?;
         }
 
         // Encode hostname (version 3) using Denc
-        self.hostname
-            .encode(&mut buf, 0)
-            .map_err(|_| MonClientError::MessageError(msgr2::Error::Serialization))?;
+        self.hostname.encode(&mut buf, 0)?;
         tracing::debug!("  🖥️  Hostname: '{}'", self.hostname);
 
         let bytes = buf.freeze();
@@ -87,13 +84,10 @@ impl MMonSubscribe {
     /// Decode from message payload
     pub fn decode(mut data: &[u8]) -> Result<Self> {
         use denc::Denc;
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete MMonSubscribe".into(),
-            ));
-        }
 
-        let count = data.get_u32_le() as usize;
+        let count = u32::decode(&mut data, 0)
+            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode count: {}", e)))?
+            as usize;
         let mut what = HashMap::new();
 
         for _ in 0..count {
@@ -102,14 +96,9 @@ impl MMonSubscribe {
                 MonClientError::DecodingError(format!("Failed to decode name: {}", e))
             })?;
 
-            // Decode subscribe item
-            if data.remaining() < 9 {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete subscribe item".into(),
-                ));
-            }
-            let start = data.get_u64_le();
-            let flags = data.get_u8();
+            // Decode subscribe item using Denc
+            let start = u64::decode(&mut data, 0)?;
+            let flags = u8::decode(&mut data, 0)?;
 
             what.insert(name, SubscribeItem { start, flags });
         }
@@ -144,24 +133,24 @@ impl MMonSubscribeAck {
     }
 
     pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
         let mut buf = BytesMut::new();
-        buf.put_u32_le(self.interval);
-        buf.put_slice(self.fsid.as_bytes());
+        self.interval.encode(&mut buf, 0)?;
+
+        // Encode UUID using Denc
+        let uuid_denc = UuidD::from_bytes(*self.fsid.as_bytes());
+        uuid_denc.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 20 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete MMonSubscribeAck".into(),
-            ));
-        }
+        use denc::Denc;
 
-        let interval = data.get_u32_le();
+        let interval = u32::decode(&mut data, 0)?;
 
-        let mut fsid_bytes = [0u8; 16];
-        data.copy_to_slice(&mut fsid_bytes);
-        let fsid = Uuid::from_bytes(fsid_bytes);
+        // Decode UUID using Denc
+        let uuid_denc = UuidD::decode(&mut data, 0)?;
+        let fsid = Uuid::from_bytes(uuid_denc.bytes);
 
         Ok(Self { interval, fsid })
     }
@@ -182,10 +171,8 @@ impl MMonGetVersion {
     pub fn encode(&self) -> Result<Bytes> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        buf.put_u64_le(self.tid);
-        self.what
-            .encode(&mut buf, 0)
-            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
+        self.tid.encode(&mut buf, 0)?;
+        self.what.encode(&mut buf, 0)?;
         let result = buf.freeze();
         eprintln!(
             "DEBUG: MMonGetVersion::encode() tid={}, what='{}', payload={} bytes: {:02x?}",
@@ -199,13 +186,8 @@ impl MMonGetVersion {
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
         use denc::Denc;
-        if data.remaining() < 12 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete MMonGetVersion".into(),
-            ));
-        }
 
-        let tid = data.get_u64_le();
+        let tid = u64::decode(&mut data, 0)?;
         let what = String::decode(&mut data, 0).map_err(|e| {
             MonClientError::DecodingError(format!("Failed to decode what string: {}", e))
         })?;
@@ -232,23 +214,20 @@ impl MMonGetVersionReply {
     }
 
     pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
         let mut buf = BytesMut::new();
-        buf.put_u64_le(self.tid);
-        buf.put_u64_le(self.version);
-        buf.put_u64_le(self.oldest_version);
+        self.tid.encode(&mut buf, 0)?;
+        self.version.encode(&mut buf, 0)?;
+        self.oldest_version.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 24 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete MMonGetVersionReply".into(),
-            ));
-        }
+        use denc::Denc;
 
-        let tid = data.get_u64_le();
-        let version = data.get_u64_le();
-        let oldest_version = data.get_u64_le();
+        let tid = u64::decode(&mut data, 0)?;
+        let version = u64::decode(&mut data, 0)?;
+        let oldest_version = u64::decode(&mut data, 0)?;
 
         Ok(Self {
             tid,
@@ -270,25 +249,18 @@ impl MMonMap {
     }
 
     pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
         let mut buf = BytesMut::new();
-        buf.put_u32_le(self.monmap_bl.len() as u32);
-        buf.put_slice(&self.monmap_bl);
+        // Use Denc for Bytes which handles length prefix automatically
+        self.monmap_bl.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError("Incomplete MMonMap".into()));
-        }
+        use denc::Denc;
 
-        let len = data.get_u32_le() as usize;
-        if data.remaining() < len {
-            return Err(MonClientError::DecodingError(
-                "Incomplete monmap data".into(),
-            ));
-        }
-
-        let monmap_bl = Bytes::copy_from_slice(&data[..len]);
+        // Use Denc for Bytes which handles length prefix automatically
+        let monmap_bl = Bytes::decode(&mut data, 0)?;
         Ok(Self { monmap_bl })
     }
 }
@@ -305,72 +277,39 @@ pub struct MOSDMap {
 
 impl MOSDMap {
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        // Decode fsid (16 bytes)
-        if data.remaining() < 16 {
-            return Err(MonClientError::DecodingError("Incomplete fsid".into()));
-        }
-        let mut fsid = [0u8; 16];
-        data.copy_to_slice(&mut fsid);
+        use denc::Denc;
+
+        // Decode fsid using Denc (16 bytes)
+        let fsid_denc = UuidD::decode(&mut data, 0)?;
+        let fsid = fsid_denc.bytes;
 
         // Decode incremental_maps (map<epoch_t, buffer::list>)
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete incremental_maps count".into(),
-            ));
-        }
-        let inc_count = data.get_u32_le();
+        let inc_count = u32::decode(&mut data, 0)? as usize;
         let mut incremental_maps = HashMap::new();
         for _ in 0..inc_count {
-            if data.remaining() < 8 {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete incremental_maps entry".into(),
-                ));
-            }
-            let epoch = data.get_u32_le();
-            let len = data.get_u32_le() as usize;
-            if data.remaining() < len {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete incremental_maps data".into(),
-                ));
-            }
-            let map_data = Bytes::copy_from_slice(&data[..len]);
-            data.advance(len);
+            let epoch = u32::decode(&mut data, 0)?;
+            let map_data = Bytes::decode(&mut data, 0)?;
             incremental_maps.insert(epoch, map_data);
         }
 
         // Decode maps (map<epoch_t, buffer::list>)
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete maps count".into(),
-            ));
-        }
-        let maps_count = data.get_u32_le();
+        let maps_count = u32::decode(&mut data, 0)? as usize;
         let mut maps = HashMap::new();
         for _ in 0..maps_count {
-            if data.remaining() < 8 {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete maps entry".into(),
-                ));
-            }
-            let epoch = data.get_u32_le();
-            let len = data.get_u32_le() as usize;
-            if data.remaining() < len {
-                return Err(MonClientError::DecodingError("Incomplete maps data".into()));
-            }
-            let map_data = Bytes::copy_from_slice(&data[..len]);
-            data.advance(len);
+            let epoch = u32::decode(&mut data, 0)?;
+            let map_data = Bytes::decode(&mut data, 0)?;
             maps.insert(epoch, map_data);
         }
 
         // Decode cluster_osdmap_trim_lower_bound and newest_map (version >= 2)
         let cluster_osdmap_trim_lower_bound = if data.remaining() >= 4 {
-            data.get_u32_le()
+            u32::decode(&mut data, 0)?
         } else {
             0
         };
 
         let newest_map = if data.remaining() >= 4 {
-            data.get_u32_le()
+            u32::decode(&mut data, 0)?
         } else {
             0
         };
@@ -443,22 +382,21 @@ impl PaxosServiceMessage for MMonCommand {
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
+        use denc::Denc;
+
         // Encode fsid (UUID) using Denc
         tracing::debug!(
             "MMonCommand::encode_message: fsid={}, bytes={:02x?}",
             self.fsid,
             self.fsid.bytes
         );
-        self.fsid
-            .encode(buf, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to encode fsid: {}", e)))?;
+        self.fsid.encode(buf, 0)?;
         tracing::debug!("MMonCommand::encode: fsid={}", self.fsid);
 
         // Encode command array using Denc
-        buf.put_u32_le(self.cmd.len() as u32);
+        (self.cmd.len() as u32).encode(buf, 0)?;
         for s in &self.cmd {
-            s.encode(buf, 0)
-                .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
+            s.encode(buf, 0)?;
         }
         tracing::debug!("MMonCommand::encode: cmd={:?}", self.cmd);
 
@@ -466,23 +404,17 @@ impl PaxosServiceMessage for MMonCommand {
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
         // Decode fsid (UUID) using Denc
-        let fsid = UuidD::decode(data, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode fsid: {}", e)))?;
+        let fsid = UuidD::decode(data, 0)?;
 
         // Decode command array using Denc
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete command count".into(),
-            ));
-        }
-        let cmd_count = data.get_u32_le() as usize;
+        let cmd_count = u32::decode(data, 0)? as usize;
         let mut cmd = Vec::with_capacity(cmd_count);
 
         for _ in 0..cmd_count {
-            let s = String::decode(data, 0).map_err(|e| {
-                MonClientError::DecodingError(format!("Failed to decode command string: {}", e))
-            })?;
+            let s = String::decode(data, 0)?;
             cmd.push(s);
         }
 
@@ -528,26 +460,26 @@ impl PaxosServiceMessage for MMonCommandAck {
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
-        // Encode r (errorcode32_t)
-        buf.put_i32_le(self.r);
+        use denc::Denc;
 
-        // Encode rs string
+        // Encode r (errorcode32_t)
+        self.r.encode(buf, 0)?;
+
         // Encode rs string using Denc
-        self.rs
-            .encode(buf, 0)
-            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
+        self.rs.encode(buf, 0)?;
 
         // Encode cmd array using Denc
-        buf.put_u32_le(self.cmd.len() as u32);
+        (self.cmd.len() as u32).encode(buf, 0)?;
         for s in &self.cmd {
-            s.encode(buf, 0)
-                .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
+            s.encode(buf, 0)?;
         }
 
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
         tracing::debug!(
             "MMonCommandAck::decode: data.len()={}, first 32 bytes: {:02x?}",
             data.len(),
@@ -555,29 +487,15 @@ impl PaxosServiceMessage for MMonCommandAck {
         );
 
         // Decode r (errorcode32_t)
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(format!(
-                "Incomplete r field: need 4 bytes, got {}",
-                data.remaining()
-            )));
-        }
-        let r = data.get_i32_le();
+        let r = i32::decode(data, 0)?;
 
         tracing::debug!("Decoded r={}, remaining={}", r, data.remaining());
 
         // Decode rs string using Denc
-        let rs = String::decode(data, 0).map_err(|e| {
-            MonClientError::DecodingError(format!("Failed to decode rs string: {}", e))
-        })?;
+        let rs = String::decode(data, 0)?;
 
         // Decode cmd array using Denc
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(format!(
-                "Incomplete cmd count: need 4 bytes, got {}",
-                data.remaining()
-            )));
-        }
-        let cmd_count = data.get_u32_le() as usize;
+        let cmd_count = u32::decode(data, 0)? as usize;
         tracing::debug!("cmd_count={}, remaining={}", cmd_count, data.remaining());
 
         let mut cmd = Vec::with_capacity(cmd_count);
@@ -684,83 +602,61 @@ impl PaxosServiceMessage for MPoolOp {
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
+        use denc::Denc;
+
         // Encode fsid (UUID) using Denc
-        self.fsid
-            .encode(buf, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to encode fsid: {}", e)))?;
+        self.fsid.encode(buf, 0)?;
 
         // Encode pool
-        buf.put_u32_le(self.pool);
+        self.pool.encode(buf, 0)?;
 
         // Encode op
-        buf.put_u32_le(self.op);
+        self.op.encode(buf, 0)?;
 
         // Encode old_auid (obsolete, always 0)
-        buf.put_u64_le(0);
+        0u64.encode(buf, 0)?;
 
         // Encode snapid
-        buf.put_u64_le(self.snapid);
+        self.snapid.encode(buf, 0)?;
 
         // Encode name using Denc
-        self.name
-            .encode(buf, 0)
-            .map_err(|_e| MonClientError::MessageError(msgr2::Error::Serialization))?;
+        self.name.encode(buf, 0)?;
 
         // Encode pad (for v3->v4 encoding change)
-        buf.put_u8(0);
+        0u8.encode(buf, 0)?;
 
         // Encode crush_rule
-        buf.put_i16_le(self.crush_rule);
+        self.crush_rule.encode(buf, 0)?;
 
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
         // Decode fsid (UUID) using Denc
-        let fsid = UuidD::decode(data, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode fsid: {}", e)))?;
+        let fsid = UuidD::decode(data, 0)?;
 
         // Decode pool
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError("Incomplete pool".into()));
-        }
-        let pool = data.get_u32_le();
+        let pool = u32::decode(data, 0)?;
 
         // Decode op
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError("Incomplete op".into()));
-        }
-        let op = data.get_u32_le();
+        let op = u32::decode(data, 0)?;
 
         // Decode old_auid (obsolete)
-        if data.remaining() < 8 {
-            return Err(MonClientError::DecodingError("Incomplete old_auid".into()));
-        }
-        let _old_auid = data.get_u64_le();
+        let _old_auid = u64::decode(data, 0)?;
 
         // Decode snapid
-        if data.remaining() < 8 {
-            return Err(MonClientError::DecodingError("Incomplete snapid".into()));
-        }
-        let snapid = data.get_u64_le();
+        let snapid = u64::decode(data, 0)?;
 
         // Decode name using Denc
-        let name = String::decode(data, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode name: {}", e)))?;
+        let name = String::decode(data, 0)?;
 
         // Decode pad (for v3->v4 encoding change)
-        if data.remaining() < 1 {
-            return Err(MonClientError::DecodingError("Incomplete pad".into()));
-        }
-        let _pad = data.get_u8();
+        let _pad = u8::decode(data, 0)?;
 
         // Decode crush_rule
-        if data.remaining() < 2 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete crush_rule".into(),
-            ));
-        }
-        let crush_rule = data.get_i16_le();
+        let crush_rule = i16::decode(data, 0)?;
 
         Ok(Self {
             paxos,
@@ -813,69 +709,45 @@ impl PaxosServiceMessage for MPoolOpReply {
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
+        use denc::Denc;
+
         // Encode fsid (UUID) using Denc
-        self.fsid
-            .encode(buf, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to encode fsid: {}", e)))?;
+        self.fsid.encode(buf, 0)?;
 
         // Encode reply_code
-        buf.put_u32_le(self.reply_code);
+        self.reply_code.encode(buf, 0)?;
 
         // Encode epoch
-        buf.put_u32_le(self.epoch);
+        self.epoch.encode(buf, 0)?;
 
         // Encode response_data (optional)
         if !self.response_data.is_empty() {
-            buf.put_u8(1); // has_data = true
-            buf.put_u32_le(self.response_data.len() as u32);
-            buf.put_slice(&self.response_data);
+            1u8.encode(buf, 0)?; // has_data = true
+            self.response_data.encode(buf, 0)?;
         } else {
-            buf.put_u8(0); // has_data = false
+            0u8.encode(buf, 0)?; // has_data = false
         }
 
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
         // Decode fsid (UUID) using Denc
-        let fsid = UuidD::decode(data, 0)
-            .map_err(|e| MonClientError::DecodingError(format!("Failed to decode fsid: {}", e)))?;
+        let fsid = UuidD::decode(data, 0)?;
 
         // Decode reply_code
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError(
-                "Incomplete reply_code".into(),
-            ));
-        }
-        let reply_code = data.get_u32_le();
+        let reply_code = u32::decode(data, 0)?;
 
         // Decode epoch
-        if data.remaining() < 4 {
-            return Err(MonClientError::DecodingError("Incomplete epoch".into()));
-        }
-        let epoch = data.get_u32_le();
+        let epoch = u32::decode(data, 0)?;
 
         // Decode response_data (optional)
-        if data.remaining() < 1 {
-            return Err(MonClientError::DecodingError("Incomplete has_data".into()));
-        }
-        let has_data = data.get_u8();
+        let has_data = u8::decode(data, 0)?;
 
         let response_data = if has_data != 0 {
-            if data.remaining() < 4 {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete response_data length".into(),
-                ));
-            }
-            let len = data.get_u32_le() as usize;
-            if data.remaining() < len {
-                return Err(MonClientError::DecodingError(
-                    "Incomplete response_data".into(),
-                ));
-            }
-            let bytes = Bytes::copy_from_slice(&data[..len]);
-            data.advance(len);
-            bytes
+            Bytes::decode(data, 0)?
         } else {
             Bytes::new()
         };
@@ -886,6 +758,147 @@ impl PaxosServiceMessage for MPoolOpReply {
             reply_code,
             epoch,
             response_data,
+        })
+    }
+}
+
+/// MAuth - Authentication request message
+///
+/// This message is used for authentication with the monitor, including:
+/// - Initial authentication during connection setup
+/// - Ticket renewal requests
+///
+/// This is a PaxosServiceMessage, so it includes paxos fields.
+#[derive(Debug, Clone)]
+pub struct MAuth {
+    // PaxosServiceMessage fields
+    pub paxos: PaxosFields,
+
+    // MAuth-specific fields
+    pub protocol: u32,
+    pub auth_payload: Bytes,
+    pub monmap_epoch: u32,
+}
+
+impl MAuth {
+    pub fn new(protocol: u32, auth_payload: Bytes) -> Self {
+        Self {
+            paxos: PaxosFields::new(),
+            protocol,
+            auth_payload,
+            monmap_epoch: 0,
+        }
+    }
+}
+
+impl PaxosServiceMessage for MAuth {
+    fn paxos_fields(&self) -> &PaxosFields {
+        &self.paxos
+    }
+
+    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
+        &mut self.paxos
+    }
+
+    fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
+        use denc::Denc;
+        self.protocol.encode(buf, 0)?;
+        self.auth_payload.encode(buf, 0)?;
+        self.monmap_epoch.encode(buf, 0)?;
+        Ok(())
+    }
+
+    fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
+        let protocol = u32::decode(data, 0)?;
+        let auth_payload = Bytes::decode(data, 0)?;
+
+        // monmap_epoch is optional (for backwards compatibility)
+        let monmap_epoch = if !data.is_empty() {
+            u32::decode(data, 0)?
+        } else {
+            0
+        };
+
+        Ok(Self {
+            paxos,
+            protocol,
+            auth_payload,
+            monmap_epoch,
+        })
+    }
+}
+
+/// MAuthReply - Authentication reply message
+///
+/// This message is sent by the monitor in response to MAuth.
+/// Note: This is NOT a PaxosServiceMessage (it inherits from Message in C++).
+#[derive(Debug, Clone)]
+pub struct MAuthReply {
+    pub protocol: u32,
+    pub result: i32,
+    pub global_id: u64,
+    pub result_msg: String,
+    pub auth_payload: Bytes,
+}
+
+impl MAuthReply {
+    pub fn new(
+        protocol: u32,
+        result: i32,
+        global_id: u64,
+        result_msg: String,
+        auth_payload: Bytes,
+    ) -> Self {
+        Self {
+            protocol,
+            result,
+            global_id,
+            result_msg,
+            auth_payload,
+        }
+    }
+
+    /// Encode the message payload
+    pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
+        let mut buf = BytesMut::new();
+
+        self.protocol.encode(&mut buf, 0)?;
+        self.result.encode(&mut buf, 0)?;
+        self.global_id.encode(&mut buf, 0)?;
+
+        // Encode result_msg as length-prefixed string
+        let msg_bytes = Bytes::from(self.result_msg.as_bytes().to_vec());
+        msg_bytes.encode(&mut buf, 0)?;
+
+        self.auth_payload.encode(&mut buf, 0)?;
+
+        Ok(buf.freeze())
+    }
+
+    /// Decode the message payload
+    pub fn decode(data: &mut &[u8]) -> Result<Self> {
+        use denc::Denc;
+
+        let protocol = u32::decode(data, 0)?;
+        let result = i32::decode(data, 0)?;
+        let global_id = u64::decode(data, 0)?;
+
+        // Decode result_msg as string
+        let result_msg_bytes = Bytes::decode(data, 0)?;
+        let result_msg = String::from_utf8(result_msg_bytes.to_vec())
+            .map_err(|e| MonClientError::Other(format!("Invalid UTF-8 in result_msg: {}", e)))?;
+
+        let auth_payload = Bytes::decode(data, 0)?;
+
+        Ok(Self {
+            protocol,
+            result,
+            global_id,
+            result_msg,
+            auth_payload,
         })
     }
 }

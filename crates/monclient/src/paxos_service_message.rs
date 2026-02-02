@@ -4,8 +4,8 @@
 //! that inherit from PaxosServiceMessage in Ceph. These messages include
 //! common paxos fields that must be encoded/decoded consistently.
 
-use crate::error::{MonClientError, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crate::error::Result;
+use bytes::{Bytes, BytesMut};
 
 /// Common fields for all PaxosServiceMessage types
 ///
@@ -41,25 +41,21 @@ impl PaxosFields {
     }
 
     /// Encode paxos fields to buffer (paxos_encode in C++)
-    pub fn encode(&self, buf: &mut BytesMut) {
-        buf.put_u64_le(self.version);
-        buf.put_i16_le(self.deprecated_session_mon);
-        buf.put_u64_le(self.deprecated_session_mon_tid);
+    pub fn encode(&self, buf: &mut BytesMut) -> crate::error::Result<()> {
+        use denc::Denc;
+        self.version.encode(buf, 0)?;
+        self.deprecated_session_mon.encode(buf, 0)?;
+        self.deprecated_session_mon_tid.encode(buf, 0)?;
+        Ok(())
     }
 
     /// Decode paxos fields from buffer (paxos_decode in C++)
     pub fn decode(data: &mut &[u8]) -> Result<Self> {
-        if data.remaining() < 18 {
-            // 8 + 2 + 8 = 18 bytes
-            return Err(MonClientError::DecodingError(format!(
-                "Incomplete PaxosFields: need 18 bytes, got {}",
-                data.remaining()
-            )));
-        }
+        use denc::Denc;
 
-        let version = data.get_u64_le();
-        let deprecated_session_mon = data.get_i16_le();
-        let deprecated_session_mon_tid = data.get_u64_le();
+        let version = u64::decode(data, 0)?;
+        let deprecated_session_mon = i16::decode(data, 0)?;
+        let deprecated_session_mon_tid = u64::decode(data, 0)?;
 
         Ok(Self {
             version,
@@ -100,7 +96,7 @@ pub trait PaxosServiceMessage: Sized {
         let mut buf = BytesMut::new();
 
         // Encode paxos fields first
-        self.paxos_fields().encode(&mut buf);
+        self.paxos_fields().encode(&mut buf)?;
 
         // Encode message-specific fields
         self.encode_message(&mut buf)?;
@@ -131,7 +127,7 @@ mod tests {
         };
 
         let mut buf = BytesMut::new();
-        fields.encode(&mut buf);
+        fields.encode(&mut buf).unwrap();
 
         assert_eq!(buf.len(), PaxosFields::encoded_size());
 

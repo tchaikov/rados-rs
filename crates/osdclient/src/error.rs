@@ -27,6 +27,9 @@ pub enum OSDClientError {
     #[error("Msgr2 error: {0}")]
     Msgr2(#[from] msgr2::Error),
 
+    #[error("Denc error: {0}")]
+    Denc(#[from] denc::RadosError),
+
     #[error("Authentication error: {0}")]
     Auth(String),
 

@@ -1018,7 +1018,7 @@ impl MonClient {
                         debug!("Built ticket renewal request: {} bytes", auth_payload.len());
 
                         // Create MAuth message with CEPHX protocol (2)
-                        let mauth = msgr2::ceph_message::MAuth::new(2, auth_payload);
+                        let mauth = crate::messages::MAuth::new(2, auth_payload);
 
                         // Convert to CephMessage and then to Message
                         let ceph_msg = msgr2::ceph_message::CephMessage::from_payload(

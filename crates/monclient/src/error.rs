@@ -51,6 +51,9 @@ pub enum MonClientError {
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
 
+    #[error("Rados error: {0}")]
+    RadosError(#[from] denc::error::RadosError),
+
     #[error("Other error: {0}")]
     Other(String),
 }

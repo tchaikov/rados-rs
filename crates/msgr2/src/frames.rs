@@ -7,7 +7,7 @@
 //   - Tag enum and protocol constants
 
 use crate::header::MsgHeader;
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use denc::RadosError;
 
@@ -328,49 +328,51 @@ impl Preamble {
     }
 
     pub fn encode(&self) -> Bytes {
+        use denc::Denc;
         let mut buf = BytesMut::with_capacity(PREAMBLE_SIZE);
 
-        buf.put_u8(self.tag as u8);
-        buf.put_u8(self.num_segments);
+        (self.tag as u8).encode(&mut buf, 0).unwrap();
+        self.num_segments.encode(&mut buf, 0).unwrap();
 
         for segment in &self.segments {
-            buf.put_u32_le(segment.logical_len);
-            buf.put_u16_le(segment.align);
+            segment.logical_len.encode(&mut buf, 0).unwrap();
+            segment.align.encode(&mut buf, 0).unwrap();
         }
 
-        buf.put_u8(self.flags);
-        buf.put_u8(self.reserved);
+        self.flags.encode(&mut buf, 0).unwrap();
+        self.reserved.encode(&mut buf, 0).unwrap();
 
         // Calculate CRC using Ceph's non-standard CRC32C algorithm
         // Ceph's ceph_crc32c() produces different results than standard CRC32C
         // We need to match Ceph's algorithm: !crc32c_append(0xFFFFFFFF, data)
         let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
 
-        buf.put_u32_le(crc);
+        crc.encode(&mut buf, 0).unwrap();
 
         buf.freeze()
     }
 
     pub fn decode(mut buf: Bytes) -> Result<Self, RadosError> {
+        use denc::Denc;
         if buf.len() < PREAMBLE_SIZE {
             return Err(RadosError::Protocol("Preamble too short".to_string()));
         }
 
-        let tag = Tag::try_from(buf.get_u8())?;
-        let num_segments = buf.get_u8();
+        let tag = Tag::try_from(u8::decode(&mut buf, 0)?)?;
+        let num_segments = u8::decode(&mut buf, 0)?;
 
         let mut segments = [SegmentDescriptor {
             logical_len: 0,
             align: 0,
         }; MAX_NUM_SEGMENTS];
         for segment in segments.iter_mut() {
-            segment.logical_len = buf.get_u32_le();
-            segment.align = buf.get_u16_le();
+            segment.logical_len = u32::decode(&mut buf, 0)?;
+            segment.align = u16::decode(&mut buf, 0)?;
         }
 
-        let flags = buf.get_u8();
-        let reserved = buf.get_u8();
-        let crc = buf.get_u32_le();
+        let flags = u8::decode(&mut buf, 0)?;
+        let reserved = u8::decode(&mut buf, 0)?;
+        let crc = u32::decode(&mut buf, 0)?;
 
         // TODO: Verify CRC
 
