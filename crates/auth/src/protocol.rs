@@ -142,6 +142,60 @@ impl Denc for EncryptedServiceTicket {
     }
 }
 
+/// Complete service ticket information
+///
+/// Represents a single service ticket entry in the service ticket reply.
+/// Contains all fields needed to authenticate with a specific service.
+///
+/// Wire format:
+/// - `service_id: u32` - Service type (MON=6, OSD=4, MDS=2, MGR=32)
+/// - `encrypted_service_ticket: EncryptedServiceTicket` - Encrypted ticket
+/// - `ticket_enc: u8` - Ticket encoding type (1 = encrypted, 0 = unencrypted)
+/// - `ticket_blob: CephXTicketBlob` - The actual ticket blob for the service
+#[derive(Debug, Clone)]
+pub struct ServiceTicketInfo {
+    pub service_id: u32,
+    pub encrypted_service_ticket: EncryptedServiceTicket,
+    pub ticket_enc: u8,
+    pub ticket_blob: CephXTicketBlob,
+}
+
+impl Denc for ServiceTicketInfo {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        self.service_id.encode(buf, 0)?;
+        self.encrypted_service_ticket.encode(buf, features)?;
+        self.ticket_enc.encode(buf, 0)?;
+        self.ticket_blob.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        let service_id = u32::decode(buf, 0)?;
+        let encrypted_service_ticket = EncryptedServiceTicket::decode(buf, features)?;
+        let ticket_enc = u8::decode(buf, 0)?;
+        let ticket_blob = CephXTicketBlob::decode(buf, features)?;
+        Ok(Self {
+            service_id,
+            encrypted_service_ticket,
+            ticket_enc,
+            ticket_blob,
+        })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(
+            4 + // service_id
+            self.encrypted_service_ticket.encoded_size(features)? +
+            1 + // ticket_enc
+            self.ticket_blob.encoded_size(features)?,
+        )
+    }
+}
+
 /// Authentication modes
 /// From src/auth/Auth.h
 // Auth modes for different Ceph services
