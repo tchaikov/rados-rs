@@ -49,6 +49,20 @@ Msgr2 protocol implemented in:
 
 ---
 
+## Development Workflow
+
+### Incremental Development Process
+
+**CRITICAL:** After EVERY code change:
+1. Run full integration test suite: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored --test-threads=1`
+2. If ALL tests pass → commit immediately with descriptive message
+3. If ANY test fails → revert the change and investigate
+4. Move to next change
+
+**Never** accumulate multiple changes in one commit. This makes it easy to identify which specific change caused a regression.
+
+---
+
 ## Development Cluster
 
 ### Starting the Cluster
