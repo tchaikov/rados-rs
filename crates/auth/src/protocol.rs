@@ -57,6 +57,51 @@ impl Denc for CephXServiceTicketRequest {
     }
 }
 
+/// CephX service ticket structure (encrypted payload)
+///
+/// Corresponds to C++ `struct CephXServiceTicket` in `/src/auth/cephx/CephxProtocol.h`
+///
+/// C++ encoding format:
+/// - `__u8 struct_v` - Structure version (currently 1)
+/// - `CryptoKey session_key` - Session key for the service
+/// - `utime_t validity` - Ticket validity period
+///
+/// This structure is sent encrypted inside the AUTH_DONE response.
+/// It contains the session key and validity for a specific service.
+#[derive(Debug, Clone)]
+pub struct CephXServiceTicket {
+    pub session_key: CryptoKey,
+    pub validity: std::time::Duration,
+}
+
+impl Denc for CephXServiceTicket {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        1u8.encode(buf, 0)?; // struct_v
+        self.session_key.encode(buf, 0)?;
+        self.validity.encode(buf, 0)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        let _struct_v = u8::decode(buf, 0)?;
+        let session_key = CryptoKey::decode(buf, 0)?;
+        let validity = std::time::Duration::decode(buf, 0)?;
+        Ok(Self {
+            session_key,
+            validity,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // struct_v (1) + session_key (variable) + validity (8)
+        Some(1 + self.session_key.encoded_size(0)? + 8)
+    }
+}
+
 /// Authentication modes
 /// From src/auth/Auth.h
 // Auth modes for different Ceph services

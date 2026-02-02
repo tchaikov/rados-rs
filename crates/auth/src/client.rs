@@ -382,8 +382,8 @@ impl CephXClientHandler {
         auth_payload: &mut Bytes,
         secret_key: &CryptoKey,
     ) -> Result<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> {
-        use crate::protocol::AUTH_ENC_MAGIC;
-        use bytes::Buf; // Keep for get_u8() calls
+        use crate::protocol::CephXEncryptedEnvelope;
+        use bytes::Buf;
 
         // Read service_id
         if auth_payload.len() < 4 {
@@ -394,10 +394,6 @@ impl CephXClientHandler {
         let service_id = u32::decode(auth_payload, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to decode service_id: {}", e))
         })?;
-        eprintln!(
-            "DEBUG: parse_service_ticket: Parsing ticket for service_id: {} (0x{:08x})",
-            service_id, service_id
-        );
         debug!(
             "Parsing ticket for service_id: {} (0x{:08x})",
             service_id, service_id
@@ -435,61 +431,32 @@ impl CephXClientHandler {
         let decrypted = secret_key.decrypt(&encrypted_ticket)?;
         let mut decrypted_data = decrypted;
 
-        // Parse decrypted data: [struct_v:u8][magic:u64][CephXServiceTicket_struct_v:u8][session_key:CryptoKey][validity:utime_t]
-        if decrypted_data.len() < 9 {
-            return Err(CephXError::ProtocolError(
-                "Decrypted ticket too short".into(),
-            ));
-        }
-
-        let _struct_v = decrypted_data.get_u8();
-        let magic = u64::decode(&mut decrypted_data, 0)
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode magic: {}", e)))?;
-
-        if magic != AUTH_ENC_MAGIC {
-            return Err(CephXError::CryptographicError(format!(
-                "Bad magic in decrypted ticket: 0x{:016x}",
-                magic
-            )));
-        }
-
-        // CephXServiceTicket struct_v
-        if decrypted_data.is_empty() {
-            return Err(CephXError::ProtocolError(
-                "No data for CephXServiceTicket struct_v".into(),
-            ));
-        }
-        let ticket_struct_v = decrypted_data.get_u8();
-        debug!("CephXServiceTicket struct_v: {}", ticket_struct_v);
-
-        // Decode session_key
-        let session_key = CryptoKey::decode(&mut decrypted_data, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode session_key: {:?}", e))
+        // Decode using CephXEncryptedEnvelope<CephXServiceTicket>
+        // This handles: struct_v, magic verification, and CephXServiceTicket decoding
+        let envelope = CephXEncryptedEnvelope::<crate::protocol::CephXServiceTicket>::decode(
+            &mut decrypted_data,
+            0,
+        )
+        .map_err(|e| {
+            CephXError::ProtocolError(format!(
+                "Failed to decode CephXServiceTicket envelope: {}",
+                e
+            ))
         })?;
+
+        let service_ticket = envelope.payload;
         debug!(
             "Service {} session key type: {}, length: {}",
             service_id,
-            session_key.get_type(),
-            session_key.len()
+            service_ticket.session_key.get_type(),
+            service_ticket.session_key.len()
         );
-
-        // Decode validity using Duration's Denc implementation
-        let validity_duration = if decrypted_data.len() >= 8 {
-            use denc::Denc;
-            let duration = Duration::decode(&mut decrypted_data, 0).map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode validity: {}", e))
-            })?;
-            debug!("Validity: {:?}", duration);
-            duration
-        } else {
-            // Default validity if not specified
-            Duration::from_secs(3600) // 1 hour
-        };
+        debug!("Validity: {:?}", service_ticket.validity);
 
         // Check if session key is CEPH_CRYPTO_NONE (type 0, length 0)
         // This indicates a dummy/placeholder ticket with no actual ticket blob
         // This can happen for extra tickets that are not fully populated
-        if session_key.get_type() == 0 && session_key.is_empty() {
+        if service_ticket.session_key.get_type() == 0 && service_ticket.session_key.is_empty() {
             debug!(
                 "Service {} has CEPH_CRYPTO_NONE session key, skipping ticket blob parsing",
                 service_id
@@ -497,10 +464,10 @@ impl CephXClientHandler {
             // Return a minimal ticket with empty blob
             return Ok((
                 service_id,
-                session_key,
+                service_ticket.session_key,
                 0, // secret_id
                 CephXTicketBlob::new(0, Bytes::new()),
-                validity_duration,
+                service_ticket.validity,
             ));
         }
 
@@ -558,10 +525,10 @@ impl CephXClientHandler {
 
         Ok((
             service_id,
-            session_key,
+            service_ticket.session_key,
             secret_id,
             ticket_blob,
-            validity_duration,
+            service_ticket.validity,
         ))
     }
 
