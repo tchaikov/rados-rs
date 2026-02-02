@@ -272,29 +272,17 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 /// ```
 impl Denc for Duration {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for Duration: need 8, have {}",
-                buf.remaining_mut()
-            )));
-        }
         // Truncate to u32::MAX seconds if necessary (matches Ceph behavior)
         let sec = self.as_secs().min(u32::MAX as u64) as u32;
         let nsec = self.subsec_nanos();
-        buf.put_u32_le(sec);
-        buf.put_u32_le(nsec);
+        sec.encode(buf, 0)?;
+        nsec.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for Duration: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        let sec = buf.get_u32_le();
-        let nsec = buf.get_u32_le();
+        let sec = u32::decode(buf, 0)?;
+        let nsec = u32::decode(buf, 0)?;
         Ok(Duration::new(sec as u64, nsec))
     }
 
@@ -337,32 +325,20 @@ impl FixedSize for Duration {
 /// ```
 impl Denc for SystemTime {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for SystemTime: need 8, have {}",
-                buf.remaining_mut()
-            )));
-        }
         let duration = self
             .duration_since(UNIX_EPOCH)
             .map_err(|_| RadosError::Protocol("SystemTime before UNIX_EPOCH".to_string()))?;
         // Truncate to u32::MAX seconds if necessary (matches Ceph's 2106 limit)
         let sec = duration.as_secs().min(u32::MAX as u64) as u32;
         let nsec = duration.subsec_nanos();
-        buf.put_u32_le(sec);
-        buf.put_u32_le(nsec);
+        sec.encode(buf, 0)?;
+        nsec.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for SystemTime: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        let sec = buf.get_u32_le();
-        let nsec = buf.get_u32_le();
+        let sec = u32::decode(buf, 0)?;
+        let nsec = u32::decode(buf, 0)?;
         Ok(UNIX_EPOCH + Duration::new(sec as u64, nsec))
     }
 
