@@ -1,101 +1,171 @@
-## Ceph encoding
+# Rados-rs Development Guide
 
-- 使用env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 CEPH_LIB=$HOME/dev/ceph/build/lib ~/dev/ceph/build/bin/ceph-dencoder type pg_pool_t import ~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_pool_t/453c7bee75dca4766602cee267caa589 decode dump_json可以以 json 格式 dump pg_pool_t 的内容
-- ~/dev/ceph/src/include/denc.h 是 ceph 编码解码的实现
-- ~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects 下保存着很多 ceph 类型 encode 得到的二进制文件，我们把它们叫做 corpus
-- 这个项目的目标是用 rust 实现 librados。
-- 当本项目无法正常解码的时候，我们可以用 "cd ~/dev/ceph/build; bin/ceph-dencoder" 来分析 corpus 的内容，提供参考。
-- OSDMap 的定义在 ~/dev/ceph/src/osd/OSDMap.h 和 ~/dev/ceph/src/osd/OSDMap.cc 里
-- 我们在编码时当时采用的 features 可能会影响编码的结果，这是除了 Sized 的另外一种和 Denc 相关的编译期属性，我们也许也可以用 trait 表示，因为有的类型的编码会受到 features 影响，而有的不会。请注意，那些会被 features 影响的类型会使用 WRITE_CLASS_ENCODER_FEATURES 来对这种行为进行标注。
+A Rust implementation of librados for Ceph cluster communication.
 
-## local resources
+## Table of Contents
 
-- ceph's source code is located at ~/dev/ceph
-- the official document for the messenger v2 protocol is located at ~/dev/ceph/doc/dev/msgr2.rst
-- the msgr2 protocol is implemented in following places
-  - ~/dev/ceph/src/crimson/net/ProtocolV2.cc
-  - ~/dev/ceph/src/crimson/net/ProtocolV2.h
-  - ~/dev/ceph/src/crimson/net/FrameAssemblerV2.cc
-  - ~/dev/ceph/src/crimson/net/FrameAssemblerV2.h
-  - ~/dev/ceph/src/msg/async/ProtocolV2.cc
-  - ~/dev/ceph/src/msg/async/ProtocolV2.h
-  - ~/dev/ceph/src/msg/async/frames_v2.cc
-  - ~/dev/ceph/src/msg/async/frames_v2.h
-  
-## cluster for testing
+- [Project Overview](#project-overview)
+- [Local Resources](#local-resources)
+- [Development Cluster](#development-cluster)
+- [Coding Standards](#coding-standards)
+- [Verification Workflow](#verification-workflow)
+- [Architecture Notes](#architecture-notes)
 
-- there is a cluster running locally. it's setting is located at `/home/kefu/dev/ceph/build/ceph.conf`, use `cd ~/dev/ceph/build; ../src/vstart.sh -d --without-dashboard` to start it, and use `cd ~/dev/ceph/build; ../src/stop.sh` to stop it
-- please use `LD_PRELOAD=/usr/lib/libasan.so.8 /home/kefu/dev/ceph/build/bin/ceph --conf "/home/kefu/dev/ceph/build/ceph.conf" -s 2>/dev/null` to run the offical client to verify the behavior, or when we need to dump the TCP traffic to cross check with our own implementation`
+---
 
-## guidelines
+## Project Overview
 
-- do not start from scratch.
-- always fix existing code
-- test encoding using dencoder in this project, and verify it using ceph-dencoder with the corpus fro ceph project
+### Goal
+Implement Ceph type encoding/decoding and librados functionality in Rust.
 
-## Denc Coding Principles
+### Key Technologies
+- **Ceph Protocol**: msgr2 (messenger v2) for network communication
+- **Encoding**: Denc trait for efficient serialization/deserialization
+- **Authentication**: CephX authentication protocol
 
-### Always Use Denc Trait
+---
 
-- **NEVER** manually encode/decode primitive types with `get_u*_le()`/`put_u*_le()`
-- **ALWAYS** use the Denc trait: `u32::decode(&mut buf, 0)?` and `value.encode(&mut buf, 0)?`
-- **ALWAYS** use `Bytes::decode()` for length-prefixed data instead of manual length extraction
+## Local Resources
 
-### Error Handling
+### Ceph Source Code
+- **Location**: `~/dev/ceph`
+- **Build directory**: `~/dev/ceph/build`
 
-- **Keep it simple**: Use `?` operator directly instead of `.map_err()` for each field
-- If underlying types have proper Denc support, error handling should be minimal
-- Only add custom error messages when providing additional context is truly helpful
-- Let the Denc trait errors propagate naturally
+### Protocol Implementation
+Msgr2 protocol implemented in:
+- `~/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`
+- `~/dev/ceph/src/crimson/net/FrameAssemblerV2.{cc,h}`
+- `~/dev/ceph/src/msg/async/ProtocolV2.{cc,h}`
+- `~/dev/ceph/src/msg/async/frames_v2.{cc,h}`
 
-### Constants and Shared Definitions
+### Documentation
+- **Msgr2 protocol**: `~/dev/ceph/doc/dev/msgr2.rst`
+- **Denc encoding**: `~/dev/ceph/src/include/denc.h`
+- **OSDMap**: `~/dev/ceph/src/osd/OSDMap.{h,cc}`
 
-- **Define once, use everywhere**: Magic numbers, IVs, and constants should be defined in a single location
-- Example: `CEPH_AES_IV` and `AUTH_ENC_MAGIC` are defined in `protocol.rs` and reused
-- **NEVER** duplicate constant definitions across files
+### Test Data (Corpus)
+- **Location**: `~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/`
+- Binary-encoded Ceph types for testing
 
-### Generic Wrappers for Common Patterns
+---
 
-- Create reusable generic types for common encoding patterns
-- Example: `CephXEncryptedEnvelope<T>` wraps any `T: Denc` with encryption envelope
-- Promotes code reuse and maintains consistency
+## Development Cluster
 
-### Function Signatures
-
-- Use `Bytes` instead of `&[u8]` for encoded data when working with Denc
-- Use `&mut Bytes` or `impl Buf` for decoding to leverage Denc trait directly
-- Avoid converting between types unnecessarily
-
-## Code Smells (Bad Patterns to Avoid)
-
-### ❌ Manual Buffer Length Checking in High-Level Functions
-
-```rust
-// BAD: Manual length checking
-if buf.remaining() < 4 {
-    return Err(...);
-}
-let value = buf.get_u32_le();
-
-// GOOD: Let Denc handle it
-let value = u32::decode(&mut buf, 0)?;
+### Starting the Cluster
+```bash
+cd ~/dev/ceph/build
+../src/vstart.sh -d --without-dashboard
 ```
 
-### ❌ Manual Primitive Decoding
+### Stopping the Cluster
+```bash
+cd ~/dev/ceph/build
+../src/stop.sh
+```
 
+### Cluster Configuration
+- **Config file**: `/home/kefu/dev/ceph/build/ceph.conf`
+- **Usage in tests**: `export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf`
+
+### Verifying Behavior
+Use official Ceph client to verify implementation behavior:
+```bash
+LD_PRELOAD=/usr/lib/libasan.so.8 \
+  /home/kefu/dev/ceph/build/bin/ceph \
+  --conf "/home/kefu/dev/ceph/build/ceph.conf" \
+  -s 2>/dev/null
+```
+
+To capture TCP traffic for cross-checking, use tcpdump with the official client.
+
+---
+
+## Coding Standards
+
+### Primary Principle: Use Denc Everywhere
+
+**High-level code must use the Denc trait for ALL encoding/decoding.**
+Manual primitive operations (`get_u*_le`, `put_u*_le`, `buf.remaining() < N`) should only appear inside Denc trait implementations.
+
+### Denc Trait Usage
+
+#### ✅ GOOD: High-Level Code
 ```rust
-// BAD: Manual byte manipulation
-let mut chunk_val = 0u64;
-for (i, &byte) in chunk.iter().enumerate() {
-    chunk_val |= (byte as u64) << (i * 8);
+// In application code, services, protocol handlers
+pub fn encode_message(&self) -> Result<Bytes> {
+    let mut buf = BytesMut::new();
+
+    // Use Denc::encode() for all fields
+    self.version.encode(&mut buf, 0)?;      // Use ? operator
+    self.session_id.encode(&mut buf, 0)?;   // No .map_err()
+    self.payload.encode(&mut buf, 0)?;
+
+    Ok(buf.freeze())
+}
+
+pub fn decode_message(data: &mut &[u8]) -> Result<Self> {
+    // Use Denc::decode() for all fields
+    let version = u64::decode(data, 0)?;        // Use ? operator
+    let session_id = u64::decode(data, 0)?;     // No .map_err()
+    let payload = Bytes::decode(data, 0)?;
+
+    Ok(Self { version, session_id, payload })
+}
+```
+
+#### ✅ GOOD: Denc Implementation (Low-Level)
+```rust
+// Inside impl Denc for CustomType
+impl Denc for PgId {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // Manual primitives are OK here - we ARE the Denc implementation
+        buf.put_u64_le(self.pool);
+        buf.put_u32_le(self.seed);
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        // Manual primitives are OK here
+        let pool = buf.get_u64_le();
+        let seed = buf.get_u32_le();
+        Ok(Self { pool, seed })
+    }
+}
+```
+
+---
+
+## Bad Smells to Avoid
+
+### ❌ Manual Primitive Encoding in High-Level Code
+```rust
+// BAD: Manual primitives outside Denc implementations
+fn encode(&self, buf: &mut BytesMut) {
+    buf.put_u64_le(self.version);        // BAD
+    buf.put_u32_le(self.session_id);     // BAD
 }
 
 // GOOD: Use Denc
-let chunk_val = u64::decode(&mut buf, 0)?;
+fn encode(&self, buf: &mut BytesMut) -> Result<()> {
+    self.version.encode(buf, 0)?;
+    self.session_id.encode(buf, 0)?;
+    Ok(())
+}
 ```
 
-### ❌ Manual Length Prefix Encoding
+### ❌ Manual Buffer Length Checks
+```rust
+// BAD: Manual remaining() checks
+if data.remaining() < 8 {
+    return Err(Error::InsufficientData);
+}
+let value = data.get_u64_le();
 
+// GOOD: Use Denc (handles bounds checking automatically)
+let value = u64::decode(&mut data, 0)?;
+```
+
+### ❌ Manual Length-Prefixed Encoding
 ```rust
 // BAD: Manual length + data
 buf.put_u32_le(data.len() as u32);
@@ -107,7 +177,6 @@ bytes.encode(&mut buf, 0)?;
 ```
 
 ### ❌ Duplicate Constants
-
 ```rust
 // BAD: Defined in multiple places
 const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";  // In file A
@@ -118,7 +187,6 @@ use crate::protocol::CEPH_AES_IV;
 ```
 
 ### ❌ Manual Struct Encoding When Denc Could Be Used
-
 ```rust
 // BAD: Manual field-by-field encoding
 buf.put_u8(1);  // struct_v
@@ -131,7 +199,6 @@ envelope.encode(&mut buf, 0)?;
 ```
 
 ### ❌ Custom Error Handling for Each Field in Denc Implementations
-
 ```rust
 // BAD: Wrapping every field's error with .map_err()
 fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
@@ -152,23 +219,157 @@ fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
 }
 ```
 
-The Denc trait already provides descriptive error messages. Adding custom error
-handling for each field creates noise and doesn't add value. The stack trace
-will show which decode() call failed.
+**Rationale**: The Denc trait already provides descriptive error messages. Adding custom error handling for each field creates noise without adding value. The stack trace will show which decode() call failed.
 
-### When to Investigate for Denc Usage
+---
 
-If you see any of these patterns, consider refactoring to use Denc:
+## Code Review Checklist
 
-1. Manual `if buf.remaining() < N` checks
-2. Manual `get_u*_le()` or `put_u*_le()` calls
-3. Manual byte slicing and length prefix handling
-4. Repeated encoding patterns across functions
-5. Duplicate constant definitions
-6. Custom error handling for every primitive field
+When reviewing code, investigate if you see:
 
-### Exceptions
+1. ❌ Manual `if buf.remaining() < N` checks
+2. ❌ Manual `get_u*_le()` or `put_u*_le()` calls outside `impl Denc`
+3. ❌ Manual byte slicing and length prefix handling
+4. ❌ Repeated encoding patterns across functions
+5. ❌ Duplicate constant definitions
+6. ❌ Custom `.map_err()` for every field in `decode()`
 
-- Helper functions in `crush` crate use manual decoding to avoid circular dependency
-- Low-level AES encryption/decryption may need raw bytes
-- Test code may use manual encoding for specific test scenarios
+**Action**: Refactor to use Denc trait or consolidate into reusable structures.
+
+### Exceptions (Where Manual Encoding is OK)
+
+1. **Inside `impl Denc` blocks** - This is the implementation layer
+2. **Helper functions in `crush` crate** - Avoids circular dependency
+3. **Low-level AES encryption/decryption** - Requires raw bytes
+4. **Test code** - May need manual encoding for specific test scenarios
+
+---
+
+## Verification Workflow
+
+### Testing Encoding/Decoding
+
+Use `ceph-dencoder` to analyze and verify encoded data:
+
+```bash
+cd ~/dev/ceph/build
+
+# Decode and display a type from corpus
+env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
+    CEPH_LIB=$HOME/dev/ceph/build/lib \
+    bin/ceph-dencoder type pg_pool_t \
+    import ~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_pool_t/453c7bee75dca4766602cee267caa589 \
+    decode dump_json
+```
+
+### Running Tests
+
+```bash
+# Unit tests
+cargo test --package <crate>
+
+# Integration tests (requires running cluster)
+export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf
+cargo test --package monclient --tests -- --ignored --test-threads=1 --nocapture
+```
+
+### Development Tools
+
+```bash
+# Format code
+cargo fmt
+
+# Lint code
+cargo clippy --all-targets --all-features
+
+# Build
+cargo build --package <crate>
+```
+
+---
+
+## Architecture Notes
+
+### Ceph Encoding System
+
+#### Feature Flags
+Encoding may be affected by feature flags at encode time. This is a compile-time property orthogonal to the `Sized` trait.
+
+Types affected by features use `WRITE_CLASS_ENCODER_FEATURES` macro in C++.
+
+#### Versioned Encoding
+Many Ceph types use `ENCODE_START`/`DECODE_START` wrappers that include:
+- Structure version number
+- Compatibility version number
+
+This allows forward/backward compatibility as types evolve.
+
+#### Key Concepts
+- **Corpus**: Binary-encoded test data from actual Ceph builds
+- **Dencoder**: Tool to encode/decode Ceph types for verification
+- **Features**: Capability flags that affect encoding format
+- **OSDMap**: Core data structure containing cluster topology
+
+### Message Hierarchy
+
+```
+Message (base)
+├── PaxosServiceMessage (adds paxos fields)
+│   ├── MAuth (authentication)
+│   ├── MMonCommand (monitor commands)
+│   └── MPoolOp (pool operations)
+└── Regular Messages
+    └── MAuthReply (auth responses)
+```
+
+**Key Rule**: PaxosServiceMessage types must encode paxos fields first (version, deprecated_session_mon, deprecated_session_mon_tid) before message-specific fields.
+
+### Generic Patterns
+
+#### CephXEncryptedEnvelope<T>
+Generic wrapper for encrypted CephX protocol data:
+```rust
+pub struct CephXEncryptedEnvelope<T> {
+    pub payload: T,
+}
+```
+
+Automatically handles:
+- struct_v (u8)
+- AUTH_ENC_MAGIC (u64) verification
+- Payload encoding/decoding
+
+Use this instead of manually parsing struct_v and magic.
+
+---
+
+## Guidelines Summary
+
+### DO:
+✅ Use Denc trait for all encoding/decoding in high-level code
+✅ Use `?` operator for error propagation
+✅ Define constants once, import everywhere
+✅ Implement Denc for reusable patterns
+✅ Test against corpus data
+✅ Run cargo fmt and cargo clippy
+
+### DON'T:
+❌ Use manual primitives (`get_u*_le`, `put_u*_le`) outside `impl Denc`
+❌ Add manual buffer checks (`remaining() < N`)
+❌ Wrap every field with `.map_err()`
+❌ Duplicate constants across files
+❌ Start from scratch - always fix existing code
+❌ Tolerate test failures
+
+---
+
+## Quick Reference
+
+| Task | Command |
+|------|---------|
+| Start cluster | `cd ~/dev/ceph/build && ../src/vstart.sh -d --without-dashboard` |
+| Stop cluster | `cd ~/dev/ceph/build && ../src/stop.sh` |
+| Decode corpus | `cd ~/dev/ceph/build && bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json` |
+| Run tests | `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p <PACKAGE> --tests -- --ignored` |
+| Format code | `cargo fmt` |
+| Lint code | `cargo clippy --all-targets --all-features` |
