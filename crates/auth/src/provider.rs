@@ -303,7 +303,7 @@ impl AuthProvider for ServiceAuthProvider {
                 .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
 
             // Decrypt and extract server_challenge
-            match handler.decrypt_authorize_challenge(service_id, &payload) {
+            match handler.decrypt_authorize_challenge(service_id, payload.clone()) {
                 Ok(server_challenge) => {
                     eprintln!(
                         "DEBUG: Successfully extracted server_challenge: 0x{:016x}",

@@ -98,6 +98,45 @@ pub const AUTH_MODE_MON: u8 = AuthMode::Mon as u8;
 /// From src/auth/cephx/CephxProtocol.h
 pub const AUTH_ENC_MAGIC: u64 = 0xff009cad8826aa55;
 
+/// Encrypted envelope wrapper for CephX encrypted data
+/// Contains struct_v, magic verification, and the payload
+/// This is the standard CephX encryption envelope format
+#[derive(Debug, Clone)]
+pub struct CephXEncryptedEnvelope<T> {
+    pub payload: T,
+}
+
+impl<T: Denc> Denc for CephXEncryptedEnvelope<T> {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
+        // struct_v = 1
+        1u8.encode(buf, 0)?;
+        // magic
+        AUTH_ENC_MAGIC.encode(buf, 0)?;
+        // payload
+        self.payload.encode(buf, features)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
+        let _struct_v = u8::decode(buf, 0)
+            .map_err(|e| RadosError::Protocol(format!("Failed to decode struct_v: {}", e)))?;
+        let magic = u64::decode(buf, 0)
+            .map_err(|e| RadosError::Protocol(format!("Failed to decode magic: {}", e)))?;
+        if magic != AUTH_ENC_MAGIC {
+            return Err(RadosError::Protocol(format!(
+                "Invalid magic: expected 0x{:016x}, got 0x{:016x}",
+                AUTH_ENC_MAGIC, magic
+            )));
+        }
+        let payload = T::decode(buf, features)?;
+        Ok(Self { payload })
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        Some(1 + 8 + self.payload.encoded_size(features)?)
+    }
+}
+
 /// CephX request header structure
 ///
 /// Corresponds to C++ `struct CephXRequestHeader` in `/src/auth/cephx/CephxProtocol.h`

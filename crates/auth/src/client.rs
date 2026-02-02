@@ -951,10 +951,10 @@ impl CephXClientHandler {
     pub fn decrypt_authorize_challenge(
         &self,
         service_id: u32,
-        encrypted_payload: &[u8],
+        mut encrypted_payload: Bytes,
     ) -> Result<u64> {
-        use crate::protocol::AUTH_ENC_MAGIC;
-        use bytes::Buf;
+        use crate::protocol::{CephXAuthorizeReply, CephXEncryptedEnvelope};
+        use denc::Denc;
 
         debug!("Decrypting authorize challenge for service {}", service_id);
         eprintln!(
@@ -983,80 +983,23 @@ impl CephXClientHandler {
             )));
         }
 
-        // Payload format: [len:u32][encrypted_data]
-        // encrypted_data format after decryption: [struct_v:u8][magic:u64][CephXAuthorizeReply]
-        let mut buf = Bytes::copy_from_slice(encrypted_payload);
-
-        // Read length prefix
-        if buf.remaining() < 4 {
-            return Err(CephXError::ProtocolError(
-                "Challenge payload too short".into(),
-            ));
-        }
-        let encrypted_len = u32::decode(&mut buf, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
-        })? as usize;
-        eprintln!("DEBUG: encrypted_len: {}", encrypted_len);
-
-        if buf.remaining() < encrypted_len {
-            return Err(CephXError::ProtocolError(format!(
-                "Insufficient data: need {} bytes, have {}",
-                encrypted_len,
-                buf.remaining()
-            )));
-        }
-
-        // Extract encrypted data
-        let encrypted_data = buf.copy_to_bytes(encrypted_len);
+        // Decode length-prefixed encrypted data using Denc
+        let encrypted_data = Bytes::decode(&mut encrypted_payload, 0).map_err(|e| {
+            CephXError::ProtocolError(format!("Failed to decode encrypted data: {}", e))
+        })?;
+        eprintln!("DEBUG: encrypted_len: {}", encrypted_data.len());
 
         // Decrypt using session key
         let decrypted = Self::decrypt_with_key(&handler.session_key, &encrypted_data)?;
-
         let mut dec_buf = Bytes::from(decrypted);
 
-        // Verify struct_v
-        if dec_buf.remaining() < 1 {
-            return Err(CephXError::ProtocolError(
-                "Decrypted data too short for struct_v".into(),
-            ));
-        }
-        let struct_v = dec_buf.get_u8();
-        eprintln!("DEBUG: struct_v: {}", struct_v);
+        // Decode the encrypted envelope containing CephXAuthorizeReply
+        let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)
+            .map_err(|e| {
+                CephXError::ProtocolError(format!("Failed to decode authorize reply: {}", e))
+            })?;
 
-        // Verify magic
-        if dec_buf.remaining() < 8 {
-            return Err(CephXError::ProtocolError(
-                "Decrypted data too short for magic".into(),
-            ));
-        }
-        let magic = u64::decode(&mut dec_buf, 0)
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode magic: {}", e)))?;
-        eprintln!("DEBUG: magic: 0x{:016x}", magic);
-
-        if magic != AUTH_ENC_MAGIC {
-            return Err(CephXError::ProtocolError(format!(
-                "Invalid magic in decrypted challenge: expected 0x{:016x}, got 0x{:016x}",
-                AUTH_ENC_MAGIC, magic
-            )));
-        }
-
-        // Parse CephXAuthorizeReply: [struct_v:u8][server_challenge:u64]
-        if dec_buf.remaining() < 1 {
-            return Err(CephXError::ProtocolError(
-                "No struct_v for CephXAuthorizeReply".into(),
-            ));
-        }
-        let reply_struct_v = dec_buf.get_u8();
-        eprintln!("DEBUG: reply struct_v: {}", reply_struct_v);
-
-        if dec_buf.remaining() < 8 {
-            return Err(CephXError::ProtocolError(
-                "No server_challenge in reply".into(),
-            ));
-        }
-        let server_challenge = u64::decode(&mut dec_buf, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode server_challenge: {}", e))
-        })?;
+        let server_challenge = envelope.payload.nonce_plus_one;
         eprintln!(
             "DEBUG: Extracted server_challenge: 0x{:016x}",
             server_challenge
