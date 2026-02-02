@@ -31,15 +31,15 @@ impl Denc for PgId {
 
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // pg_t encoding: version byte + pool (i64) + seed (u32) + preferred (i32, always -1)
-        buf.put_u8(1); // version
-        buf.put_i64_le(self.pool);
-        buf.put_u32_le(self.seed);
-        buf.put_i32_le(-1); // preferred (deprecated, always -1)
+        1u8.encode(buf, 0)?; // version
+        self.pool.encode(buf, 0)?;
+        self.seed.encode(buf, 0)?;
+        (-1i32).encode(buf, 0)?; // preferred (deprecated, always -1)
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let version = buf.get_u8();
+        let version = u8::decode(buf, 0)?;
         if version != 1 {
             return Err(RadosError::Protocol(format!(
                 "Unknown pg_t version: {}",
@@ -47,9 +47,9 @@ impl Denc for PgId {
             )));
         }
 
-        let pool = buf.get_i64_le();
-        let seed = buf.get_u32_le();
-        let _preferred = buf.get_i32_le(); // deprecated
+        let pool = i64::decode(buf, 0)?;
+        let seed = u32::decode(buf, 0)?;
+        let _preferred = i32::decode(buf, 0)?; // deprecated
 
         Ok(PgId { pool, seed })
     }
@@ -84,7 +84,7 @@ impl VersionedEncode for StripedPgId {
         pgid.encode(buf, features)?;
 
         // Encode shard (i8)
-        buf.put_i8(self.shard);
+        self.shard.encode(buf, 0)?;
 
         Ok(())
     }
@@ -99,7 +99,7 @@ impl VersionedEncode for StripedPgId {
         let pgid = PgId::decode(buf, features)?;
 
         // Decode shard (i8)
-        let shard = buf.get_i8();
+        let shard = i8::decode(buf, 0)?;
 
         Ok(StripedPgId {
             pool: pgid.pool,
@@ -133,14 +133,14 @@ impl Denc for StripedPgId {
 impl Denc for EntityName {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // entity_name_t encoding: type (u8) + num (u64)
-        buf.put_u8(self.entity_type);
-        buf.put_u64_le(self.num);
+        self.entity_type.encode(buf, 0)?;
+        self.num.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let entity_type = buf.get_u8();
-        let num = buf.get_u64_le();
+        let entity_type = u8::decode(buf, 0)?;
+        let num = u64::decode(buf, 0)?;
 
         Ok(EntityName { entity_type, num })
     }
@@ -181,10 +181,10 @@ impl VersionedEncode for OsdReqId {
         self.name.encode(buf, features)?;
 
         // Encode tid (u64)
-        buf.put_u64_le(self.tid);
+        self.tid.encode(buf, 0)?;
 
         // Encode inc (i32)
-        buf.put_i32_le(self.inc);
+        self.inc.encode(buf, 0)?;
 
         Ok(())
     }
@@ -199,10 +199,10 @@ impl VersionedEncode for OsdReqId {
         let name = EntityName::decode(buf, features)?;
 
         // Decode tid (u64)
-        let tid = buf.get_u64_le();
+        let tid = u64::decode(buf, 0)?;
 
         // Decode inc (i32)
-        let inc = buf.get_i32_le();
+        let inc = i32::decode(buf, 0)?;
 
         Ok(OsdReqId { name, tid, inc })
     }
@@ -232,16 +232,16 @@ impl Denc for OsdReqId {
 impl Denc for BlkinTraceInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // blkin_trace_info encoding: 3 x u64
-        buf.put_u64_le(self.trace_id);
-        buf.put_u64_le(self.span_id);
-        buf.put_u64_le(self.parent_span_id);
+        self.trace_id.encode(buf, 0)?;
+        self.span_id.encode(buf, 0)?;
+        self.parent_span_id.encode(buf, 0)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let trace_id = buf.get_u64_le();
-        let span_id = buf.get_u64_le();
-        let parent_span_id = buf.get_u64_le();
+        let trace_id = u64::decode(buf, 0)?;
+        let span_id = u64::decode(buf, 0)?;
+        let parent_span_id = u64::decode(buf, 0)?;
 
         Ok(BlkinTraceInfo {
             trace_id,
@@ -273,7 +273,7 @@ impl VersionedEncode for JaegerSpanContext {
         _version: u8,
     ) -> Result<(), RadosError> {
         // When Jaeger is not enabled, just encode is_valid flag
-        buf.put_u8(if self.is_valid { 1 } else { 0 });
+        (if self.is_valid { 1u8 } else { 0u8 }).encode(buf, 0)?;
         Ok(())
     }
 
@@ -283,7 +283,7 @@ impl VersionedEncode for JaegerSpanContext {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        let is_valid = buf.get_u8() != 0;
+        let is_valid = u8::decode(buf, 0)? != 0;
 
         Ok(JaegerSpanContext { is_valid })
     }
@@ -326,10 +326,10 @@ impl VersionedEncode for ObjectLocator {
         _version: u8,
     ) -> Result<(), RadosError> {
         // Encode pool (i64)
-        buf.put_i64_le(self.pool);
+        self.pool.encode(buf, 0)?;
 
         // Encode preferred (i32, always -1, deprecated field)
-        buf.put_i32_le(-1);
+        (-1i32).encode(buf, 0)?;
 
         // Encode key (String)
         self.key.encode(buf, features)?;
@@ -338,7 +338,7 @@ impl VersionedEncode for ObjectLocator {
         self.nspace.encode(buf, features)?;
 
         // Encode hash (i64)
-        buf.put_i64_le(self.hash);
+        self.hash.encode(buf, 0)?;
 
         Ok(())
     }
@@ -350,10 +350,10 @@ impl VersionedEncode for ObjectLocator {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Decode pool (i64)
-        let pool = buf.get_i64_le();
+        let pool = i64::decode(buf, 0)?;
 
         // Decode preferred (i32, deprecated)
-        let _preferred = buf.get_i32_le();
+        let _preferred = i32::decode(buf, 0)?;
 
         // Decode key (String)
         let key = String::decode(buf, features)?;
@@ -362,7 +362,7 @@ impl VersionedEncode for ObjectLocator {
         let nspace = String::decode(buf, features)?;
 
         // Decode hash (i64)
-        let hash = buf.get_i64_le();
+        let hash = i64::decode(buf, 0)?;
 
         Ok(ObjectLocator {
             pool,
@@ -418,7 +418,7 @@ impl VersionedEncode for RequestRedirect {
         self.redirect_object.encode(buf, features)?;
 
         // Encode legacy field (u32, always 0)
-        buf.put_u32_le(0);
+        0u32.encode(buf, 0)?;
 
         Ok(())
     }
@@ -436,7 +436,7 @@ impl VersionedEncode for RequestRedirect {
         let redirect_object = String::decode(buf, features)?;
 
         // Decode legacy field (u32, ignore)
-        let _legacy = buf.get_u32_le();
+        let _legacy = u32::decode(buf, 0)?;
 
         Ok(RequestRedirect {
             redirect_locator,

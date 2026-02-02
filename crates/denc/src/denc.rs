@@ -171,6 +171,7 @@ impl_denc_int!(u8, put_u8, get_u8, 1);
 impl_denc_int!(u16, put_u16_le, get_u16_le, 2);
 impl_denc_int!(u32, put_u32_le, get_u32_le, 4);
 impl_denc_int!(u64, put_u64_le, get_u64_le, 8);
+impl_denc_int!(i8, put_i8, get_i8, 1);
 impl_denc_int!(i16, put_i16_le, get_i16_le, 2);
 impl_denc_int!(i32, put_i32_le, get_i32_le, 4);
 impl_denc_int!(i64, put_i64_le, get_i64_le, 8);

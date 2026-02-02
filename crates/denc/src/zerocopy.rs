@@ -219,6 +219,123 @@ impl Decode for u64 {
     }
 }
 
+// Signed integer implementations
+impl Encode for i8 {
+    fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
+        if buf.remaining_mut() < 1 {
+            return Err(EncodeError::InsufficientSpace {
+                required: 1,
+                available: buf.remaining_mut(),
+            });
+        }
+        buf.put_i8(*self);
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        1
+    }
+}
+
+impl Decode for i8 {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self, DecodeError> {
+        if buf.remaining() < 1 {
+            return Err(DecodeError::UnexpectedEof {
+                expected: 1,
+                available: buf.remaining(),
+            });
+        }
+        Ok(buf.get_i8())
+    }
+}
+
+impl Encode for i16 {
+    fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
+        if buf.remaining_mut() < 2 {
+            return Err(EncodeError::InsufficientSpace {
+                required: 2,
+                available: buf.remaining_mut(),
+            });
+        }
+        buf.put_i16_le(*self);
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        2
+    }
+}
+
+impl Decode for i16 {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self, DecodeError> {
+        if buf.remaining() < 2 {
+            return Err(DecodeError::UnexpectedEof {
+                expected: 2,
+                available: buf.remaining(),
+            });
+        }
+        Ok(buf.get_i16_le())
+    }
+}
+
+impl Encode for i32 {
+    fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
+        if buf.remaining_mut() < 4 {
+            return Err(EncodeError::InsufficientSpace {
+                required: 4,
+                available: buf.remaining_mut(),
+            });
+        }
+        buf.put_i32_le(*self);
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        4
+    }
+}
+
+impl Decode for i32 {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self, DecodeError> {
+        if buf.remaining() < 4 {
+            return Err(DecodeError::UnexpectedEof {
+                expected: 4,
+                available: buf.remaining(),
+            });
+        }
+        Ok(buf.get_i32_le())
+    }
+}
+
+impl Encode for i64 {
+    fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
+        if buf.remaining_mut() < 8 {
+            return Err(EncodeError::InsufficientSpace {
+                required: 8,
+                available: buf.remaining_mut(),
+            });
+        }
+        buf.put_i64_le(*self);
+        Ok(())
+    }
+
+    fn encoded_size(&self) -> usize {
+        8
+    }
+}
+
+impl Decode for i64 {
+    fn decode<B: Buf>(buf: &mut B) -> Result<Self, DecodeError> {
+        if buf.remaining() < 8 {
+            return Err(DecodeError::UnexpectedEof {
+                expected: 8,
+                available: buf.remaining(),
+            });
+        }
+        Ok(buf.get_i64_le())
+    }
+}
+
 // Array implementations for fixed-size byte arrays (common in protocol headers)
 impl<const N: usize> Encode for [u8; N] {
     fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), EncodeError> {
