@@ -366,22 +366,12 @@ impl CephXClientHandler {
             );
             Ok(AuthResult::NeedMoreData)
         } else {
-            // Subsequent responses contain auth results
-            debug!("Handling auth result response");
-
-            // TODO: Parse the actual auth response
-            // For now, assume success if we get here
-
-            // Create a session with placeholder values
-            if let Some(secret_key) = &self.secret_key {
-                self.session = Some(CephXSession::new(
-                    self.entity_name.clone(),
-                    0, // Global ID would come from auth response
-                    secret_key.clone(),
-                ));
-            }
-
-            Ok(AuthResult::Success)
+            // Subsequent AUTH_REPLY_MORE messages should not occur in the normal flow.
+            // After the initial server challenge, we should get AUTH_DONE instead.
+            // If we reach here, it's an unexpected protocol state.
+            Err(CephXError::ProtocolError(
+                "Unexpected AUTH_REPLY_MORE after initial challenge. Expected AUTH_DONE.".into(),
+            ))
         }
     }
 
