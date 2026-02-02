@@ -276,7 +276,7 @@ impl CryptoKey {
         };
 
         // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
-        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+        use crate::protocol::CEPH_AES_IV;
 
         // Decrypt with AES-128-CBC using Pkcs7 padding
         type Aes128CbcDec = Decryptor<Aes128>;
@@ -331,7 +331,7 @@ impl CryptoKey {
         };
 
         // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
-        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+        use crate::protocol::CEPH_AES_IV;
 
         // Encrypt with AES-128-CBC using Pkcs7 padding
         type Aes128CbcEnc = Encryptor<Aes128>;

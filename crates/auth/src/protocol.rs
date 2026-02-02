@@ -98,6 +98,10 @@ pub const AUTH_MODE_MON: u8 = AuthMode::Mon as u8;
 /// From src/auth/cephx/CephxProtocol.h
 pub const AUTH_ENC_MAGIC: u64 = 0xff009cad8826aa55;
 
+/// Fixed IV used for all CephX AES-128-CBC encryption
+/// From src/auth/Crypto.cc
+pub const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+
 /// Encrypted envelope wrapper for CephX encrypted data
 /// Contains struct_v, magic verification, and the payload
 /// This is the standard CephX encryption envelope format

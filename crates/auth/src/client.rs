@@ -250,10 +250,13 @@ impl CephXClientHandler {
             "Step 5: AES key (first 16 bytes of secret): {}",
             hex::encode(key_bytes)
         );
-        debug!("Step 6: AES IV: {}", hex::encode(b"cephsageyudagreg"));
+        debug!(
+            "Step 6: AES IV: {}",
+            hex::encode(crate::protocol::CEPH_AES_IV)
+        );
 
-        // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
-        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+        // Use Ceph's IV
+        use crate::protocol::CEPH_AES_IV;
 
         // Encrypt with AES-128-CBC using Pkcs7 padding
         type Aes128CbcEnc = Encryptor<Aes128>;
@@ -277,12 +280,10 @@ impl CephXClientHandler {
 
         // In C++, encode_encrypt() adds a u32 length prefix to the encrypted data
         // before XOR folding. We need to replicate this behavior.
-        // Create a buffer with: [u32 length][encrypted data]
-        let mut folding_buffer = BytesMut::with_capacity(4 + ciphertext.len());
-        (ciphertext.len() as u32)
-            .encode(&mut folding_buffer, 0)
-            .map_err(|e| CephXError::EncodingError(format!("Failed to encode length: {}", e)))?;
-        folding_buffer.extend_from_slice(ciphertext);
+        // Use Denc to create length-prefixed buffer
+        let encrypted_bytes = Bytes::copy_from_slice(ciphertext);
+        let mut folding_buffer = BytesMut::new();
+        encrypted_bytes.encode(&mut folding_buffer, 0)?;
         let folding_data = folding_buffer.freeze();
 
         debug!(
@@ -290,32 +291,20 @@ impl CephXClientHandler {
             folding_data.len(),
             hex::encode(&folding_data)
         );
-        debug!(
-            "  - Length prefix (4 bytes): {}",
-            hex::encode(&folding_data[..4])
-        );
-        debug!(
-            "  - Encrypted data ({} bytes): {}",
-            ciphertext.len(),
-            hex::encode(&folding_data[4..])
-        );
 
         // XOR fold the entire buffer (length prefix + encrypted data) to get a 64-bit key
-        // IMPORTANT: C++ only processes complete 8-byte chunks, ignoring any remaining bytes
+        // C++ only processes complete 8-byte chunks, ignoring any remaining bytes
         debug!(
-            "Step 9: XOR folding {} bytes as little-endian u64 chunks (complete chunks only):",
+            "Step 9: XOR folding {} bytes as little-endian u64 chunks:",
             folding_data.len()
         );
         let mut key = 0u64;
-        let num_complete_chunks = folding_data.len() / 8; // Only complete 8-byte chunks
+        let mut buf = folding_data.clone();
+        let num_complete_chunks = buf.len() / 8;
+
         for idx in 0..num_complete_chunks {
-            let offset = idx * 8;
-            let chunk = &folding_data[offset..offset + 8];
-            let mut chunk_val = 0u64;
-            for (i, &byte) in chunk.iter().enumerate() {
-                chunk_val |= (byte as u64) << (i * 8);
-            }
-            debug!("  Chunk {}: 8 bytes = 0x{:016x}", idx, chunk_val);
+            let chunk_val = u64::decode(&mut buf, 0)?;
+            debug!("  Chunk {}: 0x{:016x}", idx, chunk_val);
             key ^= chunk_val;
             debug!("  Running XOR result: 0x{:016x}", key);
         }
@@ -997,13 +986,11 @@ impl CephXClientHandler {
     /// Decrypt data using AES-128-CBC with the given key
     /// Ceph uses a fixed IV: "cephsageyudagreg"
     pub fn decrypt_with_key(key: &CryptoKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
+        use crate::protocol::CEPH_AES_IV;
         use aes::cipher::generic_array::GenericArray;
         use aes::Aes128;
         use cbc::cipher::{BlockDecryptMut, KeyIvInit};
         use cbc::Decryptor;
-
-        // Ceph uses a fixed IV for AES-CBC encryption
-        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
 
         // Verify key length
         if key.get_secret().len() != 16 {
@@ -1244,7 +1231,7 @@ impl CephXClientHandler {
         );
 
         // Use Ceph's IV
-        const CEPH_AES_IV: &[u8; 16] = b"cephsageyudagreg";
+        use crate::protocol::CEPH_AES_IV;
 
         // Encrypt with AES-128-CBC
         type Aes128CbcEnc = Encryptor<Aes128>;
