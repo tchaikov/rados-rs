@@ -610,13 +610,11 @@ impl CephXClientHandler {
             ));
         }
 
-        let service_ticket_reply_v = auth_payload.get_u8();
+        let service_ticket_reply_v = u8::decode(&mut auth_payload, 0)?;
         eprintln!("DEBUG: service_ticket_reply_v: {}", service_ticket_reply_v);
         debug!("service_ticket_reply_v: {}", service_ticket_reply_v);
 
-        let num_tickets = u32::decode(&mut auth_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode num_tickets: {}", e))
-        })?;
+        let num_tickets = u32::decode(&mut auth_payload, 0)?;
         eprintln!("DEBUG: num_tickets: {}", num_tickets);
         debug!("num_tickets: {}", num_tickets);
 
@@ -653,9 +651,7 @@ impl CephXClientHandler {
         // Check for connection_secret blob (encrypted with session_key) and extra_tickets
         let mut connection_secret_bytes = None;
         if auth_payload.len() >= 4 {
-            let cbl_len = u32::decode(&mut auth_payload, 0).map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode cbl_len: {}", e))
-            })? as usize;
+            let cbl_len = u32::decode(&mut auth_payload, 0)? as usize;
             debug!("connection_secret blob length: {}", cbl_len);
 
             if cbl_len > 0 && auth_payload.len() >= cbl_len {
@@ -669,9 +665,7 @@ impl CephXClientHandler {
                 if encrypted_secret_bl.len() < 4 {
                     debug!("connection_secret bufferlist too short for inner length");
                 } else {
-                    let inner_len = u32::decode(&mut encrypted_secret_bl, 0).map_err(|e| {
-                        CephXError::ProtocolError(format!("Failed to decode inner_len: {}", e))
-                    })? as usize;
+                    let inner_len = u32::decode(&mut encrypted_secret_bl, 0)? as usize;
                     debug!("Inner encrypted data length: {}", inner_len);
 
                     if encrypted_secret_bl.len() >= inner_len {
