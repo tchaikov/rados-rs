@@ -565,14 +565,8 @@ impl CephXClientHandler {
                             Ok(mut decrypted_secret) => {
                                 // Parse: [struct_v:u8][magic:u64][connection_secret:string]
                                 if decrypted_secret.len() >= 9 {
-                                    let struct_v = decrypted_secret.get_u8();
-                                    let magic =
-                                        u64::decode(&mut decrypted_secret, 0).map_err(|e| {
-                                            CephXError::ProtocolError(format!(
-                                                "Failed to decode magic: {}",
-                                                e
-                                            ))
-                                        })?;
+                                    let struct_v = u8::decode(&mut decrypted_secret, 0)?;
+                                    let magic = u64::decode(&mut decrypted_secret, 0)?;
                                     debug!(
                                         "Connection secret struct_v: {}, magic: 0x{:016x}",
                                         struct_v, magic
@@ -581,14 +575,7 @@ impl CephXClientHandler {
                                     if magic == AUTH_ENC_MAGIC {
                                         // Read length-prefixed string
                                         if decrypted_secret.len() >= 4 {
-                                            let secret_len = u32::decode(&mut decrypted_secret, 0)
-                                                .map_err(|e| {
-                                                CephXError::ProtocolError(format!(
-                                                    "Failed to decode secret_len: {}",
-                                                    e
-                                                ))
-                                            })?
-                                                as usize;
+                                            let secret_len = u32::decode(&mut decrypted_secret, 0)? as usize;
                                             // Only set connection_secret if length > 0 (CRC mode has 0-length secret)
                                             if secret_len > 0
                                                 && decrypted_secret.len() >= secret_len
@@ -624,9 +611,7 @@ impl CephXClientHandler {
             auth_payload.len()
         );
         if auth_payload.len() >= 4 {
-            let extra_tickets_len = u32::decode(&mut auth_payload, 0).map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode extra_tickets_len: {}", e))
-            })? as usize;
+            let extra_tickets_len = u32::decode(&mut auth_payload, 0)? as usize;
             eprintln!("DEBUG: extra_tickets blob length: {}", extra_tickets_len);
 
             if extra_tickets_len > 0 && auth_payload.len() >= extra_tickets_len {
