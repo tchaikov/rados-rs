@@ -406,7 +406,7 @@ impl CephXClientHandler {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use crate::protocol::{CephXResponseHeader, AUTH_ENC_MAGIC};
+        use crate::protocol::{CephXResponseHeader, CephXEncryptedEnvelope};
         use denc::Denc;
 
         debug!(
@@ -560,36 +560,19 @@ impl CephXClientHandler {
                         // Decrypt connection_secret using the session_key we just extracted
                         match first_ticket_session_key.decrypt(&encrypted_secret) {
                             Ok(mut decrypted_secret) => {
-                                // Parse: [struct_v:u8][magic:u64][connection_secret:string]
-                                if decrypted_secret.len() >= 9 {
-                                    let struct_v = u8::decode(&mut decrypted_secret, 0)?;
-                                    let magic = u64::decode(&mut decrypted_secret, 0)?;
-                                    debug!(
-                                        "Connection secret struct_v: {}, magic: 0x{:016x}",
-                                        struct_v, magic
-                                    );
-
-                                    if magic == AUTH_ENC_MAGIC {
-                                        // Read length-prefixed string
-                                        if decrypted_secret.len() >= 4 {
-                                            let secret_len = u32::decode(&mut decrypted_secret, 0)? as usize;
-                                            // Only set connection_secret if length > 0 (CRC mode has 0-length secret)
-                                            if secret_len > 0
-                                                && decrypted_secret.len() >= secret_len
-                                            {
-                                                let secret_data =
-                                                    decrypted_secret.split_to(secret_len);
-                                                debug!(
-                                                    "Connection secret: {} bytes",
-                                                    secret_data.len()
-                                                );
-                                                connection_secret_bytes = Some(secret_data);
-                                            } else if secret_len == 0 {
-                                                debug!(
-                                                    "Connection secret length is 0 (CRC mode), leaving as None"
-                                                );
-                                            }
+                                // Decode using CephXEncryptedEnvelope<Bytes>
+                                match CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0) {
+                                    Ok(envelope) => {
+                                        let secret_data = envelope.payload;
+                                        if secret_data.len() > 0 {
+                                            debug!("Connection secret: {} bytes", secret_data.len());
+                                            connection_secret_bytes = Some(secret_data);
+                                        } else {
+                                            debug!("Connection secret length is 0 (CRC mode), leaving as None");
                                         }
+                                    }
+                                    Err(e) => {
+                                        debug!("Failed to decode connection_secret envelope: {:?}", e);
                                     }
                                 }
                             }
