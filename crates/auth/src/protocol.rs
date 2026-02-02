@@ -37,18 +37,8 @@ impl Denc for CephXServiceTicketRequest {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXServiceTicketRequest: {}",
-                e
-            ))
-        })?;
-        let keys = u32::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode keys for CephXServiceTicketRequest: {}",
-                e
-            ))
-        })?;
+        let _struct_v = u8::decode(buf, 0)?;
+        let keys = u32::decode(buf, 0)?;
         Ok(Self { keys })
     }
 
@@ -380,12 +370,7 @@ impl Denc for CephXRequestHeader {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let request_type = u16::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode request_type for CephXRequestHeader: {}",
-                e
-            ))
-        })?;
+        let request_type = u16::decode(buf, 0)?;
         Ok(Self { request_type })
     }
 
@@ -421,18 +406,8 @@ impl Denc for CephXResponseHeader {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let request_type = u16::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode request_type for CephXResponseHeader: {}",
-                e
-            ))
-        })?;
-        let status = i32::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode status for CephXResponseHeader: {}",
-                e
-            ))
-        })?;
+        let request_type = u16::decode(buf, 0)?;
+        let status = i32::decode(buf, 0)?;
         Ok(Self {
             request_type,
             status,
@@ -486,12 +461,7 @@ impl Denc for CephXAuthenticate {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
         // Decode struct version
-        let struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXAuthenticate: {}",
-                e
-            ))
-        })?;
+        let struct_v = u8::decode(buf, 0)?;
         if !(1..=3).contains(&struct_v) {
             return Err(RadosError::Protocol(format!(
                 "Unsupported CephXAuthenticate version: {}",
@@ -499,27 +469,13 @@ impl Denc for CephXAuthenticate {
             )));
         }
 
-        let client_challenge = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode client_challenge for CephXAuthenticate: {}",
-                e
-            ))
-        })?;
-
-        let key = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!("Failed to decode key for CephXAuthenticate: {}", e))
-        })?;
-
+        let client_challenge = u64::decode(buf, 0)?;
+        let key = u64::decode(buf, 0)?;
         let old_ticket = CephXTicketBlob::decode(buf, features)?;
 
         // other_keys was added in v2
         let other_keys = if struct_v >= 2 {
-            u32::decode(buf, 0).map_err(|e| {
-                RadosError::Protocol(format!(
-                    "Failed to decode other_keys for CephXAuthenticate: {}",
-                    e
-                ))
-            })?
+            u32::decode(buf, 0)?
         } else {
             0
         };
@@ -563,12 +519,7 @@ impl Denc for CephXServerChallenge {
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
         // Read and validate struct_v
-        let struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXServerChallenge: {}",
-                e
-            ))
-        })?;
+        let struct_v = u8::decode(buf, 0)?;
         if struct_v != 1 {
             return Err(RadosError::Protocol(format!(
                 "Unsupported CephXServerChallenge version: {}",
@@ -576,12 +527,7 @@ impl Denc for CephXServerChallenge {
             )));
         }
         // Read server challenge
-        let server_challenge = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode server_challenge for CephXServerChallenge: {}",
-                e
-            ))
-        })?;
+        let server_challenge = u64::decode(buf, 0)?;
         Ok(Self { server_challenge })
     }
 
@@ -614,18 +560,8 @@ impl Denc for CephXChallengeBlob {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let server_challenge = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode server_challenge for CephXChallengeBlob: {}",
-                e
-            ))
-        })?;
-        let client_challenge = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode client_challenge for CephXChallengeBlob: {}",
-                e
-            ))
-        })?;
+        let server_challenge = u64::decode(buf, 0)?;
+        let client_challenge = u64::decode(buf, 0)?;
         Ok(Self {
             server_challenge,
             client_challenge,
@@ -864,24 +800,9 @@ impl Denc for CephXAuthorizeA {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXAuthorizeA: {}",
-                e
-            ))
-        })?;
-        let global_id = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode global_id for CephXAuthorizeA: {}",
-                e
-            ))
-        })?;
-        let service_id = u32::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode service_id for CephXAuthorizeA: {}",
-                e
-            ))
-        })?;
+        let _struct_v = u8::decode(buf, 0)?;
+        let global_id = u64::decode(buf, 0)?;
+        let service_id = u32::decode(buf, 0)?;
         let ticket_blob = CephXTicketBlob::decode(buf, features)?;
         Ok(Self {
             global_id,
@@ -943,29 +864,12 @@ impl Denc for CephXAuthorizeB {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXAuthorizeB: {}",
-                e
-            ))
-        })?;
-        let nonce = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!("Failed to decode nonce for CephXAuthorizeB: {}", e))
-        })?;
-        let have_challenge_byte = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode have_challenge for CephXAuthorizeB: {}",
-                e
-            ))
-        })?;
+        let _struct_v = u8::decode(buf, 0)?;
+        let nonce = u64::decode(buf, 0)?;
+        let have_challenge_byte = u8::decode(buf, 0)?;
         let have_challenge = have_challenge_byte != 0;
         let server_challenge_plus_one = if have_challenge {
-            u64::decode(buf, 0).map_err(|e| {
-                RadosError::Protocol(format!(
-                    "Failed to decode server_challenge_plus_one for CephXAuthorizeB: {}",
-                    e
-                ))
-            })?
+            u64::decode(buf, 0)?
         } else {
             0
         };
@@ -1006,18 +910,8 @@ impl Denc for CephXAuthorizeReply {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode struct_v for CephXAuthorizeReply: {}",
-                e
-            ))
-        })?;
-        let nonce_plus_one = u64::decode(buf, 0).map_err(|e| {
-            RadosError::Protocol(format!(
-                "Failed to decode nonce_plus_one for CephXAuthorizeReply: {}",
-                e
-            ))
-        })?;
+        let _struct_v = u8::decode(buf, 0)?;
+        let nonce_plus_one = u64::decode(buf, 0)?;
         Ok(Self { nonce_plus_one })
     }
 
