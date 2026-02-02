@@ -398,163 +398,6 @@ impl CephXClientHandler {
         Ok((service_ticket.session_key, service_ticket.validity))
     }
 
-    /// Parse a single service ticket from the AUTH_DONE response
-    /// Returns (service_id, session_key, secret_id, ticket_blob, validity_duration)
-    fn parse_service_ticket(
-        &self,
-        auth_payload: &mut Bytes,
-        secret_key: &CryptoKey,
-    ) -> Result<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> {
-        use crate::protocol::CephXEncryptedEnvelope;
-        use bytes::Buf;
-
-        // Read service_id
-        if auth_payload.len() < 4 {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for service_id".into(),
-            ));
-        }
-        let service_id = u32::decode(auth_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode service_id: {}", e))
-        })?;
-        debug!(
-            "Parsing ticket for service_id: {} (0x{:08x})",
-            service_id, service_id
-        );
-
-        // Read service_ticket_v
-        if auth_payload.is_empty() {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for service_ticket_v".into(),
-            ));
-        }
-        let service_ticket_v = auth_payload.get_u8();
-        debug!("service_ticket_v: {}", service_ticket_v);
-
-        // Read encrypted CephXServiceTicket (length-prefixed)
-        if auth_payload.len() < 4 {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for encrypted ticket length".into(),
-            ));
-        }
-        let encrypted_len = u32::decode(auth_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
-        })? as usize;
-        debug!("encrypted ticket length: {}", encrypted_len);
-
-        if auth_payload.len() < encrypted_len {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for encrypted ticket".into(),
-            ));
-        }
-
-        let encrypted_ticket = auth_payload.split_to(encrypted_len);
-
-        // Decrypt the CephXServiceTicket
-        let decrypted = secret_key.decrypt(&encrypted_ticket)?;
-        let mut decrypted_data = decrypted;
-
-        // Decode using CephXEncryptedEnvelope<CephXServiceTicket>
-        // This handles: struct_v, magic verification, and CephXServiceTicket decoding
-        let envelope = CephXEncryptedEnvelope::<crate::protocol::CephXServiceTicket>::decode(
-            &mut decrypted_data,
-            0,
-        )
-        .map_err(|e| {
-            CephXError::ProtocolError(format!(
-                "Failed to decode CephXServiceTicket envelope: {}",
-                e
-            ))
-        })?;
-
-        let service_ticket = envelope.payload;
-        debug!(
-            "Service {} session key type: {}, length: {}",
-            service_id,
-            service_ticket.session_key.get_type(),
-            service_ticket.session_key.len()
-        );
-        debug!("Validity: {:?}", service_ticket.validity);
-
-        // Check if session key is CEPH_CRYPTO_NONE (type 0, length 0)
-        // This indicates a dummy/placeholder ticket with no actual ticket blob
-        // This can happen for extra tickets that are not fully populated
-        if service_ticket.session_key.get_type() == 0 && service_ticket.session_key.is_empty() {
-            debug!(
-                "Service {} has CEPH_CRYPTO_NONE session key, skipping ticket blob parsing",
-                service_id
-            );
-            // Return a minimal ticket with empty blob
-            return Ok((
-                service_id,
-                service_ticket.session_key,
-                0, // secret_id
-                CephXTicketBlob::new(0, Bytes::new()),
-                service_ticket.validity,
-            ));
-        }
-
-        // Read ticket_enc byte
-        if auth_payload.is_empty() {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for ticket_enc".into(),
-            ));
-        }
-        let ticket_enc = auth_payload.get_u8();
-        debug!("ticket_enc: {}", ticket_enc);
-
-        // Read the ticket blob (secret_id + blob)
-        if auth_payload.len() < 4 {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for ticket blob length".into(),
-            ));
-        }
-        let ticket_blob_len = u32::decode(auth_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode ticket_blob_len: {}", e))
-        })? as usize;
-        debug!("ticket_blob_len: {}", ticket_blob_len);
-
-        if auth_payload.len() < ticket_blob_len {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for ticket blob".into(),
-            ));
-        }
-        let ticket_blob_data = auth_payload.split_to(ticket_blob_len);
-
-        // Parse ticket blob: [struct_v:u8][secret_id:u64][blob_len:u32][blob:bytes]
-        let mut ticket_data = ticket_blob_data;
-        if ticket_data.len() < 13 {
-            return Err(CephXError::ProtocolError("Ticket blob too short".into()));
-        }
-        let _blob_struct_v = ticket_data.get_u8();
-        let secret_id = u64::decode(&mut ticket_data, 0)
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode secret_id: {}", e)))?;
-        let blob_len = u32::decode(&mut ticket_data, 0)
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode blob_len: {}", e)))?
-            as usize;
-
-        if ticket_data.len() < blob_len {
-            return Err(CephXError::ProtocolError(
-                "Insufficient data for ticket blob data".into(),
-            ));
-        }
-        let blob = ticket_data.split_to(blob_len);
-
-        let ticket_blob = CephXTicketBlob::new(secret_id, blob);
-        debug!(
-            "Service {} ticket: secret_id={}, blob_len={}",
-            service_id, secret_id, blob_len
-        );
-
-        Ok((
-            service_id,
-            service_ticket.session_key,
-            secret_id,
-            ticket_blob,
-            service_ticket.validity,
-        ))
-    }
-
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
     /// Returns (session_key_bytes, connection_secret_bytes) if in SECURE mode
     pub fn handle_auth_done(
@@ -810,58 +653,59 @@ impl CephXClientHandler {
                         .join("")
                 );
 
-                // The extra_tickets bufferlist might contain a CephXServiceTicketReply structure
-                // Let's try parsing it as such: struct_v (u8) + num_tickets (u32) + tickets
-                if extra_tickets_bl.len() >= 5 {
-                    let extra_v = extra_tickets_bl.get_u8();
-                    let extra_num_tickets = u32::decode(&mut extra_tickets_bl, 0).map_err(|e| {
-                        CephXError::ProtocolError(format!(
-                            "Failed to decode extra_num_tickets: {}",
-                            e
-                        ))
+                // Parse extra_tickets using ServiceTicketReply (same format as main tickets)
+                // Extra tickets are encrypted with the AUTH session key (from first ticket)
+                let auth_session_key = ticket_handlers
+                    .first()
+                    .map(|(_, session_key, _, _, _)| session_key.clone())
+                    .ok_or_else(|| {
+                        CephXError::ProtocolError(
+                            "No AUTH ticket to decrypt extra tickets".into(),
+                        )
                     })?;
-                    eprintln!(
-                        "DEBUG: extra_tickets struct_v: {}, num_tickets: {}",
-                        extra_v, extra_num_tickets
-                    );
 
-                    // Extra tickets are encrypted with the AUTH session key (from first ticket)
-                    // Get the AUTH session key from ticket_handlers (clone to avoid borrow issues)
-                    let auth_session_key = ticket_handlers
-                        .first()
-                        .map(|(_, session_key, _, _, _)| session_key.clone())
-                        .ok_or_else(|| {
-                            CephXError::ProtocolError(
-                                "No AUTH ticket to decrypt extra tickets".into(),
-                            )
-                        })?;
+                match crate::protocol::ServiceTicketReply::decode(&mut extra_tickets_bl, 0) {
+                    Ok(extra_ticket_reply) => {
+                        eprintln!(
+                            "DEBUG: extra_tickets struct_v: {}, num_tickets: {}",
+                            extra_ticket_reply.struct_v,
+                            extra_ticket_reply.tickets.len()
+                        );
 
-                    eprintln!("DEBUG: Using AUTH session key to decrypt extra tickets");
-
-                    // Parse each extra ticket using the AUTH session key
-                    for i in 0..extra_num_tickets {
-                        match self.parse_service_ticket(&mut extra_tickets_bl, &auth_session_key) {
-                            Ok((service_id, session_key, secret_id, ticket_blob, validity)) => {
-                                ticket_handlers.push((
-                                    service_id,
-                                    session_key,
-                                    secret_id,
-                                    ticket_blob,
-                                    validity,
-                                ));
-                            }
-                            Err(e) => {
-                                // It's normal for the server to indicate more tickets than actually present
-                                // Just log and break when we run out of data
-                                debug!(
-                                    "Finished parsing extra tickets at {}/{}: {:?}",
-                                    i + 1,
-                                    extra_num_tickets,
-                                    e
-                                );
-                                break;
+                        // Process each extra ticket
+                        for ticket_info in &extra_ticket_reply.tickets {
+                            match self.decrypt_service_ticket(
+                                &ticket_info.encrypted_service_ticket,
+                                &auth_session_key,
+                            ) {
+                                Ok((session_key, validity)) => {
+                                    debug!(
+                                        "Extra ticket for service {}: session_key type={}, validity={:?}",
+                                        ticket_info.service_id,
+                                        session_key.get_type(),
+                                        validity
+                                    );
+                                    ticket_handlers.push((
+                                        ticket_info.service_id,
+                                        session_key,
+                                        ticket_info.ticket_blob.secret_id,
+                                        ticket_info.ticket_blob.clone(),
+                                        validity,
+                                    ));
+                                }
+                                Err(e) => {
+                                    // It's normal for extra tickets to have dummy/placeholder data
+                                    debug!(
+                                        "Failed to decrypt extra ticket for service {}: {:?}",
+                                        ticket_info.service_id, e
+                                    );
+                                }
                             }
                         }
+                    }
+                    Err(e) => {
+                        // It's normal for extra_tickets to be malformed or empty
+                        debug!("Failed to parse extra_tickets: {:?}", e);
                     }
                 }
             }
