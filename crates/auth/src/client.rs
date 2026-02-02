@@ -437,16 +437,8 @@ impl CephXClientHandler {
         // 3. connection_secret bufferlist (u32 len + encrypted data)
         // 4. extra_tickets bufferlist (u32 len + data)
 
-        if auth_payload.len() < 2 {
-            return Err(CephXError::ProtocolError(
-                "AUTH_DONE payload too short for header".into(),
-            ));
-        }
-
         // Decode CephXResponseHeader
-        let header = CephXResponseHeader::decode(&mut auth_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode CephXResponseHeader: {:?}", e))
-        })?;
+        let header = CephXResponseHeader::decode(&mut auth_payload, 0)?;
         debug!(
             "CephXResponseHeader: request_type=0x{:04x}, status={}",
             header.request_type, header.status
