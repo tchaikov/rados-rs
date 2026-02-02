@@ -169,7 +169,18 @@ impl Denc for ServiceTicketInfo {
         self.service_id.encode(buf, 0)?;
         self.encrypted_service_ticket.encode(buf, features)?;
         self.ticket_enc.encode(buf, 0)?;
-        self.ticket_blob.encode(buf, features)?;
+
+        // Encode ticket_blob with outer length prefix
+        // First encode to a temp buffer to get the length
+        let mut temp_buf = bytes::BytesMut::new();
+        self.ticket_blob.encode(&mut temp_buf, features)?;
+
+        // Write the length prefix
+        (temp_buf.len() as u32).encode(buf, 0)?;
+
+        // Write the encoded ticket_blob
+        buf.put_slice(&temp_buf);
+
         Ok(())
     }
 
@@ -177,7 +188,26 @@ impl Denc for ServiceTicketInfo {
         let service_id = u32::decode(buf, 0)?;
         let encrypted_service_ticket = EncryptedServiceTicket::decode(buf, features)?;
         let ticket_enc = u8::decode(buf, 0)?;
-        let ticket_blob = CephXTicketBlob::decode(buf, features)?;
+
+        // Read outer length prefix for ticket_blob
+        let ticket_blob_len = u32::decode(buf, 0)? as usize;
+
+        // Read the ticket_blob data into a temporary buffer
+        if buf.remaining() < ticket_blob_len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient data for ticket blob: need {}, have {}",
+                ticket_blob_len,
+                buf.remaining()
+            )));
+        }
+
+        let mut ticket_blob_data = vec![0u8; ticket_blob_len];
+        buf.copy_to_slice(&mut ticket_blob_data);
+        let mut ticket_blob_buf = &ticket_blob_data[..];
+
+        // Now decode CephXTicketBlob from the sized buffer
+        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_buf, features)?;
+
         Ok(Self {
             service_id,
             encrypted_service_ticket,
@@ -191,6 +221,7 @@ impl Denc for ServiceTicketInfo {
             4 + // service_id
             self.encrypted_service_ticket.encoded_size(features)? +
             1 + // ticket_enc
+            4 + // ticket_blob_len (outer length prefix)
             self.ticket_blob.encoded_size(features)?,
         )
     }

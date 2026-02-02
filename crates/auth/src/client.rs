@@ -375,6 +375,29 @@ impl CephXClientHandler {
         }
     }
 
+    /// Decrypt an EncryptedServiceTicket and extract session key and validity
+    fn decrypt_service_ticket(
+        &self,
+        encrypted_ticket: &crate::protocol::EncryptedServiceTicket,
+        secret_key: &CryptoKey,
+    ) -> Result<(CryptoKey, Duration)> {
+        use crate::protocol::CephXEncryptedEnvelope;
+
+        // Decrypt the encrypted data
+        let decrypted = secret_key.decrypt(&encrypted_ticket.encrypted_data)?;
+        let mut decrypted_data = decrypted;
+
+        // Decode using CephXEncryptedEnvelope<CephXServiceTicket>
+        let envelope =
+            CephXEncryptedEnvelope::<crate::protocol::CephXServiceTicket>::decode(
+                &mut decrypted_data,
+                0,
+            )?;
+
+        let service_ticket = envelope.payload;
+        Ok((service_ticket.session_key, service_ticket.validity))
+    }
+
     /// Parse a single service ticket from the AUTH_DONE response
     /// Returns (service_id, session_key, secret_id, ticket_blob, validity_duration)
     fn parse_service_ticket(
@@ -600,43 +623,56 @@ impl CephXClientHandler {
             )));
         }
 
-        // Now decode the service ticket reply
-        // Format: [u8 service_ticket_reply_v][u32 num_tickets]
-        // For each ticket: [u32 service_id][u8 service_ticket_v][encrypted CephXServiceTicket][u8 ticket_enc][ticket blob]
+        // Decode the service ticket reply using the new Denc structure
+        let ticket_reply = crate::protocol::ServiceTicketReply::decode(&mut auth_payload, 0)?;
+        eprintln!("DEBUG: service_ticket_reply_v: {}", ticket_reply.struct_v);
+        eprintln!("DEBUG: num_tickets: {}", ticket_reply.tickets.len());
+        debug!(
+            "service_ticket_reply_v: {}, num_tickets: {}",
+            ticket_reply.struct_v,
+            ticket_reply.tickets.len()
+        );
 
-        if auth_payload.len() < 5 {
-            return Err(CephXError::ProtocolError(
-                "AUTH_DONE payload too short after header".into(),
-            ));
-        }
-
-        let service_ticket_reply_v = u8::decode(&mut auth_payload, 0)?;
-        eprintln!("DEBUG: service_ticket_reply_v: {}", service_ticket_reply_v);
-        debug!("service_ticket_reply_v: {}", service_ticket_reply_v);
-
-        let num_tickets = u32::decode(&mut auth_payload, 0)?;
-        eprintln!("DEBUG: num_tickets: {}", num_tickets);
-        debug!("num_tickets: {}", num_tickets);
-
-        if num_tickets == 0 {
+        if ticket_reply.tickets.is_empty() {
             return Err(CephXError::ProtocolError("No tickets in AUTH_DONE".into()));
         }
 
-        // Parse all service tickets
+        // Process all service tickets
         let mut first_session_key_bytes: Option<Bytes> = None;
         let mut ticket_handlers: Vec<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> = Vec::new();
 
-        for i in 0..num_tickets {
-            debug!("Processing ticket {}/{}", i + 1, num_tickets);
-            let (service_id, session_key, secret_id, ticket_blob, validity) =
-                self.parse_service_ticket(&mut auth_payload, secret_key)?;
+        for (i, ticket_info) in ticket_reply.tickets.iter().enumerate() {
+            debug!(
+                "Processing ticket {}/{}: service_id={}",
+                i + 1,
+                ticket_reply.tickets.len(),
+                ticket_info.service_id
+            );
+
+            // Decrypt the encrypted service ticket to get session key and validity
+            let (session_key, validity) =
+                self.decrypt_service_ticket(&ticket_info.encrypted_service_ticket, secret_key)?;
+
+            debug!(
+                "Service {} session key type: {}, length: {}",
+                ticket_info.service_id,
+                session_key.get_type(),
+                session_key.len()
+            );
+            debug!("Validity: {:?}", validity);
 
             // Store the first ticket's session key for returning (this is the AUTH service)
             if i == 0 {
                 first_session_key_bytes = Some(session_key.get_secret().clone());
             }
 
-            ticket_handlers.push((service_id, session_key, secret_id, ticket_blob, validity));
+            ticket_handlers.push((
+                ticket_info.service_id,
+                session_key,
+                ticket_info.ticket_blob.secret_id,
+                ticket_info.ticket_blob.clone(),
+                validity,
+            ));
         }
 
         let session_key_bytes = first_session_key_bytes
