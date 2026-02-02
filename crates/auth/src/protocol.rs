@@ -102,6 +102,46 @@ impl Denc for CephXServiceTicket {
     }
 }
 
+/// Encrypted service ticket (before decryption)
+///
+/// Represents the encrypted form of CephXServiceTicket as it appears on the wire.
+/// After decryption, contains CephXServiceTicket inside an encrypted envelope.
+///
+/// Wire format:
+/// - `version: u8` - Service ticket version
+/// - `encrypted_data: Bytes` - Length-prefixed encrypted CephXServiceTicket
+#[derive(Debug, Clone)]
+pub struct EncryptedServiceTicket {
+    pub version: u8,
+    pub encrypted_data: Bytes,
+}
+
+impl Denc for EncryptedServiceTicket {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        self.version.encode(buf, 0)?;
+        self.encrypted_data.encode(buf, 0)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        let version = u8::decode(buf, 0)?;
+        let encrypted_data = Bytes::decode(buf, 0)?;
+        Ok(Self {
+            version,
+            encrypted_data,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // version (1) + length_prefix (4) + encrypted_data length
+        Some(1 + 4 + self.encrypted_data.len())
+    }
+}
+
 /// Authentication modes
 /// From src/auth/Auth.h
 // Auth modes for different Ceph services
