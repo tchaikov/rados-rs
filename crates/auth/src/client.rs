@@ -184,7 +184,6 @@ impl CephXClientHandler {
     ) -> Result<u64> {
         use crate::protocol::CephXChallengeBlob;
         use aes::Aes128;
-        use bytes::BufMut;
         use cbc::cipher::{BlockEncryptMut, KeyIvInit};
         use cbc::Encryptor;
 
@@ -205,32 +204,18 @@ impl CephXClientHandler {
             client_challenge,
         };
 
-        // Encode the challenge blob (like encode_encrypt_enc_bl in C++)
+        // Wrap in encrypted envelope and encode
+        use crate::protocol::CephXEncryptedEnvelope;
+        let envelope = CephXEncryptedEnvelope {
+            payload: challenge_blob,
+        };
+
         let mut bl = BytesMut::new();
-
-        // struct_v = 1
-        bl.put_u8(1);
-        debug!("Step 1: Added struct_v = 1");
-
-        // AUTH_ENC_MAGIC = 0xff009cad8826aa55ULL
-        let magic: u64 = 0xff009cad8826aa55;
-        magic
-            .encode(&mut bl, 0)
-            .map_err(|e| CephXError::EncodingError(format!("Failed to encode magic: {}", e)))?;
-        debug!("Step 2: Added AUTH_ENC_MAGIC = 0x{:016x}", magic);
-
-        // Encode the challenge blob itself
-        let challenge_size = challenge_blob.encoded_size(0).unwrap_or(0);
-        challenge_blob.encode(&mut bl, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to encode challenge: {:?}", e))
-        })?;
-        debug!("Step 3: Added challenge blob ({} bytes)", challenge_size);
-
-        // Prepare for AES encryption
+        envelope.encode(&mut bl, 0)?;
         let plaintext = bl.freeze();
 
         debug!(
-            "Step 4: Plaintext for AES encryption ({} bytes): {}",
+            "Encoded challenge envelope ({} bytes): {}",
             plaintext.len(),
             hex::encode(&plaintext)
         );
@@ -1187,27 +1172,8 @@ impl CephXClientHandler {
                 .join("")
         );
 
-        // Encode authorize_b
-        let mut authorize_b_buf = BytesMut::new();
-        authorize_b.encode(&mut authorize_b_buf, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeB: {:?}", e))
-        })?;
-
-        eprintln!(
-            "DEBUG:   authorize_b buffer length: {}",
-            authorize_b_buf.len()
-        );
-        eprintln!(
-            "DEBUG:   authorize_b hex: {}",
-            authorize_b_buf
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
-        );
-
-        // Encrypt authorize_b with session key
-        let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b_buf)?;
+        // Encrypt authorize_b with session key (envelope wrapping happens inside)
+        let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b)?;
 
         eprintln!("DEBUG:   encrypted_b length: {}", encrypted_b.len());
         eprintln!(
@@ -1229,27 +1195,30 @@ impl CephXClientHandler {
 
     /// Encrypt CephXAuthorizeB using the service session key
     /// This replicates the C++ ceph_x_encrypt behavior
-    fn encrypt_authorize_b(session_key: &CryptoKey, plaintext: &[u8]) -> Result<Bytes> {
+    fn encrypt_authorize_b(
+        session_key: &CryptoKey,
+        authorize_b: &crate::protocol::CephXAuthorizeB,
+    ) -> Result<Bytes> {
+        use crate::protocol::CephXEncryptedEnvelope;
         use aes::Aes128;
         use cbc::cipher::{BlockEncryptMut, KeyIvInit};
         use cbc::Encryptor;
+        use denc::Denc;
 
-        debug!("Encrypting CephXAuthorizeB ({} bytes)", plaintext.len());
+        debug!("Encrypting CephXAuthorizeB");
 
-        // Prepare encryption envelope: [struct_v:u8][magic:u64][plaintext]
-        let mut envelope = BytesMut::new();
-        envelope.put_u8(1); // struct_v
-        crate::protocol::AUTH_ENC_MAGIC
-            .encode(&mut envelope, 0)
-            .map_err(|e| {
-                CephXError::EncodingError(format!("Failed to encode AUTH_ENC_MAGIC: {}", e))
-            })?;
-        envelope.extend_from_slice(plaintext);
+        // Wrap authorize_b in encrypted envelope and encode
+        let envelope = CephXEncryptedEnvelope {
+            payload: authorize_b.clone(),
+        };
+
+        let mut envelope_buf = BytesMut::new();
+        envelope.encode(&mut envelope_buf, 0)?;
 
         debug!(
             "Encryption envelope ({} bytes): {}",
-            envelope.len(),
-            hex::encode(&envelope[..32.min(envelope.len())])
+            envelope_buf.len(),
+            hex::encode(&envelope_buf[..32.min(envelope_buf.len())])
         );
 
         // Extract AES key from session key
@@ -1281,11 +1250,14 @@ impl CephXClientHandler {
         type Aes128CbcEnc = Encryptor<Aes128>;
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
-        let mut buffer = vec![0u8; envelope.len() + 16];
-        buffer[..envelope.len()].copy_from_slice(&envelope);
+        let mut buffer = vec![0u8; envelope_buf.len() + 16];
+        buffer[..envelope_buf.len()].copy_from_slice(&envelope_buf);
 
         let ciphertext = cipher
-            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, envelope.len())
+            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(
+                &mut buffer,
+                envelope_buf.len(),
+            )
             .map_err(|e| {
                 CephXError::CryptographicError(format!("AES encryption failed: {:?}", e))
             })?;
