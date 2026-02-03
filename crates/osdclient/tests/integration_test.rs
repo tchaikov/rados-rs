@@ -129,6 +129,7 @@ fn test_object_name(prefix: &str) -> String {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_write_read_roundtrip() {
     let (_mon, osd, pool) = setup().await;
 
@@ -164,6 +165,7 @@ async fn test_write_read_roundtrip() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_stat_operation() {
     let (_mon, osd, pool) = setup().await;
 
@@ -197,6 +199,7 @@ async fn test_stat_operation() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_remove_operation() {
     let (_mon, osd, pool) = setup().await;
 
@@ -222,6 +225,7 @@ async fn test_remove_operation() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_write_full_vs_partial() {
     let (_mon, osd, pool) = setup().await;
 
@@ -254,6 +258,7 @@ async fn test_write_full_vs_partial() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_nonexistent_object() {
     let (_mon, osd, pool) = setup().await;
 
@@ -275,6 +280,7 @@ async fn test_nonexistent_object() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_large_object() {
     let (_mon, osd, pool) = setup().await;
 
@@ -322,6 +328,7 @@ async fn test_large_object() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_empty_object() {
     let (_mon, osd, pool) = setup().await;
 
@@ -358,6 +365,7 @@ async fn test_empty_object() {
 }
 
 #[tokio::test]
+#[ignore] // Requires a running Ceph cluster
 async fn test_overwrite_object() {
     let (_mon, osd, pool) = setup().await;
 
