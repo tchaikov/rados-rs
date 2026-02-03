@@ -12,6 +12,9 @@ pub enum MonClientError {
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
 
+    #[error("Timeout waiting for authentication to complete")]
+    AuthenticationTimeout,
+
     #[error("Command failed with code {code}: {message}")]
     CommandFailed { code: i32, message: String },
 

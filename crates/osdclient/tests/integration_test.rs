@@ -112,8 +112,11 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
         .expect("Failed to initialize MonClient");
 
     // Wait for authentication to fully complete with all service tickets
-    // Service tickets are received asynchronously after initial authentication
-    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+    // This ensures OSD service tickets are available before creating OSDClient
+    mon_client
+        .wait_for_auth(std::time::Duration::from_secs(5))
+        .await
+        .expect("Failed to complete authentication");
 
     // Subscribe to OSDMap
     mon_client

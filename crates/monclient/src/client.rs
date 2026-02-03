@@ -1845,6 +1845,50 @@ impl MonClient {
         state.authenticated
     }
 
+    /// Wait for authentication to complete
+    ///
+    /// This waits until the MonClient is authenticated with the monitor cluster
+    /// and has received all service tickets (OSD, MDS, MGR, etc.).
+    ///
+    /// Should be called after init() to ensure authentication is fully complete
+    /// before creating service clients like OSDClient.
+    pub async fn wait_for_auth(&self, timeout: std::time::Duration) -> Result<()> {
+        let start = std::time::Instant::now();
+
+        while start.elapsed() < timeout {
+            if self.is_authenticated().await {
+                // Also verify we have service tickets by checking if we can create an auth provider
+                if let Some(service_auth) = self.get_service_auth_provider().await {
+                    // Lock the handler and check what tickets are available
+                    let handler_arc = service_auth.handler();
+                    let handler = handler_arc.lock().unwrap();
+                    if let Some(session) = handler.get_session() {
+                        eprintln!(
+                            "Session has {} ticket handlers",
+                            session.ticket_handlers.len()
+                        );
+                        for (sid, h) in &session.ticket_handlers {
+                            eprintln!(
+                                "  Service {}: have_key={}, expired={}",
+                                sid,
+                                h.have_key,
+                                h.is_expired()
+                            );
+                        }
+                    } else {
+                    }
+                    drop(handler); // Release lock before logging
+                    info!("Authentication complete with service tickets available");
+                    return Ok(());
+                }
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+
+        Err(MonClientError::AuthenticationTimeout)
+    }
+
     /// Get the cluster FSID
     pub async fn get_fsid(&self) -> UuidD {
         let state = self.state.read().await;

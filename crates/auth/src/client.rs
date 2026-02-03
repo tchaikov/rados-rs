@@ -397,6 +397,137 @@ impl CephXClientHandler {
         Ok((service_ticket.session_key, service_ticket.validity))
     }
 
+    /// Decode extra_tickets in the simpler non-versioned format
+    /// Format: u8 version, u32 num, for each: u32 service_id, u8 ticket_v, EncryptedServiceTicket, u8 enc, ticket_blob
+    fn decode_extra_tickets(
+        &self,
+        buf: &mut Bytes,
+        auth_session_key: &CryptoKey,
+    ) -> Result<Vec<(u32, CryptoKey, u64, CephXTicketBlob, Duration)>> {
+        use bytes::Buf;
+        use denc::Denc;
+
+        // Read version and count
+        let _version = u8::decode(buf, 0)?;
+        let num = u32::decode(buf, 0)?;
+
+        let mut result = Vec::new();
+
+        for _i in 0..num {
+            // Read service_id
+            let service_id = match u32::decode(buf, 0) {
+                Ok(id) => id,
+                Err(_e) => {
+                    break;
+                }
+            };
+
+            // Decrypt the encrypted service ticket to get session key (includes version byte)
+            let encrypted_ticket = match crate::protocol::EncryptedServiceTicket::decode(buf, 0) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "  Failed to decode EncryptedServiceTicket: {:?}, skipping rest",
+                        e
+                    );
+                    break;
+                }
+            };
+            eprintln!(
+                "  encrypted_ticket version: {}, encrypted_data len: {}",
+                encrypted_ticket.version,
+                encrypted_ticket.encrypted_data.len()
+            );
+
+            let (session_key, validity) =
+                match self.decrypt_service_ticket(&encrypted_ticket, auth_session_key) {
+                    Ok(r) => r,
+                    Err(_e) => {
+                        continue;
+                    }
+                };
+            eprintln!(
+                "  session_key type: {}, validity: {:?}",
+                session_key.get_type(),
+                validity
+            );
+
+            // Read ticket_enc flag
+            let ticket_enc = match u8::decode(buf, 0) {
+                Ok(enc) => enc,
+                Err(_e) => {
+                    break;
+                }
+            };
+
+            // Read ticket blob (encrypted or not)
+            let ticket_blob = if ticket_enc != 0 {
+                // Encrypted ticket - decrypt with session key
+                match u32::decode(buf, 0) {
+                    Ok(encrypted_bl_len) => {
+                        if buf.remaining() < encrypted_bl_len as usize {
+                            eprintln!(
+                                "  Not enough bytes for encrypted ticket blob, skipping rest"
+                            );
+                            break;
+                        }
+                        let encrypted_bl = buf.split_to(encrypted_bl_len as usize);
+                        match session_key.decrypt(&encrypted_bl) {
+                            Ok(decrypted) => {
+                                let mut decrypted_buf = decrypted;
+                                match CephXTicketBlob::decode(&mut decrypted_buf, 0) {
+                                    Ok(blob) => blob,
+                                    Err(_e) => {
+                                        continue;
+                                    }
+                                }
+                            }
+                            Err(_e) => {
+                                continue;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "  Failed to decode encrypted ticket length: {:?}, skipping rest",
+                            e
+                        );
+                        break;
+                    }
+                }
+            } else {
+                // Unencrypted ticket - read bufferlist and decode
+                match u32::decode(buf, 0) {
+                    Ok(bl_len) => {
+                        if buf.remaining() < bl_len as usize {
+                            break;
+                        }
+                        let mut ticket_bl = buf.split_to(bl_len as usize);
+                        match CephXTicketBlob::decode(&mut ticket_bl, 0) {
+                            Ok(blob) => blob,
+                            Err(_e) => {
+                                continue;
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        break;
+                    }
+                }
+            };
+
+            result.push((
+                service_id,
+                session_key,
+                ticket_blob.secret_id,
+                ticket_blob,
+                validity,
+            ));
+        }
+
+        Ok(result)
+    }
+
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
     /// Returns (session_key_bytes, connection_secret_bytes) if in SECURE mode
     pub fn handle_auth_done(
@@ -586,6 +717,10 @@ impl CephXClientHandler {
         }
 
         // Parse extra_tickets if any remain in the payload
+        eprintln!(
+            "After connection_secret, auth_payload remaining: {} bytes",
+            auth_payload.remaining()
+        );
         trace!(
             "After connection_secret, auth_payload remaining: {} bytes",
             auth_payload.remaining()
@@ -597,6 +732,10 @@ impl CephXClientHandler {
 
                 if extra_tickets_len > 0 && auth_payload.remaining() >= extra_tickets_len {
                     let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
+                    eprintln!(
+                        "First 32 bytes: {:?}",
+                        &extra_tickets_bl[0..32.min(extra_tickets_bl.len())]
+                    );
                     trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
 
                     // Parse extra_tickets using ServiceTicketReply (same format as main tickets)
@@ -610,48 +749,32 @@ impl CephXClientHandler {
                             )
                         })?;
 
-                    match crate::protocol::ServiceTicketReply::decode(&mut extra_tickets_bl, 0) {
-                        Ok(extra_ticket_reply) => {
-                            trace!(
-                                "extra_tickets struct_v: {}, num_tickets: {}",
-                                extra_ticket_reply.struct_v,
-                                extra_ticket_reply.tickets.len()
+                    // Decode extra_tickets using the simpler non-versioned format
+                    // Format: u8 version, u32 num, for each: u32 service_id, u8 ticket_v, EncryptedServiceTicket, u8 enc, ticket_blob
+                    match self.decode_extra_tickets(&mut extra_tickets_bl, &auth_session_key) {
+                        Ok(extra_handlers) => {
+                            eprintln!(
+                                "Successfully decoded {} extra ticket(s)",
+                                extra_handlers.len()
                             );
-
-                            // Process each extra ticket
-                            for ticket_info in &extra_ticket_reply.tickets {
-                                match self.decrypt_service_ticket(
-                                    &ticket_info.encrypted_service_ticket,
-                                    &auth_session_key,
-                                ) {
-                                    Ok((session_key, validity)) => {
-                                        debug!(
-                                            "Extra ticket for service {}: session_key type={}, validity={:?}",
-                                            ticket_info.service_id,
-                                            session_key.get_type(),
-                                            validity
-                                        );
-                                        ticket_handlers.push((
-                                            ticket_info.service_id,
-                                            session_key,
-                                            ticket_info.ticket_blob.secret_id,
-                                            ticket_info.ticket_blob.clone(),
-                                            validity,
-                                        ));
-                                    }
-                                    Err(e) => {
-                                        // It's normal for extra tickets to have dummy/placeholder data
-                                        debug!(
-                                            "Failed to decrypt extra ticket for service {}: {:?}",
-                                            ticket_info.service_id, e
-                                        );
-                                    }
-                                }
+                            for (service_id, session_key, secret_id, ticket_blob, validity) in
+                                extra_handlers
+                            {
+                                eprintln!(
+                                    "  ✓ Extra ticket for service {}: secret_id={}, validity={:?}",
+                                    service_id, secret_id, validity
+                                );
+                                ticket_handlers.push((
+                                    service_id,
+                                    session_key,
+                                    secret_id,
+                                    ticket_blob,
+                                    validity,
+                                ));
                             }
                         }
                         Err(e) => {
-                            // It's normal for extra_tickets to be malformed or empty
-                            debug!("Failed to parse extra_tickets: {:?}", e);
+                            debug!("Failed to decode extra_tickets: {:?}", e);
                         }
                     }
                 }
@@ -670,6 +793,10 @@ impl CephXClientHandler {
 
         // Store all service tickets in the session
         if let Some(session) = &mut self.session {
+            eprintln!(
+                "\n=== handle_auth_done: Storing {} ticket handlers ===",
+                ticket_handlers.len()
+            );
             debug!(
                 "Storing {} ticket handlers in session",
                 ticket_handlers.len()
@@ -682,9 +809,36 @@ impl CephXClientHandler {
                 );
                 let handler = session.get_ticket_handler(service_id);
                 handler.update(session_key, secret_id, ticket_blob, validity);
+                eprintln!(
+                    "  ✓ Stored service {}: have_key={}, expired={}",
+                    service_id,
+                    handler.have_key,
+                    handler.is_expired()
+                );
                 debug!(
-                    "Stored ticket for service {} (secret_id={})",
-                    service_id, secret_id
+                    "✓ Stored ticket for service {} (secret_id={}, have_key={}, expired={})",
+                    service_id,
+                    secret_id,
+                    handler.have_key,
+                    handler.is_expired()
+                );
+            }
+            // Log all available tickets
+            for (sid, h) in &session.ticket_handlers {
+                eprintln!(
+                    "  Service {}: have_key={}, expired={}",
+                    sid,
+                    h.have_key,
+                    h.is_expired()
+                );
+            }
+            debug!("Available service tickets after storage:");
+            for (service_id, handler) in &session.ticket_handlers {
+                debug!(
+                    "  Service {}: have_key={}, expired={}",
+                    service_id,
+                    handler.have_key,
+                    handler.is_expired()
                 );
             }
         } else {
@@ -818,24 +972,16 @@ impl CephXClientHandler {
 
         // Debug: log all available ticket handlers
         debug!(
-            "Session has {} ticket handlers",
+            "build_authorizer: Requesting service_id={}, Session has {} ticket handlers",
+            service_id,
             session.ticket_handlers.len()
         );
         for (sid, handler) in &session.ticket_handlers {
-            trace!(
-                "  Ticket handler for service {}: have_key={}, ticket_blob={}",
+            debug!(
+                "  Ticket handler for service {}: have_key={}, expired={}, ticket_blob={}",
                 sid,
                 handler.have_key,
-                if handler.ticket_blob.is_some() {
-                    "present"
-                } else {
-                    "absent"
-                }
-            );
-            trace!(
-                "  Ticket handler for service {}: have_key={}, ticket_blob={}",
-                sid,
-                handler.have_key,
+                handler.is_expired(),
                 if handler.ticket_blob.is_some() {
                     "present"
                 } else {
@@ -845,7 +991,26 @@ impl CephXClientHandler {
         }
 
         // Get or create ticket handler
+        eprintln!(
+            "Session has {} ticket handlers",
+            session.ticket_handlers.len()
+        );
+        for (sid, h) in &session.ticket_handlers {
+            eprintln!(
+                "  Handler {}: have_key={}, expired={}",
+                sid,
+                h.have_key,
+                h.is_expired()
+            );
+        }
+
         let handler = session.get_ticket_handler(service_id);
+        eprintln!(
+            "After get_ticket_handler({}): have_key={}, expired={}",
+            service_id,
+            handler.have_key,
+            handler.is_expired()
+        );
 
         if !handler.have_key {
             return Err(CephXError::AuthenticationFailed(format!(
