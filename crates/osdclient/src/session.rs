@@ -170,9 +170,10 @@ impl OSDSession {
     ///
     /// This task multiplexes:
     /// - Receiving messages from send_rx channel and sending to OSD
-    /// - Receiving messages from OSD and routing to pending ops
+    /// - Receiving messages from OSD and dispatching to handlers
     ///
     /// Like Linux kernel's con_work() function, but using tokio::select!
+    /// Reference: ~/dev/ceph/src/msg/async/ProtocolV2.cc and ~/dev/linux/net/ceph/messenger.c
     async fn io_task(
         osd_id: i32,
         mut connection: msgr2::protocol::Connection,
@@ -197,105 +198,16 @@ impl OSDSession {
                 result = connection.recv_message() => {
                     match result {
                         Ok(msg) => {
-                            match msg.msg_type() {
-                                crate::messages::CEPH_MSG_OSD_OPREPLY => {
-                                    let tid = msg.tid();
-
-                                    // Decode MOSDOpReply from message sections
-                                    match MOSDOpReply::decode(&msg.front, &msg.data) {
-                                        Ok(reply) => {
-                                            // Handle reply and check if retry is needed
-                                            if let Some((mut pending_op, new_flags)) =
-                                                Self::handle_reply(tid, reply, &pending_ops).await
-                                            {
-                                                // EAGAIN on replica read - retry to primary
-                                                debug!(
-                                                    "Resubmitting operation tid {} with flags 0x{:x} (was 0x{:x})",
-                                                    tid, new_flags, pending_op.op.flags
-                                                );
-
-                                                // Update for retry
-                                                pending_op.op.flags = new_flags;
-                                                pending_op.attempts += 1;
-                                                // retry_attempt is 0-based, attempts is 1-based
-                                                pending_op.op.retry_attempt = pending_op.attempts - 1;
-
-                                                // Encode the operation
-                                                match CephMessage::from_payload(
-                                                    &pending_op.op,
-                                                    0,
-                                                    CrcFlags::ALL,
-                                                ) {
-                                                    Ok(ceph_msg) => {
-                                                        // Create msgr2 message
-                                                        let mut retry_msg =
-                                                            msgr2::message::Message::new(
-                                                                crate::messages::CEPH_MSG_OSD_OP,
-                                                                ceph_msg.front,
-                                                            )
-                                                            .with_version(ceph_msg.header.version)
-                                                            .with_tid(tid);
-                                                        retry_msg.header.compat_version =
-                                                            ceph_msg.header.compat_version;
-                                                        retry_msg.data = ceph_msg.data;
-
-                                                        pending_op.tid = tid;
-
-                                                        // Try to send first, only add to pending if successful
-                                                        if let Err(e) = send_tx.send(retry_msg).await {
-                                                            error!(
-                                                                "Failed to send retry for tid {}: {}",
-                                                                tid, e
-                                                            );
-                                                            // Send failed - notify client directly
-                                                            let _ = pending_op.result_tx.send(Err(
-                                                                OSDClientError::Connection(
-                                                                    "Failed to send retry".into(),
-                                                                ),
-                                                            ));
-                                                        } else {
-                                                            // Send succeeded - add back to pending ops
-                                                            let mut pending =
-                                                                pending_ops.write().await;
-                                                            pending.insert(tid, pending_op);
-                                                        }
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            "Failed to encode retry for tid {}: {}",
-                                                            tid, e
-                                                        );
-                                                        // Notify client of encoding failure
-                                                        let _ = pending_op.result_tx.send(Err(
-                                                            OSDClientError::Encoding(format!(
-                                                                "Failed to encode retry: {}",
-                                                                e
-                                                            )),
-                                                        ));
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to decode MOSDOpReply: {}", e);
-                                        }
-                                    }
-                                }
-                                crate::messages::CEPH_MSG_OSD_BACKOFF => {
-                                    // Decode MOSDBackoff from message sections
-                                    match crate::messages::MOSDBackoff::decode(&msg.front) {
-                                        Ok(backoff_msg) => {
-                                            Self::handle_backoff(osd_id, backoff_msg, &backoffs, &mut connection).await;
-                                        }
-                                        Err(e) => {
-                                            error!("Failed to decode MOSDBackoff: {}", e);
-                                        }
-                                    }
-                                }
-                                _ => {
-                                    warn!("Received unexpected message type: 0x{:04x}", msg.msg_type());
-                                }
-                            }
+                            // Dispatch to appropriate handler (like Ceph's ms_dispatch2)
+                            Self::dispatch_message(
+                                osd_id,
+                                msg,
+                                &send_tx,
+                                &pending_ops,
+                                &backoffs,
+                                &mut connection,
+                            )
+                            .await;
                         }
                         Err(e) => {
                             error!("Failed to receive message from OSD {}: {}", osd_id, e);
@@ -307,6 +219,130 @@ impl OSDSession {
         }
 
         info!("I/O task exiting for OSD {}", osd_id);
+    }
+
+    /// Dispatch incoming message to appropriate handler
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2()
+    async fn dispatch_message(
+        osd_id: i32,
+        msg: msgr2::message::Message,
+        send_tx: &mpsc::Sender<msgr2::message::Message>,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+        backoffs: &Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+        connection: &mut msgr2::protocol::Connection,
+    ) {
+        match msg.msg_type() {
+            crate::messages::CEPH_MSG_OSD_OPREPLY => {
+                let tid = msg.tid();
+                match MOSDOpReply::decode(&msg.front, &msg.data) {
+                    Ok(reply) => {
+                        Self::handle_osd_op_reply(osd_id, tid, reply, send_tx, pending_ops).await;
+                    }
+                    Err(e) => {
+                        error!("Failed to decode MOSDOpReply: {}", e);
+                    }
+                }
+            }
+            crate::messages::CEPH_MSG_OSD_BACKOFF => {
+                match crate::messages::MOSDBackoff::decode(&msg.front) {
+                    Ok(backoff_msg) => {
+                        Self::handle_backoff(osd_id, backoff_msg, backoffs, connection).await;
+                    }
+                    Err(e) => {
+                        error!("Failed to decode MOSDBackoff: {}", e);
+                    }
+                }
+            }
+            _ => {
+                warn!(
+                    "OSD {} sent unexpected message type: 0x{:04x}",
+                    osd_id,
+                    msg.msg_type()
+                );
+            }
+        }
+    }
+
+    /// Handle OSD operation reply
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc handle_osd_op_reply()
+    async fn handle_osd_op_reply(
+        osd_id: i32,
+        tid: u64,
+        reply: MOSDOpReply,
+        send_tx: &mpsc::Sender<msgr2::message::Message>,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+    ) {
+        // Check if retry is needed (returns Some if EAGAIN on replica read)
+        if let Some((mut pending_op, new_flags)) = Self::handle_reply(tid, reply, pending_ops).await
+        {
+            debug!(
+                "OSD {} EAGAIN on replica read tid {}, retrying to primary (flags: 0x{:x} -> 0x{:x})",
+                osd_id, tid, pending_op.op.flags, new_flags
+            );
+
+            // Update operation for retry
+            pending_op.op.flags = new_flags;
+            pending_op.attempts += 1;
+            pending_op.op.retry_attempt = pending_op.attempts - 1;
+
+            // Resubmit the operation
+            if let Err(e) = Self::resubmit_operation(tid, pending_op, send_tx, pending_ops).await {
+                error!("Failed to resubmit operation tid {}: {}", tid, e);
+            }
+        }
+    }
+
+    /// Resubmit an operation (for retries)
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _op_submit()
+    async fn resubmit_operation(
+        tid: u64,
+        mut pending_op: PendingOp,
+        send_tx: &mpsc::Sender<msgr2::message::Message>,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+    ) -> Result<()> {
+        // Encode the operation
+        let msg = Self::encode_operation(&pending_op.op, tid)?;
+
+        // Update tid in pending_op
+        pending_op.tid = tid;
+
+        // Try to send first, only add to pending if successful
+        if let Err(e) = send_tx.send(msg).await {
+            // Send failed - notify client
+            let _ = pending_op
+                .result_tx
+                .send(Err(OSDClientError::Connection(format!(
+                    "Failed to send retry: {}",
+                    e
+                ))));
+            return Err(OSDClientError::Connection("Failed to send retry".into()));
+        }
+
+        // Send succeeded - add back to pending ops
+        let mut pending = pending_ops.write().await;
+        pending.insert(tid, pending_op);
+
+        Ok(())
+    }
+
+    /// Encode an operation into a msgr2 message
+    ///
+    /// Helper to eliminate duplication between submit_op and retry logic
+    fn encode_operation(op: &MOSDOp, tid: u64) -> Result<msgr2::message::Message> {
+        let ceph_msg = CephMessage::from_payload(op, 0, CrcFlags::ALL)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
+
+        let mut msg =
+            msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
+                .with_version(ceph_msg.header.version)
+                .with_tid(tid);
+        msg.header.compat_version = ceph_msg.header.compat_version;
+        msg.data = ceph_msg.data;
+
+        Ok(msg)
     }
 
     /// Submit an operation to the OSD
@@ -363,19 +399,8 @@ impl OSDSession {
             );
         }
 
-        // Encode the operation using the unified CephMessage framework
-        let ceph_msg = CephMessage::from_payload(&op, 0, CrcFlags::ALL)
-            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
-
-        // Convert CephMessage to msgr2::Message for sending
-        // The msgr2::Message is used by the protocol layer for framing
-        // Use the version from the CephMessage header (set by CephMessagePayload trait)
-        let mut msg =
-            msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
-                .with_version(ceph_msg.header.version)
-                .with_tid(tid);
-        msg.header.compat_version = ceph_msg.header.compat_version;
-        msg.data = ceph_msg.data;
+        // Encode the operation using shared helper
+        let msg = Self::encode_operation(&op, tid)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         self.send_tx
@@ -668,13 +693,6 @@ impl OSDSession {
             pending.insert(tid, pending_op);
         }
 
-        // Note: We don't send the message here because the io_task will handle retransmission
-        // if needed based on the OSDMap epoch mismatch. The OSD will detect the stale epoch
-        // and respond appropriately.
-        //
-        // Actually, we DO need to send it because this is a migration from a different session.
-        // The new session's io_task doesn't know about this operation yet.
-
         // Get a reference to the op for sending
         let pending = self.pending_ops.read().await;
         let op = match pending.get(&tid) {
@@ -687,16 +705,8 @@ impl OSDSession {
         };
         drop(pending);
 
-        // Encode and send the operation
-        let ceph_msg = CephMessage::from_payload(&op, 0, CrcFlags::ALL)
-            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
-
-        let mut msg =
-            msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
-                .with_version(ceph_msg.header.version)
-                .with_tid(tid);
-        msg.header.compat_version = ceph_msg.header.compat_version;
-        msg.data = ceph_msg.data;
+        // Encode and send the operation using shared helper
+        let msg = Self::encode_operation(&op, tid)?;
 
         // Send to channel
         self.send_tx
