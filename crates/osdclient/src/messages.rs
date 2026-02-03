@@ -87,28 +87,28 @@ impl MOSDOp {
     /// This determines the READ/WRITE flags based on the operation types,
     /// matching the behavior of the Linux kernel and librados.
     pub fn calculate_flags(ops: &[OSDOp]) -> u32 {
-        use crate::types::flags::*;
+        use crate::types::OsdOpFlags;
 
-        let mut flags = CEPH_OSD_FLAG_ACK; // Always want acknowledgment
+        let mut flags = OsdOpFlags::ACK; // Always want acknowledgment
 
         // Check if we have any read or write operations
         let has_read = ops.iter().any(|op| op.op.is_read());
         let has_write = ops.iter().any(|op| op.op.is_write());
 
         if has_read {
-            flags |= CEPH_OSD_FLAG_READ;
+            flags |= OsdOpFlags::READ;
         }
         if has_write {
-            flags |= CEPH_OSD_FLAG_WRITE;
+            flags |= OsdOpFlags::WRITE;
         }
 
         // Check if any operation is a PG operation (based on opcode type)
         let has_pgop = ops.iter().any(|op| op.op.is_pg_op());
         if has_pgop {
-            flags |= CEPH_OSD_FLAG_PGOP;
+            flags |= OsdOpFlags::PGOP;
         }
 
-        flags
+        flags.bits()
     }
 
     /// Get the expected front section size for a PGLS operation

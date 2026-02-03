@@ -427,8 +427,8 @@ impl OSDSession {
             const EAGAIN: i32 = -11;
             if reply.result == EAGAIN {
                 // Check if this was a replica read
-                use crate::types::{CEPH_OSD_FLAG_BALANCE_READS, CEPH_OSD_FLAG_LOCALIZE_READS};
-                let replica_flags = CEPH_OSD_FLAG_BALANCE_READS | CEPH_OSD_FLAG_LOCALIZE_READS;
+                use crate::types::OsdOpFlags;
+                let replica_flags = (OsdOpFlags::BALANCE_READS | OsdOpFlags::LOCALIZE_READS).bits();
 
                 if pending_op.op.flags & replica_flags != 0 {
                     debug!(

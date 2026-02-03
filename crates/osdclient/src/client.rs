@@ -16,9 +16,8 @@ use crate::session::{OSDSession, PendingOp};
 use crate::throttle::Throttle;
 use crate::tracker::{Tracker, TrackerConfig};
 use crate::types::{
-    calc_op_budget, ListObjectEntry, ListResult, OSDOp, ObjectId, ReadResult, RequestRedirect,
-    StatResult, StripedPgId, WriteResult, CEPH_OSD_FLAG_IGNORE_CACHE, CEPH_OSD_FLAG_IGNORE_OVERLAY,
-    CEPH_OSD_FLAG_REDIRECTED,
+    calc_op_budget, ListObjectEntry, ListResult, OSDOp, ObjectId, OsdOpFlags, PoolFlags,
+    ReadResult, RequestRedirect, StatResult, StripedPgId, WriteResult,
 };
 
 /// Configuration for OSD client
@@ -226,8 +225,8 @@ impl OSDClient {
                     };
 
                     // Check hashpspool flag
-                    const FLAG_HASHPSPOOL: u64 = 1;
-                    let hashpspool = (pool_info.flags & FLAG_HASHPSPOOL) != 0;
+                    let hashpspool = PoolFlags::from_bits_truncate(pool_info.flags)
+                        .contains(PoolFlags::HASHPSPOOL);
 
                     // Calculate new target OSDs
                     let result = crush::placement::object_to_osds(
@@ -460,9 +459,8 @@ impl OSDClient {
         );
 
         // Check if pool has hashpspool flag (modern pools)
-        // FLAG_HASHPSPOOL = 1<<0 = 1 (from ~/dev/ceph/src/osd/osd_types.h)
-        const FLAG_HASHPSPOOL: u64 = 1;
-        let hashpspool = (pool_info.flags & FLAG_HASHPSPOOL) != 0;
+        let hashpspool =
+            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
 
         let (pg, mut osds) = crush::placement::object_to_osds(
             crush_map,
@@ -553,9 +551,9 @@ impl OSDClient {
         }
 
         // Set redirect flags (from ~/dev/ceph/src/osdc/Objecter.cc:3744)
-        op.flags |= CEPH_OSD_FLAG_REDIRECTED;
-        op.flags |= CEPH_OSD_FLAG_IGNORE_CACHE;
-        op.flags |= CEPH_OSD_FLAG_IGNORE_OVERLAY;
+        let redirect_flags =
+            OsdOpFlags::REDIRECTED | OsdOpFlags::IGNORE_CACHE | OsdOpFlags::IGNORE_OVERLAY;
+        op.flags |= redirect_flags.bits();
 
         debug!(
             "Applied redirect: pool={}, oid={}, key={}, nspace={}",
@@ -953,8 +951,8 @@ impl OSDClient {
         let starting_pg = current_pg;
 
         // Check if pool has hashpspool flag
-        const FLAG_HASHPSPOOL: u64 = 1;
-        let hashpspool = (pool_info.flags & FLAG_HASHPSPOOL) != 0;
+        let hashpspool =
+            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
 
         let crush_map = osdmap
             .crush

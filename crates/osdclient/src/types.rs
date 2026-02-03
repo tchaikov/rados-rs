@@ -3,17 +3,80 @@
 use bytes::Bytes;
 use std::time::SystemTime;
 
-// OSD operation flags (from ~/dev/ceph/src/include/rados.h)
-/// Ignore cache logic (used for redirects)
-pub const CEPH_OSD_FLAG_IGNORE_CACHE: u32 = 0x8000;
-/// Ignore pool overlay (used for redirects)
-pub const CEPH_OSD_FLAG_IGNORE_OVERLAY: u32 = 0x20000;
-/// Operation has been redirected (for EC pools)
-pub const CEPH_OSD_FLAG_REDIRECTED: u32 = 0x200000;
-/// Balance reads among replicas
-pub const CEPH_OSD_FLAG_BALANCE_READS: u32 = 0x0100;
-/// Read from nearby replica, if any
-pub const CEPH_OSD_FLAG_LOCALIZE_READS: u32 = 0x2000;
+// ============= Pool Flags =============
+
+bitflags::bitflags! {
+    /// Pool flags (from ~/dev/ceph/src/osd/osd_types.h)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct PoolFlags: u64 {
+        /// Hash pg seed and pool together (instead of adding)
+        const HASHPSPOOL = 1 << 0;
+        /// Pool is full
+        const FULL = 1 << 1;
+        /// May have incomplete clones (bc we are/were an overlay)
+        const INCOMPLETE_CLONES = 1 << 3;
+        /// Pool is currently running out of quota, will set FULL too
+        const FULL_QUOTA = 1 << 10;
+    }
+}
+
+// ============= OSD Operation Flags =============
+
+bitflags::bitflags! {
+    /// OSD operation flags (from ~/dev/ceph/src/include/rados.h)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct OsdOpFlags: u32 {
+        /// Request acknowledgement
+        const ACK = 0x0001;
+        /// Request commit confirmation
+        const ONDISK = 0x0004;
+        /// Read operation
+        const READ = 0x0010;
+        /// Write operation
+        const WRITE = 0x0020;
+        /// Balance reads among replicas
+        const BALANCE_READS = 0x0100;
+        /// Read from nearby replica, if any
+        const LOCALIZE_READS = 0x2000;
+        /// PG operation
+        const PGOP = 0x0400;
+        /// Ignore cache logic (used for redirects)
+        const IGNORE_CACHE = 0x8000;
+        /// Ignore pool overlay (used for redirects)
+        const IGNORE_OVERLAY = 0x20000;
+        /// Operation has been redirected (for EC pools)
+        const REDIRECTED = 0x200000;
+    }
+}
+
+bitflags::bitflags! {
+    /// OSD Read-Modify-Write operation flags (from ~/dev/ceph/src/osd/osd_types.h)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct OsdRmwFlags: u32 {
+        /// Read operation
+        const READ = 1 << 1;
+        /// Write operation
+        const WRITE = 1 << 2;
+        /// Class read operation
+        const CLASS_READ = 1 << 3;
+        /// Class write operation
+        const CLASS_WRITE = 1 << 4;
+        /// PG operation
+        const PGOP = 1 << 5;
+        /// Cache operation
+        const CACHE = 1 << 6;
+        /// Force promote
+        const FORCE_PROMOTE = 1 << 7;
+        /// Skip handle cache
+        const SKIP_HANDLE_CACHE = 1 << 8;
+        /// Skip promote
+        const SKIP_PROMOTE = 1 << 9;
+        /// RW ordered
+        const RWORDERED = 1 << 10;
+        /// Return vector
+        const RETURNVEC = 1 << 11;
+    }
+}
 
 /// Object identification (corresponds to hobject_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -310,34 +373,6 @@ impl JaegerSpanContext {
     pub const fn invalid() -> Self {
         Self { is_valid: false }
     }
-}
-
-/// OSD request flags (from Ceph's rados.h)
-pub mod flags {
-    /// Want (or is) "ack" acknowledgment
-    pub const CEPH_OSD_FLAG_ACK: u32 = 0x0001;
-    /// Want (or is) "ondisk" acknowledgment
-    pub const CEPH_OSD_FLAG_ONDISK: u32 = 0x0004;
-    /// Op may read
-    pub const CEPH_OSD_FLAG_READ: u32 = 0x0010;
-    /// Op may write
-    pub const CEPH_OSD_FLAG_WRITE: u32 = 0x0020;
-    /// PG operation, no object
-    pub const CEPH_OSD_FLAG_PGOP: u32 = 0x0400;
-
-    // Internal OSD op flags (RMW flags) - set based on op types
-    // These are per-operation flags, not message-level flags
-    pub const CEPH_OSD_RMW_FLAG_READ: u32 = 1 << 1;
-    pub const CEPH_OSD_RMW_FLAG_WRITE: u32 = 1 << 2;
-    pub const CEPH_OSD_RMW_FLAG_CLASS_READ: u32 = 1 << 3;
-    pub const CEPH_OSD_RMW_FLAG_CLASS_WRITE: u32 = 1 << 4;
-    pub const CEPH_OSD_RMW_FLAG_PGOP: u32 = 1 << 5;
-    pub const CEPH_OSD_RMW_FLAG_CACHE: u32 = 1 << 6;
-    pub const CEPH_OSD_RMW_FLAG_FORCE_PROMOTE: u32 = 1 << 7;
-    pub const CEPH_OSD_RMW_FLAG_SKIP_HANDLE_CACHE: u32 = 1 << 8;
-    pub const CEPH_OSD_RMW_FLAG_SKIP_PROMOTE: u32 = 1 << 9;
-    pub const CEPH_OSD_RMW_FLAG_RWORDERED: u32 = 1 << 10;
-    pub const CEPH_OSD_RMW_FLAG_RETURNVEC: u32 = 1 << 11;
 }
 
 // OSD operation modes (from Ceph's rados.h)

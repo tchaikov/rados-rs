@@ -27,11 +27,19 @@ pub struct CephMsgFooterOld {
     pub flags: u8,
 }
 
+bitflags::bitflags! {
+    /// Message footer flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct MsgFooterFlags: u8 {
+        /// Message is complete
+        const COMPLETE = 1;
+        /// No CRC check needed
+        const NOCRC = 2;
+    }
+}
+
 impl CephMsgFooterOld {
     pub const LENGTH: usize = 13; // 3 * u32 + u8
-
-    pub const FLAG_COMPLETE: u8 = 1;
-    pub const FLAG_NOCRC: u8 = 2;
 
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
         use denc::Denc;
@@ -224,7 +232,7 @@ impl CephMessage {
 
         // Create footer with CRCs
         let mut footer = CephMsgFooterOld {
-            flags: CephMsgFooterOld::FLAG_COMPLETE,
+            flags: MsgFooterFlags::COMPLETE.bits(),
             ..Default::default()
         };
 
@@ -233,7 +241,7 @@ impl CephMessage {
             footer.middle_crc = crc32c(&middle);
             footer.data_crc = crc32c(&data);
         } else {
-            footer.flags |= CephMsgFooterOld::FLAG_NOCRC;
+            footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
 
         if _crc_flags.contains(CrcFlags::HEADER) {
@@ -297,7 +305,7 @@ impl CephMessage {
         src.copy_to_slice(&mut data);
 
         // Verify CRCs if not disabled
-        if footer.flags & CephMsgFooterOld::FLAG_NOCRC == 0 {
+        if footer.flags & MsgFooterFlags::NOCRC.bits() == 0 {
             let front_crc = crc32c(&front);
             if front_crc != footer.front_crc {
                 return Err(Error::Deserialization(format!(
