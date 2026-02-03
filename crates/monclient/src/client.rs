@@ -2218,6 +2218,22 @@ impl MonClient {
             })
         }
     }
+
+    /// Handle OSDMap message from OSD
+    ///
+    /// This is a public method that can be called by OSDClient when it receives
+    /// an OSDMap message from an OSD. The message is processed the same way as
+    /// OSDMap messages from monitors.
+    ///
+    /// # Arguments
+    /// * `msg` - The OSDMap message received from the OSD
+    ///
+    /// # Returns
+    /// Result indicating success or failure
+    pub async fn handle_osdmap_from_osd(&self, msg: msgr2::message::Message) -> Result<()> {
+        info!("Handling OSDMap from OSD ({} bytes)", msg.front.len());
+        Self::handle_osdmap(&self.state, &self.map_events, msg).await
+    }
 }
 
 impl std::fmt::Debug for MonClient {

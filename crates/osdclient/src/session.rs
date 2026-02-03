@@ -49,6 +49,8 @@ pub struct OSDSession {
     /// Outer map: pgid -> inner map
     /// Inner map: begin hobject -> backoff info
     backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+    /// MonClient for handling OSDMap updates from OSDs
+    mon_client: Option<Arc<monclient::MonClient>>,
 }
 
 /// Tracking information for a pending operation
@@ -77,6 +79,7 @@ impl OSDSession {
         entity_name: String,
         client_inc: u32,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
+        mon_client: Option<Arc<monclient::MonClient>>,
     ) -> Self {
         // Create channel for outgoing messages (like Linux kernel's out_queue)
         // Buffer size of 100 messages should be plenty
@@ -91,6 +94,7 @@ impl OSDSession {
             client_inc,
             auth_provider,
             backoffs: Arc::new(RwLock::new(HashMap::new())),
+            mon_client,
         }
     }
 
@@ -147,6 +151,7 @@ impl OSDSession {
         // This task multiplexes send/receive using tokio::select!
         let pending_ops = Arc::clone(&self.pending_ops);
         let backoffs = Arc::clone(&self.backoffs);
+        let mon_client = self.mon_client.clone();
         let osd_id = self.osd_id;
         let send_tx_clone = self.send_tx.clone();
         tokio::spawn(async move {
@@ -157,6 +162,7 @@ impl OSDSession {
                 send_rx,
                 pending_ops,
                 backoffs,
+                mon_client,
             )
             .await;
         });
@@ -181,6 +187,7 @@ impl OSDSession {
         mut send_rx: mpsc::Receiver<msgr2::message::Message>,
         pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
         backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+        mon_client: Option<Arc<monclient::MonClient>>,
     ) {
         info!("I/O task started for OSD {}", osd_id);
 
@@ -206,6 +213,7 @@ impl OSDSession {
                                 &pending_ops,
                                 &backoffs,
                                 &mut connection,
+                                &mon_client,
                             )
                             .await;
                         }
@@ -231,6 +239,7 @@ impl OSDSession {
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
         backoffs: &Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
         connection: &mut msgr2::protocol::Connection,
+        mon_client: &Option<Arc<monclient::MonClient>>,
     ) {
         match msg.msg_type() {
             crate::messages::CEPH_MSG_OSD_OPREPLY => {
@@ -264,13 +273,26 @@ impl OSDSession {
             }
             crate::messages::CEPH_MSG_OSD_MAP => {
                 // OSDs can send OSDMap updates to clients
-                // The MonClient is responsible for managing the OSDMap, so we just
-                // acknowledge receipt and ignore the message here
-                debug!(
-                    "OSD {} sent OSDMap update ({} bytes), ignoring (MonClient manages OSDMap)",
-                    osd_id,
-                    msg.front.len()
-                );
+                // Forward this to MonClient for processing, just like OSDMap updates from monitors
+                if let Some(mon_client) = mon_client {
+                    info!(
+                        "OSD {} sent OSDMap update ({} bytes), forwarding to MonClient",
+                        osd_id,
+                        msg.front.len()
+                    );
+                    if let Err(e) = mon_client.handle_osdmap_from_osd(msg).await {
+                        warn!(
+                            "Failed to handle OSDMap from OSD {}: {}",
+                            osd_id, e
+                        );
+                    }
+                } else {
+                    debug!(
+                        "OSD {} sent OSDMap update ({} bytes), but no MonClient available to handle it",
+                        osd_id,
+                        msg.front.len()
+                    );
+                }
             }
             _ => {
                 warn!(

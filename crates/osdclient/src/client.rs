@@ -375,6 +375,7 @@ impl OSDClient {
             self.config.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
+            Some(Arc::clone(&self.mon_client)),
         );
 
         // Get OSD address from OSDMap
