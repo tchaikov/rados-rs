@@ -858,8 +858,11 @@ mod tests {
         let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();
 
         // Verify message structure
-        assert_eq!(msg.header.msg_type, CEPH_MSG_OSD_OP);
-        assert_eq!(msg.header.version, MOSDOp::VERSION);
+        // Copy packed struct fields to local variables to avoid unaligned references
+        let msg_type = msg.header.msg_type;
+        let version = msg.header.version;
+        assert_eq!(msg_type, CEPH_MSG_OSD_OP);
+        assert_eq!(version, MOSDOp::VERSION);
         assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0); // No data for read operation

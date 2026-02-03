@@ -352,8 +352,11 @@ mod tests {
         let msg = CephMessage::from_payload(&subscribe, 0, CrcFlags::ALL).unwrap();
 
         // Verify message structure
-        assert_eq!(msg.header.msg_type, CEPH_MSG_MON_SUBSCRIBE);
-        assert_eq!(msg.header.version, MMON_SUBSCRIBE_VERSION);
+        // Copy packed struct fields to local variables to avoid unaligned references
+        let msg_type = msg.header.msg_type;
+        let version = msg.header.version;
+        assert_eq!(msg_type, CEPH_MSG_MON_SUBSCRIBE);
+        assert_eq!(version, MMON_SUBSCRIBE_VERSION);
         assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0);
@@ -371,8 +374,11 @@ mod tests {
         let msg = CephMessage::from_payload(&get_version, 0, CrcFlags::ALL).unwrap();
 
         // Verify message structure
-        assert_eq!(msg.header.msg_type, CEPH_MSG_MON_GET_VERSION);
-        assert_eq!(msg.header.version, MMON_GET_VERSION_VERSION);
+        // Copy packed struct fields to local variables to avoid unaligned references
+        let msg_type = msg.header.msg_type;
+        let version = msg.header.version;
+        assert_eq!(msg_type, CEPH_MSG_MON_GET_VERSION);
+        assert_eq!(version, MMON_GET_VERSION_VERSION);
         assert!(!msg.front.is_empty());
     }
 }
