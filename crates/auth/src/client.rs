@@ -425,7 +425,7 @@ impl CephXClientHandler {
             // Decrypt the encrypted service ticket to get session key (includes version byte)
             let encrypted_ticket = match crate::protocol::EncryptedServiceTicket::decode(buf, 0) {
                 Ok(t) => t,
-                Err(e) => {
+                Err(_e) => {
                     break;
                 }
             };
@@ -470,7 +470,7 @@ impl CephXClientHandler {
                             }
                         }
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         break;
                     }
                 }
@@ -777,7 +777,6 @@ impl CephXClientHandler {
                 );
             }
             // Log all available tickets
-            for (sid, h) in &session.ticket_handlers {}
             debug!("Available service tickets after storage:");
             for (service_id, handler) in &session.ticket_handlers {
                 debug!(
@@ -937,8 +936,6 @@ impl CephXClientHandler {
         }
 
         // Get or create ticket handler
-        for (sid, h) in &session.ticket_handlers {}
-
         let handler = session.get_ticket_handler(service_id);
 
         if !handler.have_key {

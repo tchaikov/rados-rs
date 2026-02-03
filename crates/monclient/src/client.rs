@@ -1858,15 +1858,7 @@ impl MonClient {
         while start.elapsed() < timeout {
             if self.is_authenticated().await {
                 // Also verify we have service tickets by checking if we can create an auth provider
-                if let Some(service_auth) = self.get_service_auth_provider().await {
-                    // Lock the handler and check what tickets are available
-                    let handler_arc = service_auth.handler();
-                    let handler = handler_arc.lock().unwrap();
-                    if let Some(session) = handler.get_session() {
-                        for (sid, h) in &session.ticket_handlers {}
-                    } else {
-                    }
-                    drop(handler); // Release lock before logging
+                if self.get_service_auth_provider().await.is_some() {
                     info!("Authentication complete with service tickets available");
                     return Ok(());
                 }
