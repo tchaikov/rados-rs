@@ -100,9 +100,7 @@ impl CephXClientHandler {
         let entity_name_len = self.entity_name.encoded_size(0).unwrap_or(0);
 
         // 3. global_id (u64)
-        global_id
-            .encode(&mut payload, 0)
-            .map_err(|e| CephXError::EncodingError(format!("Failed to encode global_id: {}", e)))?;
+        global_id.encode(&mut payload, 0)?;
 
         // 4. build_initial_request() is empty for CephX (no payload)
 
@@ -467,17 +465,15 @@ impl CephXClientHandler {
         let mut ticket_blob_bytes = if ticket_enc != 0 {
             // Encrypted: read length-prefixed encrypted data and decrypt
             // Bytes::decode() is zero-copy when buf is Bytes (just increments refcount)
-            let encrypted_bl =
-                Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
+            let encrypted_bl = Bytes::decode(buf, 0)?;
             session_key.decrypt(&encrypted_bl)?
         } else {
             // Unencrypted: read length-prefixed data directly
-            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?
+            Bytes::decode(buf, 0)?
         };
 
         // Decode ticket blob from the extracted bytes
-        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)
-            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
+        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)?;
 
         Ok((
             service_id,
