@@ -12,6 +12,9 @@ use rand::RngCore;
 use std::time::Duration;
 use tracing::{debug, trace, warn};
 
+/// Decoded service ticket information: (service_id, session_key, secret_id, ticket_blob, validity)
+type DecodedServiceTicket = (u32, CryptoKey, u64, CephXTicketBlob, Duration);
+
 /// Authentication result from handler
 #[derive(Debug, PartialEq)]
 pub enum AuthResult {
@@ -398,113 +401,125 @@ impl CephXClientHandler {
     }
 
     /// Decode extra_tickets in the simpler non-versioned format
-    /// Format: u8 version, u32 num, for each: u32 service_id, u8 ticket_v, EncryptedServiceTicket, u8 enc, ticket_blob
+    ///
+    /// Format: u8 version, u32 num, for each: u32 service_id, EncryptedServiceTicket, u8 enc, ticket_blob
+    ///
+    /// Returns partial results if some tickets fail to decode (common for placeholder tickets)
     fn decode_extra_tickets(
         &self,
         buf: &mut Bytes,
         auth_session_key: &CryptoKey,
-    ) -> Result<Vec<(u32, CryptoKey, u64, CephXTicketBlob, Duration)>> {
-        use bytes::Buf;
+    ) -> Result<Vec<DecodedServiceTicket>> {
         use denc::Denc;
 
-        // Read version and count
         let _version = u8::decode(buf, 0)?;
         let num = u32::decode(buf, 0)?;
+        debug!("Decoding {} extra tickets", num);
 
-        let mut result = Vec::new();
+        let mut result = Vec::with_capacity(num.min(16) as usize);
 
-        for _i in 0..num {
-            // Read service_id
-            let service_id = match u32::decode(buf, 0) {
-                Ok(id) => id,
-                Err(_e) => {
+        for i in 0..num {
+            match self.try_decode_single_ticket(buf, auth_session_key) {
+                Ok(ticket_info) => {
+                    trace!(
+                        "Decoded extra ticket {}/{} for service {}",
+                        i + 1,
+                        num,
+                        ticket_info.0
+                    );
+                    result.push(ticket_info);
+                }
+                Err(e) => {
+                    // Extra tickets may contain invalid/placeholder data
+                    // Return successfully decoded tickets so far
+                    debug!(
+                        "Stopping at ticket {}/{} due to error: {:?} (decoded {} valid tickets)",
+                        i + 1,
+                        num,
+                        e,
+                        result.len()
+                    );
                     break;
                 }
-            };
-
-            // Decrypt the encrypted service ticket to get session key (includes version byte)
-            let encrypted_ticket = match crate::protocol::EncryptedServiceTicket::decode(buf, 0) {
-                Ok(t) => t,
-                Err(_e) => {
-                    break;
-                }
-            };
-
-            let (session_key, validity) =
-                match self.decrypt_service_ticket(&encrypted_ticket, auth_session_key) {
-                    Ok(r) => r,
-                    Err(_e) => {
-                        continue;
-                    }
-                };
-
-            // Read ticket_enc flag
-            let ticket_enc = match u8::decode(buf, 0) {
-                Ok(enc) => enc,
-                Err(_e) => {
-                    break;
-                }
-            };
-
-            // Read ticket blob (encrypted or not)
-            let ticket_blob = if ticket_enc != 0 {
-                // Encrypted ticket - decrypt with session key
-                match u32::decode(buf, 0) {
-                    Ok(encrypted_bl_len) => {
-                        if buf.remaining() < encrypted_bl_len as usize {
-                            break;
-                        }
-                        let encrypted_bl = buf.split_to(encrypted_bl_len as usize);
-                        match session_key.decrypt(&encrypted_bl) {
-                            Ok(decrypted) => {
-                                let mut decrypted_buf = decrypted;
-                                match CephXTicketBlob::decode(&mut decrypted_buf, 0) {
-                                    Ok(blob) => blob,
-                                    Err(_e) => {
-                                        continue;
-                                    }
-                                }
-                            }
-                            Err(_e) => {
-                                continue;
-                            }
-                        }
-                    }
-                    Err(_e) => {
-                        break;
-                    }
-                }
-            } else {
-                // Unencrypted ticket - read bufferlist and decode
-                match u32::decode(buf, 0) {
-                    Ok(bl_len) => {
-                        if buf.remaining() < bl_len as usize {
-                            break;
-                        }
-                        let mut ticket_bl = buf.split_to(bl_len as usize);
-                        match CephXTicketBlob::decode(&mut ticket_bl, 0) {
-                            Ok(blob) => blob,
-                            Err(_e) => {
-                                continue;
-                            }
-                        }
-                    }
-                    Err(_e) => {
-                        break;
-                    }
-                }
-            };
-
-            result.push((
-                service_id,
-                session_key,
-                ticket_blob.secret_id,
-                ticket_blob,
-                validity,
-            ));
+            }
         }
 
         Ok(result)
+    }
+
+    /// Try to decode a single extra ticket
+    ///
+    /// Uses `?` operator for clean error propagation - caller handles partial results
+    fn try_decode_single_ticket(
+        &self,
+        buf: &mut Bytes,
+        auth_session_key: &CryptoKey,
+    ) -> Result<DecodedServiceTicket> {
+        use denc::Denc;
+
+        let service_id = u32::decode(buf, 0)?;
+        let encrypted_ticket = crate::protocol::EncryptedServiceTicket::decode(buf, 0)?;
+        let (session_key, validity) =
+            self.decrypt_service_ticket(&encrypted_ticket, auth_session_key)?;
+
+        let ticket_enc = u8::decode(buf, 0)?;
+        let ticket_blob = if ticket_enc != 0 {
+            self.decode_encrypted_ticket_blob(buf, &session_key)?
+        } else {
+            self.decode_unencrypted_ticket_blob(buf)?
+        };
+
+        Ok((
+            service_id,
+            session_key,
+            ticket_blob.secret_id,
+            ticket_blob,
+            validity,
+        ))
+    }
+
+    /// Decode encrypted ticket blob (read length, decrypt with session key, decode)
+    fn decode_encrypted_ticket_blob(
+        &self,
+        buf: &mut Bytes,
+        session_key: &CryptoKey,
+    ) -> Result<CephXTicketBlob> {
+        use bytes::Buf;
+        use denc::Denc;
+
+        let len = u32::decode(buf, 0)? as usize;
+        if buf.remaining() < len {
+            return Err(CephXError::ProtocolError(format!(
+                "Insufficient data for encrypted ticket blob: need {}, have {}",
+                len,
+                buf.remaining()
+            )));
+        }
+
+        let encrypted_bl = buf.split_to(len);
+        let decrypted = session_key.decrypt(&encrypted_bl)?;
+        let blob = CephXTicketBlob::decode(&mut decrypted.as_ref(), 0)
+            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
+        Ok(blob)
+    }
+
+    /// Decode unencrypted ticket blob (read length, decode directly)
+    fn decode_unencrypted_ticket_blob(&self, buf: &mut Bytes) -> Result<CephXTicketBlob> {
+        use bytes::Buf;
+        use denc::Denc;
+
+        let len = u32::decode(buf, 0)? as usize;
+        if buf.remaining() < len {
+            return Err(CephXError::ProtocolError(format!(
+                "Insufficient data for ticket blob: need {}, have {}",
+                len,
+                buf.remaining()
+            )));
+        }
+
+        let blob = CephXTicketBlob::decode(&mut buf.split_to(len).as_ref(), 0)
+            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
+        Ok(blob)
     }
 
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
