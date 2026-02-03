@@ -1,6 +1,12 @@
 // CRUSH natural logarithm lookup tables
 // Ported from ~/dev/ceph/src/crush/crush_ln_table.h
 //
+// These tables are hardcoded rather than generated at compile-time because:
+// 1. Rust const fn doesn't support f64::log2() (required for generation)
+// 2. Floating-point precision differences would cause 1 LSB deviations
+// 3. CRUSH placement algorithm requires EXACT bit-for-bit compatibility with C++
+// 4. Tables are small (2KB total) and never change
+//
 // RH_LH_tbl[2*k] = 2^48/(1.0+k/128.0)
 // RH_LH_tbl[2*k+1] = 2^48*log2(1.0+k/128.0)
 #[allow(dead_code)]
@@ -525,3 +531,99 @@ pub const LL_TBL: [i64; 256] = [
     0x000002da102d63b0,
     0x000002dced24f814,
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Verify that lookup table values approximately match their formulas
+    ///
+    /// NOTE: The formulas are provided for documentation purposes only.
+    /// Due to floating-point precision and rounding differences, we cannot
+    /// reliably reproduce the exact table values. The hardcoded tables are
+    /// the AUTHORITATIVE values from Ceph and must never be changed.
+    ///
+    /// This test allows large tolerances to verify the tables are "reasonable"
+    /// but does not enforce exact matching.
+    #[test]
+    fn test_rh_lh_table_approximate() {
+        for k in 0..129 {
+            // Check RH values: 2^48/(1.0+k/128.0)
+            // Allow 0.1% tolerance due to floating point differences
+            let expected_rh = 2.0_f64.powi(48) / (1.0 + k as f64 / 128.0);
+            let actual_rh = RH_LH_TBL[2 * k] as f64;
+            let rel_diff = ((expected_rh - actual_rh) / expected_rh).abs();
+
+            assert!(
+                rel_diff < 0.001,
+                "RH[{}]: formula gives {:.0}, table has {:.0}, rel_diff {:.6}",
+                k,
+                expected_rh,
+                actual_rh,
+                rel_diff
+            );
+        }
+    }
+
+    #[test]
+    fn test_table_sizes() {
+        assert_eq!(
+            RH_LH_TBL.len(),
+            258,
+            "RH_LH_TBL must have exactly 258 entries"
+        );
+        assert_eq!(LL_TBL.len(), 256, "LL_TBL must have exactly 256 entries");
+    }
+
+    #[test]
+    fn test_table_values_are_from_ceph() {
+        // Verify exact match with Ceph's crush_ln_table.h
+        // These are the ONLY correct values
+
+        // First entries of RH_LH_TBL from Ceph
+        assert_eq!(RH_LH_TBL[0], 0x0001000000000000i64);
+        assert_eq!(RH_LH_TBL[1], 0x0000000000000000);
+        assert_eq!(RH_LH_TBL[2], 0x0000fe03f80fe040);
+        assert_eq!(RH_LH_TBL[3], 0x000002dfca16dde1);
+
+        // Last entries of RH_LH_TBL
+        assert_eq!(RH_LH_TBL[256], 0x0000800000000000);
+        assert_eq!(RH_LH_TBL[257], 0x0000ffff00000000);
+
+        // First entries of LL_TBL from Ceph
+        assert_eq!(LL_TBL[0], 0x0000000000000000i64);
+        assert_eq!(LL_TBL[1], 0x00000002e2a60a00);
+        assert_eq!(LL_TBL[2], 0x000000070cb64ec5);
+        assert_eq!(LL_TBL[3], 0x00000009ef50ce67);
+
+        // Last entry of LL_TBL
+        assert_eq!(LL_TBL[255], 0x000002dced24f814);
+    }
+
+    #[test]
+    fn test_tables_are_monotonic() {
+        // RH values should be decreasing (reciprocals)
+        for k in 0..128 {
+            assert!(
+                RH_LH_TBL[2 * k] > RH_LH_TBL[2 * (k + 1)],
+                "RH values should be monotonically decreasing"
+            );
+        }
+
+        // LH values should be increasing (logarithms)
+        for k in 0..128 {
+            assert!(
+                RH_LH_TBL[2 * k + 1] < RH_LH_TBL[2 * (k + 1) + 1],
+                "LH values should be monotonically increasing"
+            );
+        }
+
+        // LL values should be increasing (logarithms)
+        for k in 0..255 {
+            assert!(
+                LL_TBL[k] < LL_TBL[k + 1],
+                "LL values should be monotonically increasing"
+            );
+        }
+    }
+}
