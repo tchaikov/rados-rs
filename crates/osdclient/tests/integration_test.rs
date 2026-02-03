@@ -33,8 +33,7 @@ struct TestConfig {
 impl TestConfig {
     fn from_env() -> Self {
         // Get ceph.conf path from environment
-        let conf_path =
-            env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
+        let conf_path = env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
 
         // Load configuration from ceph.conf
         Self::from_ceph_conf(&conf_path)

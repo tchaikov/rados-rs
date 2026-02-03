@@ -56,7 +56,7 @@ Msgr2 protocol implemented in:
 **CRITICAL:** After EVERY code change:
 1. Run full unit test suite: `cargo test --workspace --lib`
 2. Run integration test suite (with cluster running):
-   - MonClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored --test-threads=1`
+   - MonClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored`
    - OSDClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p osdclient --test integration_test`
 3. If ALL tests pass → commit immediately with descriptive message
 4. If ANY test fails → revert the change and investigate
@@ -390,7 +390,7 @@ cargo test --package <crate>
 
 # Integration tests (requires running cluster)
 export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf
-cargo test --package monclient --tests -- --ignored --test-threads=1 --nocapture
+cargo test --package monclient --tests -- --ignored --nocapture
 ```
 
 ### Development Tools

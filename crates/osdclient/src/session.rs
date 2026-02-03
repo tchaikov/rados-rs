@@ -332,9 +332,9 @@ impl OSDSession {
                 // Channel is full - this shouldn't happen with our 100-message buffer
                 // but if it does, notify the client rather than deadlocking
                 error!("Send channel full when retrying operation tid {}", tid);
-                let _ = pending_op.result_tx.send(Err(OSDClientError::Connection(
-                    "Send channel full".into(),
-                )));
+                let _ = pending_op
+                    .result_tx
+                    .send(Err(OSDClientError::Connection("Send channel full".into())));
                 Err(OSDClientError::Connection("Send channel full".into()))
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
