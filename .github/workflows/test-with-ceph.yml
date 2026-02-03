@@ -17,6 +17,10 @@ jobs:
     name: Ceph Integration Tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CEPH_CONFIG_DIR: /tmp/rados-rs
+      CEPH_TEST_POOL: test-pool
+      CEPH_CONF: /tmp/rados-rs/ceph.conf
 
     steps:
       - name: Checkout code
@@ -32,12 +36,10 @@ jobs:
             build-essential \
             pkg-config \
             libssl-dev \
-            jq
+            jq \
+            ceph-common
 
       - name: Start Ceph cluster
-        env:
-          CEPH_CONFIG_DIR: /tmp/rados-rs
-          CEPH_TEST_POOL: test-pool
         run: |
           # Use existing docker-compose setup
           cd docker
@@ -91,27 +93,34 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build msgr2 crate
+      - name: Clone ceph-object-corpus
         run: |
-          cd crates/msgr2
-          cargo build --verbose
+          git clone --depth=1 https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus
 
-      - name: Run msgr2 Connection Tests
-        run: |
-          cd crates/msgr2
-          cargo test --test connection_tests --verbose -- --ignored --test-threads=1 --nocapture
+      - name: Build dencoder
+        run: cargo build --bin dencoder
+
+      - name: Run denc Integration Tests
+        run: cargo test -p denc --tests -- --ignored --nocapture
         env:
-          CEPH_CONF: /tmp/rados-rs/ceph.conf
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Run monclient Integration Tests
+        run: cargo test -p monclient --tests -- --ignored --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Run msgr2 Integration Tests
+        run: cargo test -p msgr2 --tests -- --ignored --nocapture
+        env:
           RUST_BACKTRACE: full
           RUST_LOG: debug
 
-      - name: Run RADOS Operations Tests
-        run: |
-          cd crates/osdclient
-          cargo test --test rados_operations --verbose -- --ignored --test-threads=1 --nocapture
+      - name: Run osdclient Integration Tests
+        run: cargo test -p osdclient --tests -- --ignored --nocapture
         env:
-          CEPH_CONF: /tmp/rados-rs/ceph.conf
-          CEPH_TEST_POOL: test-pool
           RUST_BACKTRACE: full
           RUST_LOG: info
 
