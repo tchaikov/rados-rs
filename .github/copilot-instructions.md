@@ -51,9 +51,10 @@ cargo test -p denc
 cargo test -p msgr2
 cargo test -p auth
 
+# Run integration tests (requires ceph-object-corpus)
+cargo test -p denc --tests -- --ignored
+
 # Run examples
-cargo run --example test_corpus -p auth
-cargo run --example test_entity_addr_corpus -p denc
 cargo run --example test_osdmap_decode -p denc
 ```
 

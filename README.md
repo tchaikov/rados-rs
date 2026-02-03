@@ -47,14 +47,17 @@ The project includes examples demonstrating various components:
 # Test msgr2 session connecting
 cargo run --example test_session_connecting -p msgr2
 
-# Test CephX authentication corpus
-cargo run --example test_corpus -p auth
-
-# Test entity address encoding/decoding
-cargo run --example test_entity_addr_corpus -p denc
-
 # Test OSD map decoding
 cargo run --example test_osdmap_decode -p denc
+```
+
+### Running Integration Tests
+
+Integration tests use the external ceph-object-corpus:
+
+```bash
+# Run denc corpus tests (requires ceph-object-corpus)
+CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p denc --tests -- --ignored
 ```
 
 ### Using the Library
