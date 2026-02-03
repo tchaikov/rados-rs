@@ -36,7 +36,8 @@ jobs:
             build-essential \
             pkg-config \
             libssl-dev \
-            jq
+            jq \
+            ceph-common
 
       - name: Start Ceph cluster
         run: |
@@ -91,6 +92,13 @@ jobs:
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Clone ceph-object-corpus
+        run: |
+          git clone --depth=1 https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus
+
+      - name: Build dencoder
+        run: cargo build --bin dencoder
 
       - name: Run denc Integration Tests
         run: cargo test -p denc --tests -- --ignored --nocapture
