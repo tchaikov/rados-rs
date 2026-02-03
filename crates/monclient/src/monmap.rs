@@ -100,28 +100,6 @@ impl MonMap {
         Ok(monmap)
     }
 
-    /// Build initial monmap from CEPH_MON_ADDR environment variable
-    pub fn build_from_env() -> Result<Self> {
-        let mon_addr = std::env::var("CEPH_MON_ADDR")
-            .map_err(|_| MonClientError::InvalidMonMap("CEPH_MON_ADDR not set".into()))?;
-
-        // CEPH_MON_ADDR can be a single address or comma-separated list
-        let addrs: Vec<String> = mon_addr
-            .split(',')
-            .map(|s| {
-                let s = s.trim();
-                // If no protocol prefix, assume v2
-                if s.starts_with("v1:") || s.starts_with("v2:") {
-                    s.to_string()
-                } else {
-                    format!("v2:{}", s)
-                }
-            })
-            .collect();
-
-        Self::build_initial(&addrs)
-    }
-
     /// Add a monitor to the map
     pub fn add_monitor(&mut self, mon: MonInfo) {
         let rank = mon.rank;

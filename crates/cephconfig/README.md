@@ -51,22 +51,15 @@ use cephconfig::CephConfig;
 use std::env;
 
 fn load_test_config() -> TestConfig {
-    // Try to load from CEPH_CONF environment variable
-    if let Ok(conf_path) = env::var("CEPH_CONF") {
-        let config = CephConfig::from_file(conf_path).unwrap();
+    // Load from CEPH_CONF environment variable
+    let conf_path = env::var("CEPH_CONF")
+        .expect("CEPH_CONF environment variable must be set");
+    let config = CephConfig::from_file(conf_path).unwrap();
 
-        TestConfig {
-            mon_addrs: config.mon_addrs().unwrap(),
-            keyring: config.keyring().unwrap(),
-            entity_name: config.entity_name(),
-        }
-    } else {
-        // Fall back to environment variables
-        TestConfig {
-            mon_addrs: vec![env::var("CEPH_MON_ADDR").unwrap()],
-            keyring: env::var("CEPH_KEYRING").unwrap(),
-            entity_name: env::var("CEPH_ENTITY_NAME").unwrap_or_else(|_| "client.admin".to_string()),
-        }
+    TestConfig {
+        mon_addrs: config.mon_addrs().unwrap(),
+        keyring: config.keyring().unwrap(),
+        entity_name: config.entity_name(),
     }
 }
 ```
@@ -76,9 +69,6 @@ Then run tests with:
 ```bash
 # Using ceph.conf
 CEPH_CONF=/path/to/ceph.conf cargo test
-
-# Or using environment variables (legacy)
-CEPH_MON_ADDR=v2:127.0.0.1:3300 CEPH_KEYRING=/path/to/keyring cargo test
 ```
 
 ### Custom Configuration Structs

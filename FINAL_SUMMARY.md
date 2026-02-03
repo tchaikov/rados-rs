@@ -117,13 +117,8 @@ This ensures each CLI invocation has a unique request ID space.
 
 **Usage:**
 ```bash
-# New method (recommended)
+# Using ceph.conf
 CEPH_CONF=/path/to/ceph.conf cargo test -p osdclient
-
-# Legacy method (still supported)
-CEPH_MON_ADDR=v2:192.168.1.43:40799 \
-CEPH_KEYRING=/path/to/keyring \
-cargo test -p osdclient
 ```
 
 **Benefits:**

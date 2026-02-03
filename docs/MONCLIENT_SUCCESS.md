@@ -3,7 +3,7 @@
 ## Test Results
 
 ```
-CEPH_MON_ADDR=192.168.1.37:40390 cargo run --example connect_mon
+CEPH_CONF=/path/to/ceph.conf cargo run --example connect_mon
 ```
 
 ### Success Output:
@@ -25,11 +25,11 @@ CEPH_MON_ADDR=192.168.1.37:40390 cargo run --example connect_mon
 
 ### ✅ Completed Features
 
-1. **MonMap Building from Environment**
-   - Reads `CEPH_MON_ADDR` environment variable
-   - Parses monitor addresses (with or without v2: prefix)
-   - Supports comma-separated list of monitors
-   - Falls back to config if env var not set
+1. **Configuration Loading**
+   - Reads configuration from CEPH_CONF environment variable
+   - Parses monitor addresses from ceph.conf
+   - Loads keyring and entity name
+   - Supports all standard ceph.conf options
 
 2. **Real msgr2 Connection**
    - `MonConnection::connect()` uses actual `msgr2::Connection`
@@ -44,7 +44,7 @@ CEPH_MON_ADDR=192.168.1.37:40390 cargo run --example connect_mon
    - Connection state tracking
 
 4. **Example Binary**
-   - `examples/connect_mon.rs` demonstrates usage
+   - `examples/connect_mon.rs` demonstrates usage (Note: examples have been removed, use integration tests instead)
    - Clean async/await API
    - Proper error handling
    - Graceful shutdown
@@ -92,8 +92,6 @@ crates/monclient/
 │   ├── messages.rs               ✅ Created (400 lines, tested)
 │   ├── types.rs                  ✅ Created (150 lines)
 │   └── error.rs                  ✅ Created (60 lines)
-└── examples/
-    └── connect_mon.rs            ✅ Created
 
 docs/
 ├── MONCLIENT_DESIGN.md           ✅ Created (1,100 lines)
@@ -130,12 +128,12 @@ use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Set CEPH_MON_ADDR environment variable
-    std::env::set_var("CEPH_MON_ADDR", "192.168.1.37:40390");
+    // Configuration loaded from CEPH_CONF environment variable
+    // or provided directly in mon_addrs
 
     let config = MonClientConfig {
         entity_name: "client.admin".to_string(),
-        mon_addrs: vec![],  // Will use CEPH_MON_ADDR
+        mon_addrs: vec!["v2:192.168.1.37:40390".to_string()],
         keyring_path: "/etc/ceph/ceph.client.admin.keyring".to_string(),
         connect_timeout: Duration::from_secs(30),
         command_timeout: Duration::from_secs(60),

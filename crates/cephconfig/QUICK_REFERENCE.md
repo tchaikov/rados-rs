@@ -70,7 +70,7 @@ let keys = config.keys("client");
 
 ## Running Tests with ceph.conf
 
-### Method 1: Using CEPH_CONF (Recommended)
+### Using CEPH_CONF
 
 ```bash
 # Set CEPH_CONF environment variable
@@ -78,16 +78,6 @@ CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test -p osdclient
 
 # With pool ID
 CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf CEPH_POOL_ID=1 \
-  cargo test -p osdclient --test integration_test
-```
-
-### Method 2: Using Environment Variables (Legacy)
-
-```bash
-CEPH_MON_ADDR="v2:192.168.1.43:40472" \
-CEPH_KEYRING="/home/kefu/dev/ceph/build/keyring" \
-CEPH_ENTITY_NAME="client.admin" \
-CEPH_POOL_ID=1 \
   cargo test -p osdclient --test integration_test
 ```
 
@@ -106,38 +96,20 @@ struct TestConfig {
 
 impl TestConfig {
     fn from_env() -> Self {
-        // Try to load from ceph.conf first
-        if let Ok(conf_path) = env::var("CEPH_CONF") {
-            if let Ok(config) = Self::from_ceph_conf(&conf_path) {
-                return config;
-            }
-        }
+        // Load from ceph.conf
+        let conf_path = env::var("CEPH_CONF")
+            .expect("CEPH_CONF environment variable must be set");
+        let config = CephConfig::from_file(&conf_path).unwrap();
 
-        // Fall back to environment variables
         Self {
-            mon_addrs: vec![env::var("CEPH_MON_ADDR").unwrap()],
-            keyring_path: env::var("CEPH_KEYRING").unwrap(),
-            entity_name: env::var("CEPH_ENTITY_NAME")
-                .unwrap_or_else(|_| "client.admin".to_string()),
+            mon_addrs: config.mon_addrs().unwrap(),
+            keyring_path: config.keyring().unwrap(),
+            entity_name: config.entity_name(),
             pool_id: env::var("CEPH_POOL_ID")
                 .unwrap_or_else(|_| "1".to_string())
                 .parse()
                 .unwrap(),
         }
-    }
-
-    fn from_ceph_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = CephConfig::from_file(path)?;
-
-        Ok(Self {
-            mon_addrs: config.mon_addrs()?,
-            keyring_path: config.keyring()?,
-            entity_name: config.entity_name(),
-            pool_id: env::var("CEPH_POOL_ID")
-                .unwrap_or_else(|_| "1".to_string())
-                .parse()
-                .unwrap_or(1),
-        })
     }
 }
 ```
@@ -183,10 +155,9 @@ match CephConfig::from_file("/etc/ceph/ceph.conf") {
 
 ## Tips
 
-1. **Always use CEPH_CONF for tests**: It's more convenient than setting multiple environment variables
+1. **Always use CEPH_CONF for tests**: It's the standard way to configure Ceph tools
 2. **Check the example**: Run `cargo run --example parse_config -p cephconfig` to see what's in your config
-3. **Fallback pattern**: Support both CEPH_CONF and environment variables for flexibility
-4. **Error handling**: Always handle errors properly - missing config files are common
+3. **Error handling**: Always handle errors properly - missing config files are common
 
 ## Monitor Address Format
 

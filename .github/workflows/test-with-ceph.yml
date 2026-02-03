@@ -102,8 +102,6 @@ jobs:
           cargo test --test connection_tests --verbose -- --ignored --test-threads=1 --nocapture
         env:
           CEPH_CONF: /tmp/rados-rs/ceph.conf
-          CEPH_KEYRING: /tmp/rados-rs/ceph.client.admin.keyring
-          CEPH_MON_ADDR: 127.0.0.1:6789
           RUST_BACKTRACE: full
           RUST_LOG: debug
 

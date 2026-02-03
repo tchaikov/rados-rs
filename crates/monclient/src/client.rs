@@ -286,16 +286,13 @@ impl MonClient {
             .parse()
             .map_err(|e| MonClientError::Other(format!("Invalid entity name: {}", e)))?;
 
-        // Build initial monmap - try env var first, then config
-        let monmap = if std::env::var("CEPH_MON_ADDR").is_ok() {
-            info!("Building monmap from CEPH_MON_ADDR environment variable");
-            MonMap::build_from_env()?
-        } else if !config.mon_addrs.is_empty() {
+        // Build initial monmap from config
+        let monmap = if !config.mon_addrs.is_empty() {
             info!("Building monmap from config");
             MonMap::build_initial(&config.mon_addrs)?
         } else {
             return Err(MonClientError::InvalidMonMap(
-                "No monitor addresses provided (set CEPH_MON_ADDR or provide mon_addrs)".into(),
+                "No monitor addresses provided in config (mon_addrs)".into(),
             ));
         };
 

@@ -61,19 +61,13 @@ All tests pass successfully.
 
 ### 4. Integration with OSDClient Tests
 
-Updated `crates/osdclient/tests/integration_test.rs` to support both:
+**Updated `crates/osdclient/tests/integration_test.rs`** to use ceph.conf:
 
-1. **New method (recommended)**: Using ceph.conf file
-   ```bash
-   CEPH_CONF=/path/to/ceph.conf cargo test -p osdclient
-   ```
-
-2. **Legacy method**: Using environment variables
-   ```bash
-   CEPH_MON_ADDR=v2:127.0.0.1:3300 CEPH_KEYRING=/path/to/keyring cargo test -p osdclient
-   ```
-
-The test configuration automatically tries to load from `CEPH_CONF` first, then falls back to environment variables.
+**Usage:**
+```bash
+# New method (recommended)
+CEPH_CONF=/path/to/ceph.conf cargo test -p osdclient
+```
 
 ## Usage Examples
 
@@ -106,12 +100,6 @@ let entity = config.entity_name();
 ```bash
 # Using ceph.conf (recommended)
 CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf CEPH_POOL_ID=1 \
-  cargo test --test integration_test -p osdclient
-
-# Using environment variables (legacy)
-CEPH_MON_ADDR="v2:192.168.1.43:40472" \
-CEPH_KEYRING="/home/kefu/dev/ceph/build/keyring" \
-CEPH_POOL_ID=1 \
   cargo test --test integration_test -p osdclient
 ```
 

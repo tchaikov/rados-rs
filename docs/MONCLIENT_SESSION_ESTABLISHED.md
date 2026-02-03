@@ -24,7 +24,7 @@
    - **Session**: Fully established and ready
 
 3. **MonClient API**
-   - ✅ `MonClient::new()` - Creates client from config or CEPH_MON_ADDR
+   - ✅ `MonClient::new()` - Creates client from config (via CEPH_CONF)
    - ✅ `MonClient::init()` - Connects and authenticates
    - ✅ `MonConnection::connect()` - Full session establishment
    - ✅ `is_connected()`, `is_authenticated()` - Status checks
@@ -113,7 +113,7 @@ async fn receive_and_dispatch_message(state: &MonClientState) -> Result<()> {
 
 ### Current Test Output
 ```bash
-CEPH_MON_ADDR=192.168.1.37:40390 cargo run --example connect_mon
+CEPH_CONF=/path/to/ceph.conf cargo test -p monclient --tests -- --ignored
 ```
 
 ```

@@ -20,7 +20,7 @@
 //! - `CEPH_TEST_POOL`: Pool name or ID to use for testing (default: test-pool)
 //!
 //! Note: The keyring path is automatically discovered from ceph.conf.
-//! Do not set CEPH_KEYRING or CEPH_MON_ADDR environment variables.
+//! Do not set environment variables other than CEPH_CONF.
 //!
 
 use bytes::Bytes;
