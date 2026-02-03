@@ -462,25 +462,22 @@ impl CephXClientHandler {
         let (session_key, validity) =
             self.decrypt_service_ticket(&encrypted_ticket, auth_session_key)?;
 
+        // Extract ticket blob bytes (decrypt if encrypted)
         let ticket_enc = u8::decode(buf, 0)?;
-        let ticket_blob = if ticket_enc != 0 {
-            // Encrypted ticket blob: read length-prefixed encrypted data, decrypt, and decode
+        let mut ticket_blob_bytes = if ticket_enc != 0 {
+            // Encrypted: read length-prefixed encrypted data and decrypt
             // Bytes::decode() is zero-copy when buf is Bytes (just increments refcount)
             let encrypted_bl =
                 Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            let mut decrypted = session_key.decrypt(&encrypted_bl)?;
-            // Decode directly from Bytes to avoid conversion to slice
-            CephXTicketBlob::decode(&mut decrypted, 0)
-                .map_err(|e| CephXError::EncodingError(e.to_string()))?
+            session_key.decrypt(&encrypted_bl)?
         } else {
-            // Unencrypted ticket blob: read length-prefixed data and decode
-            // Bytes::decode() is zero-copy when buf is Bytes
-            let mut ticket_bytes =
-                Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            // Decode directly from Bytes to avoid conversion to slice
-            CephXTicketBlob::decode(&mut ticket_bytes, 0)
-                .map_err(|e| CephXError::EncodingError(e.to_string()))?
+            // Unencrypted: read length-prefixed data directly
+            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?
         };
+
+        // Decode ticket blob from the extracted bytes
+        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)
+            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
 
         Ok((
             service_id,
