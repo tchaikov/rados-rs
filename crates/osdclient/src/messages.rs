@@ -22,6 +22,10 @@ pub const CEPH_MSG_OSD_OPREPLY: u16 = 43;
 /// Message type for MOSDBackoff (OSD to Client)
 pub const CEPH_MSG_OSD_BACKOFF: u16 = 61;
 
+/// Message type for OSDMap (OSD to Client)
+/// OSDs can send OSDMap updates to clients
+pub const CEPH_MSG_OSD_MAP: u16 = 0x0029;
+
 /// Backoff operation codes
 pub const CEPH_OSD_BACKOFF_OP_BLOCK: u8 = 1;
 pub const CEPH_OSD_BACKOFF_OP_ACK_BLOCK: u8 = 2;

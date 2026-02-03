@@ -262,6 +262,16 @@ impl OSDSession {
                     }
                 }
             }
+            crate::messages::CEPH_MSG_OSD_MAP => {
+                // OSDs can send OSDMap updates to clients
+                // The MonClient is responsible for managing the OSDMap, so we just
+                // acknowledge receipt and ignore the message here
+                debug!(
+                    "OSD {} sent OSDMap update ({} bytes), ignoring (MonClient manages OSDMap)",
+                    osd_id,
+                    msg.front.len()
+                );
+            }
             _ => {
                 warn!(
                     "OSD {} sent unexpected message type: 0x{:04x}",
