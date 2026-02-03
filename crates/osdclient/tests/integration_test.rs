@@ -5,6 +5,7 @@
 //! To run these tests:
 //! ```bash
 //! export CEPH_CONF=/path/to/ceph.conf
+//! export CEPH_TEST_POOL=test-pool  # Pool name or ID
 //! cargo test --package osdclient --test integration_test -- --ignored
 //! ```
 //!
@@ -12,6 +13,10 @@
 //! - Monitor addresses (mon_host or mon_addr)
 //! - Keyring path
 //! - Entity name
+//!
+//! Environment variables:
+//! - `CEPH_CONF`: Path to ceph.conf file (default: /etc/ceph/ceph.conf)
+//! - `CEPH_TEST_POOL`: Pool name or ID to use for testing (default: test-pool)
 //!
 //! Example:
 //!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test -- --ignored
@@ -27,7 +32,7 @@ struct TestConfig {
     mon_addrs: Vec<String>,
     keyring_path: String,
     entity_name: String,
-    pool_id: i64,
+    pool: String,
 }
 
 impl TestConfig {
@@ -52,19 +57,42 @@ impl TestConfig {
         // Get entity name (defaults to client.admin)
         let entity_name = config.entity_name();
 
-        // Pool ID from environment variable or default to 2 (typical test pool)
-        let pool_id = env::var("CEPH_POOL_ID")
-            .unwrap_or_else(|_| "2".to_string())
-            .parse()
-            .unwrap_or(2);
+        // Get test pool (name or ID)
+        let pool = env::var("CEPH_TEST_POOL").unwrap_or_else(|_| "test-pool".to_string());
 
         Ok(Self {
             mon_addrs,
             keyring_path,
             entity_name,
-            pool_id,
+            pool,
         })
     }
+}
+
+/// Parse pool identifier (name or numeric ID) to pool ID
+async fn parse_pool(
+    pool: &str,
+    mon_client: &Arc<monclient::MonClient>,
+) -> Result<i64, Box<dyn std::error::Error>> {
+    // If it's already a number, use it directly
+    if let Ok(id) = pool.parse::<i64>() {
+        return Ok(id);
+    }
+
+    // Otherwise, look up pool by name in OSDMap
+    let osdmap = match mon_client.get_osdmap().await {
+        Ok(map) => map,
+        Err(_) => return Err("OSDMap not available".into()),
+    };
+
+    // Search for pool by name
+    for (pool_id, pool_name) in &osdmap.pool_name {
+        if pool_name == pool {
+            return Ok(*pool_id);
+        }
+    }
+
+    Err(format!("Pool '{}' not found", pool).into())
 }
 
 /// Setup test environment
@@ -110,6 +138,11 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
     // Wait for OSDMap to arrive (increased timeout for slower systems)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
+    // Parse pool (name or ID) to pool ID
+    let pool_id = parse_pool(&config.pool, &mon_client)
+        .await
+        .expect("Failed to parse pool");
+
     // Create OSD client
     let osd_config = osdclient::OSDClientConfig {
         entity_name: config.entity_name.clone(),
@@ -120,7 +153,7 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
         .await
         .expect("Failed to create OSDClient");
 
-    (mon_client, osd_client, config.pool_id)
+    (mon_client, osd_client, pool_id)
 }
 
 /// Generate unique object name for test
