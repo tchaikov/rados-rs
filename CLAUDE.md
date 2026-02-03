@@ -56,8 +56,10 @@ Msgr2 protocol implemented in:
 **CRITICAL:** After EVERY code change:
 1. Run full unit test suite: `cargo test --workspace --lib`
 2. Run integration test suite (with cluster running):
+   - Denc corpus: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p denc --tests -- --ignored`
    - MonClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored`
-   - OSDClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p osdclient --test integration_test`
+   - Msgr2: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p msgr2 --tests -- --ignored`
+   - OSDClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p osdclient --tests -- --ignored`
 3. If ALL tests pass → commit immediately with descriptive message
 4. If ANY test fails → revert the change and investigate
 5. Move to next change
@@ -385,12 +387,20 @@ env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
 ### Running Tests
 
 ```bash
-# Unit tests
-cargo test --package <crate>
+# Unit tests (no cluster required)
+cargo test --workspace --lib
 
 # Integration tests (requires running cluster)
 export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf
-cargo test --package monclient --tests -- --ignored --nocapture
+
+# Run all integration tests
+cargo test -p denc --tests -- --ignored --nocapture
+cargo test -p monclient --tests -- --ignored --nocapture
+cargo test -p msgr2 --tests -- --ignored --nocapture
+cargo test -p osdclient --tests -- --ignored --nocapture
+
+# Or run specific package
+cargo test -p <package> --tests -- --ignored --nocapture
 ```
 
 ### Development Tools
