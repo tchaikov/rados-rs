@@ -214,9 +214,11 @@ impl OSDSession {
                                                     tid, new_flags, pending_op.op.flags
                                                 );
 
-                                                // Modify flags
+                                                // Update for retry
                                                 pending_op.op.flags = new_flags;
                                                 pending_op.attempts += 1;
+                                                // retry_attempt is 0-based, attempts is 1-based
+                                                pending_op.op.retry_attempt = pending_op.attempts - 1;
 
                                                 // Encode the operation
                                                 match CephMessage::from_payload(
@@ -310,7 +312,7 @@ impl OSDSession {
     /// Submit an operation to the OSD
     ///
     /// This queues the message for sending (non-blocking, like ceph_con_send)
-    pub async fn submit_op(&self, op: MOSDOp) -> Result<oneshot::Receiver<Result<OpResult>>> {
+    pub async fn submit_op(&self, mut op: MOSDOp) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
 
         // Create HObject from operation for backoff checking
@@ -331,6 +333,13 @@ impl OSDSession {
                 op.pgid, op.object.oid
             )));
         }
+
+        // Set retry_attempt for this operation
+        // retry_attempt is 0-based: 0 for first attempt, 1 for first retry, etc.
+        // Our attempts counter is 1-based, so retry_attempt = attempts - 1
+        // See: ~/dev/linux/net/ceph/osd_client.c (encodes req->r_attempts)
+        const FIRST_ATTEMPT: i32 = 1;
+        op.retry_attempt = FIRST_ATTEMPT - 1; // 0 for first send
 
         // Create channel for result
         let (tx, rx) = oneshot::channel();
@@ -405,8 +414,12 @@ impl OSDSession {
                     return None;
                 }
             } else {
-                // Old server that doesn't support retry_attempt
-                warn!("Received reply without retry_attempt for tid {}", tid);
+                // Server doesn't support retry_attempt field
+                // This should only happen with very old Ceph versions (pre-v3, from 2012)
+                debug!(
+                    "Reply for tid {} has retry_attempt=-1 (old server or unset field)",
+                    tid
+                );
             }
 
             // Check for EAGAIN on replica reads
