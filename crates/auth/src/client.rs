@@ -464,9 +464,22 @@ impl CephXClientHandler {
 
         let ticket_enc = u8::decode(buf, 0)?;
         let ticket_blob = if ticket_enc != 0 {
-            self.decode_encrypted_ticket_blob(buf, &session_key)?
+            // Encrypted ticket blob: read length-prefixed encrypted data, decrypt, and decode
+            // Bytes::decode() is zero-copy when buf is Bytes (just increments refcount)
+            let encrypted_bl =
+                Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
+            let mut decrypted = session_key.decrypt(&encrypted_bl)?;
+            // Decode directly from Bytes to avoid conversion to slice
+            CephXTicketBlob::decode(&mut decrypted, 0)
+                .map_err(|e| CephXError::EncodingError(e.to_string()))?
         } else {
-            self.decode_unencrypted_ticket_blob(buf)?
+            // Unencrypted ticket blob: read length-prefixed data and decode
+            // Bytes::decode() is zero-copy when buf is Bytes
+            let mut ticket_bytes =
+                Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
+            // Decode directly from Bytes to avoid conversion to slice
+            CephXTicketBlob::decode(&mut ticket_bytes, 0)
+                .map_err(|e| CephXError::EncodingError(e.to_string()))?
         };
 
         Ok((
@@ -476,35 +489,6 @@ impl CephXClientHandler {
             ticket_blob,
             validity,
         ))
-    }
-
-    /// Decode encrypted ticket blob (read length, decrypt with session key, decode)
-    fn decode_encrypted_ticket_blob(
-        &self,
-        buf: &mut Bytes,
-        session_key: &CryptoKey,
-    ) -> Result<CephXTicketBlob> {
-        use denc::Denc;
-
-        // Bytes::decode() reads length prefix and extracts the bytes
-        let encrypted_bl =
-            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
-
-        let decrypted = session_key.decrypt(&encrypted_bl)?;
-        CephXTicketBlob::decode(&mut decrypted.as_ref(), 0)
-            .map_err(|e| CephXError::EncodingError(e.to_string()))
-    }
-
-    /// Decode unencrypted ticket blob (read length, decode directly)
-    fn decode_unencrypted_ticket_blob(&self, buf: &mut Bytes) -> Result<CephXTicketBlob> {
-        use denc::Denc;
-
-        // Bytes::decode() reads length prefix and extracts the bytes
-        let ticket_bytes =
-            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
-
-        CephXTicketBlob::decode(&mut ticket_bytes.as_ref(), 0)
-            .map_err(|e| CephXError::EncodingError(e.to_string()))
     }
 
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
