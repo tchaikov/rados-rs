@@ -15,9 +15,12 @@
 //! The tests use the cephconfig crate to parse ceph.conf and automatically
 //! discover monitor addresses and keyring paths.
 //!
-//! Required environment variables:
+//! Environment variables:
 //! - `CEPH_CONF`: Path to ceph.conf file (default: /etc/ceph/ceph.conf)
 //! - `CEPH_TEST_POOL`: Pool name or ID to use for testing (default: test-pool)
+//!
+//! Note: The keyring path is automatically discovered from ceph.conf.
+//! Do not set CEPH_KEYRING or CEPH_MON_ADDR environment variables.
 //!
 
 use bytes::Bytes;
@@ -49,9 +52,9 @@ impl TestConfig {
         // Get monitor addresses
         let mon_addrs = ceph_config.mon_addrs()?;
 
-        // Get keyring path
-        let keyring_path = std::env::var("CEPH_KEYRING")
-            .or_else(|_| ceph_config.keyring())
+        // Get keyring path from ceph.conf
+        let keyring_path = ceph_config
+            .keyring()
             .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
 
         // Get entity name

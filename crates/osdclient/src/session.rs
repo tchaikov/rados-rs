@@ -317,23 +317,34 @@ impl OSDSession {
         // Update tid in pending_op
         pending_op.tid = tid;
 
-        // Try to send first, only add to pending if successful
-        if let Err(e) = send_tx.send(msg).await {
-            // Send failed - notify client
-            let _ = pending_op
-                .result_tx
-                .send(Err(OSDClientError::Connection(format!(
-                    "Failed to send retry: {}",
-                    e
-                ))));
-            return Err(OSDClientError::Connection("Failed to send retry".into()));
+        // IMPORTANT: Use try_send() instead of send().await to avoid deadlock
+        // This function is called from io_task which is the consumer of send_rx
+        // If we await on send(), we could block the io_task and prevent it from
+        // draining the channel, causing a deadlock
+        match send_tx.try_send(msg) {
+            Ok(()) => {
+                // Send succeeded - add back to pending ops
+                let mut pending = pending_ops.write().await;
+                pending.insert(tid, pending_op);
+                Ok(())
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                // Channel is full - this shouldn't happen with our 100-message buffer
+                // but if it does, notify the client rather than deadlocking
+                error!("Send channel full when retrying operation tid {}", tid);
+                let _ = pending_op.result_tx.send(Err(OSDClientError::Connection(
+                    "Send channel full".into(),
+                )));
+                Err(OSDClientError::Connection("Send channel full".into()))
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Channel closed - notify client
+                let _ = pending_op.result_tx.send(Err(OSDClientError::Connection(
+                    "Send channel closed".into(),
+                )));
+                Err(OSDClientError::Connection("Send channel closed".into()))
+            }
         }
-
-        // Send succeeded - add back to pending ops
-        let mut pending = pending_ops.write().await;
-        pending.insert(tid, pending_op);
-
-        Ok(())
     }
 
     /// Encode an operation into a msgr2 message
@@ -656,21 +667,30 @@ impl OSDSession {
         drop(pending);
 
         // Resend the operations
+        // IMPORTANT: Use try_send() to avoid deadlock (we're in the io_task)
         for (tid, op) in ops_to_resend {
             match Self::encode_operation(&op, tid) {
-                Ok(msg) => {
-                    if let Err(e) = send_tx.send(msg).await {
-                        error!(
-                            "OSD {} failed to resend operation tid={} after backoff lifted: {}",
-                            osd_id, tid, e
-                        );
-                    } else {
+                Ok(msg) => match send_tx.try_send(msg) {
+                    Ok(()) => {
                         info!(
                             "OSD {} resent operation tid={} for object={} after backoff lifted",
                             osd_id, tid, op.object.oid
                         );
                     }
-                }
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        warn!(
+                            "OSD {} send channel full, cannot resend tid={} after backoff",
+                            osd_id, tid
+                        );
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => {
+                        error!(
+                            "OSD {} send channel closed, cannot resend tid={} after backoff",
+                            osd_id, tid
+                        );
+                        break;
+                    }
+                },
                 Err(e) => {
                     error!(
                         "OSD {} failed to encode operation tid={} for resend: {}",

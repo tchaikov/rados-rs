@@ -2,14 +2,20 @@
 //!
 //! These tests require a running Ceph cluster.
 //!
-//! Configuration can be provided in two ways:
-//! 1. Via environment variables (legacy):
-//!    CEPH_MON_ADDR=v2:127.0.0.1:3300 CEPH_KEYRING=/path/to/keyring cargo test
-//! 2. Via ceph.conf file (recommended):
-//!    CEPH_CONF=/path/to/ceph.conf cargo test
+//! To run these tests:
+//! ```bash
+//! export CEPH_CONF=/path/to/ceph.conf
+//! cargo test --package osdclient --test integration_test -- --ignored
+//! ```
+//!
+//! Configuration is read from ceph.conf which should contain:
+//! - Monitor addresses (mon_host or mon_addr)
+//! - Keyring path
+//! - Entity name
 //!
 //! Example:
-//!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test
+//!   CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf cargo test --package osdclient --test integration_test -- --ignored
+//!
 
 use bytes::Bytes;
 use std::env;
@@ -26,35 +32,13 @@ struct TestConfig {
 
 impl TestConfig {
     fn from_env() -> Self {
-        // Try to load from ceph.conf first
-        if let Ok(conf_path) = env::var("CEPH_CONF") {
-            if let Ok(config) = Self::from_ceph_conf(&conf_path) {
-                return config;
-            }
-            eprintln!("Warning: Failed to parse CEPH_CONF, falling back to environment variables");
-        }
+        // Get ceph.conf path from environment
+        let conf_path =
+            env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
 
-        // Fall back to environment variables
-        let mon_addr =
-            env::var("CEPH_MON_ADDR").expect("CEPH_MON_ADDR must be set for integration tests");
-
-        let keyring_path = env::var("CEPH_KEYRING")
-            .unwrap_or_else(|_| "/home/kefu/dev/ceph/build/keyring".to_string());
-
-        let entity_name =
-            env::var("CEPH_ENTITY_NAME").unwrap_or_else(|_| "client.admin".to_string());
-
-        let pool_id = env::var("CEPH_POOL_ID")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse()
-            .expect("CEPH_POOL_ID must be a valid integer");
-
-        Self {
-            mon_addrs: vec![mon_addr],
-            keyring_path,
-            entity_name,
-            pool_id,
-        }
+        // Load configuration from ceph.conf
+        Self::from_ceph_conf(&conf_path)
+            .unwrap_or_else(|e| panic!("Failed to load configuration from {}: {}", conf_path, e))
     }
 
     fn from_ceph_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -63,15 +47,15 @@ impl TestConfig {
         // Get monitor addresses (prefer v2)
         let mon_addrs = config.mon_addrs()?;
 
-        // Get keyring path
+        // Get keyring path from ceph.conf
         let keyring_path = config.keyring()?;
 
         // Get entity name (defaults to client.admin)
         let entity_name = config.entity_name();
 
-        // Pool ID still comes from environment variable
+        // Pool ID from environment variable or default to 2 (typical test pool)
         let pool_id = env::var("CEPH_POOL_ID")
-            .unwrap_or_else(|_| "2".to_string()) // Default to pool 2 (test pool)
+            .unwrap_or_else(|_| "2".to_string())
             .parse()
             .unwrap_or(2);
 
