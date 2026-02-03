@@ -247,7 +247,15 @@ impl OSDSession {
             crate::messages::CEPH_MSG_OSD_BACKOFF => {
                 match crate::messages::MOSDBackoff::decode(&msg.front) {
                     Ok(backoff_msg) => {
-                        Self::handle_backoff(osd_id, backoff_msg, backoffs, connection).await;
+                        Self::handle_backoff(
+                            osd_id,
+                            backoff_msg,
+                            send_tx,
+                            pending_ops,
+                            backoffs,
+                            connection,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         error!("Failed to decode MOSDBackoff: {}", e);
@@ -482,6 +490,8 @@ impl OSDSession {
     async fn handle_backoff(
         osd_id: i32,
         backoff: crate::messages::MOSDBackoff,
+        send_tx: &mpsc::Sender<msgr2::message::Message>,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
         backoffs: &Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
         connection: &mut msgr2::protocol::Connection,
     ) {
@@ -551,8 +561,14 @@ impl OSDSession {
 
             CEPH_OSD_BACKOFF_OP_UNBLOCK => {
                 info!(
-                    "OSD {} lifts backoff: pgid={}:{}.{}, id={}",
-                    osd_id, backoff.pgid.pool, backoff.pgid.seed, backoff.pgid.shard, backoff.id
+                    "OSD {} lifts backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+                    osd_id,
+                    backoff.pgid.pool,
+                    backoff.pgid.seed,
+                    backoff.pgid.shard,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end
                 );
 
                 // Remove backoff
@@ -568,13 +584,17 @@ impl OSDSession {
                     }
                 }
 
-                // TODO: Resend queued operations in this range
-                // This requires tracking which operations were blocked
-                // For now, operations will timeout and be retried naturally
-                debug!(
-                    "Backoff lifted for pgid={:?}, future operations will proceed",
-                    backoff.pgid
-                );
+                // Resend operations that were in the backoff range
+                // Reference: ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff() UNBLOCK case
+                Self::resend_ops_in_range(
+                    osd_id,
+                    &backoff.pgid,
+                    &backoff.begin,
+                    &backoff.end,
+                    send_tx,
+                    pending_ops,
+                )
+                .await;
             }
 
             _ => {
@@ -582,6 +602,81 @@ impl OSDSession {
                     "Received unknown backoff operation {} from OSD {}",
                     backoff.op, osd_id
                 );
+            }
+        }
+    }
+
+    /// Resend operations in the specified backoff range
+    ///
+    /// When a backoff is lifted, we need to resend any pending operations
+    /// whose hobject falls within the [begin, end) range for the given PG.
+    ///
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff() UNBLOCK case
+    async fn resend_ops_in_range(
+        osd_id: i32,
+        pgid: &StripedPgId,
+        begin: &denc::HObject,
+        end: &denc::HObject,
+        send_tx: &mpsc::Sender<msgr2::message::Message>,
+        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+    ) {
+        let pending = pending_ops.read().await;
+
+        let mut ops_to_resend = Vec::new();
+
+        // Find all operations in this PG that fall within the backoff range
+        for (tid, pending_op) in pending.iter() {
+            // Check if this operation is for the same PG
+            if pending_op.op.pgid != *pgid {
+                continue;
+            }
+
+            // Create hobject for this operation
+            let hobj = denc::HObject {
+                key: pending_op.op.object.key.clone(),
+                oid: pending_op.op.object.oid.clone(),
+                snapid: pending_op.op.snapid,
+                hash: pending_op.op.object.hash,
+                max: false,
+                nspace: pending_op.op.object.namespace.clone(),
+                pool: pending_op.op.object.pool,
+            };
+
+            // Check if hobject is contained in [begin, end)
+            // This matches Ceph's contained_by() logic
+            if hobj >= *begin && hobj < *end {
+                debug!(
+                    "OSD {} backoff lifted: will resend operation tid={} for object={} in range [{:?}, {:?})",
+                    osd_id, tid, pending_op.op.object.oid, begin, end
+                );
+                ops_to_resend.push((*tid, pending_op.op.clone()));
+            }
+        }
+
+        drop(pending);
+
+        // Resend the operations
+        for (tid, op) in ops_to_resend {
+            match Self::encode_operation(&op, tid) {
+                Ok(msg) => {
+                    if let Err(e) = send_tx.send(msg).await {
+                        error!(
+                            "OSD {} failed to resend operation tid={} after backoff lifted: {}",
+                            osd_id, tid, e
+                        );
+                    } else {
+                        info!(
+                            "OSD {} resent operation tid={} for object={} after backoff lifted",
+                            osd_id, tid, op.object.oid
+                        );
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "OSD {} failed to encode operation tid={} for resend: {}",
+                        osd_id, tid, e
+                    );
+                }
             }
         }
     }
