@@ -151,7 +151,7 @@ impl OSDSession {
         // This task multiplexes send/receive using tokio::select!
         let pending_ops = Arc::clone(&self.pending_ops);
         let backoffs = Arc::clone(&self.backoffs);
-        let mon_client = self.mon_client.clone();
+        let mon_client = self.mon_client.as_ref().map(Arc::clone);
         let osd_id = self.osd_id;
         let send_tx_clone = self.send_tx.clone();
         tokio::spawn(async move {
@@ -282,7 +282,8 @@ impl OSDSession {
                     );
                     if let Err(e) = mon_client.handle_osdmap_from_osd(msg).await {
                         warn!(
-                            "Failed to handle OSDMap from OSD {}: {}",
+                            "Failed to handle OSDMap from OSD {}: {}. \
+                            Client will use stale topology until next monitor sync or OSD retry.",
                             osd_id, e
                         );
                     }
