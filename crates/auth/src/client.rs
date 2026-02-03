@@ -569,6 +569,68 @@ impl CephXClientHandler {
         }
     }
 
+    /// Store service tickets in session
+    ///
+    /// Creates session if it doesn't exist yet, then stores all ticket handlers
+    fn store_ticket_handlers(
+        &mut self,
+        ticket_handlers: Vec<DecodedServiceTicket>,
+        global_id: u64,
+    ) -> Result<()> {
+        let secret_key = self
+            .secret_key
+            .as_ref()
+            .ok_or_else(|| CephXError::AuthenticationFailed("No secret key set".into()))?;
+
+        // Create session if it doesn't exist yet
+        if self.session.is_none() {
+            debug!("Creating new session with global_id={}", global_id);
+            self.session = Some(CephXSession::new(
+                self.entity_name.clone(),
+                global_id,
+                secret_key.clone(),
+            ));
+        }
+
+        // Store all service tickets in the session
+        if let Some(session) = &mut self.session {
+            debug!(
+                "Storing {} ticket handlers in session",
+                ticket_handlers.len()
+            );
+            for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
+                trace!(
+                    "Storing ticket for service {} (secret_id={})",
+                    service_id,
+                    secret_id
+                );
+                let handler = session.get_ticket_handler(service_id);
+                handler.update(session_key, secret_id, ticket_blob, validity);
+                debug!(
+                    "✓ Stored ticket for service {} (secret_id={}, have_key={}, expired={})",
+                    service_id,
+                    secret_id,
+                    handler.have_key,
+                    handler.is_expired()
+                );
+            }
+            // Log all available tickets
+            debug!("Available service tickets after storage:");
+            for (service_id, handler) in &session.ticket_handlers {
+                debug!(
+                    "  Service {}: have_key={}, expired={}",
+                    service_id,
+                    handler.have_key,
+                    handler.is_expired()
+                );
+            }
+        } else {
+            warn!("No session available to store ticket handlers");
+        }
+
+        Ok(())
+    }
+
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
     /// Returns (session_key_bytes, connection_secret_bytes) if in SECURE mode
     pub fn handle_auth_done(
@@ -741,51 +803,8 @@ impl CephXClientHandler {
             }
         }
 
-        // Create session if it doesn't exist yet
-        if self.session.is_none() {
-            debug!("Creating new session with global_id={}", global_id);
-            self.session = Some(CephXSession::new(
-                self.entity_name.clone(),
-                global_id,
-                secret_key.clone(),
-            ));
-        }
-
-        // Store all service tickets in the session
-        if let Some(session) = &mut self.session {
-            debug!(
-                "Storing {} ticket handlers in session",
-                ticket_handlers.len()
-            );
-            for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
-                trace!(
-                    "Storing ticket for service {} (secret_id={})",
-                    service_id,
-                    secret_id
-                );
-                let handler = session.get_ticket_handler(service_id);
-                handler.update(session_key, secret_id, ticket_blob, validity);
-                debug!(
-                    "✓ Stored ticket for service {} (secret_id={}, have_key={}, expired={})",
-                    service_id,
-                    secret_id,
-                    handler.have_key,
-                    handler.is_expired()
-                );
-            }
-            // Log all available tickets
-            debug!("Available service tickets after storage:");
-            for (service_id, handler) in &session.ticket_handlers {
-                debug!(
-                    "  Service {}: have_key={}, expired={}",
-                    service_id,
-                    handler.have_key,
-                    handler.is_expired()
-                );
-            }
-        } else {
-            warn!("No session available to store ticket handlers");
-        }
+        // Store all tickets in session
+        self.store_ticket_handlers(ticket_handlers, global_id)?;
 
         Ok((Some(session_key_bytes), connection_secret_bytes))
     }
