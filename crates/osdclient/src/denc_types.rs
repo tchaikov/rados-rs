@@ -198,8 +198,6 @@ impl VersionedEncode for OsdReqId {
 
 denc::impl_denc_for_versioned!(OsdReqId);
 
-// ============= BlkinTraceInfo =============
-
 // ============= JaegerSpanContext (jspan_context) =============
 
 impl VersionedEncode for JaegerSpanContext {

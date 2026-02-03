@@ -1863,18 +1863,7 @@ impl MonClient {
                     let handler_arc = service_auth.handler();
                     let handler = handler_arc.lock().unwrap();
                     if let Some(session) = handler.get_session() {
-                        eprintln!(
-                            "Session has {} ticket handlers",
-                            session.ticket_handlers.len()
-                        );
-                        for (sid, h) in &session.ticket_handlers {
-                            eprintln!(
-                                "  Service {}: have_key={}, expired={}",
-                                sid,
-                                h.have_key,
-                                h.is_expired()
-                            );
-                        }
+                        for (sid, h) in &session.ticket_handlers {}
                     } else {
                     }
                     drop(handler); // Release lock before logging
