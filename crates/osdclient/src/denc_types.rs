@@ -233,7 +233,7 @@ impl VersionedEncode for JaegerSpanContext {
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
         // Just is_valid flag
-        Some((if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)?)
+        (if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)
     }
 }
 

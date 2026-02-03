@@ -535,7 +535,6 @@ impl ConnectionConfig {
 }
 
 /// Parse size string from ceph.conf (e.g., "100M", "1G", "512K")
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -647,8 +646,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_empty_auth_methods() {
-        let mut config = ConnectionConfig::default();
-        config.supported_auth_methods = vec![];
+        let config = ConnectionConfig {
+            supported_auth_methods: vec![],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -658,8 +659,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_unknown_auth_method() {
-        let mut config = ConnectionConfig::default();
-        config.supported_auth_methods = vec![AuthMethod::Unknown, AuthMethod::None];
+        let config = ConnectionConfig {
+            supported_auth_methods: vec![AuthMethod::Unknown, AuthMethod::None],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -669,8 +672,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_gss_not_implemented() {
-        let mut config = ConnectionConfig::default();
-        config.supported_auth_methods = vec![AuthMethod::Gss];
+        let config = ConnectionConfig {
+            supported_auth_methods: vec![AuthMethod::Gss],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -680,8 +685,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_empty_modes() {
-        let mut config = ConnectionConfig::default();
-        config.preferred_modes = vec![];
+        let config = ConnectionConfig {
+            preferred_modes: vec![],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -691,8 +698,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_unknown_mode() {
-        let mut config = ConnectionConfig::default();
-        config.preferred_modes = vec![ConnectionMode::Unknown];
+        let config = ConnectionConfig {
+            preferred_modes: vec![ConnectionMode::Unknown],
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -718,9 +727,11 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_cephx_without_provider() {
-        let mut config = ConnectionConfig::default();
-        config.supported_auth_methods = vec![AuthMethod::Cephx];
-        config.auth_provider = None;
+        let config = ConnectionConfig {
+            supported_auth_methods: vec![AuthMethod::Cephx],
+            auth_provider: None,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -730,9 +741,11 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_required_features_not_supported() {
-        let mut config = ConnectionConfig::default();
-        config.supported_features = MSGR2_FEATURE_REVISION_1; // Only revision 1
-        config.required_features = MSGR2_FEATURE_COMPRESSION; // Require compression
+        let config = ConnectionConfig {
+            supported_features: MSGR2_FEATURE_REVISION_1,
+            required_features: MSGR2_FEATURE_COMPRESSION,
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config.validate().unwrap_err().contains("required_features"));
         assert!(config.validate().unwrap_err().contains("subset"));
@@ -765,13 +778,15 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_throttle_all_zeros() {
-        let mut config = ConnectionConfig::default();
-        config.throttle_config = Some(ThrottleConfig {
-            max_bytes_per_sec: 0,
-            max_messages_per_sec: 0,
-            max_dispatch_queue_depth: 0,
-            rate_window: std::time::Duration::from_secs(1),
-        });
+        let config = ConnectionConfig {
+            throttle_config: Some(ThrottleConfig {
+                max_bytes_per_sec: 0,
+                max_messages_per_sec: 0,
+                max_dispatch_queue_depth: 0,
+                rate_window: std::time::Duration::from_secs(1),
+            }),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -781,8 +796,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_throttle_bytes_too_small() {
-        let mut config = ConnectionConfig::default();
-        config.throttle_config = Some(ThrottleConfig::with_byte_rate(512)); // < 1KB
+        let config = ConnectionConfig {
+            throttle_config: Some(ThrottleConfig::with_byte_rate(512)),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -792,8 +809,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_throttle_messages_too_small() {
-        let mut config = ConnectionConfig::default();
-        config.throttle_config = Some(ThrottleConfig::with_message_rate(5)); // < 10
+        let config = ConnectionConfig {
+            throttle_config: Some(ThrottleConfig::with_message_rate(5)),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -803,8 +822,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_throttle_queue_too_small() {
-        let mut config = ConnectionConfig::default();
-        config.throttle_config = Some(ThrottleConfig::with_queue_depth(5)); // < 10
+        let config = ConnectionConfig {
+            throttle_config: Some(ThrottleConfig::with_queue_depth(5)),
+            ..Default::default()
+        };
         assert!(config.validate().is_err());
         assert!(config
             .validate()
@@ -814,8 +835,10 @@ mod tests {
 
     #[test]
     fn test_connection_config_validate_throttle_valid() {
-        let mut config = ConnectionConfig::default();
-        config.throttle_config = Some(ThrottleConfig::with_byte_rate(1024 * 1024)); // 1MB/s
+        let config = ConnectionConfig {
+            throttle_config: Some(ThrottleConfig::with_byte_rate(1024 * 1024)),
+            ..Default::default()
+        };
         assert!(config.validate().is_ok());
     }
 }

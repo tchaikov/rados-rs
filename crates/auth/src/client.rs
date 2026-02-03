@@ -484,42 +484,27 @@ impl CephXClientHandler {
         buf: &mut Bytes,
         session_key: &CryptoKey,
     ) -> Result<CephXTicketBlob> {
-        use bytes::Buf;
         use denc::Denc;
 
-        let len = u32::decode(buf, 0)? as usize;
-        if buf.remaining() < len {
-            return Err(CephXError::ProtocolError(format!(
-                "Insufficient data for encrypted ticket blob: need {}, have {}",
-                len,
-                buf.remaining()
-            )));
-        }
+        // Bytes::decode() reads length prefix and extracts the bytes
+        let encrypted_bl =
+            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
 
-        let encrypted_bl = buf.split_to(len);
         let decrypted = session_key.decrypt(&encrypted_bl)?;
-        let blob = CephXTicketBlob::decode(&mut decrypted.as_ref(), 0)
-            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-        Ok(blob)
+        CephXTicketBlob::decode(&mut decrypted.as_ref(), 0)
+            .map_err(|e| CephXError::EncodingError(e.to_string()))
     }
 
     /// Decode unencrypted ticket blob (read length, decode directly)
     fn decode_unencrypted_ticket_blob(&self, buf: &mut Bytes) -> Result<CephXTicketBlob> {
-        use bytes::Buf;
         use denc::Denc;
 
-        let len = u32::decode(buf, 0)? as usize;
-        if buf.remaining() < len {
-            return Err(CephXError::ProtocolError(format!(
-                "Insufficient data for ticket blob: need {}, have {}",
-                len,
-                buf.remaining()
-            )));
-        }
+        // Bytes::decode() reads length prefix and extracts the bytes
+        let ticket_bytes =
+            Bytes::decode(buf, 0).map_err(|e| CephXError::EncodingError(e.to_string()))?;
 
-        let blob = CephXTicketBlob::decode(&mut buf.split_to(len).as_ref(), 0)
-            .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-        Ok(blob)
+        CephXTicketBlob::decode(&mut ticket_bytes.as_ref(), 0)
+            .map_err(|e| CephXError::EncodingError(e.to_string()))
     }
 
     /// Handle AUTH_DONE payload to extract session_key and connection_secret

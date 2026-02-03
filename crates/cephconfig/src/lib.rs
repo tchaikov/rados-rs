@@ -780,16 +780,16 @@ debug mon = 20
 
     #[test]
     fn test_bool_config_value() {
-        assert_eq!(bool::parse_config_value("true").unwrap(), true);
-        assert_eq!(bool::parse_config_value("True").unwrap(), true);
-        assert_eq!(bool::parse_config_value("yes").unwrap(), true);
-        assert_eq!(bool::parse_config_value("1").unwrap(), true);
-        assert_eq!(bool::parse_config_value("on").unwrap(), true);
-        assert_eq!(bool::parse_config_value("false").unwrap(), false);
-        assert_eq!(bool::parse_config_value("False").unwrap(), false);
-        assert_eq!(bool::parse_config_value("no").unwrap(), false);
-        assert_eq!(bool::parse_config_value("0").unwrap(), false);
-        assert_eq!(bool::parse_config_value("off").unwrap(), false);
+        assert!(bool::parse_config_value("true").unwrap());
+        assert!(bool::parse_config_value("True").unwrap());
+        assert!(bool::parse_config_value("yes").unwrap());
+        assert!(bool::parse_config_value("1").unwrap());
+        assert!(bool::parse_config_value("on").unwrap());
+        assert!(!bool::parse_config_value("false").unwrap());
+        assert!(!bool::parse_config_value("False").unwrap());
+        assert!(!bool::parse_config_value("no").unwrap());
+        assert!(!bool::parse_config_value("0").unwrap());
+        assert!(!bool::parse_config_value("off").unwrap());
         assert!(bool::parse_config_value("maybe").is_err());
         assert_eq!(bool::type_name(), "bool");
     }
@@ -839,7 +839,7 @@ debug mon = 20
         // Test bool option
         let opt = ConfigOption::new("ms_compression_enabled", false);
         let value = opt.get(&config, &["global"]);
-        assert_eq!(value, true);
+        assert!(value);
 
         // Test Ratio option
         let opt = ConfigOption::new("ms_compression_ratio", Ratio(0.8));
@@ -885,7 +885,7 @@ debug mon = 20
             config.ms_connection_timeout.0,
             std::time::Duration::from_secs(30)
         );
-        assert_eq!(config.ms_compression_enabled, false);
+        assert!(!config.ms_compression_enabled);
         assert_eq!(config.ms_compression_ratio.0, 0.8);
         assert_eq!(config.mon_host, "");
 
@@ -899,7 +899,7 @@ debug mon = 20
             config.ms_connection_timeout.0,
             std::time::Duration::from_secs(60)
         );
-        assert_eq!(config.ms_compression_enabled, true);
+        assert!(config.ms_compression_enabled);
         assert_eq!(config.ms_compression_ratio.0, 0.75);
 
         // Test option_names
