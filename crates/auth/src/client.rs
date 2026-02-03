@@ -484,6 +484,91 @@ impl CephXClientHandler {
         ))
     }
 
+    /// Try to decode connection_secret from payload (inner method with ? error propagation)
+    fn try_decode_connection_secret(
+        payload: &mut Bytes,
+        session_key: &CryptoKey,
+    ) -> Result<Option<Bytes>> {
+        use crate::protocol::CephXEncryptedEnvelope;
+        use bytes::Buf;
+        use denc::Denc;
+
+        // Read outer bufferlist length
+        let cbl_len = u32::decode(payload, 0)? as usize;
+        if cbl_len == 0 {
+            return Ok(None);
+        }
+
+        if payload.remaining() < cbl_len {
+            return Err(CephXError::ProtocolError(format!(
+                "Insufficient data for connection_secret: need {}, have {}",
+                cbl_len,
+                payload.remaining()
+            )));
+        }
+
+        let mut encrypted_secret_bl = payload.split_to(cbl_len);
+
+        // Read inner encrypted data length
+        let inner_len = u32::decode(&mut encrypted_secret_bl, 0)? as usize;
+        if inner_len == 0 {
+            return Ok(None);
+        }
+
+        if encrypted_secret_bl.remaining() < inner_len {
+            return Err(CephXError::ProtocolError(format!(
+                "Insufficient data for encrypted connection_secret: need {}, have {}",
+                inner_len,
+                encrypted_secret_bl.remaining()
+            )));
+        }
+
+        let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
+
+        // Decrypt connection_secret
+        let mut decrypted_secret = session_key.decrypt(&encrypted_secret)?;
+
+        // Decode envelope
+        let envelope = CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0)?;
+
+        // Return payload if non-empty (CRC mode has empty connection_secret)
+        if envelope.payload.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(envelope.payload))
+        }
+    }
+
+    /// Decode connection_secret from payload (outer method that handles errors gracefully)
+    ///
+    /// Returns Ok(None) if decoding fails (connection_secret is optional for CRC mode)
+    fn decode_connection_secret(
+        &self,
+        payload: &mut Bytes,
+        session_key: &CryptoKey,
+    ) -> Result<Option<Bytes>> {
+        use bytes::Buf;
+
+        if payload.remaining() == 0 {
+            return Ok(None);
+        }
+
+        match Self::try_decode_connection_secret(payload, session_key) {
+            Ok(secret) => {
+                if let Some(ref s) = secret {
+                    debug!("Connection secret: {} bytes", s.len());
+                } else {
+                    debug!("Connection secret length is 0 (CRC mode), leaving as None");
+                }
+                Ok(secret)
+            }
+            Err(e) => {
+                debug!("Failed to decode connection_secret: {:?}", e);
+                Ok(None)
+            }
+        }
+    }
+
     /// Handle AUTH_DONE payload to extract session_key and connection_secret
     /// Returns (session_key_bytes, connection_secret_bytes) if in SECURE mode
     pub fn handle_auth_done(
@@ -492,7 +577,7 @@ impl CephXClientHandler {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use crate::protocol::{CephXEncryptedEnvelope, CephXResponseHeader};
+        use crate::protocol::CephXResponseHeader;
         use bytes::Buf;
         use denc::Denc;
 
@@ -603,74 +688,9 @@ impl CephXClientHandler {
             .map(|(_, sk, _, _, _)| sk)
             .ok_or_else(|| CephXError::ProtocolError("No tickets available".into()))?;
 
-        // Check for connection_secret blob (encrypted with session_key) and extra_tickets
-        let mut connection_secret_bytes = None;
-        // Try to read outer length-prefixed bufferlist for connection_secret
-        if auth_payload.remaining() > 0 {
-            if let Ok(cbl_len) = u32::decode(&mut auth_payload, 0) {
-                let cbl_len = cbl_len as usize;
-                debug!("connection_secret blob length: {}", cbl_len);
-
-                if cbl_len > 0 && auth_payload.remaining() >= cbl_len {
-                    let mut encrypted_secret_bl = auth_payload.split_to(cbl_len);
-                    debug!(
-                        "connection_secret bufferlist: {} bytes",
-                        encrypted_secret_bl.len()
-                    );
-
-                    // The bufferlist contains another nested length prefix for the actual encrypted data
-                    if let Ok(inner_len) = u32::decode(&mut encrypted_secret_bl, 0) {
-                        let inner_len = inner_len as usize;
-                        debug!("Inner encrypted data length: {}", inner_len);
-
-                        if encrypted_secret_bl.remaining() >= inner_len {
-                            let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
-                            trace!(
-                                "Encrypted connection_secret: {} bytes",
-                                encrypted_secret.len()
-                            );
-                            trace!(
-                                "Session key for decryption - type: {}, secret length: {}",
-                                first_ticket_session_key.get_type(),
-                                first_ticket_session_key.get_secret().len()
-                            );
-
-                            // Decrypt connection_secret using the session_key we just extracted
-                            if let Ok(mut decrypted_secret) =
-                                first_ticket_session_key.decrypt(&encrypted_secret)
-                            {
-                                // Decode using CephXEncryptedEnvelope<Bytes>
-                                match CephXEncryptedEnvelope::<Bytes>::decode(
-                                    &mut decrypted_secret,
-                                    0,
-                                ) {
-                                    Ok(envelope) => {
-                                        let secret_data = envelope.payload;
-                                        if !secret_data.is_empty() {
-                                            debug!(
-                                                "Connection secret: {} bytes",
-                                                secret_data.len()
-                                            );
-                                            connection_secret_bytes = Some(secret_data);
-                                        } else {
-                                            debug!("Connection secret length is 0 (CRC mode), leaving as None");
-                                        }
-                                    }
-                                    Err(e) => {
-                                        debug!(
-                                            "Failed to decode connection_secret envelope: {:?}",
-                                            e
-                                        );
-                                    }
-                                }
-                            } else {
-                                debug!("Failed to decrypt connection_secret");
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        // Decode connection_secret blob (encrypted with session_key)
+        let connection_secret_bytes =
+            self.decode_connection_secret(&mut auth_payload, first_ticket_session_key)?;
 
         // Parse extra_tickets if any remain in the payload
         trace!(
