@@ -13,7 +13,10 @@ use bytes::Bytes;
 use denc::denc::VersionedEncode;
 use denc::UuidD;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
+use msgr2::{Dispatcher, MessageBus};
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -118,6 +121,9 @@ pub struct MonClient {
 
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
+
+    /// Global message bus for inter-component routing
+    message_bus: Arc<MessageBus>,
 }
 
 impl Clone for MonClient {
@@ -131,6 +137,7 @@ impl Clone for MonClient {
             tick_task: Arc::clone(&self.tick_task),
             keepalive_state: Arc::clone(&self.keepalive_state),
             map_events: self.map_events.clone(),
+            message_bus: Arc::clone(&self.message_bus),
         }
     }
 }
@@ -278,8 +285,23 @@ struct VersionTracker {
 }
 
 impl MonClient {
-    /// Create a new MonClient
-    pub async fn new(config: MonClientConfig) -> Result<Self> {
+    /// Create a new MonClient with default MessageBus
+    ///
+    /// This is a convenience wrapper that creates a new MessageBus.
+    /// For production use with OSDClient integration, use `new_with_bus()`.
+    pub async fn new(config: MonClientConfig) -> std::result::Result<Self, MonClientError> {
+        let message_bus = Arc::new(MessageBus::new());
+        Self::new_with_bus(config, message_bus).await
+    }
+
+    /// Create a new MonClient with a shared MessageBus
+    ///
+    /// This allows MonClient to forward messages (like OSDMap) to other components
+    /// like OSDClient through the shared message bus.
+    pub async fn new_with_bus(
+        config: MonClientConfig,
+        message_bus: Arc<MessageBus>,
+    ) -> std::result::Result<Self, MonClientError> {
         // Parse entity name
         let entity_name: EntityName = config
             .entity_name
@@ -335,6 +357,7 @@ impl MonClient {
             tick_task: Arc::new(RwLock::new(None)),
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             map_events,
+            message_bus,
         })
     }
 
@@ -745,6 +768,8 @@ impl MonClient {
 
     /// Helper to renew a subscription from within spawned tasks
     /// This doesn't require &self, so it can be called from the message loop
+    /// NOTE: Currently only used by handle_osdmap which will move to OSDClient
+    #[allow(dead_code)]
     async fn renew_subscription(
         state_arc: &Arc<RwLock<MonClientState>>,
         what: &str,
@@ -1097,10 +1122,6 @@ impl MonClient {
                     "Received unexpected CEPH_MSG_PING_ACK (monitors don't send these to clients)"
                 );
             }
-            CEPH_MSG_OSD_MAP => {
-                info!("Received CEPH_MSG_OSD_MAP");
-                Self::handle_osdmap(state, map_events, msg).await?;
-            }
             CEPH_MSG_MON_SUBSCRIBE_ACK => {
                 info!("Received CEPH_MSG_MON_SUBSCRIBE_ACK");
                 Self::handle_subscribe_ack(state, msg).await?;
@@ -1167,6 +1188,8 @@ impl MonClient {
     }
 
     /// Handle OSDMap message
+    /// NOTE: This will be moved to OSDClient in Phase 3
+    #[allow(dead_code)]
     async fn handle_osdmap(
         state: &Arc<RwLock<MonClientState>>,
         map_events: &broadcast::Sender<MapEvent>,
@@ -2226,6 +2249,21 @@ impl std::fmt::Debug for MonClient {
             .field("entity_name", &self.entity_name)
             .field("config", &self.config)
             .finish()
+    }
+}
+
+/// Implement Dispatcher trait for MonClient to handle monitor-specific messages
+impl Dispatcher for MonClient {
+    fn dispatch<'a>(
+        &'a self,
+        msg: msgr2::message::Message,
+    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), denc::RadosError>> + Send + 'a>> {
+        Box::pin(async move {
+            // Convert MonClientError to RadosError
+            Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, msg)
+                .await
+                .map_err(|e| denc::RadosError::Protocol(format!("MonClient error: {}", e)))
+        })
     }
 }
 
