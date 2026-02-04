@@ -12,6 +12,7 @@ pub mod error;
 pub mod frames;
 pub mod header;
 pub mod message;
+pub mod message_bus;
 pub mod protocol;
 pub mod revocation;
 pub mod state_machine;
@@ -23,6 +24,7 @@ pub use error::*;
 pub use frames::*;
 pub use header::*;
 pub use message::*;
+pub use message_bus::*;
 pub use revocation::*;
 pub use throttle::*;
 

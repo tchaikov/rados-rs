@@ -4,15 +4,19 @@
 //! handling frame I/O, encryption, and state machine coordination.
 
 use bytes::{Bytes, BytesMut};
+use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::task::JoinHandle;
 
 use crate::banner::Banner;
 use crate::error::{Error, Result};
 use crate::frames::{Frame, MessageFrame, Preamble, Tag};
 use crate::header::MsgHeader;
 use crate::message::Message;
+use crate::message_bus::{Dispatcher, MessageBus};
 use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, StateResult};
 use crate::FeatureSet;
 use std::borrow::Cow;
@@ -736,6 +740,13 @@ pub struct Connection {
     config: crate::ConnectionConfig,
     /// Optional message throttle for rate limiting
     throttle: Option<crate::throttle::MessageThrottle>,
+    /// Local message handlers registered on this connection
+    local_handlers: HashMap<u16, Arc<dyn Dispatcher>>,
+    /// Global message bus for inter-component messages
+    message_bus: Option<Arc<MessageBus>>,
+    /// Background task handle for message loop
+    #[allow(dead_code)] // Will be used when message loop is implemented
+    recv_task: Option<JoinHandle<()>>,
 }
 
 impl Connection {
@@ -873,6 +884,9 @@ impl Connection {
             target_entity_addr: Some(target_entity_addr),
             config,
             throttle,
+            local_handlers: HashMap::new(),
+            message_bus: None,
+            recv_task: None,
         })
     }
 
@@ -932,6 +946,9 @@ impl Connection {
             target_entity_addr: None,
             config,
             throttle,
+            local_handlers: HashMap::new(),
+            message_bus: None,
+            recv_task: None,
         })
     }
 
@@ -1161,6 +1178,9 @@ impl Connection {
             target_entity_addr: None,
             config,
             throttle,
+            local_handlers: HashMap::new(),
+            message_bus: None,
+            recv_task: None,
         })
     }
 
@@ -1622,6 +1642,50 @@ impl Connection {
             "Failed to {} after {} attempts",
             operation_name, MAX_RECONNECT_ATTEMPTS
         )))
+    }
+
+    /// Register a local handler for a message type
+    ///
+    /// The handler will be called when messages of this type are received on this
+    /// connection. Local handlers are checked first before falling back to the global
+    /// message bus.
+    ///
+    /// # Arguments
+    ///
+    /// * `msg_type` - The message type to register for (e.g., CEPH_MSG_OSD_OPREPLY)
+    /// * `dispatcher` - The dispatcher to invoke for this message type
+    pub fn register_local_handler(&mut self, msg_type: u16, dispatcher: Arc<dyn Dispatcher>) {
+        self.local_handlers.insert(msg_type, dispatcher);
+    }
+
+    /// Set the global message bus
+    ///
+    /// Messages that are not handled by local handlers will be dispatched through
+    /// the global message bus. This allows inter-component communication without
+    /// tight coupling.
+    ///
+    /// # Arguments
+    ///
+    /// * `bus` - The message bus to use for unhandled messages
+    pub fn set_message_bus(&mut self, bus: Arc<MessageBus>) {
+        self.message_bus = Some(bus);
+    }
+
+    /// Start the embedded message loop
+    ///
+    /// This spawns a background task that continuously receives messages from the
+    /// connection and dispatches them to registered handlers. Local handlers are
+    /// tried first, then the global message bus if no local handler is found.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - No handlers (local or global) are configured
+    /// - A message is received with no handler registered
+    pub fn start(&mut self) -> Result<()> {
+        // TODO: Implement message loop
+        // This will be implemented in the next step
+        Ok(())
     }
 
     /// Send a Ceph message over the established session
