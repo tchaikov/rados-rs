@@ -9,14 +9,13 @@ use crate::monmap::MonMap;
 use crate::paxos_service_message::PaxosServiceMessage;
 use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
+use async_trait::async_trait;
 use bytes::Bytes;
 use denc::denc::VersionedEncode;
 use denc::UuidD;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::{Dispatcher, MessageBus};
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -2253,17 +2252,16 @@ impl std::fmt::Debug for MonClient {
 }
 
 /// Implement Dispatcher trait for MonClient to handle monitor-specific messages
+#[async_trait]
 impl Dispatcher for MonClient {
-    fn dispatch<'a>(
-        &'a self,
+    async fn dispatch(
+        &self,
         msg: msgr2::message::Message,
-    ) -> Pin<Box<dyn Future<Output = std::result::Result<(), denc::RadosError>> + Send + 'a>> {
-        Box::pin(async move {
-            // Convert MonClientError to RadosError
-            Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, msg)
-                .await
-                .map_err(|e| denc::RadosError::Protocol(format!("MonClient error: {}", e)))
-        })
+    ) -> std::result::Result<(), denc::RadosError> {
+        // Convert MonClientError to RadosError
+        Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, msg)
+            .await
+            .map_err(|e| denc::RadosError::Protocol(format!("MonClient error: {}", e)))
     }
 }
 

@@ -5,10 +5,9 @@
 //! Dispatcher trait to receive messages of specific types.
 
 use crate::message::Message;
+use async_trait::async_trait;
 use denc::RadosError;
 use std::collections::HashMap;
-use std::future::Future;
-use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -21,24 +20,21 @@ use tokio::sync::RwLock;
 /// # Example
 ///
 /// ```rust,ignore
+/// #[async_trait]
 /// impl Dispatcher for OSDClient {
-///     fn dispatch<'a>(&'a self, msg: Message) -> Pin<Box<dyn Future<Output = Result<(), RadosError>> + Send + 'a>> {
-///         Box::pin(async move {
-///             self.handle_osdmap(msg).await
-///         })
+///     async fn dispatch(&self, msg: Message) -> Result<(), RadosError> {
+///         self.handle_osdmap(msg).await
 ///     }
 /// }
 /// ```
+#[async_trait]
 pub trait Dispatcher: Send + Sync {
     /// Dispatch a message to this handler
     ///
     /// This method is called directly from Connection's message loop when a
     /// message of the registered type is received. The handler should process
     /// the message and return Ok(()) on success or an error on failure.
-    fn dispatch<'a>(
-        &'a self,
-        msg: Message,
-    ) -> Pin<Box<dyn Future<Output = Result<(), RadosError>> + Send + 'a>>;
+    async fn dispatch(&self, msg: Message) -> Result<(), RadosError>;
 }
 
 /// Message bus routes inter-component messages
@@ -175,18 +171,14 @@ mod tests {
         }
     }
 
+    #[async_trait]
     impl Dispatcher for TestDispatcher {
-        fn dispatch<'a>(
-            &'a self,
-            msg: Message,
-        ) -> Pin<Box<dyn Future<Output = Result<(), RadosError>> + Send + 'a>> {
-            Box::pin(async move {
-                // Copy msg_type to avoid packed struct reference
-                let msg_type = msg.header.msg_type;
-                assert_eq!(msg_type, self.msg_type);
-                self.count.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            })
+        async fn dispatch(&self, msg: Message) -> Result<(), RadosError> {
+            // Copy msg_type to avoid packed struct reference
+            let msg_type = msg.header.msg_type;
+            assert_eq!(msg_type, self.msg_type);
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
         }
     }
 
@@ -246,12 +238,10 @@ mod tests {
     async fn test_dispatcher_error_propagation() {
         struct ErrorDispatcher;
 
+        #[async_trait]
         impl Dispatcher for ErrorDispatcher {
-            fn dispatch<'a>(
-                &'a self,
-                _msg: Message,
-            ) -> Pin<Box<dyn Future<Output = Result<(), RadosError>> + Send + 'a>> {
-                Box::pin(async move { Err(RadosError::Protocol("Test error".into())) })
+            async fn dispatch(&self, _msg: Message) -> Result<(), RadosError> {
+                Err(RadosError::Protocol("Test error".into()))
             }
         }
 

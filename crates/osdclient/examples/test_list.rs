@@ -52,8 +52,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         keyring_path: Some("/home/kefu/dev/ceph/build/keyring".to_string()),
         ..Default::default()
     };
-    let osd_client =
-        Arc::new(osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client)).await?);
+
+    // Get FSID and create MessageBus
+    let fsid = mon_client.get_fsid().await;
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    let osd_client = Arc::new(
+        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus).await?,
+    );
     println!("   ✓ OSD client created\n");
 
     // 4. Create IoCtx for test pool (pool 2)

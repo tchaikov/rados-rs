@@ -184,8 +184,12 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
+    // Get FSID and create MessageBus
+    let fsid = mon_client.get_fsid().await;
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
     let osd_client = Arc::new(
-        osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client))
+        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus)
             .await
             .context("Failed to create OSDClient")?,
     );

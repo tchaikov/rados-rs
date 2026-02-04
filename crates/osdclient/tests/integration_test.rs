@@ -149,9 +149,16 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
         ..Default::default()
     };
 
-    let osd_client = osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client))
-        .await
-        .expect("Failed to create OSDClient");
+    // Get FSID from MonClient
+    let fsid = mon_client.get_fsid().await;
+
+    // Create MessageBus for message routing
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    let osd_client =
+        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus)
+            .await
+            .expect("Failed to create OSDClient");
 
     (mon_client, osd_client, pool_id)
 }

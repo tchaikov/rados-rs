@@ -110,7 +110,14 @@ async fn create_osd_client(
         ..Default::default()
     };
 
-    let osd_client = osdclient::OSDClient::new(osd_config, Arc::clone(&mon_client)).await?;
+    // Get FSID from MonClient
+    let fsid = mon_client.get_fsid().await;
+
+    // Create MessageBus for message routing
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    let osd_client =
+        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus).await?;
     info!("✓ OSD client created");
 
     Ok((osd_client, mon_client))

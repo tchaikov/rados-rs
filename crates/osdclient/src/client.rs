@@ -2,13 +2,15 @@
 //!
 //! Main entry point for performing object operations against a Ceph cluster.
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-use denc::Denc;
+use denc::{Denc, VersionedEncode};
 use monclient::client::MapEvent;
+use msgr2::{Dispatcher, MessageBus};
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
@@ -46,13 +48,21 @@ pub struct OSDClient {
     throttle: Arc<Throttle>,
     /// Global ID from monitor authentication (used in entity_name for request IDs)
     global_id: u64,
+    /// Cluster FSID for OSDMap validation
+    fsid: denc::UuidD,
+    /// Current OSDMap
+    osdmap: Arc<RwLock<Option<Arc<denc::osdmap::OSDMap>>>>,
+    /// Global message bus for inter-component messaging
+    message_bus: Arc<MessageBus>,
 }
 
 impl OSDClient {
     /// Create a new OSD client
     pub async fn new(
         config: OSDClientConfig,
+        fsid: denc::UuidD,
         mon_client: Arc<monclient::MonClient>,
+        message_bus: Arc<MessageBus>,
     ) -> Result<Self> {
         info!("Creating OSDClient for {}", config.entity_name);
 
@@ -77,13 +87,21 @@ impl OSDClient {
             tracker,
             throttle,
             global_id,
+            fsid,
+            osdmap: Arc::new(RwLock::new(None)),
+            message_bus,
         };
 
-        // Spawn OSDMap event listener task
-        // This task handles OSDMap updates and rescans pending operations
-        Self::spawn_osdmap_listener(Arc::clone(&client.sessions), Arc::clone(&mon_client));
-
         Ok(client)
+    }
+
+    /// Register this OSDClient as a handler for OSDMap messages on the message bus
+    pub async fn register_handlers(self: Arc<Self>) -> Result<()> {
+        info!("Registering OSDClient as OSDMap handler on message bus");
+        self.message_bus
+            .register(msgr2::message::CEPH_MSG_OSD_MAP, self.clone())
+            .await;
+        Ok(())
     }
 
     /// Spawn background task to listen for OSDMap updates
@@ -92,6 +110,7 @@ impl OSDClient {
     /// - Detached task with proper error handling
     /// - Handles broadcast receiver lagging gracefully
     /// - Automatically stops when MonClient is dropped (broadcast sender closes)
+    #[allow(dead_code)]
     fn spawn_osdmap_listener(
         sessions: Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
         mon_client: Arc<monclient::MonClient>,
@@ -148,6 +167,7 @@ impl OSDClient {
     /// 3. Cancels operations for deleted pools (POOL_DNE)
     ///
     /// Reference: Ceph C++ Objecter::handle_osd_map() and _scan_requests()
+    #[allow(dead_code)]
     async fn handle_osdmap_update(
         epoch: u64,
         sessions: &Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
@@ -1171,5 +1191,170 @@ impl OSDClient {
         }
 
         Ok(pools)
+    }
+
+    /// Handle OSDMap message (moved from MonClient)
+    async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
+        use monclient::messages::MOSDMap;
+
+        info!("Handling OSDMap message ({} bytes)", msg.front.len());
+
+        // Decode MOSDMap
+        let mosdmap = MOSDMap::decode(&msg.front)
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode MOSDMap: {}", e)))?;
+        info!(
+            "Received MOSDMap: epochs [{}..{}], {} full maps, {} incremental maps",
+            mosdmap.get_first(),
+            mosdmap.get_last(),
+            mosdmap.maps.len(),
+            mosdmap.incremental_maps.len()
+        );
+
+        // 1. Validate FSID
+        if mosdmap.fsid != self.fsid.bytes {
+            warn!(
+                "Ignoring OSDMap with wrong fsid (expected {:?}, got {:?})",
+                self.fsid.bytes, mosdmap.fsid
+            );
+            return Ok(());
+        }
+
+        // 2. Check if we've already processed these epochs
+        let current_epoch = self
+            .osdmap
+            .read()
+            .await
+            .as_ref()
+            .map(|m| m.epoch)
+            .unwrap_or(0);
+
+        if mosdmap.get_last() <= current_epoch {
+            info!(
+                "Ignoring OSDMap epochs [{}..{}] <= current epoch {}",
+                mosdmap.get_first(),
+                mosdmap.get_last(),
+                current_epoch
+            );
+            return Ok(());
+        }
+
+        info!(
+            "Processing OSDMap epochs [{}..{}] > current epoch {}",
+            mosdmap.get_first(),
+            mosdmap.get_last(),
+            current_epoch
+        );
+
+        // 3. Process epochs sequentially
+        let mut updated = false;
+        {
+            let mut osdmap_guard = self.osdmap.write().await;
+
+            if current_epoch > 0 {
+                // We have a current map, apply updates sequentially
+                for e in (current_epoch + 1)..=mosdmap.get_last() {
+                    let current_map_epoch = osdmap_guard.as_ref().map(|m| m.epoch).unwrap_or(0);
+
+                    if current_map_epoch == e - 1 && mosdmap.incremental_maps.contains_key(&e) {
+                        // Apply incremental
+                        info!("Applying incremental OSDMap for epoch {}", e);
+                        let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
+
+                        match denc::osdmap::OSDMapIncremental::decode_versioned(
+                            &mut inc_bl.as_ref(),
+                            0,
+                        ) {
+                            Ok(inc_map) => {
+                                info!(
+                                    "✓ Decoded incremental: epoch={}, {} new pools, {} old pools",
+                                    inc_map.epoch,
+                                    inc_map.new_pools.len(),
+                                    inc_map.old_pools.len()
+                                );
+
+                                if let Some(current_map) = &*osdmap_guard {
+                                    let mut updated_map = (**current_map).clone();
+                                    if let Err(err) = inc_map.apply_to(&mut updated_map) {
+                                        warn!("Failed to apply incremental epoch {}: {}", e, err);
+                                    } else {
+                                        *osdmap_guard = Some(Arc::new(updated_map));
+                                        updated = true;
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                warn!("Failed to decode incremental epoch {}: {}", e, err);
+                            }
+                        }
+                    } else if mosdmap.maps.contains_key(&e) {
+                        // Use full map
+                        info!("Using full OSDMap for epoch {}", e);
+                        let full_bl = mosdmap.maps.get(&e).unwrap();
+                        match denc::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+                            Ok(full_map) => {
+                                info!("✓ Decoded full OSDMap: epoch={}", full_map.epoch);
+                                *osdmap_guard = Some(Arc::new(full_map));
+                                updated = true;
+                            }
+                            Err(err) => {
+                                warn!("Failed to decode full map epoch {}: {}", e, err);
+                            }
+                        }
+                    } else {
+                        warn!("Missing epoch {} (incremental and full)", e);
+                    }
+                }
+            } else {
+                // No current map, use latest full map
+                if let Some((&latest_epoch, full_bl)) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)
+                {
+                    info!("Using latest full OSDMap (epoch {})", latest_epoch);
+                    match denc::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+                        Ok(full_map) => {
+                            info!("✓ Initial OSDMap loaded: epoch={}", full_map.epoch);
+                            *osdmap_guard = Some(Arc::new(full_map));
+                            updated = true;
+                        }
+                        Err(err) => {
+                            warn!("Failed to decode initial full map: {}", err);
+                        }
+                    }
+                }
+            }
+        }
+
+        // 4. Rescan pending operations if map updated
+        if updated {
+            let final_epoch = self
+                .osdmap
+                .read()
+                .await
+                .as_ref()
+                .map(|m| m.epoch)
+                .unwrap_or(0);
+            info!(
+                "OSDMap updated to epoch {}, rescanning pending operations",
+                final_epoch
+            );
+
+            // TODO: Rescan all sessions for pending operations
+            // This will be implemented when we add rescan() method to OSDSession
+        }
+
+        Ok(())
+    }
+}
+
+/// Implement Dispatcher trait for OSDClient to handle OSDMap messages
+#[async_trait]
+impl Dispatcher for OSDClient {
+    async fn dispatch(
+        &self,
+        msg: msgr2::message::Message,
+    ) -> std::result::Result<(), denc::RadosError> {
+        // Convert OSDClientError to RadosError
+        self.handle_osdmap(msg)
+            .await
+            .map_err(|e| denc::RadosError::Protocol(format!("OSDClient error: {}", e)))
     }
 }
