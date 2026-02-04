@@ -1677,15 +1677,30 @@ impl Connection {
     /// connection and dispatches them to registered handlers. Local handlers are
     /// tried first, then the global message bus if no local handler is found.
     ///
+    /// # Implementation Status
+    ///
+    /// **TODO**: Not yet implemented. Requires architectural refactoring of Connection
+    /// to support interior mutability or split send/receive paths. The current design
+    /// with `recv_message(&mut self)` cannot be called from a spawned task without
+    /// wrapping Connection in Arc<Mutex<...>>.
+    ///
+    /// Possible approaches:
+    /// 1. Wrap ConnectionState in Arc<Mutex<...>> for shared access
+    /// 2. Split Connection into send/receive halves (like tokio::net::TcpStream::split)
+    /// 3. Use channels between the task and Connection methods
+    ///
+    /// For now, applications should call recv_message() manually in their own loops.
+    ///
     /// # Errors
     ///
     /// Returns error if:
     /// - No handlers (local or global) are configured
     /// - A message is received with no handler registered
     pub fn start(&mut self) -> Result<()> {
-        // TODO: Implement message loop
-        // This will be implemented in the next step
-        Ok(())
+        // TODO: Implement message loop once Connection architecture supports it
+        Err(Error::Protocol(
+            "Embedded message loop not yet implemented - use recv_message() manually".into(),
+        ))
     }
 
     /// Send a Ceph message over the established session
