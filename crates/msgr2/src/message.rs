@@ -6,7 +6,7 @@ use std::fmt;
 pub const CEPH_MSG_PING: u16 = 0x0001;
 pub const CEPH_MSG_PING_ACK: u16 = 0x0002;
 pub const CEPH_MSG_MON_MAP: u16 = 0x0004;
-pub const CEPH_MSG_OSD_MAP: u16 = 0x0041;
+pub const CEPH_MSG_OSD_MAP: u16 = 0x0029; // 41 decimal - Verified from Ceph src/include/ceph_fs.h:174
 pub const CEPH_MSG_MON_COMMAND: u16 = 50;
 pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 51;
 pub const CEPH_MSG_POOLOP_REPLY: u16 = 48;
