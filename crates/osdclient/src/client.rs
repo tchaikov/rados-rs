@@ -1263,9 +1263,9 @@ impl Dispatcher for OSDClient {
         &self,
         msg: msgr2::message::Message,
     ) -> std::result::Result<(), denc::RadosError> {
-        // Convert OSDClientError to RadosError
+        // Use From trait for error conversion
         self.handle_osdmap(msg)
             .await
-            .map_err(|e| denc::RadosError::Protocol(format!("OSDClient error: {}", e)))
+            .map_err(Into::into)
     }
 }

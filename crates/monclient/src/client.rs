@@ -1686,10 +1686,10 @@ impl Dispatcher for MonClient {
         &self,
         msg: msgr2::message::Message,
     ) -> std::result::Result<(), denc::RadosError> {
-        // Convert MonClientError to RadosError
+        // Use From trait for error conversion
         Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, &self.monmap_notify, msg)
             .await
-            .map_err(|e| denc::RadosError::Protocol(format!("MonClient error: {}", e)))
+            .map_err(Into::into)
     }
 }
 

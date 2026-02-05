@@ -60,3 +60,9 @@ pub enum OSDClientError {
 
 /// Result type alias for OSD client operations
 pub type Result<T> = std::result::Result<T, OSDClientError>;
+
+impl From<OSDClientError> for denc::RadosError {
+    fn from(e: OSDClientError) -> Self {
+        denc::RadosError::Protocol(format!("OSDClient error: {}", e))
+    }
+}

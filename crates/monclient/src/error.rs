@@ -72,3 +72,9 @@ impl From<&str> for MonClientError {
         MonClientError::Other(s.to_string())
     }
 }
+
+impl From<MonClientError> for denc::RadosError {
+    fn from(e: MonClientError) -> Self {
+        denc::RadosError::Protocol(format!("MonClient error: {}", e))
+    }
+}
