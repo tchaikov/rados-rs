@@ -1517,9 +1517,7 @@ impl MonClient {
     /// before creating service clients like OSDClient.
     pub async fn wait_for_auth(&self, timeout: std::time::Duration) -> Result<()> {
         // Check if already authenticated
-        if self.is_authenticated().await
-            && self.get_service_auth_provider().await.is_some()
-        {
+        if self.is_authenticated().await && self.get_service_auth_provider().await.is_some() {
             return Ok(());
         }
 
