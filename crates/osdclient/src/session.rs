@@ -170,7 +170,14 @@ impl OSDSession {
             message_bus: Arc::clone(&self.message_bus),
             client: self.client.clone(),
         };
+        // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
+        // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
+        // io_task's lifetime, we ensure the channel stays open even if there are timing issues with
+        // session lifecycle management. This matches the previous implementation's behavior.
+        let _send_tx_keepalive = self.send_tx.clone();
         tokio::spawn(async move {
+            // Move the keepalive into the async block to extend its lifetime
+            let _ = &_send_tx_keepalive;
             Self::io_task(context, connection, send_rx).await;
         });
 
