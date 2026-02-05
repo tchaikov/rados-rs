@@ -104,8 +104,10 @@ async fn create_osd_client(
         .wait_for_auth(std::time::Duration::from_secs(5))
         .await?;
 
-    // Wait for MonMap to arrive (contains FSID)
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+    // Wait for MonMap to arrive (contains FSID) - use event-driven wait
+    mon_client
+        .wait_for_monmap(std::time::Duration::from_secs(2))
+        .await?;
 
     // Create OSD client with unique client_inc
     let client_inc = std::time::SystemTime::now()
@@ -142,8 +144,10 @@ async fn create_osd_client(
     // NOW subscribe to OSDMap - OSDClient is ready to receive
     mon_client.subscribe("osdmap", 0, 0).await?;
 
-    // Wait for OSDMap to arrive (increased timeout for slower systems)
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Wait for OSDMap to arrive - use event-driven wait
+    osd_client
+        .wait_for_osdmap(std::time::Duration::from_secs(2))
+        .await?;
     info!("✓ OSDMap received");
 
     Ok((osd_client, mon_client))

@@ -9,12 +9,11 @@ use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use denc::{Denc, VersionedEncode};
-use monclient::client::MapEvent;
 use msgr2::{Dispatcher, MessageBus};
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
-use crate::session::{OSDSession, PendingOp};
+use crate::session::OSDSession;
 use crate::throttle::Throttle;
 use crate::tracker::{Tracker, TrackerConfig};
 use crate::types::{
@@ -54,6 +53,8 @@ pub struct OSDClient {
     osdmap: Arc<RwLock<Option<Arc<denc::osdmap::OSDMap>>>>,
     /// Global message bus for inter-component messaging
     message_bus: Arc<MessageBus>,
+    /// Notification for OSDMap arrival
+    osdmap_notify: Arc<tokio::sync::Notify>,
 }
 
 impl OSDClient {
@@ -90,6 +91,7 @@ impl OSDClient {
             fsid,
             osdmap: Arc::new(RwLock::new(None)),
             message_bus,
+            osdmap_notify: Arc::new(tokio::sync::Notify::new()),
         };
 
         Ok(client)
@@ -115,258 +117,42 @@ impl OSDClient {
         }
     }
 
-    /// Spawn background task to listen for OSDMap updates
+    /// Wait for OSDMap to be received
     ///
-    /// This follows Tokio best practices:
-    /// - Detached task with proper error handling
-    /// - Handles broadcast receiver lagging gracefully
-    /// - Automatically stops when MonClient is dropped (broadcast sender closes)
-    #[allow(dead_code)]
-    fn spawn_osdmap_listener(
-        sessions: Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
-        mon_client: Arc<monclient::MonClient>,
-    ) {
-        let mut map_rx = mon_client.subscribe_events();
-
-        tokio::spawn(async move {
-            info!("OSDMap event listener task started");
-
-            loop {
-                match map_rx.recv().await {
-                    Ok(MapEvent::OsdMapUpdated { epoch }) => {
-                        debug!("Received OSDMap update to epoch {}", epoch);
-
-                        // Handle the update asynchronously
-                        if let Err(e) =
-                            Self::handle_osdmap_update(epoch, &sessions, &mon_client).await
-                        {
-                            tracing::error!(
-                                "Failed to handle OSDMap update (epoch {}): {}",
-                                epoch,
-                                e
-                            );
-                            // Continue processing subsequent updates even if one fails
-                        }
-                    }
-                    Ok(_) => {
-                        // Ignore other map events (MonMap, MgrMap, MdsMap)
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                        // Receiver fell behind - some map updates were missed
-                        // This is not critical as subsequent updates will catch up
-                        warn!("OSDMap event listener lagged, skipped {} updates", skipped);
-                        continue;
-                    }
-                    Err(tokio::sync::broadcast::error::RecvError::Closed) => {
-                        // Broadcast sender closed - MonClient was dropped
-                        info!("OSDMap event listener stopping (MonClient closed)");
-                        break;
-                    }
-                }
-            }
-
-            info!("OSDMap event listener task ended");
-        });
-    }
-
-    /// Handle OSDMap updates and rescan pending operations
+    /// This waits until the OSDClient has received an OSDMap from the monitor cluster.
+    /// The OSDMap is required for all object operations as it contains the cluster topology.
     ///
-    /// This is called when the OSDMap is updated. It:
-    /// 1. Checks all pending operations against the new topology
-    /// 2. Migrates operations whose target OSD has changed
-    /// 3. Cancels operations for deleted pools (POOL_DNE)
-    ///
-    /// Reference: Ceph C++ Objecter::handle_osd_map() and _scan_requests()
-    #[allow(dead_code)]
-    async fn handle_osdmap_update(
-        epoch: u64,
-        sessions: &Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
-        mon_client: &Arc<monclient::MonClient>,
-    ) -> Result<()> {
-        // Get the new OSDMap
-        let osdmap = mon_client
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
-
-        if osdmap.epoch != epoch as u32 {
-            debug!(
-                "OSDMap epoch mismatch: expected {}, got {}",
-                epoch, osdmap.epoch
-            );
-        }
-
-        debug!(
-            "OSDMap updated to epoch {}, rescanning pending operations",
-            osdmap.epoch
-        );
-
-        // Get CRUSH map once for all calculations
-        let crush_map = match osdmap.crush.as_ref() {
-            Some(c) => c,
-            None => {
-                tracing::error!("No CRUSH map in OSDMap, skipping rescan");
-                return Ok(());
-            }
-        };
-
-        // Collect operations that need migration
-        // Format: (old_osd, new_osd, pending_op)
-        let mut migrations: Vec<(i32, i32, PendingOp)> = Vec::new();
-
-        // Scan all sessions for pending operations
+    /// Should be called after subscribing to osdmap to ensure the map is available
+    /// before performing object operations.
+    pub async fn wait_for_osdmap(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Arc<denc::osdmap::OSDMap>> {
+        // Check if we already have an OSDMap
         {
-            let sessions_guard = sessions.read().await;
-
-            for (current_osd_id, session) in sessions_guard.iter() {
-                // Get metadata for all pending operations in this session
-                let ops_metadata = session.get_pending_ops_metadata().await;
-
-                for (tid, pool_id, object_id, op_epoch) in ops_metadata {
-                    // Skip operations that are already using the current map
-                    if op_epoch >= osdmap.epoch {
-                        continue;
-                    }
-
-                    // Check if pool still exists
-                    let pool_info = match osdmap.pools.get(&pool_id) {
-                        Some(p) => p,
-                        None => {
-                            // Pool deleted (POOL_DNE) - cancel operation
-                            info!(
-                                "Pool {} deleted (POOL_DNE), cancelling operation {} on OSD {}",
-                                pool_id, tid, current_osd_id
-                            );
-                            if let Some(pending_op) = session.remove_pending_op(tid).await {
-                                let _ = pending_op
-                                    .result_tx
-                                    .send(Err(OSDClientError::PoolNotFound(pool_id)));
-                            }
-                            continue;
-                        }
-                    };
-
-                    // Recalculate CRUSH placement
-                    let locator = crush::placement::ObjectLocator {
-                        pool_id,
-                        key: String::new(),
-                        namespace: String::new(),
-                        hash: -1,
-                    };
-
-                    // Check hashpspool flag
-                    let hashpspool = PoolFlags::from_bits_truncate(pool_info.flags)
-                        .contains(PoolFlags::HASHPSPOOL);
-
-                    // Calculate new target OSDs
-                    let result = crush::placement::object_to_osds(
-                        crush_map,
-                        &object_id,
-                        &locator,
-                        pool_info.pg_num,
-                        pool_info.crush_rule as u32,
-                        &osdmap.osd_weight,
-                        pool_info.size as usize,
-                        hashpspool,
-                    );
-
-                    let (_pg, new_osds) = match result {
-                        Ok(placement) => placement,
-                        Err(e) => {
-                            tracing::error!(
-                                "CRUSH placement failed for op {} (object: {}): {}",
-                                tid,
-                                object_id,
-                                e
-                            );
-                            // Cancel operation due to CRUSH error
-                            if let Some(pending_op) = session.remove_pending_op(tid).await {
-                                let _ = pending_op.result_tx.send(Err(OSDClientError::Crush(
-                                    format!("CRUSH placement failed: {}", e),
-                                )));
-                            }
-                            continue;
-                        }
-                    };
-
-                    if new_osds.is_empty() {
-                        // No OSDs available - cancel operation
-                        info!(
-                            "No OSDs available for op {} (object: {}), cancelling",
-                            tid, object_id
-                        );
-                        if let Some(pending_op) = session.remove_pending_op(tid).await {
-                            let _ = pending_op.result_tx.send(Err(OSDClientError::NoOSDs));
-                        }
-                        continue;
-                    }
-
-                    let new_primary_osd = new_osds[0];
-
-                    // Check if target OSD changed
-                    if new_primary_osd != *current_osd_id {
-                        info!(
-                            "OSDMap epoch {}: Op {} needs migration: OSD {} -> OSD {} (object: {})",
-                            osdmap.epoch, tid, current_osd_id, new_primary_osd, object_id
-                        );
-
-                        // Extract the operation for migration
-                        if let Some(pending_op) = session.remove_pending_op(tid).await {
-                            migrations.push((*current_osd_id, new_primary_osd, pending_op));
-                        }
-                    }
-                }
-            }
-        } // Release sessions read lock
-
-        // Now perform the migrations
-        if !migrations.is_empty() {
-            info!(
-                "Migrating {} operations due to OSDMap epoch {}",
-                migrations.len(),
-                osdmap.epoch
-            );
-
-            for (old_osd, new_osd, pending_op) in migrations {
-                // Get or create session for new OSD
-                // We need to get the session from the sessions map
-                let sessions_guard = sessions.read().await;
-                let new_session =
-                    match sessions_guard.get(&new_osd) {
-                        Some(s) => Arc::clone(s),
-                        None => {
-                            // Session doesn't exist yet - operation will fail
-                            // In a full implementation, we'd create the session here
-                            // For now, cancel the operation
-                            warn!(
-                                "No session exists for OSD {}, cancelling migrated op {}",
-                                new_osd, pending_op.tid
-                            );
-                            let _ = pending_op.result_tx.send(Err(OSDClientError::Connection(
-                                format!("No session for OSD {}", new_osd),
-                            )));
-                            continue;
-                        }
-                    };
-                drop(sessions_guard);
-
-                // Insert the operation into the new session
-                if let Err(e) = new_session
-                    .insert_migrated_op(pending_op, osdmap.epoch)
-                    .await
-                {
-                    tracing::error!(
-                        "Failed to migrate operation from OSD {} to OSD {}: {}",
-                        old_osd,
-                        new_osd,
-                        e
-                    );
-                }
+            let osdmap_guard = self.osdmap.read().await;
+            if let Some(map) = osdmap_guard.as_ref() {
+                return Ok(Arc::clone(map));
             }
         }
 
-        Ok(())
+        // Wait for OSDMap notification with timeout
+        tokio::select! {
+            _ = self.osdmap_notify.notified() => {
+                // After notification, get the map
+                let osdmap_guard = self.osdmap.read().await;
+                match osdmap_guard.as_ref() {
+                    Some(map) => {
+                        info!("OSDMap received via event notification");
+                        Ok(Arc::clone(map))
+                    }
+                    None => Err(OSDClientError::Connection("OSDMap not available after notification".to_string()))
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                Err(OSDClientError::Connection("Timeout waiting for OSDMap".to_string()))
+            }
+        }
     }
 
     /// Get or create a session for an OSD
@@ -1199,6 +985,131 @@ impl OSDClient {
         Ok(pools)
     }
 
+    /// Create a new pool
+    ///
+    /// This is a simplified interface for pool creation using MPoolOp messages.
+    /// For advanced pool creation with custom parameters (pg_num, pgp_num, pool_type, etc.),
+    /// use MonClient's invoke() method with a mon_command instead.
+    ///
+    /// # Arguments
+    /// * `pool_name` - Name of the pool to create
+    /// * `crush_rule` - Optional CRUSH rule ID (uses cluster default if None)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the pool was created successfully
+    /// * `Err(OSDClientError)` if the operation failed
+    pub async fn create_pool(&self, pool_name: &str, crush_rule: Option<i16>) -> Result<()> {
+        debug!("Creating pool: {}", pool_name);
+
+        // Get current OSDMap epoch
+        let version = {
+            let osdmap_guard = self.osdmap.read().await;
+            osdmap_guard
+                .as_ref()
+                .map(|map| map.epoch as u64)
+                .unwrap_or(0)
+        };
+
+        // Create MPoolOp message
+        let msg = monclient::MPoolOp::create_pool(
+            self.fsid.bytes,
+            pool_name.to_string(),
+            crush_rule,
+            version,
+        );
+
+        // Send via MonClient
+        let result = self
+            .mon_client
+            .send_poolop(pool_name.to_string(), msg)
+            .await
+            .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
+
+        if result.is_success() {
+            debug!("Pool created successfully: {}", pool_name);
+            Ok(())
+        } else {
+            Err(OSDClientError::Other(format!(
+                "Pool operation failed with code {}",
+                result.reply_code
+            )))
+        }
+    }
+
+    /// Delete a pool
+    ///
+    /// This operation uses the MPoolOp binary message protocol to delete a pool,
+    /// matching the official librados implementation.
+    ///
+    /// # Arguments
+    /// * `pool_name` - Name of the pool to delete
+    /// * `confirm` - Must be set to true to confirm deletion (safety check)
+    ///
+    /// # Returns
+    /// * `Ok(())` if the pool was deleted successfully
+    /// * `Err(OSDClientError)` if the operation failed
+    ///
+    /// # Safety
+    /// This operation is destructive and will delete all data in the pool.
+    /// The `confirm` parameter must be explicitly set to `true`.
+    pub async fn delete_pool(&self, pool_name: &str, confirm: bool) -> Result<()> {
+        if !confirm {
+            return Err(OSDClientError::Other(
+                "Pool deletion requires explicit confirmation".into(),
+            ));
+        }
+
+        debug!("Deleting pool: {}", pool_name);
+
+        // Look up pool ID and epoch from OSDMap
+        let (pool_id, version) = {
+            let osdmap_guard = self.osdmap.read().await;
+            let osdmap = osdmap_guard
+                .as_ref()
+                .ok_or_else(|| OSDClientError::Other("OSD map not available yet".into()))?;
+
+            let pool_id = osdmap
+                .pool_name
+                .iter()
+                .find(|(_, name)| name.as_str() == pool_name)
+                .map(|(id, _)| *id as u32)
+                .ok_or_else(|| OSDClientError::Other(format!("Pool '{}' not found", pool_name)))?;
+
+            let version = osdmap.epoch as u64;
+
+            (pool_id, version)
+        };
+
+        debug!(
+            "Deleting pool '{}' with ID {} (OSDMap epoch {})",
+            pool_name, pool_id, version
+        );
+
+        // Create and send MPoolOp delete message
+        let msg = monclient::MPoolOp::delete_pool(
+            self.fsid.bytes,
+            pool_id,
+            pool_name.to_string(),
+            version,
+        );
+
+        let result = self
+            .mon_client
+            .send_poolop(pool_name.to_string(), msg)
+            .await
+            .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
+
+        if result.is_success() {
+            debug!("Pool deleted successfully: {}", pool_name);
+            Ok(())
+        } else {
+            Err(OSDClientError::Other(format!(
+                "Pool operation failed with code {}",
+                result.reply_code
+            )))
+        }
+    }
+
     /// Handle OSDMap message (moved from MonClient)
     async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
         use monclient::messages::MOSDMap;
@@ -1342,6 +1253,9 @@ impl OSDClient {
                 "OSDMap updated to epoch {}, rescanning pending operations",
                 final_epoch
             );
+
+            // Notify waiters that OSDMap is available
+            self.osdmap_notify.notify_waiters();
 
             // TODO: Rescan all sessions for pending operations
             // This will be implemented when we add rescan() method to OSDSession

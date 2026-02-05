@@ -20,6 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 1. Create MonClient and connect to monitors
     println!("1️⃣  Connecting to monitor...");
+
+    // Create shared MessageBus
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
     let mon_config = monclient::MonClientConfig {
         entity_name: "client.admin".to_string(),
         mon_addrs: vec!["v2:192.168.1.43:40490".to_string()],
@@ -27,7 +31,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let mon_client = Arc::new(monclient::MonClient::new(mon_config).await?);
+    let mon_client =
+        Arc::new(monclient::MonClient::new(mon_config, Arc::clone(&message_bus)).await?);
 
     // Initialize connection
     mon_client.init().await?;
@@ -49,12 +54,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    // Get FSID and create MessageBus
+    // Get FSID
     let fsid = mon_client.get_fsid().await;
-    let message_bus = Arc::new(msgr2::MessageBus::new());
 
     let osd_client = Arc::new(
-        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus).await?,
+        osdclient::OSDClient::new(
+            osd_config,
+            fsid,
+            Arc::clone(&mon_client),
+            Arc::clone(&message_bus),
+        )
+        .await?,
     );
     println!("   ✓ OSD client created\n");
 

@@ -221,7 +221,7 @@ async fn main() -> Result<()> {
     debug!("OSDMap received");
 
     // Parse pool (try as ID first, then as name)
-    let pool_id = parse_pool(&cli.pool, &mon_client).await?;
+    let pool_id = parse_pool(&cli.pool, &osd_client).await?;
 
     debug!("Using pool ID: {}", pool_id);
 
@@ -303,14 +303,14 @@ async fn main() -> Result<()> {
 }
 
 /// Parse pool name or ID
-async fn parse_pool(pool: &str, mon_client: &Arc<monclient::MonClient>) -> Result<i64> {
+async fn parse_pool(pool: &str, osd_client: &Arc<osdclient::OSDClient>) -> Result<i64> {
     // Try parsing as integer first
     if let Ok(id) = pool.parse::<i64>() {
         return Ok(id);
     }
 
     // Otherwise, look up pool by name in OSDMap
-    let osdmap = mon_client
+    let osdmap = osd_client
         .get_osdmap()
         .await
         .context("OSDMap not available")?;

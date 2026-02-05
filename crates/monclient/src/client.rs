@@ -11,7 +11,6 @@ use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
 use async_trait::async_trait;
 use bytes::Bytes;
-use denc::denc::VersionedEncode;
 use denc::UuidD;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::{Dispatcher, MessageBus};
@@ -123,6 +122,9 @@ pub struct MonClient {
 
     /// Global message bus for inter-component routing
     message_bus: Arc<MessageBus>,
+
+    /// Notification for authentication completion
+    auth_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Clone for MonClient {
@@ -137,6 +139,7 @@ impl Clone for MonClient {
             keepalive_state: Arc::clone(&self.keepalive_state),
             map_events: self.map_events.clone(),
             message_bus: Arc::clone(&self.message_bus),
+            auth_notify: Arc::clone(&self.auth_notify),
         }
     }
 }
@@ -172,9 +175,6 @@ struct KeepaliveState {
 struct MonClientState {
     /// Monitor map
     monmap: MonMap,
-
-    /// OSD map (latest received)
-    osdmap: Option<Arc<denc::osdmap::OSDMap>>,
 
     /// Active connection
     active_con: Option<Arc<MonConnection>>,
@@ -324,7 +324,6 @@ impl MonClient {
 
         let state = MonClientState {
             monmap,
-            osdmap: None,
             active_con: None,
             pending_cons: HashMap::new(),
             tried: std::collections::HashSet::new(),
@@ -357,6 +356,7 @@ impl MonClient {
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             map_events,
             message_bus,
+            auth_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -699,6 +699,9 @@ impl MonClient {
         }
 
         drop(state);
+
+        // Notify waiters that authentication is complete (after releasing lock)
+        self.auth_notify.notify_waiters();
 
         info!("Successfully connected to mon.{}", rank);
         Ok(())
@@ -1126,7 +1129,7 @@ impl MonClient {
     /// Handle MonMap message
     async fn handle_monmap(
         state: &Arc<RwLock<MonClientState>>,
-        _map_events: &broadcast::Sender<MapEvent>,
+        map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
@@ -1144,6 +1147,8 @@ impl MonClient {
             monmap.size()
         );
 
+        let epoch = monmap.epoch;
+
         // Update state
         let mut state_guard = state.write().await;
         state_guard.monmap = monmap.clone();
@@ -1152,238 +1157,12 @@ impl MonClient {
         // Mark subscription as received
         state_guard.subscriptions.got("monmap", monmap.epoch as u64);
 
+        drop(state_guard);
+
+        // Broadcast MonMap update event
+        let _ = map_events.send(MapEvent::MonMapUpdated { epoch });
+
         info!("✓ MonMap updated successfully");
-        Ok(())
-    }
-
-    /// Handle OSDMap message
-    /// NOTE: This will be moved to OSDClient in Phase 3
-    #[allow(dead_code)]
-    async fn handle_osdmap(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
-        info!("Handling OSDMap message ({} bytes)", msg.front.len());
-
-        // Decode MOSDMap
-        let mosdmap = MOSDMap::decode(&msg.front)?;
-        info!(
-            "Received MOSDMap: epochs [{}..{}], {} full maps, {} incremental maps",
-            mosdmap.get_first(),
-            mosdmap.get_last(),
-            mosdmap.maps.len(),
-            mosdmap.incremental_maps.len()
-        );
-
-        // 1. Validate FSID
-        {
-            let state_guard = state.read().await;
-            let cluster_fsid = state_guard.monmap.fsid.as_bytes();
-            if &mosdmap.fsid != cluster_fsid {
-                tracing::warn!(
-                    "Ignoring OSDMap with wrong fsid {} != {}",
-                    uuid::Uuid::from_bytes(mosdmap.fsid),
-                    state_guard.monmap.fsid
-                );
-                return Ok(());
-            }
-        }
-
-        // 2. Check if we've already processed these epochs
-        let mut state_guard = state.write().await;
-        let current_epoch = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
-
-        if mosdmap.get_last() <= current_epoch {
-            info!(
-                "Ignoring OSDMap epochs [{}..{}] <= current epoch {}",
-                mosdmap.get_first(),
-                mosdmap.get_last(),
-                current_epoch
-            );
-            return Ok(());
-        }
-
-        info!(
-            "Processing OSDMap epochs [{}..{}] > current epoch {}",
-            mosdmap.get_first(),
-            mosdmap.get_last(),
-            current_epoch
-        );
-
-        // 3. Process epochs sequentially
-        if current_epoch > 0 {
-            // We have a current map, apply updates sequentially
-            for e in (current_epoch + 1)..=mosdmap.get_last() {
-                let current_map_epoch = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
-
-                if current_map_epoch == e - 1 && mosdmap.incremental_maps.contains_key(&e) {
-                    // Apply incremental
-                    info!("Applying incremental OSDMap for epoch {}", e);
-                    let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
-
-                    match denc::osdmap::OSDMapIncremental::decode_versioned(&mut inc_bl.as_ref(), 0)
-                    {
-                        Ok(inc_map) => {
-                            info!(
-                                "✓ Decoded incremental: epoch={}, {} new pools, {} old pools",
-                                inc_map.epoch,
-                                inc_map.new_pools.len(),
-                                inc_map.old_pools.len()
-                            );
-
-                            if let Some(current_map) = &state_guard.osdmap {
-                                let mut updated_map = (**current_map).clone();
-                                if let Err(err) = inc_map.apply_to(&mut updated_map) {
-                                    tracing::warn!(
-                                        "Failed to apply incremental epoch {}: {}",
-                                        e,
-                                        err
-                                    );
-                                    break;
-                                }
-
-                                state_guard.osdmap = Some(Arc::new(updated_map));
-                                info!("✓ Applied incremental OSDMap epoch {}", e);
-
-                                // Broadcast map event
-                                let _ =
-                                    map_events.send(MapEvent::OsdMapUpdated { epoch: e as u64 });
-                            }
-                        }
-                        Err(err) => {
-                            tracing::warn!("Failed to decode incremental epoch {}: {}", e, err);
-                            break;
-                        }
-                    }
-                } else if mosdmap.maps.contains_key(&e) {
-                    // Apply full map
-                    info!("Applying full OSDMap for epoch {}", e);
-                    let osdmap_bl = mosdmap.maps.get(&e).unwrap();
-
-                    match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
-                        Ok(osdmap) => {
-                            info!(
-                                "✓ Decoded full OSDMap: epoch={}, {} pools, {} osds",
-                                osdmap.epoch,
-                                osdmap.pools.len(),
-                                osdmap.osd_state.len()
-                            );
-
-                            state_guard.osdmap = Some(Arc::new(osdmap));
-                            info!("✓ Applied full OSDMap epoch {}", e);
-
-                            // Broadcast map event
-                            let _ = map_events.send(MapEvent::OsdMapUpdated { epoch: e as u64 });
-                        }
-                        Err(err) => {
-                            tracing::warn!("Failed to decode full OSDMap epoch {}: {}", e, err);
-                            break;
-                        }
-                    }
-                } else {
-                    // Missing epoch
-                    if e >= mosdmap.cluster_osdmap_trim_lower_bound {
-                        info!(
-                            "Missing epoch {} (>= trim lower bound {}), requesting map",
-                            e, mosdmap.cluster_osdmap_trim_lower_bound
-                        );
-                        // Request the missing map by subscribing to it
-                        drop(state_guard);
-                        if let Err(err) = Self::renew_subscription(state, "osdmap", e as u64).await
-                        {
-                            tracing::warn!("Failed to request missing epoch {}: {}", e, err);
-                        }
-                        return Ok(());
-                    } else {
-                        // Epoch has been trimmed, skip to trim lower bound
-                        info!(
-                            "Missing epoch {} has been trimmed (< {}), skipping to trim lower bound",
-                            e, mosdmap.cluster_osdmap_trim_lower_bound
-                        );
-                        // This will cause us to request the trimmed epoch in the next iteration
-                        // We need to break here and let the monitor send us a newer map
-                        drop(state_guard);
-                        if let Err(err) = Self::renew_subscription(
-                            state,
-                            "osdmap",
-                            mosdmap.cluster_osdmap_trim_lower_bound as u64,
-                        )
-                        .await
-                        {
-                            tracing::warn!(
-                                "Failed to request epoch {}: {}",
-                                mosdmap.cluster_osdmap_trim_lower_bound,
-                                err
-                            );
-                        }
-                        return Ok(());
-                    }
-                }
-            }
-        } else {
-            // First map - we need a full map
-            info!("Processing first OSDMap (no current map)");
-            if let Some(osdmap_bl) = mosdmap.maps.get(&mosdmap.get_last()) {
-                match denc::osdmap::OSDMap::decode_versioned(&mut osdmap_bl.as_ref(), 0) {
-                    Ok(osdmap) => {
-                        info!(
-                            "✓ Decoded first OSDMap: epoch={}, {} pools, {} osds",
-                            osdmap.epoch,
-                            osdmap.pools.len(),
-                            osdmap.osd_state.len()
-                        );
-
-                        state_guard.osdmap = Some(Arc::new(osdmap.clone()));
-                        info!("✓ Stored first OSDMap epoch {}", osdmap.epoch);
-
-                        // Broadcast map event
-                        let _ = map_events.send(MapEvent::OsdMapUpdated {
-                            epoch: osdmap.epoch as u64,
-                        });
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            "Failed to decode first OSDMap epoch {}: {}",
-                            mosdmap.get_last(),
-                            err
-                        );
-                        // Request full map
-                        drop(state_guard);
-                        if let Err(err) = Self::renew_subscription(state, "osdmap", 0).await {
-                            tracing::warn!("Failed to request full OSDMap: {}", err);
-                        }
-                        return Ok(());
-                    }
-                }
-            } else {
-                info!("No full map in message, requesting full OSDMap");
-                // Request full map
-                drop(state_guard);
-                if let Err(err) = Self::renew_subscription(state, "osdmap", 0).await {
-                    tracing::warn!("Failed to request full OSDMap: {}", err);
-                }
-                return Ok(());
-            }
-        }
-
-        // 4. Mark subscription as received and renew
-        if let Some(osdmap) = &state_guard.osdmap {
-            let final_epoch = osdmap.epoch;
-            state_guard.subscriptions.got("osdmap", final_epoch as u64);
-
-            drop(state_guard);
-
-            info!("✓ Processed OSDMap up to epoch {}", final_epoch);
-
-            // Renew subscription for next epoch
-            if let Err(err) =
-                Self::renew_subscription(state, "osdmap", final_epoch as u64 + 1).await
-            {
-                tracing::warn!("Failed to renew osdmap subscription: {}", err);
-            }
-        }
-
         Ok(())
     }
 
@@ -1476,7 +1255,7 @@ impl MonClient {
     /// Handle pool operation reply
     async fn handle_poolop_reply(
         state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
+        _map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         // Decode the pool operation reply message from the front payload
@@ -1494,78 +1273,6 @@ impl MonClient {
             "Pool op reply details: tid={}, reply_code={}, target epoch={}",
             tid, reply.reply_code, reply.epoch
         );
-
-        // Check if we need to wait for OSDMap update
-        let reply_epoch = reply.epoch;
-        let current_epoch = {
-            let state_guard = state.read().await;
-            state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0)
-        };
-
-        // If reply epoch is newer than our current OSDMap, wait for update
-        if reply_epoch > current_epoch {
-            info!(
-                "Pool op reply epoch {} is newer than current OSDMap epoch {}, waiting for update...",
-                reply_epoch, current_epoch
-            );
-
-            // Subscribe to map events (event-driven approach, not polling)
-            let mut map_rx = map_events.subscribe();
-            let max_wait = tokio::time::Duration::from_secs(30);
-
-            // Wait for OSDMap update using event-driven approach
-            match tokio::time::timeout(max_wait, async {
-                loop {
-                    // Check current epoch first
-                    {
-                        let state_guard = state.read().await;
-                        let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
-                        if current >= reply_epoch {
-                            return current;
-                        }
-                    }
-
-                    // Wait for next map event
-                    match map_rx.recv().await {
-                        Ok(MapEvent::OsdMapUpdated { epoch }) => {
-                            if epoch >= reply_epoch as u64 {
-                                return epoch as u32;
-                            }
-                        }
-                        Ok(_) => continue, // Other map types, ignore
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // Lagged behind, check current state and continue
-                            let state_guard = state.read().await;
-                            let current = state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0);
-                            if current >= reply_epoch {
-                                return current;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            warn!("Map events channel closed unexpectedly");
-                            break;
-                        }
-                    }
-                }
-                0 // Should not reach here
-            })
-            .await
-            {
-                Ok(epoch) => {
-                    info!("✓ OSDMap updated to epoch {}", epoch);
-                }
-                Err(_) => {
-                    let current_epoch = {
-                        let state_guard = state.read().await;
-                        state_guard.osdmap.as_ref().map(|m| m.epoch).unwrap_or(0)
-                    };
-                    warn!(
-                        "Timeout waiting for OSDMap epoch {} (current: {})",
-                        reply_epoch, current_epoch
-                    );
-                }
-            }
-        }
 
         // Find and complete the pending pool operation by matching tid
         let mut state_guard = state.write().await;
@@ -1631,42 +1338,6 @@ impl MonClient {
             .await
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))?;
-
-        // If we're getting osdmap version, wait for the actual map to be received
-        if what == "osdmap" {
-            let target_version = result.0;
-            let start = tokio::time::Instant::now();
-            let timeout = tokio::time::Duration::from_secs(2);
-
-            loop {
-                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-                let state = self.state.read().await;
-                if let Some(osdmap) = &state.osdmap {
-                    let current_epoch = osdmap.epoch as u64;
-                    if current_epoch >= target_version {
-                        info!(
-                            "OSDMap updated to epoch {} (target: {})",
-                            current_epoch, target_version
-                        );
-                        drop(state);
-                        break;
-                    }
-                    info!(
-                        "Waiting for OSDMap: current epoch={}, target={}",
-                        current_epoch, target_version
-                    );
-                }
-                drop(state);
-
-                if start.elapsed() > timeout {
-                    return Err(MonClientError::Other(format!(
-                        "Timeout waiting for OSDMap to reach version {}",
-                        target_version
-                    )));
-                }
-            }
-        }
 
         Ok(result)
     }
@@ -1773,7 +1444,10 @@ impl MonClient {
     }
 
     /// Send a pool operation to the monitor cluster
-    async fn send_poolop(&self, pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
+    ///
+    /// This is a low-level helper for sending MPoolOp messages.
+    /// Most users should use OSDClient's create_pool() and delete_pool() methods instead.
+    pub async fn send_poolop(&self, pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
         let (tx, rx) = oneshot::channel();
 
         let mut state = self.state.write().await;
@@ -1842,21 +1516,78 @@ impl MonClient {
     /// Should be called after init() to ensure authentication is fully complete
     /// before creating service clients like OSDClient.
     pub async fn wait_for_auth(&self, timeout: std::time::Duration) -> Result<()> {
-        let start = std::time::Instant::now();
-
-        while start.elapsed() < timeout {
-            if self.is_authenticated().await {
-                // Also verify we have service tickets by checking if we can create an auth provider
-                if self.get_service_auth_provider().await.is_some() {
-                    info!("Authentication complete with service tickets available");
-                    return Ok(());
-                }
-            }
-
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        // Check if already authenticated
+        if self.is_authenticated().await
+            && self.get_service_auth_provider().await.is_some()
+        {
+            return Ok(());
         }
 
-        Err(MonClientError::AuthenticationTimeout)
+        // Wait for authentication notification with timeout
+        tokio::select! {
+            _ = self.auth_notify.notified() => {
+                // Double-check authentication status after notification
+                if self.is_authenticated().await && self.get_service_auth_provider().await.is_some() {
+                    info!("Authentication complete with service tickets available");
+                    Ok(())
+                } else {
+                    // Spurious wakeup, wait again with remaining time
+                    Err(MonClientError::AuthenticationTimeout)
+                }
+            }
+            _ = tokio::time::sleep(timeout) => {
+                Err(MonClientError::AuthenticationTimeout)
+            }
+        }
+    }
+
+    /// Wait for MonMap to be received
+    ///
+    /// This waits until the MonClient has received a MonMap from the monitor cluster.
+    /// The MonMap contains the cluster FSID and monitor addresses.
+    ///
+    /// Should be called after init() to ensure MonMap is available before
+    /// creating service clients that need the FSID.
+    pub async fn wait_for_monmap(&self, timeout: std::time::Duration) -> Result<()> {
+        // Check if we already have a valid MonMap
+        {
+            let state = self.state.read().await;
+            if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
+                return Ok(());
+            }
+        }
+
+        // Subscribe to MonMap events
+        let mut rx = self.map_events.subscribe();
+
+        // Wait for MonMap event with timeout
+        tokio::select! {
+            result = async {
+                loop {
+                    match rx.recv().await {
+                        Ok(MapEvent::MonMapUpdated { .. }) => {
+                            info!("MonMap received via event notification");
+                            return Ok(());
+                        }
+                        Ok(_) => continue, // Ignore other map events
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            // We lagged behind, check if MonMap is now available
+                            let state = self.state.read().await;
+                            if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
+                                return Ok(());
+                            }
+                            continue;
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            return Err(MonClientError::Other("Map events channel closed".into()));
+                        }
+                    }
+                }
+            } => result,
+            _ = tokio::time::sleep(timeout) => {
+                Err(MonClientError::Timeout)
+            }
+        }
     }
 
     /// Get the cluster FSID
@@ -1872,36 +1603,6 @@ impl MonClient {
     pub async fn get_global_id(&self) -> u64 {
         let state = self.state.read().await;
         state.global_id
-    }
-
-    /// Get the current OSDMap
-    ///
-    /// Returns the latest OSDMap received from the monitors.
-    /// Returns an error if no OSDMap has been received yet.
-    ///
-    /// # Examples
-    ///
-    /// ```no_run
-    /// # use std::sync::Arc;
-    /// # async fn example(mon_client: Arc<monclient::MonClient>) -> monclient::Result<()> {
-    /// // Subscribe to OSDMap updates
-    /// mon_client.subscribe("osdmap", 0, 0).await?;
-    ///
-    /// // Wait a moment for the OSDMap to arrive
-    /// tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    ///
-    /// // Get the current OSDMap
-    /// let osdmap = mon_client.get_osdmap().await?;
-    /// println!("OSDMap epoch: {}", osdmap.epoch);
-    /// println!("Number of pools: {}", osdmap.pools.len());
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn get_osdmap(&self) -> Result<Arc<denc::osdmap::OSDMap>> {
-        let state = self.state.read().await;
-        state.osdmap.clone().ok_or(MonClientError::Other(
-            "No OSDMap available - subscribe to 'osdmap' first".to_string(),
-        ))
     }
 
     /// Get a ServiceAuthProvider for connecting to OSDs/MDSs/MGRs
@@ -1999,216 +1700,6 @@ impl MonClient {
     /// Subscribe to map events
     pub fn subscribe_events(&self) -> broadcast::Receiver<MapEvent> {
         self.map_events.subscribe()
-    }
-
-    /// Create a new pool
-    ///
-    /// This is a simplified interface for pool creation using MPoolOp messages.
-    /// For advanced pool creation with custom parameters (pg_num, pgp_num, pool_type, etc.),
-    /// use the `invoke()` method with a mon_command instead.
-    ///
-    /// # Arguments
-    /// * `pool_name` - Name of the pool to create
-    /// * `crush_rule` - Optional CRUSH rule ID (uses cluster default if None)
-    ///
-    /// # Returns
-    /// * `Ok(())` if the pool was created successfully
-    /// * `Err(MonClientError)` if the operation failed
-    ///
-    /// # Example
-    /// ```no_run
-    /// # use monclient::MonClient;
-    /// # async fn example(client: &MonClient) {
-    /// // Create pool with default settings
-    /// client.create_pool("mypool", None).await.unwrap();
-    ///
-    /// // Create pool with specific crush rule
-    /// client.create_pool("mypool", Some(1)).await.unwrap();
-    ///
-    /// // For more control (e.g., pg_num), use invoke():
-    /// let cmd = vec![r#"{"prefix": "osd pool create", "pool": "mypool", "pg_num": 128}"#.to_string()];
-    /// client.invoke(cmd, bytes::Bytes::new()).await.unwrap();
-    /// # }
-    /// ```
-    pub async fn create_pool(&self, pool_name: &str, crush_rule: Option<i16>) -> Result<()> {
-        // Use MPoolOp message (official librados approach)
-        let fsid = self.get_fsid().await;
-
-        // Get current OSDMap epoch to include in the message
-        let version = {
-            let state = self.state.read().await;
-            state
-                .osdmap
-                .as_ref()
-                .map(|map| map.epoch as u64)
-                .unwrap_or(0)
-        };
-
-        // For pool creation, pool_id is 0 (pool doesn't exist yet)
-        let msg = MPoolOp::create_pool(fsid.bytes, pool_name.to_string(), crush_rule, version);
-
-        let result = self.send_poolop(pool_name.to_string(), msg).await?;
-
-        if result.is_success() {
-            Ok(())
-        } else {
-            Err(MonClientError::CommandFailed {
-                code: result.reply_code,
-                message: format!("Pool operation failed with code {}", result.reply_code),
-            })
-        }
-    }
-
-    /// Delete a pool using MPoolOp protocol
-    ///
-    /// This operation uses the MPoolOp binary message protocol to delete a pool,
-    /// matching the official librados implementation.
-    ///
-    /// # Arguments
-    /// * `pool_name` - Name of the pool to delete
-    /// * `confirm` - Must be set to true to confirm deletion (safety check)
-    ///
-    /// # Returns
-    /// * `Ok(())` if the pool was deleted successfully
-    /// * `Err(MonClientError)` if the operation failed
-    ///
-    /// # Safety
-    /// This operation is destructive and will delete all data in the pool.
-    /// The `confirm` parameter must be explicitly set to `true`.
-    pub async fn delete_pool(&self, pool_name: &str, confirm: bool) -> Result<()> {
-        if !confirm {
-            return Err(MonClientError::Other(
-                "Pool deletion requires explicit confirmation".into(),
-            ));
-        }
-
-        // Get fsid
-        let fsid = self.get_fsid().await;
-
-        // Look up pool ID and epoch from OSDMap
-        let state = self.state.read().await;
-        let osdmap = state
-            .osdmap
-            .as_ref()
-            .ok_or_else(|| MonClientError::Other("OSD map not available yet".into()))?;
-
-        let pool_id = osdmap
-            .pool_name
-            .iter()
-            .find(|(_, name)| name.as_str() == pool_name)
-            .map(|(id, _)| *id as u32)
-            .ok_or_else(|| MonClientError::Other(format!("Pool '{}' not found", pool_name)))?;
-
-        // Get current OSDMap epoch for paxos versioning
-        let version = osdmap.epoch as u64;
-
-        info!(
-            "Deleting pool '{}' with ID {} (OSDMap epoch {})",
-            pool_name, pool_id, version
-        );
-
-        drop(state);
-
-        // Create and send MPoolOp delete message with current epoch
-        let msg = MPoolOp::delete_pool(fsid.bytes, pool_id, pool_name.to_string(), version);
-        let result = self.send_poolop(pool_name.to_string(), msg).await?;
-
-        if result.is_success() {
-            Ok(())
-        } else {
-            Err(MonClientError::CommandFailed {
-                code: result.reply_code,
-                message: format!("Pool operation failed with code {}", result.reply_code),
-            })
-        }
-    }
-
-    /// List all pools
-    ///
-    /// # Returns
-    /// * `Ok(Vec<String>)` - List of pool names
-    /// * `Err(MonClientError)` if the operation failed
-    pub async fn list_pools(&self) -> Result<Vec<String>> {
-        // Read from local cached OSDMap like C++ does, not from monitor
-        let state = self.state.read().await;
-        let osdmap = state
-            .osdmap
-            .as_ref()
-            .ok_or_else(|| MonClientError::Other("OSD map not available yet".into()))?;
-
-        // Iterate over pools (the authoritative source) and look up names
-        // This matches C++ librados: for (auto p : o.get_pools()) v.push_back(o.get_pool_name(p.first))
-        let mut pools: Vec<String> = osdmap
-            .pools
-            .keys()
-            .filter_map(|pool_id| osdmap.pool_name.get(pool_id).cloned())
-            .collect();
-
-        // Sort for consistent ordering
-        pools.sort();
-
-        Ok(pools)
-    }
-
-    /// List all pools by sending a command to the monitor
-    ///
-    /// This queries the monitor directly rather than using the cached OSDMap.
-    /// Prefer using list_pools() which reads from the local cache for consistency.
-    ///
-    /// # Returns
-    /// * `Ok(Vec<String>)` - List of pool names
-    /// * `Err(MonClientError)` if the operation failed
-    pub async fn list_pools_from_monitor(&self) -> Result<Vec<String>> {
-        tracing::debug!("list_pools: Creating command");
-        // Commands must be JSON formatted: {"prefix": "command"}
-        let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
-
-        tracing::debug!("list_pools: Calling send_command with cmd={:?}", cmd);
-        let result = self.send_command(cmd, Bytes::new()).await?;
-        tracing::debug!("list_pools: Received result from send_command");
-
-        if result.is_success() {
-            // Parse the output - pool names are separated by newlines
-            let pools: Vec<String> = result
-                .outs
-                .lines()
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .collect();
-            Ok(pools)
-        } else {
-            Err(MonClientError::CommandFailed {
-                code: result.retval,
-                message: result.outs,
-            })
-        }
-    }
-
-    /// Get pool statistics
-    ///
-    /// # Arguments
-    /// * `pool_name` - Name of the pool
-    ///
-    /// # Returns
-    /// * `Ok(String)` - JSON-formatted pool statistics
-    /// * `Err(MonClientError)` if the operation failed
-    pub async fn get_pool_stats(&self, pool_name: &str) -> Result<String> {
-        // Commands must be JSON formatted: {"prefix": "command", "pool_name": "name"}
-        let cmd = vec![format!(
-            r#"{{"prefix": "osd pool stats", "pool_name": "{}"}}"#,
-            pool_name
-        )];
-
-        let result = self.send_command(cmd, Bytes::new()).await?;
-
-        if result.is_success() {
-            Ok(result.outs)
-        } else {
-            Err(MonClientError::CommandFailed {
-                code: result.retval,
-                message: result.outs,
-            })
-        }
     }
 }
 

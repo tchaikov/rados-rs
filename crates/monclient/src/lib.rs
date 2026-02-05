@@ -47,7 +47,7 @@ pub mod paxos_service_message;
 pub mod subscription;
 pub mod types;
 
-pub use client::{MonClient, MonClientConfig};
+pub use client::{MonClient, MonClientConfig, PoolOpResult};
 pub use error::{MonClientError, Result};
 pub use messages::{
     MAuth, MAuthReply, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply, MMonMap,

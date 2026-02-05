@@ -24,6 +24,9 @@ pub enum OSDClientError {
     #[error("No OSDs available")]
     NoOSDs,
 
+    #[error("{0}")]
+    Other(String),
+
     #[error("Msgr2 error: {0}")]
     Msgr2(#[from] msgr2::Error),
 

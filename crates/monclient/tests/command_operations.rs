@@ -69,10 +69,7 @@ async fn create_mon_client(
     // Create shared MessageBus
     let message_bus = Arc::new(msgr2::MessageBus::new());
 
-    let mon_client = Arc::new(
-        monclient::MonClient::new(mon_config, message_bus)
-            .await?,
-    );
+    let mon_client = Arc::new(monclient::MonClient::new(mon_config, message_bus).await?);
 
     // Initialize connection
     mon_client.init().await?;
@@ -82,8 +79,15 @@ async fn create_mon_client(
 
     info!("✓ Connected to monitor");
 
-    // Wait a bit for monmap and osdmap to be received
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    // Wait for authentication to complete - use event-driven wait
+    mon_client
+        .wait_for_auth(std::time::Duration::from_secs(5))
+        .await?;
+
+    // Wait for MonMap to arrive - use event-driven wait
+    mon_client
+        .wait_for_monmap(std::time::Duration::from_secs(2))
+        .await?;
 
     Ok(mon_client)
 }
