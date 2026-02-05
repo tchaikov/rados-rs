@@ -174,11 +174,12 @@ impl OSDSession {
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
         // io_task's lifetime, we ensure the channel stays open even if there are timing issues with
         // session lifecycle management. This matches the previous implementation's behavior.
-        let _send_tx_keepalive = self.send_tx.clone();
+        let send_tx_keepalive = self.send_tx.clone();
         tokio::spawn(async move {
-            // Move the keepalive into the async block to extend its lifetime
-            let _ = &_send_tx_keepalive;
+            // Capture the keepalive by value to ensure it lives for the io_task's lifetime
+            let _keepalive = send_tx_keepalive;
             Self::io_task(context, connection, send_rx).await;
+            drop(_keepalive); // Explicit drop for clarity
         });
 
         info!("✓ I/O task started for OSD {}", self.osd_id);
@@ -212,10 +213,12 @@ impl OSDSession {
             tokio::select! {
                 // Handle outgoing messages (like try_write in Linux kernel)
                 Some(msg) = send_rx.recv() => {
+                    debug!("OSD {} sending message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
                     if let Err(e) = connection.send_message(msg).await {
                         error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
                         break;
                     }
+                    debug!("OSD {} message sent successfully", ctx.osd_id);
                 }
 
                 // Handle incoming messages - route based on message semantics
@@ -455,12 +458,21 @@ impl OSDSession {
         let msg = Self::encode_operation(&op, tid)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
+        info!(
+            "Submitting operation tid={} to OSD {} (channel closed: {})",
+            tid,
+            self.osd_id,
+            self.send_tx.is_closed()
+        );
         self.send_tx
             .send(msg)
             .await
             .map_err(|_| OSDClientError::Connection("I/O task has exited".into()))?;
 
-        debug!("Submitted operation tid={} to OSD {}", tid, self.osd_id);
+        info!(
+            "Submitted operation tid={} to OSD {} successfully",
+            tid, self.osd_id
+        );
         Ok(rx)
     }
 
