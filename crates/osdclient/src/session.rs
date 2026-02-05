@@ -205,6 +205,7 @@ impl OSDSession {
             tokio::select! {
                 // Handle outgoing messages (like try_write in Linux kernel)
                 Some(msg) = send_rx.recv() => {
+                    info!("OSD {} io_task sending message type 0x{:04x}", ctx.osd_id, msg.msg_type());
                     if let Err(e) = connection.send_message(msg).await {
                         error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
                         break;
@@ -216,16 +217,21 @@ impl OSDSession {
                     match result {
                         Ok(msg) => {
                             let msg_type = msg.msg_type();
-                            debug!("OSD {} received message type 0x{:04x}", ctx.osd_id, msg_type);
+                            info!("OSD {} io_task received message type 0x{:04x}", ctx.osd_id, msg_type);
 
                             // Route messages based on their scope (broadcast vs session-specific)
                             match msg_type {
                                 msgr2::message::CEPH_MSG_OSD_MAP => {
                                     // Broadcast message: Forward to MessageBus
                                     // Multiple components (MonClient, OSDClient) may need this
-                                    if let Err(e) = ctx.message_bus.dispatch(msg).await {
-                                        error!("Failed to dispatch OSDMap to MessageBus: {}", e);
-                                    }
+                                    // IMPORTANT: Spawn dispatch in background to avoid blocking io_task
+                                    // from receiving subsequent messages (like OPREPLY)
+                                    let bus = Arc::clone(&ctx.message_bus);
+                                    tokio::spawn(async move {
+                                        if let Err(e) = bus.dispatch(msg).await {
+                                            error!("Failed to dispatch OSDMap to MessageBus: {}", e);
+                                        }
+                                    });
                                 }
                                 crate::messages::CEPH_MSG_OSD_OPREPLY | crate::messages::CEPH_MSG_OSD_BACKOFF => {
                                     // Session-specific message: Dispatch directly with OSD context
