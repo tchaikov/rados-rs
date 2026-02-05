@@ -92,14 +92,20 @@ async fn create_osd_client(
 
     // Initialize connection
     mon_client.init().await?;
+
+    // Register MonClient handlers on MessageBus
+    mon_client.clone().register_handlers().await?;
+
     info!("✓ Connected to monitor");
 
-    // Subscribe to OSDMap
-    mon_client.subscribe("osdmap", 0, 0).await?;
+    // Wait for authentication to fully complete with all service tickets
+    // This ensures OSD service tickets are available before creating OSDClient
+    mon_client
+        .wait_for_auth(std::time::Duration::from_secs(5))
+        .await?;
 
-    // Wait for OSDMap to arrive
+    // Wait for MonMap to arrive (contains FSID)
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    info!("✓ OSDMap received");
 
     // Create OSD client with unique client_inc
     let client_inc = std::time::SystemTime::now()
@@ -133,13 +139,20 @@ async fn create_osd_client(
     osd_client.clone().register_handlers().await?;
     info!("✓ OSDClient registered on MessageBus");
 
+    // NOW subscribe to OSDMap - OSDClient is ready to receive
+    mon_client.subscribe("osdmap", 0, 0).await?;
+
+    // Wait for OSDMap to arrive (increased timeout for slower systems)
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    info!("✓ OSDMap received");
+
     Ok((osd_client, mon_client))
 }
 
 /// Helper to parse pool name or ID
 async fn parse_pool(
     pool: &str,
-    mon_client: &Arc<monclient::MonClient>,
+    osd_client: &Arc<osdclient::OSDClient>,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     // Try parsing as integer first
     if let Ok(id) = pool.parse::<i64>() {
@@ -147,7 +160,7 @@ async fn parse_pool(
     }
 
     // Otherwise, look up pool by name in OSDMap
-    let osdmap = match mon_client.get_osdmap().await {
+    let osdmap = match osd_client.get_osdmap().await {
         Ok(map) => map,
         Err(_) => return Err("OSDMap not available".into()),
     };
@@ -171,11 +184,11 @@ async fn test_write_operation() {
     info!("==============================");
 
     let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, mon_client) = create_osd_client(&config)
+    let (osd_client, _mon_client) = create_osd_client(&config)
         .await
         .expect("Failed to create OSD client");
 
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
 
@@ -210,11 +223,11 @@ async fn test_read_operation() {
     info!("=============================");
 
     let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, mon_client) = create_osd_client(&config)
+    let (osd_client, _mon_client) = create_osd_client(&config)
         .await
         .expect("Failed to create OSD client");
 
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
 
@@ -231,7 +244,7 @@ async fn test_read_operation() {
     // Now read it back
     info!("Reading object: {}", object_name);
     let result = osd_client
-        .read(pool_id, &object_name, 0, u64::MAX)
+        .read(pool_id, &object_name, 0, test_data.len() as u64)
         .await
         .expect("Read operation failed");
 
@@ -263,11 +276,11 @@ async fn test_stat_operation() {
     info!("=============================");
 
     let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, mon_client) = create_osd_client(&config)
+    let (osd_client, _mon_client) = create_osd_client(&config)
         .await
         .expect("Failed to create OSD client");
 
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
 
@@ -318,11 +331,11 @@ async fn test_remove_operation() {
     info!("===============================");
 
     let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, mon_client) = create_osd_client(&config)
+    let (osd_client, _mon_client) = create_osd_client(&config)
         .await
         .expect("Failed to create OSD client");
 
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
 
@@ -373,11 +386,11 @@ async fn test_write_read_stat_remove_workflow() {
     info!("================================");
 
     let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, mon_client) = create_osd_client(&config)
+    let (osd_client, _mon_client) = create_osd_client(&config)
         .await
         .expect("Failed to create OSD client");
 
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
 
@@ -395,7 +408,7 @@ async fn test_write_read_stat_remove_workflow() {
     // 2. Read
     info!("2. Reading object: {}", object_name);
     let read_result = osd_client
-        .read(pool_id, &object_name, 0, u64::MAX)
+        .read(pool_id, &object_name, 0, test_data.len() as u64)
         .await
         .expect("Read operation failed");
     assert_eq!(read_result.data, test_data, "Data mismatch");
