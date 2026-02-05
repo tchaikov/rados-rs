@@ -109,9 +109,6 @@ pub struct MonClient {
     #[allow(dead_code)]
     runtime: tokio::runtime::Handle,
 
-    /// Message receive task handle
-    recv_task: Arc<RwLock<Option<JoinHandle<()>>>>,
-
     /// Tick task handle (for periodic keepalive and auth renewal)
     tick_task: Arc<RwLock<Option<JoinHandle<()>>>>,
 
@@ -138,7 +135,6 @@ impl Clone for MonClient {
             entity_name: self.entity_name.clone(),
             state: Arc::clone(&self.state),
             runtime: self.runtime.clone(),
-            recv_task: Arc::clone(&self.recv_task),
             tick_task: Arc::clone(&self.tick_task),
             keepalive_state: Arc::clone(&self.keepalive_state),
             map_events: self.map_events.clone(),
@@ -356,7 +352,6 @@ impl MonClient {
             entity_name,
             state: Arc::new(RwLock::new(state)),
             runtime: tokio::runtime::Handle::current(),
-            recv_task: Arc::new(RwLock::new(None)),
             tick_task: Arc::new(RwLock::new(None)),
             keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             map_events,
@@ -429,13 +424,6 @@ impl MonClient {
 
         for con in pending_cons {
             con.close().await?;
-        }
-
-        // Stop receive task
-        let mut recv_task = self.recv_task.write().await;
-        if let Some(handle) = recv_task.take() {
-            handle.abort();
-            info!("Aborted message receive task");
         }
 
         // Stop tick task
