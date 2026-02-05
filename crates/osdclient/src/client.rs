@@ -1264,8 +1264,6 @@ impl Dispatcher for OSDClient {
         msg: msgr2::message::Message,
     ) -> std::result::Result<(), denc::RadosError> {
         // Use From trait for error conversion
-        self.handle_osdmap(msg)
-            .await
-            .map_err(Into::into)
+        self.handle_osdmap(msg).await.map_err(Into::into)
     }
 }
