@@ -9,6 +9,7 @@ use crate::monmap::MonMap;
 use crate::paxos_service_message::PaxosServiceMessage;
 use crate::subscription::MonSub;
 use crate::types::{CommandResult, EntityName};
+use crate::wait_helper::wait_for_condition;
 use async_trait::async_trait;
 use bytes::Bytes;
 use denc::UuidD;
@@ -125,6 +126,9 @@ pub struct MonClient {
 
     /// Notification for authentication completion
     auth_notify: Arc<tokio::sync::Notify>,
+
+    /// Notification for MonMap arrival
+    monmap_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Clone for MonClient {
@@ -140,6 +144,7 @@ impl Clone for MonClient {
             map_events: self.map_events.clone(),
             message_bus: Arc::clone(&self.message_bus),
             auth_notify: Arc::clone(&self.auth_notify),
+            monmap_notify: Arc::clone(&self.monmap_notify),
         }
     }
 }
@@ -357,6 +362,7 @@ impl MonClient {
             map_events,
             message_bus,
             auth_notify: Arc::new(tokio::sync::Notify::new()),
+            monmap_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 
@@ -1055,6 +1061,7 @@ impl MonClient {
         state: &Arc<RwLock<MonClientState>>,
         _keepalive_state: &Arc<Mutex<KeepaliveState>>,
         map_events: &broadcast::Sender<MapEvent>,
+        monmap_notify: &Arc<tokio::sync::Notify>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         let msg_type = msg.msg_type();
@@ -1068,7 +1075,7 @@ impl MonClient {
         match msg_type {
             msgr2::message::CEPH_MSG_MON_MAP => {
                 info!("Received CEPH_MSG_MON_MAP");
-                Self::handle_monmap(state, map_events, msg).await?;
+                Self::handle_monmap(state, map_events, monmap_notify, msg).await?;
             }
             msgr2::message::CEPH_MSG_PING => {
                 trace!("Received CEPH_MSG_PING, sending PING_ACK");
@@ -1130,6 +1137,7 @@ impl MonClient {
     async fn handle_monmap(
         state: &Arc<RwLock<MonClientState>>,
         map_events: &broadcast::Sender<MapEvent>,
+        monmap_notify: &Arc<tokio::sync::Notify>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
@@ -1161,6 +1169,9 @@ impl MonClient {
 
         // Broadcast MonMap update event
         let _ = map_events.send(MapEvent::MonMapUpdated { epoch });
+
+        // Notify waiters that MonMap has arrived
+        monmap_notify.notify_waiters();
 
         info!("✓ MonMap updated successfully");
         Ok(())
@@ -1516,27 +1527,21 @@ impl MonClient {
     /// Should be called after init() to ensure authentication is fully complete
     /// before creating service clients like OSDClient.
     pub async fn wait_for_auth(&self, timeout: std::time::Duration) -> Result<()> {
-        // Check if already authenticated
-        if self.is_authenticated().await && self.get_service_auth_provider().await.is_some() {
-            return Ok(());
-        }
-
-        // Wait for authentication notification with timeout
-        tokio::select! {
-            _ = self.auth_notify.notified() => {
-                // Double-check authentication status after notification
-                if self.is_authenticated().await && self.get_service_auth_provider().await.is_some() {
+        wait_for_condition(
+            || async {
+                if self.is_authenticated().await && self.get_service_auth_provider().await.is_some()
+                {
                     info!("Authentication complete with service tickets available");
-                    Ok(())
+                    Some(())
                 } else {
-                    // Spurious wakeup, wait again with remaining time
-                    Err(MonClientError::AuthenticationTimeout)
+                    None
                 }
-            }
-            _ = tokio::time::sleep(timeout) => {
-                Err(MonClientError::AuthenticationTimeout)
-            }
-        }
+            },
+            &self.auth_notify,
+            timeout,
+            MonClientError::AuthenticationTimeout,
+        )
+        .await
     }
 
     /// Wait for MonMap to be received
@@ -1547,45 +1552,21 @@ impl MonClient {
     /// Should be called after init() to ensure MonMap is available before
     /// creating service clients that need the FSID.
     pub async fn wait_for_monmap(&self, timeout: std::time::Duration) -> Result<()> {
-        // Check if we already have a valid MonMap
-        {
-            let state = self.state.read().await;
-            if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
-                return Ok(());
-            }
-        }
-
-        // Subscribe to MonMap events
-        let mut rx = self.map_events.subscribe();
-
-        // Wait for MonMap event with timeout
-        tokio::select! {
-            result = async {
-                loop {
-                    match rx.recv().await {
-                        Ok(MapEvent::MonMapUpdated { .. }) => {
-                            info!("MonMap received via event notification");
-                            return Ok(());
-                        }
-                        Ok(_) => continue, // Ignore other map events
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // We lagged behind, check if MonMap is now available
-                            let state = self.state.read().await;
-                            if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
-                                return Ok(());
-                            }
-                            continue;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => {
-                            return Err(MonClientError::Other("Map events channel closed".into()));
-                        }
-                    }
+        wait_for_condition(
+            || async {
+                let state = self.state.read().await;
+                if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
+                    info!("MonMap received via event notification");
+                    Some(())
+                } else {
+                    None
                 }
-            } => result,
-            _ = tokio::time::sleep(timeout) => {
-                Err(MonClientError::Timeout)
-            }
-        }
+            },
+            &self.monmap_notify,
+            timeout,
+            MonClientError::Timeout,
+        )
+        .await
     }
 
     /// Get the cluster FSID
@@ -1718,7 +1699,7 @@ impl Dispatcher for MonClient {
         msg: msgr2::message::Message,
     ) -> std::result::Result<(), denc::RadosError> {
         // Convert MonClientError to RadosError
-        Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, msg)
+        Self::dispatch_message(&self.state, &self.keepalive_state, &self.map_events, &self.monmap_notify, msg)
             .await
             .map_err(|e| denc::RadosError::Protocol(format!("MonClient error: {}", e)))
     }
