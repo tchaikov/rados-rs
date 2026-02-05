@@ -46,7 +46,7 @@ pub mod monmap;
 pub mod paxos_service_message;
 pub mod subscription;
 pub mod types;
-mod wait_helper;
+pub mod wait_helper;
 
 pub use client::{MonClient, MonClientConfig, PoolOpResult};
 pub use error::{MonClientError, Result};

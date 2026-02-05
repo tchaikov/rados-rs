@@ -3,6 +3,7 @@
 //! Main entry point for performing object operations against a Ceph cluster.
 
 use async_trait::async_trait;
+use monclient::wait_helper::wait_for_condition;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -128,31 +129,21 @@ impl OSDClient {
         &self,
         timeout: std::time::Duration,
     ) -> Result<Arc<denc::osdmap::OSDMap>> {
-        // Check if we already have an OSDMap
-        {
-            let osdmap_guard = self.osdmap.read().await;
-            if let Some(map) = osdmap_guard.as_ref() {
-                return Ok(Arc::clone(map));
-            }
-        }
-
-        // Wait for OSDMap notification with timeout
-        tokio::select! {
-            _ = self.osdmap_notify.notified() => {
-                // After notification, get the map
+        wait_for_condition(
+            || async {
                 let osdmap_guard = self.osdmap.read().await;
-                match osdmap_guard.as_ref() {
-                    Some(map) => {
-                        info!("OSDMap received via event notification");
-                        Ok(Arc::clone(map))
-                    }
-                    None => Err(OSDClientError::Connection("OSDMap not available after notification".to_string()))
+                if let Some(map) = osdmap_guard.as_ref() {
+                    info!("OSDMap received via event notification");
+                    Some(Arc::clone(map))
+                } else {
+                    None
                 }
-            }
-            _ = tokio::time::sleep(timeout) => {
-                Err(OSDClientError::Connection("Timeout waiting for OSDMap".to_string()))
-            }
-        }
+            },
+            &self.osdmap_notify,
+            timeout,
+            OSDClientError::Connection("Timeout waiting for OSDMap".to_string()),
+        )
+        .await
     }
 
     /// Get or create a session for an OSD
