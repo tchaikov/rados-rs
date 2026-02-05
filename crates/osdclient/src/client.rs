@@ -104,6 +104,17 @@ impl OSDClient {
         Ok(())
     }
 
+    /// Get the current OSDMap
+    pub async fn get_osdmap(&self) -> Result<Arc<denc::osdmap::OSDMap>> {
+        let osdmap_guard = self.osdmap.read().await;
+        match osdmap_guard.as_ref() {
+            Some(map) => Ok(Arc::clone(map)),
+            None => Err(OSDClientError::Connection(
+                "OSDMap not available".to_string(),
+            )),
+        }
+    }
+
     /// Spawn background task to listen for OSDMap updates
     ///
     /// This follows Tokio best practices:
@@ -413,10 +424,9 @@ impl OSDClient {
     /// Get OSD address from OSDMap
     async fn get_osd_address(&self, osd_id: i32) -> Result<denc::EntityAddr> {
         let osdmap = self
-            .mon_client
             .get_osdmap()
             .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Check if OSD exists
         if osd_id < 0 || osd_id as usize >= osdmap.osd_addrs_client.len() {
@@ -447,10 +457,9 @@ impl OSDClient {
     async fn object_to_osds(&self, pool: i64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
         // Get current OSDMap from MonClient
         let osdmap = self
-            .mon_client
             .get_osdmap()
             .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Find pool info
         let pool_info = osdmap
@@ -618,12 +627,11 @@ impl OSDClient {
             self.throttle.current_bytes()
         );
 
-        // Get OSDMap epoch
+        // Get OSDMap epoch from OSDClient's own osdmap (not from MonClient)
         let osdmap = self
-            .mon_client
             .get_osdmap()
             .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Build initial message
         let flags = MOSDOp::calculate_flags(&ops);
@@ -955,10 +963,9 @@ impl OSDClient {
 
         // Get OSDMap to look up pool info and pg_num
         let osdmap = self
-            .mon_client
             .get_osdmap()
             .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Find pool info
         let pool_info = osdmap
@@ -1174,10 +1181,9 @@ impl OSDClient {
 
         // Get OSDMap from monitor
         let osdmap = self
-            .mon_client
             .get_osdmap()
             .await
-            .map_err(|e| OSDClientError::MonClient(format!("Failed to get OSDMap: {}", e)))?;
+            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Extract pool information from OSDMap
         let mut pools = Vec::new();

@@ -288,16 +288,16 @@ impl MonClient {
     ///
     /// This is a convenience wrapper that creates a new MessageBus.
     /// For production use with OSDClient integration, use `new_with_bus()`.
-    pub async fn new(config: MonClientConfig) -> std::result::Result<Self, MonClientError> {
-        let message_bus = Arc::new(MessageBus::new());
-        Self::new_with_bus(config, message_bus).await
-    }
-
     /// Create a new MonClient with a shared MessageBus
     ///
     /// This allows MonClient to forward messages (like OSDMap) to other components
     /// like OSDClient through the shared message bus.
-    pub async fn new_with_bus(
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - MonClient configuration
+    /// * `message_bus` - Shared MessageBus for inter-component communication
+    pub async fn new(
         config: MonClientConfig,
         message_bus: Arc<MessageBus>,
     ) -> std::result::Result<Self, MonClientError> {
@@ -376,9 +376,8 @@ impl MonClient {
 
         drop(state);
 
-        // Start message receive loop BEFORE connecting
-        // This ensures we don't miss any messages the monitor sends immediately after session establishment
-        self.start_message_loop();
+        // NOTE: register_handlers() must be called separately after init()
+        // This ensures MonClient is registered on MessageBus to receive messages
 
         // Start tick loop for periodic keepalive and auth renewal
         self.start_tick_loop();
@@ -390,8 +389,9 @@ impl MonClient {
         info!("Subscribing to monmap...");
         self.subscribe("monmap", 0, 0).await?;
 
-        info!("Subscribing to osdmap...");
-        self.subscribe("osdmap", 0, 0).await?;
+        // NOTE: OSDMap subscription removed - OSDClient handles this via MessageBus
+        // Applications should explicitly subscribe to osdmap after registering OSDClient
+        // on the MessageBus to avoid race conditions with message routing
 
         info!("MonClient initialized successfully");
         Ok(())
@@ -645,6 +645,7 @@ impl MonClient {
                 self.config.entity_name.clone(),
                 keyring_path,
                 keepalive_policy,
+                Arc::clone(&self.message_bus), // Pass MessageBus to connection
             )
             .await?,
         );
@@ -806,78 +807,47 @@ impl MonClient {
         Ok(())
     }
 
-    /// Start background message receive loop
-    fn start_message_loop(&self) {
-        let state = Arc::clone(&self.state);
-        let keepalive_state = Arc::clone(&self.keepalive_state);
-        let map_events = self.map_events.clone();
+    /// Register MonClient as a handler on the MessageBus for messages it handles
+    pub async fn register_handlers(self: Arc<Self>) -> Result<()> {
+        use msgr2::message::*;
+        use msgr2::Dispatcher;
 
-        let handle = tokio::spawn(async move {
-            info!("Message receive loop started");
-            let mut iteration = 0;
-            loop {
-                iteration += 1;
-                debug!("Message loop iteration {}", iteration);
+        info!("Registering MonClient handlers on MessageBus");
 
-                // Check if stopping
-                {
-                    let state_guard = state.read().await;
-                    if state_guard.stopping {
-                        info!("Stopping flag set, exiting message loop");
-                        break;
-                    }
-                }
+        // Register for all message types that MonClient handles
+        self.message_bus
+            .register(CEPH_MSG_MON_MAP, self.clone() as Arc<dyn Dispatcher>)
+            .await;
+        self.message_bus
+            .register(CEPH_MSG_PING, self.clone() as Arc<dyn Dispatcher>)
+            .await;
+        self.message_bus
+            .register(CEPH_MSG_PING_ACK, self.clone() as Arc<dyn Dispatcher>)
+            .await;
+        self.message_bus
+            .register(
+                CEPH_MSG_MON_SUBSCRIBE_ACK,
+                self.clone() as Arc<dyn Dispatcher>,
+            )
+            .await;
+        self.message_bus
+            .register(
+                CEPH_MSG_MON_GET_VERSION_REPLY,
+                self.clone() as Arc<dyn Dispatcher>,
+            )
+            .await;
+        self.message_bus
+            .register(
+                CEPH_MSG_MON_COMMAND_ACK,
+                self.clone() as Arc<dyn Dispatcher>,
+            )
+            .await;
+        self.message_bus
+            .register(CEPH_MSG_POOLOP_REPLY, self.clone() as Arc<dyn Dispatcher>)
+            .await;
 
-                // Get active connection, wait if not available yet
-                let active_con = loop {
-                    let state_guard = state.read().await;
-                    match &state_guard.active_con {
-                        Some(con) => {
-                            debug!("Got active connection");
-                            break Arc::clone(con);
-                        }
-                        None => {
-                            // Check if stopping before waiting
-                            if state_guard.stopping {
-                                info!("Stopping while waiting for connection");
-                                return;
-                            }
-                            drop(state_guard);
-                            // Wait a bit before checking again
-                            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-                        }
-                    }
-                };
-
-                // Receive message
-                debug!("About to call receive_message()...");
-                match active_con.receive_message().await {
-                    Ok(msg) => {
-                        info!("✓ Received message type: 0x{:04x}", msg.msg_type());
-                        if let Err(e) =
-                            Self::dispatch_message(&state, &keepalive_state, &map_events, msg).await
-                        {
-                            tracing::error!("Error dispatching message: {}", e);
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Error receiving message: {}", e);
-                        break;
-                    }
-                }
-            }
-            info!("Message receive loop terminated");
-        });
-
-        // Store task handle directly (no need to spawn a task just to store a value)
-        // Use try_write since we're called from async context (init())
-        let recv_task = Arc::clone(&self.recv_task);
-        let mut task_guard = recv_task
-            .try_write()
-            .expect("recv_task lock should not be held during initialization");
-        *task_guard = Some(handle);
-
-        info!("Started message receive loop");
+        info!("✓ MonClient handlers registered");
+        Ok(())
     }
 
     /// Start background tick loop for periodic maintenance
@@ -1144,10 +1114,10 @@ impl MonClient {
                 Self::handle_poolop_reply(state, map_events, msg).await?;
             }
             _ => {
-                debug!(
-                    "Received unknown message type: 0x{:04x} ({})",
-                    msg_type, msg_type
-                );
+                return Err(MonClientError::Other(format!(
+                    "Received unknown message type 0x{:04x} - this is a bug! MonClient should only receive messages it subscribed for",
+                    msg_type
+                )));
             }
         }
         Ok(())
@@ -2277,7 +2247,8 @@ mod tests {
             ..Default::default()
         };
 
-        let client = MonClient::new(config).await.unwrap();
+        let message_bus = Arc::new(msgr2::MessageBus::new());
+        let client = MonClient::new(config, message_bus).await.unwrap();
         assert!(!client.is_connected().await);
     }
 
@@ -2289,7 +2260,8 @@ mod tests {
             ..Default::default()
         };
 
-        let client = MonClient::new(config).await.unwrap();
+        let message_bus = Arc::new(msgr2::MessageBus::new());
+        let client = MonClient::new(config, message_bus).await.unwrap();
 
         // Should fail before init
         assert!(client.subscribe("osdmap", 0, 0).await.is_err());

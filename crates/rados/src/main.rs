@@ -137,7 +137,10 @@ async fn main() -> Result<()> {
 
     debug!("Using keyring: {}", keyring_path);
 
-    // Create MonClient
+    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
         entity_name: cli.name.clone(),
         mon_addrs,
@@ -146,7 +149,7 @@ async fn main() -> Result<()> {
     };
 
     let mon_client = Arc::new(
-        monclient::MonClient::new(mon_config)
+        monclient::MonClient::new(mon_config, Arc::clone(&message_bus))
             .await
             .context("Failed to create MonClient")?,
     );
@@ -157,18 +160,20 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to initialize MonClient")?;
 
+    // Register MonClient handlers on MessageBus
+    mon_client
+        .clone()
+        .register_handlers()
+        .await
+        .context("Failed to register MonClient handlers")?;
+
     debug!("Connected to monitor");
 
-    // Subscribe to OSDMap
-    mon_client
-        .subscribe("osdmap", 0, 0)
-        .await
-        .context("Failed to subscribe to OSDMap")?;
-
-    // Wait for OSDMap to arrive
+    // Wait for MonMap to arrive (contains FSID)
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    debug!("OSDMap received");
+    // Get FSID
+    let fsid = mon_client.get_fsid().await;
 
     // Create OSD client with unique client_inc for this invocation
     // Use current timestamp to ensure uniqueness across CLI invocations
@@ -184,17 +189,36 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    // Get FSID and create MessageBus
-    let fsid = mon_client.get_fsid().await;
-    let message_bus = Arc::new(msgr2::MessageBus::new());
-
     let osd_client = Arc::new(
-        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus)
-            .await
-            .context("Failed to create OSDClient")?,
+        osdclient::OSDClient::new(
+            osd_config,
+            fsid,
+            Arc::clone(&mon_client),
+            Arc::clone(&message_bus),
+        )
+        .await
+        .context("Failed to create OSDClient")?,
     );
 
+    // Register OSDClient handlers on MessageBus
+    osd_client
+        .clone()
+        .register_handlers()
+        .await
+        .context("Failed to register OSDClient handlers")?;
+
     debug!("OSD client created");
+
+    // NOW subscribe to OSDMap - both MonClient and OSDClient are ready
+    mon_client
+        .subscribe("osdmap", 0, 0)
+        .await
+        .context("Failed to subscribe to OSDMap")?;
+
+    // Wait for OSDMap to arrive
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    debug!("OSDMap received");
 
     // Parse pool (try as ID first, then as name)
     let pool_id = parse_pool(&cli.pool, &mon_client).await?;

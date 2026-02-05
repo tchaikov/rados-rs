@@ -75,8 +75,11 @@ impl TestConfig {
 /// Helper to create and initialize an OSD client
 async fn create_osd_client(
     config: &TestConfig,
-) -> Result<(osdclient::OSDClient, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
-    // Create MonClient
+) -> Result<(Arc<osdclient::OSDClient>, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
+    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
@@ -84,7 +87,8 @@ async fn create_osd_client(
         ..Default::default()
     };
 
-    let mon_client = Arc::new(monclient::MonClient::new(mon_config).await?);
+    let mon_client =
+        Arc::new(monclient::MonClient::new(mon_config, Arc::clone(&message_bus)).await?);
 
     // Initialize connection
     mon_client.init().await?;
@@ -113,12 +117,21 @@ async fn create_osd_client(
     // Get FSID from MonClient
     let fsid = mon_client.get_fsid().await;
 
-    // Create MessageBus for message routing
-    let message_bus = Arc::new(msgr2::MessageBus::new());
-
-    let osd_client =
-        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus).await?;
+    // Create OSDClient with the SAME MessageBus that MonClient is using
+    let osd_client = Arc::new(
+        osdclient::OSDClient::new(
+            osd_config,
+            fsid,
+            Arc::clone(&mon_client),
+            Arc::clone(&message_bus),
+        )
+        .await?,
+    );
     info!("✓ OSD client created");
+
+    // Register OSDClient on MessageBus to receive OSDMap messages
+    osd_client.clone().register_handlers().await?;
+    info!("✓ OSDClient registered on MessageBus");
 
     Ok((osd_client, mon_client))
 }

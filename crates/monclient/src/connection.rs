@@ -5,11 +5,11 @@
 use crate::error::{MonClientError, Result};
 use crate::types::EntityAddrVec;
 use msgr2::protocol::Connection as Msgr2Connection;
-use msgr2::ConnectionConfig;
+use msgr2::{ConnectionConfig, MessageBus};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex};
 
 /// Keepalive policy for the connection
 ///
@@ -67,12 +67,15 @@ pub struct MonConnection {
     /// Channel for sending messages (to avoid deadlock with receive loop)
     send_tx: mpsc::UnboundedSender<msgr2::message::Message>,
 
-    /// Channel for receiving messages
-    recv_rx: Arc<Mutex<broadcast::Receiver<msgr2::message::Message>>>,
-
     /// Channel for receiving keepalive timeout notifications
     /// The background task sends () when a keepalive timeout occurs
     timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+
+    /// Message bus for routing ALL messages
+    /// ALL messages received from the monitor are dispatched to the MessageBus
+    /// Note: Used by the background task closure, so #[allow(dead_code)] is needed
+    #[allow(dead_code)]
+    message_bus: Arc<MessageBus>,
 }
 
 #[derive(Debug)]
@@ -103,6 +106,7 @@ impl MonConnection {
         entity_name: String,
         keyring_path: Option<String>,
         keepalive_policy: KeepalivePolicy,
+        message_bus: Arc<MessageBus>,
     ) -> Result<Self> {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
@@ -167,15 +171,17 @@ impl MonConnection {
             eprintln!("DEBUG: Auth provider is Some after authentication!");
         }
 
-        // Create channels for sending and receiving messages (to avoid deadlock)
+        // Create channels for sending messages and timeouts
         let (send_tx, mut send_rx) = mpsc::unbounded_channel::<msgr2::message::Message>();
-        let (recv_tx, recv_rx) = broadcast::channel::<msgr2::message::Message>(100);
         let (timeout_tx, timeout_rx) = mpsc::unbounded_channel::<()>();
 
         let mut connection_for_task = connection;
 
+        // Clone message_bus for the background task
+        let message_bus_for_task = Arc::clone(&message_bus);
+
         // Spawn a unified task to handle sending, receiving, and keepalive
-        // This avoids deadlock by ensuring only one task accesses the connection
+        // ALL received messages are forwarded to the MessageBus
         tokio::spawn(async move {
             tracing::debug!("Send/Receive/Keepalive task started");
 
@@ -202,12 +208,18 @@ impl MonConnection {
                         tracing::trace!("Send/Recv task: Message sent successfully");
                     }
 
-                    // Handle incoming messages
+                    // Handle incoming messages - forward ALL to MessageBus
                     result = connection_for_task.recv_message() => {
                         match result {
                             Ok(msg) => {
-                                tracing::trace!("Send/Recv task: Received message, broadcasting");
-                                let _ = recv_tx.send(msg);
+                                let msg_type = msg.header.msg_type;
+                                tracing::trace!("Received message type 0x{:04x}, forwarding to MessageBus", msg_type);
+
+                                // Forward ALL messages to MessageBus
+                                if let Err(e) = message_bus_for_task.dispatch(msg).await {
+                                    tracing::error!("Failed to dispatch message 0x{:04x} to MessageBus: {}", msg_type, e);
+                                    // Continue processing other messages even if one fails
+                                }
                             }
                             Err(e) => {
                                 tracing::error!("Failed to receive message: {}", e);
@@ -285,8 +297,8 @@ impl MonConnection {
             })),
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
-            recv_rx: Arc::new(Mutex::new(recv_rx)),
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
+            message_bus,
         };
 
         tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
@@ -362,23 +374,6 @@ impl MonConnection {
             .map_err(|_| MonClientError::Other("Send channel closed".into()))?;
         tracing::trace!("MonConnection::send_message: Message queued for sending");
         Ok(())
-    }
-
-    /// Receive a message from the monitor
-    /// Note: This should only be called by the message receive loop
-    pub async fn receive_message(&self) -> Result<msgr2::message::Message> {
-        // Receive from the broadcast channel (sent by the unified send/recv task)
-        let mut rx = self.recv_rx.lock().await;
-        let msg = rx
-            .recv()
-            .await
-            .map_err(|e| MonClientError::Other(format!("Receive channel error: {}", e)))?;
-        tracing::debug!(
-            "Received message type {} from mon.{}",
-            msg.msg_type(),
-            self.rank
-        );
-        Ok(msg)
     }
 
     /// Close the connection

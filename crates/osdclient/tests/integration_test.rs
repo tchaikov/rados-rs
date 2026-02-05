@@ -72,7 +72,7 @@ impl TestConfig {
 /// Parse pool identifier (name or numeric ID) to pool ID
 async fn parse_pool(
     pool: &str,
-    mon_client: &Arc<monclient::MonClient>,
+    osd_client: &Arc<osdclient::OSDClient>,
 ) -> Result<i64, Box<dyn std::error::Error>> {
     // If it's already a number, use it directly
     if let Ok(id) = pool.parse::<i64>() {
@@ -80,7 +80,7 @@ async fn parse_pool(
     }
 
     // Otherwise, look up pool by name in OSDMap
-    let osdmap = match mon_client.get_osdmap().await {
+    let osdmap = match osd_client.get_osdmap().await {
         Ok(map) => map,
         Err(_) => return Err("OSDMap not available".into()),
     };
@@ -96,13 +96,16 @@ async fn parse_pool(
 }
 
 /// Setup test environment
-async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
+async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, i64) {
     // Initialize tracing (ignore error if already initialized)
     let _ = tracing_subscriber::fmt().try_init();
 
     let config = TestConfig::from_env();
 
-    // Create MonClient
+    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
@@ -111,7 +114,7 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
     };
 
     let mon_client = Arc::new(
-        monclient::MonClient::new(mon_config)
+        monclient::MonClient::new(mon_config, Arc::clone(&message_bus))
             .await
             .expect("Failed to create MonClient"),
     );
@@ -122,6 +125,13 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
         .await
         .expect("Failed to initialize MonClient");
 
+    // Register MonClient handlers on MessageBus
+    mon_client
+        .clone()
+        .register_handlers()
+        .await
+        .expect("Failed to register MonClient handlers");
+
     // Wait for authentication to fully complete with all service tickets
     // This ensures OSD service tickets are available before creating OSDClient
     mon_client
@@ -129,7 +139,38 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
         .await
         .expect("Failed to complete authentication");
 
-    // Subscribe to OSDMap
+    // Wait a moment for MonMap to arrive (contains FSID)
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
+    // Create MessageBus and OSDClient BEFORE subscribing to osdmap
+    // This ensures OSDClient is registered to receive OSDMap messages
+    let osd_config = osdclient::OSDClientConfig {
+        entity_name: config.entity_name.clone(),
+        ..Default::default()
+    };
+
+    let fsid = mon_client.get_fsid().await;
+    // Use the SAME message_bus that MonClient is using
+
+    let osd_client = Arc::new(
+        osdclient::OSDClient::new(
+            osd_config,
+            fsid,
+            Arc::clone(&mon_client),
+            Arc::clone(&message_bus),
+        )
+        .await
+        .expect("Failed to create OSDClient"),
+    );
+
+    // Register OSDClient on MessageBus BEFORE subscribing to osdmap
+    osd_client
+        .clone()
+        .register_handlers()
+        .await
+        .expect("Failed to register OSDClient handlers");
+
+    // NOW subscribe to OSDMap - OSDClient is ready to receive
     mon_client
         .subscribe("osdmap", 0, 0)
         .await
@@ -138,27 +179,10 @@ async fn setup() -> (Arc<monclient::MonClient>, osdclient::OSDClient, i64) {
     // Wait for OSDMap to arrive (increased timeout for slower systems)
     tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
-    // Parse pool (name or ID) to pool ID
-    let pool_id = parse_pool(&config.pool, &mon_client)
+    // Parse pool (name or ID) to pool ID using OSDClient
+    let pool_id = parse_pool(&config.pool, &osd_client)
         .await
         .expect("Failed to parse pool");
-
-    // Create OSD client
-    let osd_config = osdclient::OSDClientConfig {
-        entity_name: config.entity_name.clone(),
-        ..Default::default()
-    };
-
-    // Get FSID from MonClient
-    let fsid = mon_client.get_fsid().await;
-
-    // Create MessageBus for message routing
-    let message_bus = Arc::new(msgr2::MessageBus::new());
-
-    let osd_client =
-        osdclient::OSDClient::new(osd_config, fsid, Arc::clone(&mon_client), message_bus)
-            .await
-            .expect("Failed to create OSDClient");
 
     (mon_client, osd_client, pool_id)
 }

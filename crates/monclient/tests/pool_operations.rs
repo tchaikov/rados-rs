@@ -77,10 +77,20 @@ async fn create_mon_client(
         ..Default::default()
     };
 
-    let mon_client = Arc::new(monclient::MonClient::new(mon_config).await?);
+    // Create shared MessageBus
+    let message_bus = Arc::new(msgr2::MessageBus::new());
+
+    let mon_client = Arc::new(
+        monclient::MonClient::new(mon_config, message_bus)
+            .await?,
+    );
 
     // Initialize connection
     mon_client.init().await?;
+
+    // Register MonClient handlers on MessageBus
+    mon_client.clone().register_handlers().await?;
+
     info!("✓ Connected to monitor");
 
     // Wait a bit for monmap to be received
