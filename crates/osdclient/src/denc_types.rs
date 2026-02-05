@@ -29,27 +29,34 @@ pub use crate::types::{
 
 // ============= PgId (pg_t) =============
 
-impl Denc for PgId {
-    const USES_VERSIONING: bool = true;
+impl VersionedEncode for PgId {
+    fn encoding_version(&self, _features: u64) -> u8 {
+        1
+    }
 
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // pg_t encoding: version byte + pool (i64) + seed (u32) + preferred (i32, always -1)
-        1u8.encode(buf, 0)?; // version
+    fn compat_version(&self, _features: u64) -> u8 {
+        1
+    }
+
+    fn encode_content<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+    ) -> Result<(), RadosError> {
+        // pg_t encoding: pool (i64) + seed (u32) + preferred (i32, always -1)
         self.pool.encode(buf, 0)?;
         self.seed.encode(buf, 0)?;
         (-1i32).encode(buf, 0)?; // preferred (deprecated, always -1)
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let version = u8::decode(buf, 0)?;
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unknown pg_t version: {}",
-                version
-            )));
-        }
-
+    fn decode_content<B: Buf>(
+        buf: &mut B,
+        _features: u64,
+        _version: u8,
+        _compat_version: u8,
+    ) -> Result<Self, RadosError> {
         let pool = i64::decode(buf, 0)?;
         let seed = u32::decode(buf, 0)?;
         let _preferred = i32::decode(buf, 0)?; // deprecated
@@ -57,16 +64,17 @@ impl Denc for PgId {
         Ok(PgId { pool, seed })
     }
 
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // version + pool + seed + preferred
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        // pool + seed + preferred
         Some(
-            1u8.encoded_size(0)? // version
-                + self.pool.encoded_size(0)?
+            self.pool.encoded_size(0)?
                 + self.seed.encoded_size(0)?
                 + (-1i32).encoded_size(0)?, // preferred (deprecated, always -1)
         )
     }
 }
+
+denc::impl_denc_for_versioned!(PgId);
 
 // ============= StripedPgId (spg_t) =============
 
