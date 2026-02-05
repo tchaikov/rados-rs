@@ -21,6 +21,16 @@ use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId, StripedPgId};
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 
+/// Context passed to the I/O task
+struct IoTaskContext {
+    osd_id: i32,
+    pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
+    #[allow(dead_code)]
+    backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+    message_bus: Arc<msgr2::MessageBus>,
+    client: std::sync::Weak<crate::client::OSDClient>,
+}
+
 /// OSD backoff tracking
 ///
 /// Represents an active backoff from the OSD requesting the client
@@ -153,24 +163,15 @@ impl OSDSession {
 
         // Spawn I/O task that owns the connection
         // This task multiplexes send/receive using tokio::select!
-        let pending_ops = Arc::clone(&self.pending_ops);
-        let backoffs = Arc::clone(&self.backoffs);
-        let osd_id = self.osd_id;
-        let send_tx_clone = self.send_tx.clone();
-        let message_bus = Arc::clone(&self.message_bus);
-        let client = self.client.clone();
+        let context = IoTaskContext {
+            osd_id: self.osd_id,
+            pending_ops: Arc::clone(&self.pending_ops),
+            backoffs: Arc::clone(&self.backoffs),
+            message_bus: Arc::clone(&self.message_bus),
+            client: self.client.clone(),
+        };
         tokio::spawn(async move {
-            Self::io_task(
-                osd_id,
-                connection,
-                send_tx_clone,
-                send_rx,
-                pending_ops,
-                backoffs,
-                message_bus,
-                client,
-            )
-            .await;
+            Self::io_task(context, connection, send_rx).await;
         });
 
         info!("✓ I/O task started for OSD {}", self.osd_id);
@@ -194,23 +195,18 @@ impl OSDSession {
     ///
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2() and ~/dev/linux/net/ceph/osd_client.c
     async fn io_task(
-        osd_id: i32,
+        ctx: IoTaskContext,
         mut connection: msgr2::protocol::Connection,
-        _send_tx: mpsc::Sender<msgr2::message::Message>,
         mut send_rx: mpsc::Receiver<msgr2::message::Message>,
-        pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
-        _backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
-        message_bus: Arc<msgr2::MessageBus>,
-        client: std::sync::Weak<crate::client::OSDClient>,
     ) {
-        info!("I/O task started for OSD {}", osd_id);
+        info!("I/O task started for OSD {}", ctx.osd_id);
 
         loop {
             tokio::select! {
                 // Handle outgoing messages (like try_write in Linux kernel)
                 Some(msg) = send_rx.recv() => {
                     if let Err(e) = connection.send_message(msg).await {
-                        error!("Failed to send message to OSD {}: {}", osd_id, e);
+                        error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
                         break;
                     }
                 }
@@ -220,36 +216,36 @@ impl OSDSession {
                     match result {
                         Ok(msg) => {
                             let msg_type = msg.msg_type();
-                            debug!("OSD {} received message type 0x{:04x}", osd_id, msg_type);
+                            debug!("OSD {} received message type 0x{:04x}", ctx.osd_id, msg_type);
 
                             // Route messages based on their scope (broadcast vs session-specific)
                             match msg_type {
                                 msgr2::message::CEPH_MSG_OSD_MAP => {
                                     // Broadcast message: Forward to MessageBus
                                     // Multiple components (MonClient, OSDClient) may need this
-                                    if let Err(e) = message_bus.dispatch(msg).await {
+                                    if let Err(e) = ctx.message_bus.dispatch(msg).await {
                                         error!("Failed to dispatch OSDMap to MessageBus: {}", e);
                                     }
                                 }
                                 crate::messages::CEPH_MSG_OSD_OPREPLY | crate::messages::CEPH_MSG_OSD_BACKOFF => {
                                     // Session-specific message: Dispatch directly with OSD context
                                     // Like Linux kernel's explicit osd parameter
-                                    if let Some(client_arc) = client.upgrade() {
-                                        if let Err(e) = client_arc.dispatch_from_osd(osd_id, msg).await {
-                                            error!("Failed to dispatch message 0x{:04x} from OSD {}: {}", msg_type, osd_id, e);
+                                    if let Some(client_arc) = ctx.client.upgrade() {
+                                        if let Err(e) = client_arc.dispatch_from_osd(ctx.osd_id, msg).await {
+                                            error!("Failed to dispatch message 0x{:04x} from OSD {}: {}", msg_type, ctx.osd_id, e);
                                         }
                                     } else {
-                                        debug!("OSDClient dropped, ignoring message from OSD {}", osd_id);
+                                        debug!("OSDClient dropped, ignoring message from OSD {}", ctx.osd_id);
                                         break;
                                     }
                                 }
                                 _ => {
-                                    warn!("OSD {} sent unexpected message type: 0x{:04x}", osd_id, msg_type);
+                                    warn!("OSD {} sent unexpected message type: 0x{:04x}", ctx.osd_id, msg_type);
                                 }
                             }
                         }
                         Err(e) => {
-                            error!("Failed to receive message from OSD {}: {}", osd_id, e);
+                            error!("Failed to receive message from OSD {}: {}", ctx.osd_id, e);
                             break;
                         }
                     }
@@ -257,20 +253,20 @@ impl OSDSession {
             }
         }
 
-        info!("I/O task exiting for OSD {}", osd_id);
+        info!("I/O task exiting for OSD {}", ctx.osd_id);
 
         // Clean up pending operations on disconnect
-        let mut pending = pending_ops.write().await;
+        let mut pending = ctx.pending_ops.write().await;
         for (tid, pending_op) in pending.drain() {
             let _ = pending_op
                 .result_tx
                 .send(Err(OSDClientError::Connection(format!(
                     "OSD {} disconnected",
-                    osd_id
+                    ctx.osd_id
                 ))));
             debug!(
                 "Cancelled pending operation tid={} due to OSD {} disconnect",
-                tid, osd_id
+                tid, ctx.osd_id
             );
         }
     }
