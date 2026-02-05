@@ -189,16 +189,14 @@ async fn main() -> Result<()> {
         ..Default::default()
     };
 
-    let osd_client = Arc::new(
-        osdclient::OSDClient::new(
-            osd_config,
-            fsid,
-            Arc::clone(&mon_client),
-            Arc::clone(&message_bus),
-        )
-        .await
-        .context("Failed to create OSDClient")?,
-    );
+    let osd_client = osdclient::OSDClient::new(
+        osd_config,
+        fsid,
+        Arc::clone(&mon_client),
+        Arc::clone(&message_bus),
+    )
+    .await
+    .context("Failed to create OSDClient")?;
 
     // Register OSDClient handlers on MessageBus
     osd_client

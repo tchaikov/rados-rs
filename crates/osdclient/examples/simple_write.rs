@@ -65,15 +65,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     };
 
-    let osd_client = Arc::new(
-        osdclient::OSDClient::new(
-            osd_config,
-            fsid,
-            Arc::clone(&mon_client),
-            Arc::clone(&message_bus),
-        )
-        .await?,
-    );
+    let osd_client = osdclient::OSDClient::new(
+        osd_config,
+        fsid,
+        Arc::clone(&mon_client),
+        Arc::clone(&message_bus),
+    )
+    .await?;
 
     // Register OSDClient handlers on MessageBus
     osd_client.clone().register_handlers().await?;

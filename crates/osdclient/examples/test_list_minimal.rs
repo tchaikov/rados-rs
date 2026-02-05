@@ -37,15 +37,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Get FSID
     let fsid = mon_client.get_fsid().await;
 
-    let osd_client = Arc::new(
-        osdclient::OSDClient::new(
-            osd_config,
-            fsid,
-            Arc::clone(&mon_client),
-            Arc::clone(&message_bus),
-        )
-        .await?,
-    );
+    let osd_client = osdclient::OSDClient::new(
+        osd_config,
+        fsid,
+        Arc::clone(&mon_client),
+        Arc::clone(&message_bus),
+    )
+    .await?;
     println!("✓ OSD client created");
 
     println!("\n📋 Calling list() on pool 2...");

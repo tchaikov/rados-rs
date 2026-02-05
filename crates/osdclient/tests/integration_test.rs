@@ -152,16 +152,14 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, i64) 
     let fsid = mon_client.get_fsid().await;
     // Use the SAME message_bus that MonClient is using
 
-    let osd_client = Arc::new(
-        osdclient::OSDClient::new(
-            osd_config,
-            fsid,
-            Arc::clone(&mon_client),
-            Arc::clone(&message_bus),
-        )
-        .await
-        .expect("Failed to create OSDClient"),
-    );
+    let osd_client = osdclient::OSDClient::new(
+        osd_config,
+        fsid,
+        Arc::clone(&mon_client),
+        Arc::clone(&message_bus),
+    )
+    .await
+    .expect("Failed to create OSDClient");
 
     // Register OSDClient on MessageBus BEFORE subscribing to osdmap
     osd_client

@@ -7,7 +7,7 @@ use monclient::wait_helper::wait_for_condition;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 
 use denc::{Denc, VersionedEncode};
 use msgr2::{Dispatcher, MessageBus};
@@ -56,6 +56,8 @@ pub struct OSDClient {
     message_bus: Arc<MessageBus>,
     /// Notification for OSDMap arrival
     osdmap_notify: Arc<tokio::sync::Notify>,
+    /// Weak self-reference for session creation
+    self_weak: std::sync::Weak<Self>,
 }
 
 impl OSDClient {
@@ -65,7 +67,7 @@ impl OSDClient {
         fsid: denc::UuidD,
         mon_client: Arc<monclient::MonClient>,
         message_bus: Arc<MessageBus>,
-    ) -> Result<Self> {
+    ) -> Result<Arc<Self>> {
         info!("Creating OSDClient for {}", config.entity_name);
 
         // Get global_id from MonClient (assigned during authentication)
@@ -82,7 +84,7 @@ impl OSDClient {
             throttle.max_bytes()
         );
 
-        let client = Self {
+        let client = Arc::new_cyclic(|weak| Self {
             config,
             mon_client: Arc::clone(&mon_client),
             sessions: Arc::new(RwLock::new(HashMap::new())),
@@ -93,18 +95,53 @@ impl OSDClient {
             osdmap: Arc::new(RwLock::new(None)),
             message_bus,
             osdmap_notify: Arc::new(tokio::sync::Notify::new()),
-        };
+            self_weak: weak.clone(),
+        });
 
         Ok(client)
     }
 
-    /// Register this OSDClient as a handler for OSDMap messages on the message bus
+    /// Register this OSDClient as a handler for broadcast messages on the message bus
+    ///
+    /// Note: Session-specific messages (OPREPLY, BACKOFF) are dispatched directly
+    /// from io_task with OSD context, following the Linux kernel pattern
     pub async fn register_handlers(self: Arc<Self>) -> Result<()> {
-        info!("Registering OSDClient as OSDMap handler on message bus");
+        info!("Registering OSDClient for broadcast messages on MessageBus");
+
+        // Register only for OSDMap updates (broadcast message)
+        // Session-specific messages (OPREPLY, BACKOFF) are handled via dispatch_from_osd()
         self.message_bus
             .register(msgr2::message::CEPH_MSG_OSD_MAP, self.clone())
             .await;
+
         Ok(())
+    }
+
+    /// Dispatch a session-specific message from an OSD
+    ///
+    /// This is called directly from the OSD session's io_task with explicit OSD context,
+    /// following the Linux kernel pattern of passing `struct ceph_osd *osd` to handlers.
+    ///
+    /// Reference: ~/dev/linux/net/ceph/osd_client.c handle_backoff(struct ceph_osd *osd, ...)
+    pub async fn dispatch_from_osd(&self, osd_id: i32, msg: msgr2::message::Message) -> Result<()> {
+        let msg_type = msg.msg_type();
+        debug!("Dispatching message 0x{:04x} from OSD {}", msg_type, osd_id);
+
+        match msg_type {
+            crate::messages::CEPH_MSG_OSD_OPREPLY => {
+                self.handle_osd_op_reply_from_osd(osd_id, msg).await
+            }
+            crate::messages::CEPH_MSG_OSD_BACKOFF => {
+                self.handle_backoff_from_osd(osd_id, msg).await
+            }
+            _ => {
+                warn!(
+                    "Unexpected session-specific message type 0x{:04x} from OSD {}",
+                    msg_type, osd_id
+                );
+                Ok(())
+            }
+        }
     }
 
     /// Get the current OSDMap
@@ -183,6 +220,8 @@ impl OSDClient {
             self.config.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
+            Arc::clone(&self.message_bus),
+            self.self_weak.clone(),
         );
 
         // Get OSD address from OSDMap
@@ -1254,16 +1293,212 @@ impl OSDClient {
 
         Ok(())
     }
+
+    /// Handle OSD operation reply from a specific OSD
+    ///
+    /// Called with explicit OSD context (Linux kernel pattern)
+    async fn handle_osd_op_reply_from_osd(
+        &self,
+        osd_id: i32,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        use crate::messages::MOSDOpReply;
+
+        let tid = msg.tid();
+
+        // Decode the reply
+        let reply = MOSDOpReply::decode(&msg.front, &msg.data).map_err(|e| {
+            OSDClientError::Decoding(format!("Failed to decode MOSDOpReply: {}", e))
+        })?;
+
+        debug!("OSD {} sent OSDOpReply for tid={}", osd_id, tid);
+
+        // Get the session for this OSD
+        let sessions = self.sessions.read().await;
+        let session = sessions.get(&osd_id).ok_or_else(|| {
+            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
+        })?;
+
+        // Check if retry is needed (returns Some if EAGAIN on replica read)
+        if let Some((pending_op, new_flags)) = session.handle_osd_op_reply(tid, reply).await {
+            debug!(
+                "OSD {} EAGAIN on replica read tid {}, retrying to primary (flags: 0x{:x} -> 0x{:x})",
+                osd_id, tid, pending_op.op.flags, new_flags
+            );
+
+            // Resubmit with new flags
+            if let Err(e) = session
+                .resubmit_with_new_flags(tid, pending_op, new_flags)
+                .await
+            {
+                error!("Failed to resubmit operation tid {}: {}", tid, e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle OSD backoff from a specific OSD
+    ///
+    /// Called with explicit OSD context (Linux kernel pattern)
+    /// The ACK must be sent back to the same OSD that sent the backoff
+    async fn handle_backoff_from_osd(
+        &self,
+        osd_id: i32,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        use crate::messages::{
+            MOSDBackoff, CEPH_OSD_BACKOFF_OP_ACK_BLOCK, CEPH_OSD_BACKOFF_OP_BLOCK,
+            CEPH_OSD_BACKOFF_OP_UNBLOCK,
+        };
+
+        // Decode the backoff message
+        let backoff = MOSDBackoff::decode(&msg.front).map_err(|e| {
+            OSDClientError::Decoding(format!("Failed to decode MOSDBackoff: {}", e))
+        })?;
+
+        debug!(
+            "OSD {} sent backoff op={} for pgid={}:{}.{}",
+            osd_id, backoff.op, backoff.pgid.pool, backoff.pgid.seed, backoff.pgid.shard
+        );
+
+        // Get the session for this OSD (the one that sent the backoff)
+        let sessions = self.sessions.read().await;
+        let session = sessions.get(&osd_id).ok_or_else(|| {
+            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
+        })?;
+
+        match backoff.op {
+            CEPH_OSD_BACKOFF_OP_BLOCK => {
+                info!(
+                    "OSD {} requests backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+                    osd_id,
+                    backoff.pgid.pool,
+                    backoff.pgid.seed,
+                    backoff.pgid.shard,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end
+                );
+
+                // Register backoff in session
+                {
+                    let backoffs = session.backoffs();
+                    let mut backoffs_map = backoffs.write().await;
+                    let pg_backoffs = backoffs_map
+                        .entry(backoff.pgid)
+                        .or_insert_with(HashMap::new);
+
+                    let backoff_entry = crate::session::OSDBackoff {
+                        pgid: backoff.pgid,
+                        id: backoff.id,
+                        begin: backoff.begin.clone(),
+                        end: backoff.end.clone(),
+                    };
+
+                    pg_backoffs.insert(backoff.begin.clone(), backoff_entry);
+                }
+
+                // Send ACK_BLOCK reply through session's send channel
+                let ack = MOSDBackoff::new(
+                    backoff.pgid,
+                    backoff.map_epoch,
+                    CEPH_OSD_BACKOFF_OP_ACK_BLOCK,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end,
+                );
+
+                match ack.encode() {
+                    Ok(payload) => {
+                        let msg = msgr2::message::Message::new(
+                            crate::messages::CEPH_MSG_OSD_BACKOFF,
+                            payload,
+                        )
+                        .with_version(MOSDBackoff::VERSION);
+
+                        let send_tx = session.send_tx();
+                        if let Err(e) = send_tx.send(msg).await {
+                            error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
+                        } else {
+                            debug!("Sent ACK_BLOCK for backoff id={} to OSD {}", ack.id, osd_id);
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to encode ACK_BLOCK message: {}", e);
+                    }
+                }
+            }
+
+            CEPH_OSD_BACKOFF_OP_UNBLOCK => {
+                info!(
+                    "OSD {} lifts backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+                    osd_id,
+                    backoff.pgid.pool,
+                    backoff.pgid.seed,
+                    backoff.pgid.shard,
+                    backoff.id,
+                    backoff.begin,
+                    backoff.end
+                );
+
+                // Remove backoff from session
+                {
+                    let backoffs = session.backoffs();
+                    let mut backoffs_map = backoffs.write().await;
+                    if let Some(pg_backoffs) = backoffs_map.get_mut(&backoff.pgid) {
+                        pg_backoffs.remove(&backoff.begin);
+
+                        // Remove PG entry if no more backoffs
+                        if pg_backoffs.is_empty() {
+                            backoffs_map.remove(&backoff.pgid);
+                        }
+                    }
+                }
+
+                // Resend operations that were in the backoff range
+                session
+                    .resend_ops_in_range(&backoff.pgid, &backoff.begin, &backoff.end)
+                    .await;
+            }
+
+            _ => {
+                warn!(
+                    "Received unknown backoff operation {} from OSD {}",
+                    backoff.op, osd_id
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
-/// Implement Dispatcher trait for OSDClient to handle OSDMap messages
+/// Implement Dispatcher trait for OSDClient to handle broadcast messages
+///
+/// Only handles OSDMAP (broadcast message).
+/// Session-specific messages (OPREPLY, BACKOFF) are dispatched via dispatch_from_osd()
 #[async_trait]
 impl Dispatcher for OSDClient {
     async fn dispatch(
         &self,
         msg: msgr2::message::Message,
     ) -> std::result::Result<(), denc::RadosError> {
-        // Use From trait for error conversion
-        self.handle_osdmap(msg).await.map_err(Into::into)
+        let msg_type = msg.msg_type();
+
+        match msg_type {
+            msgr2::message::CEPH_MSG_OSD_MAP => {
+                // OSDMap updates from monitors or OSDs (broadcast message)
+                self.handle_osdmap(msg).await.map_err(Into::into)
+            }
+            _ => {
+                // Session-specific messages should not come through MessageBus
+                warn!(
+                    "OSDClient MessageBus received unexpected message type: 0x{:04x} (should use dispatch_from_osd)",
+                    msg_type
+                );
+                Ok(())
+            }
+        }
     }
 }
