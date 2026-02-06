@@ -52,37 +52,62 @@ impl Denc for EVersion {
 }
 
 /// Universal Time structure (utime_t in C++)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+///
+/// Represents time with second and nanosecond precision.
+/// Wire format: u32 sec + u32 nsec
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UTime {
     pub sec: u32,
     pub nsec: u32,
 }
 
 impl UTime {
-    pub fn new(sec: u32, nsec: u32) -> Self {
-        UTime { sec, nsec }
+    /// Create a new UTime with zero time
+    pub const fn zero() -> Self {
+        Self { sec: 0, nsec: 0 }
     }
 
-    pub fn zero() -> Self {
-        UTime { sec: 0, nsec: 0 }
+    /// Create a new UTime from seconds and nanoseconds
+    pub const fn new(sec: u32, nsec: u32) -> Self {
+        Self { sec, nsec }
     }
 }
 
 impl Denc for UTime {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.sec.encode(buf, features)?;
-        self.nsec.encode(buf, features)?;
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        buf.put_u32_le(self.sec);
+        buf.put_u32_le(self.nsec);
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let sec = u32::decode(buf, features)?;
-        let nsec = u32::decode(buf, features)?;
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        if buf.remaining() < 8 {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for UTime: need 8, have {}",
+                buf.remaining()
+            )));
+        }
+        let sec = buf.get_u32_le();
+        let nsec = buf.get_u32_le();
         Ok(UTime { sec, nsec })
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(self.sec.encoded_size(features)? + self.nsec.encoded_size(features)?)
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(8)
+    }
+}
+
+// Custom Serialize implementation to match ceph-dencoder format
+impl Serialize for UTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UTime", 2)?;
+        state.serialize_field("seconds", &self.sec)?;
+        state.serialize_field("nanoseconds", &self.nsec)?;
+        state.end()
     }
 }
 

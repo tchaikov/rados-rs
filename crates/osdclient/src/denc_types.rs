@@ -540,31 +540,8 @@ impl Denc for OsdStatData {
 
 // ============= UTime (utime_t/timespec) =============
 
-/// Ceph utime_t structure (timespec)
-///
-/// Represents time with second and nanosecond precision.
-/// Wire format: u32 tv_sec + u32 tv_nsec
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, denc::ZeroCopyDencode)]
-#[repr(C, packed)]
-pub struct UTime {
-    pub tv_sec: u32,
-    pub tv_nsec: u32,
-}
-
-impl UTime {
-    /// Create a new UTime with zero time
-    pub const fn zero() -> Self {
-        Self {
-            tv_sec: 0,
-            tv_nsec: 0,
-        }
-    }
-
-    /// Create a new UTime from seconds and nanoseconds
-    pub const fn new(tv_sec: u32, tv_nsec: u32) -> Self {
-        Self { tv_sec, tv_nsec }
-    }
-}
+// Re-export UTime from denc crate to avoid duplication
+pub use denc::UTime;
 
 // ============= Size Constants =============
 
@@ -957,17 +934,17 @@ mod tests {
 
         let decoded = UTime::decode(&mut &buf[..], 0).unwrap();
         // Copy values to avoid taking references to packed struct fields
-        let decoded_sec = decoded.tv_sec;
-        let decoded_nsec = decoded.tv_nsec;
-        let original_sec = original.tv_sec;
-        let original_nsec = original.tv_nsec;
+        let decoded_sec = decoded.sec;
+        let decoded_nsec = decoded.nsec;
+        let original_sec = original.sec;
+        let original_nsec = original.nsec;
         assert_eq!(decoded_sec, original_sec);
         assert_eq!(decoded_nsec, original_nsec);
 
         // Test zero
         let zero = UTime::zero();
-        let zero_sec = zero.tv_sec;
-        let zero_nsec = zero.tv_nsec;
+        let zero_sec = zero.sec;
+        let zero_nsec = zero.nsec;
         assert_eq!(zero_sec, 0);
         assert_eq!(zero_nsec, 0);
     }
