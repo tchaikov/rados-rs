@@ -1,9 +1,8 @@
 // PGMap and related types from Ceph's mon/PGMap.h
 
-use crate::denc::{Denc, FixedSize, VersionedEncode};
-use crate::error::RadosError;
-use crate::osdmap::{EVersion, Epoch, PgId, UTime, Version};
+use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};
+use denc::{Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode};
 
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
@@ -2550,7 +2549,6 @@ mod pg_stat_support_tests {
             version: EVersion {
                 version: 100,
                 epoch: 10,
-                pad: crate::padding::Padding::zero(),
             },
             reported_seq: 50,
             reported_epoch: 10,
@@ -2643,7 +2641,6 @@ mod pg_stat_support_tests {
             version: EVersion {
                 version: 10,
                 epoch: 5,
-                pad: crate::padding::Padding::zero(),
             },
             ..Default::default()
         };

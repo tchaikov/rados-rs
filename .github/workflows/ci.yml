@@ -132,7 +132,7 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build dencoder
-        run: cargo build --bin dencoder
+        run: cargo build -p dencoder
 
       - name: Run corpus comparison test
         run: cd crates/denc && cargo test --test corpus_comparison_test -- --ignored --nocapture

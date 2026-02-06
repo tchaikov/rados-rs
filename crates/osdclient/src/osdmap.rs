@@ -1,22 +1,17 @@
-use crate::denc::{Denc, VersionedEncode};
-use crate::entity_addr::{EntityAddr, EntityAddrvec};
-use crate::error::RadosError;
-use crate::padding::Padding;
-use crate::{mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding};
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
+use denc::{
+    mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
+    EntityAddr, EntityAddrvec, Padding, RadosError, VersionedEncode,
+};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// Basic Ceph types that match C++ implementation
-/// Ceph filesystem identifier (uuid_d in C++)
-pub type FsId = [u8; 16];
+/// Re-export basic types from denc
+pub use denc::{EVersion, Epoch, FsId, UTime, UuidD, Version};
 
-/// Ceph epoch type  
-pub type Epoch = u32;
-
-/// Ceph version type
-pub type Version = u64;
+/// Re-export PgId from crush
+pub use crush::PgId;
 
 /// Varint encoding/decoding utilities (matching C++ denc_varint)
 fn decode_varint<B: Buf>(buf: &mut B) -> Result<u64, RadosError> {
@@ -183,118 +178,7 @@ impl Denc for ShardIdSet {
     }
 }
 
-/// Re-export PgId from crush crate
-/// The Denc implementation is in crush_types.rs
-pub use crush::PgId;
-
-/// Event Version (eversion_t in C++)
-/// Note: In corpus data, only version and epoch are encoded (12 bytes total)
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct EVersion {
-    pub version: Version,
-    pub epoch: Epoch,
-    #[serde(skip_serializing)]
-    pub pad: Padding<u32>, // __pad field from C++, but not encoded in corpus data
-}
-
-// DencMut implementation for EVersion
-impl crate::denc::Denc for EVersion {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 12 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for EVersion: need 12, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u64_le(self.version);
-        buf.put_u32_le(self.epoch);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 12 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for EVersion".to_string(),
-            ));
-        }
-        let version = buf.get_u64_le();
-        let epoch = buf.get_u32_le();
-        Ok(EVersion {
-            version,
-            epoch,
-            pad: Padding::zero(),
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(12)
-    }
-}
-
-impl crate::denc::FixedSize for EVersion {
-    const SIZE: usize = 12;
-}
-
-/// Unix timestamp (utime_t in C++)
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct UTime {
-    pub sec: u32,
-    pub nsec: u32,
-}
-
-// Custom Serialize implementation to match ceph-dencoder format
-impl Serialize for UTime {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("UTime", 2)?;
-        state.serialize_field("seconds", &self.sec)?;
-        state.serialize_field("nanoseconds", &self.nsec)?;
-        state.end()
-    }
-}
-
-// DencMut implementation for UTime
-impl crate::denc::Denc for UTime {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for UTime: need 8, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u32_le(self.sec);
-        buf.put_u32_le(self.nsec);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for UTime".to_string(),
-            ));
-        }
-        let sec = buf.get_u32_le();
-        let nsec = buf.get_u32_le();
-        Ok(UTime { sec, nsec })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
-}
-
-impl crate::denc::FixedSize for UTime {
-    const SIZE: usize = 8;
-}
-
-/// Helper function to format UTime as ISO 8601 timestamp string
-/// Matches ceph-dencoder output format: "YYYY-MM-DDTHH:MM:SS.ffffff+0000"
-/// Special cases:
-///   - if timestamp is 0, output "0.000000"
-///   - if timestamp is < 365 days (31536000 seconds), output as "seconds.microseconds"
+/// Helper function to format UTime as timestamp string for serialization
 fn format_utime_as_timestamp(utime: &UTime) -> String {
     use std::time::Duration;
 
@@ -427,7 +311,7 @@ impl VersionedEncode for ExplicitHashHitSetParams {
     }
 }
 
-crate::impl_denc_for_versioned!(ExplicitHashHitSetParams);
+denc::impl_denc_for_versioned!(ExplicitHashHitSetParams);
 
 /// Explicit Object HitSet parameters - no additional parameters needed
 #[derive(Debug, Clone, Default, Serialize)]
@@ -466,7 +350,7 @@ impl VersionedEncode for ExplicitObjectHitSetParams {
     }
 }
 
-crate::impl_denc_for_versioned!(ExplicitObjectHitSetParams);
+denc::impl_denc_for_versioned!(ExplicitObjectHitSetParams);
 
 /// BloomHitSet parameters - separate VersionedEncode implementation
 #[derive(Debug, Clone, Default, Serialize)]
@@ -527,7 +411,7 @@ impl VersionedEncode for BloomHitSetParams {
     }
 }
 
-crate::impl_denc_for_versioned!(BloomHitSetParams);
+denc::impl_denc_for_versioned!(BloomHitSetParams);
 
 /// HitSet parameter types - using dedicated types for each variant
 #[derive(Debug, Clone, Default)]
@@ -655,95 +539,9 @@ impl VersionedEncode for HitSetParams {
     }
 }
 
-crate::impl_denc_for_versioned!(HitSetParams);
+denc::impl_denc_for_versioned!(HitSetParams);
 
 /// Ceph UUID type (uuid_d in C++)
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct UuidD {
-    pub bytes: [u8; 16],
-}
-
-// Custom Serialize implementation to match ceph-dencoder format
-impl Serialize for UuidD {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("UuidD", 1)?;
-        // Format as UUID string to match ceph-dencoder
-        let uuid_str = format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
-            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
-            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
-            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
-        );
-        state.serialize_field("uuid", &uuid_str)?;
-        state.end()
-    }
-}
-
-impl UuidD {
-    pub fn new() -> Self {
-        Self { bytes: [0; 16] }
-    }
-
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self { bytes }
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.bytes.iter().all(|&b| b == 0)
-    }
-}
-
-impl std::fmt::Display for UuidD {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
-            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
-            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
-            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
-        )
-    }
-}
-
-// DencMut implementation for UuidD
-impl crate::denc::Denc for UuidD {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 16 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for UuidD: need 16, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_slice(&self.bytes);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for UuidD".to_string(),
-            ));
-        }
-        let mut uuid_bytes = [0u8; 16];
-        buf.copy_to_slice(&mut uuid_bytes);
-        Ok(UuidD { bytes: uuid_bytes })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(16)
-    }
-}
-
-impl crate::denc::FixedSize for UuidD {
-    const SIZE: usize = 16;
-}
-
 /// OSD extended information structure (osd_xinfo_t in C++)
 #[derive(Debug, Clone, Default)]
 pub struct OsdXInfo {
@@ -910,7 +708,7 @@ impl VersionedEncode for OsdXInfo {
     }
 }
 
-crate::impl_denc_for_versioned!(OsdXInfo);
+denc::impl_denc_for_versioned!(OsdXInfo);
 
 /// OSD information structure (osd_info_t in C++)
 #[derive(Debug, Clone, Default, Serialize)]
@@ -924,7 +722,7 @@ pub struct OsdInfo {
 }
 
 // DencMut implementation for OsdInfo
-impl crate::denc::Denc for OsdInfo {
+impl denc::Denc for OsdInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 25 {
             return Err(RadosError::Protocol(format!(
@@ -971,7 +769,7 @@ impl crate::denc::Denc for OsdInfo {
     }
 }
 
-impl crate::denc::FixedSize for OsdInfo {
+impl denc::FixedSize for OsdInfo {
     const SIZE: usize = 25;
 }
 
@@ -1306,7 +1104,7 @@ impl VersionedEncode for PoolSnapInfo {
     }
 }
 // Manual Denc implementation for PoolSnapInfo (uses VersionedEncode)
-impl crate::denc::Denc for PoolSnapInfo {
+impl denc::Denc for PoolSnapInfo {
     const USES_VERSIONING: bool = true;
     const FEATURE_DEPENDENT: bool = <PoolSnapInfo as VersionedEncode>::FEATURE_DEPENDENT;
 
@@ -1336,7 +1134,7 @@ pub struct SnapInterval {
 }
 
 // DencMut implementation for SnapInterval
-impl crate::denc::Denc for SnapInterval {
+impl denc::Denc for SnapInterval {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 16 {
             return Err(RadosError::Protocol(format!(
@@ -1365,7 +1163,7 @@ impl crate::denc::Denc for SnapInterval {
     }
 }
 
-impl crate::denc::FixedSize for SnapInterval {
+impl denc::FixedSize for SnapInterval {
     const SIZE: usize = 16;
 }
 
@@ -1392,7 +1190,7 @@ impl VersionedEncode for PgPool {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
-        use crate::features::*;
+        use denc::features::*;
 
         // Implement the same logic as Ceph's pg_pool_t::encode
         let mut v = Self::VERSION_CURRENT; // Default to latest
@@ -1567,12 +1365,6 @@ impl VersionedEncode for PgPool {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        println!(
-            "  Debug: Starting decode with version {}, remaining bytes: {}",
-            version,
-            buf.remaining()
-        );
-
         if version < Self::COMPAT_VERSION {
             return Err(RadosError::Protocol(format!(
                 "pg_pool_t version {} too old (minimum {})",
@@ -1581,11 +1373,6 @@ impl VersionedEncode for PgPool {
             )));
         }
 
-        println!(
-            "  Debug: Starting decode with version {}, remaining bytes: {}",
-            version,
-            buf.remaining()
-        );
         let mut pool = PgPool::new();
 
         // Basic fields (always present)
@@ -1601,28 +1388,13 @@ impl VersionedEncode for PgPool {
         pool.snap_seq = buf.get_u64_le();
         pool.snap_epoch = buf.get_u32_le();
 
-        println!(
-            "  Debug: Before snaps, remaining bytes: {}",
-            buf.remaining()
-        );
-
         // Version-dependent fields following C++ decode logic
         if version >= 3 {
             // Decode snaps map using generic implementation
             pool.snaps = BTreeMap::decode(buf, features)?;
-            println!(
-                "  Debug: After snaps decode, snaps.len()={}, remaining bytes: {}",
-                pool.snaps.len(),
-                buf.remaining()
-            );
 
             // Decode removed_snaps using generic implementation
             pool.removed_snaps = Vec::decode(buf, features)?;
-            println!(
-                "  Debug: After removed_snaps decode, removed_snaps.len()={}, remaining bytes: {}",
-                pool.removed_snaps.len(),
-                buf.remaining()
-            );
 
             pool.auid = buf.get_u64_le();
         } else {
@@ -1637,20 +1409,12 @@ impl VersionedEncode for PgPool {
 
             // Read crash_replay_interval but don't store it (matches C++ behavior)
             let _crash_replay_interval = buf.get_u32_le();
-            println!(
-                "  Debug: After crash_replay_interval (not stored), remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.flags = 0;
         }
 
         if version >= 7 {
             pool.min_size = buf.get_u8();
-            println!(
-                "  Debug: After min_size, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.min_size = if pool.size > 0 {
                 pool.size - pool.size / 2
@@ -1661,58 +1425,24 @@ impl VersionedEncode for PgPool {
 
         if version >= 8 {
             pool.quota_max_bytes = buf.get_u64_le();
-            println!(
-                "  Debug: After quota_max_bytes, remaining bytes: {}",
-                buf.remaining()
-            );
 
             pool.quota_max_objects = buf.get_u64_le();
-            println!(
-                "  Debug: After quota_max_objects, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.quota_max_bytes = 0;
             pool.quota_max_objects = 0;
         }
 
         if version >= 9 {
-            println!(
-                "  Debug: Before tiers (version >= 9), remaining bytes: {}",
-                buf.remaining()
-            );
-
             // Decode tiers using generic Vec implementation
             pool.tiers = Vec::decode(buf, features)?;
-            println!(
-                "  Debug: After tiers decode, tiers.len()={}, remaining bytes: {}",
-                pool.tiers.len(),
-                buf.remaining()
-            );
 
             pool.tier_of = buf.get_i64_le();
-            println!(
-                "  Debug: After tier_of, remaining bytes: {}",
-                buf.remaining()
-            );
 
             pool.cache_mode = buf.get_u8();
-            println!(
-                "  Debug: After cache_mode, remaining bytes: {}",
-                buf.remaining()
-            );
 
             pool.read_tier = buf.get_i64_le();
-            println!(
-                "  Debug: After read_tier, remaining bytes: {}",
-                buf.remaining()
-            );
 
             pool.write_tier = buf.get_i64_le();
-            println!(
-                "  Debug: After write_tier, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.tiers = Vec::new();
             pool.tier_of = -1;
@@ -1722,42 +1452,20 @@ impl VersionedEncode for PgPool {
         }
 
         if version >= 10 {
-            println!(
-                "  Debug: Before properties (version >= 10), remaining bytes: {}",
-                buf.remaining()
-            );
             // Decode properties using generic BTreeMap implementation
             pool.properties = BTreeMap::decode(buf, features)?;
-            println!(
-                "  Debug: After properties decode, properties.len()={}, remaining bytes: {}",
-                pool.properties.len(),
-                buf.remaining()
-            );
         } else {
             pool.properties = BTreeMap::new();
         }
 
         if version >= 11 {
-            println!(
-                "  Debug: Before hit_set_params (version >= 11), remaining bytes: {}",
-                buf.remaining()
-            );
-
             // Debug code removed - cannot index into generic Buf trait
 
             // Decode HitSetParams using the proper implementation
             pool.hit_set_params = HitSetParams::decode_versioned(buf, features)?;
-            println!(
-                "  Debug: After hit_set_params decode, remaining bytes: {}",
-                buf.remaining()
-            );
 
             pool.hit_set_period = buf.get_u32_le();
             pool.hit_set_count = buf.get_u32_le();
-            println!(
-                "  Debug: After hit_set_period/count, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.hit_set_params = HitSetParams::None;
             pool.hit_set_period = 0;
@@ -1766,10 +1474,6 @@ impl VersionedEncode for PgPool {
 
         if version >= 12 {
             pool.stripe_width = buf.get_u32_le();
-            println!(
-                "  Debug: After stripe_width, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.stripe_width = 0;
         }
@@ -1781,10 +1485,6 @@ impl VersionedEncode for PgPool {
             pool.cache_target_full_ratio_micro = buf.get_u32_le();
             pool.cache_min_flush_age = buf.get_u32_le();
             pool.cache_min_evict_age = buf.get_u32_le();
-            println!(
-                "  Debug: After version 13 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.target_max_bytes = 0;
             pool.target_max_objects = 0;
@@ -1796,40 +1496,24 @@ impl VersionedEncode for PgPool {
 
         if version >= 14 {
             pool.erasure_code_profile = String::decode(buf, features)?;
-            println!(
-                "  Debug: After erasure_code_profile, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.erasure_code_profile = String::new();
         }
 
         if version >= 15 {
             pool.last_force_op_resend_preluminous = buf.get_u32_le();
-            println!(
-                "  Debug: After last_force_op_resend_preluminous, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.last_force_op_resend_preluminous = 0;
         }
 
         if version >= 16 {
             pool.min_read_recency_for_promote = buf.get_i32_le();
-            println!(
-                "  Debug: After min_read_recency_for_promote, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.min_read_recency_for_promote = 1;
         }
 
         if version >= 17 {
             pool.expected_num_objects = buf.get_u64_le();
-            println!(
-                "  Debug: After expected_num_objects, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.expected_num_objects = 0;
         }
@@ -1850,10 +1534,6 @@ impl VersionedEncode for PgPool {
         if version >= 23 {
             pool.hit_set_grade_decay_rate = buf.get_i32_le();
             pool.hit_set_search_last_n = buf.get_u32_le();
-            println!(
-                "  Debug: After version 23 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.hit_set_grade_decay_rate = 0;
             pool.hit_set_search_last_n = 1;
@@ -1863,10 +1543,7 @@ impl VersionedEncode for PgPool {
         // If we can't decode them properly, skip them
         if version >= 24 && buf.remaining() > 4 {
             // Pool opts (simplified as raw data for now)
-            println!(
-                "  Debug: About to read opts len, remaining bytes: {}",
-                buf.remaining()
-            );
+
             if buf.remaining() >= 8 {
                 // Debug array removed - cannot index generic Buf
             }
@@ -1874,16 +1551,9 @@ impl VersionedEncode for PgPool {
             // opts is versioned encoded - read version header first
             if buf.remaining() >= 6 {
                 // Need at least 6 bytes for version header
-                let version = buf.get_u8();
-                let compat_version = buf.get_u8();
+                let _version = buf.get_u8();
+                let _compat_version = buf.get_u8();
                 let opts_len = buf.get_u32_le() as usize;
-                println!(
-                    "  Debug: opts version={}, compat={}, len={}, remaining bytes: {}",
-                    version,
-                    compat_version,
-                    opts_len,
-                    buf.remaining()
-                );
 
                 if opts_len <= buf.remaining() && opts_len < 10000 {
                     // Reasonable limit
@@ -1904,10 +1574,6 @@ impl VersionedEncode for PgPool {
         // Try to continue with remaining fields if there are enough bytes
         if version >= 25 && buf.remaining() >= 4 {
             pool.last_force_op_resend_prenautilus = buf.get_u32_le();
-            println!(
-                "  Debug: After last_force_op_resend_prenautilus (v25), remaining bytes: {}",
-                buf.remaining()
-            );
         } else {
             pool.last_force_op_resend_prenautilus = pool.last_force_op_resend_preluminous;
         }
@@ -1916,19 +1582,11 @@ impl VersionedEncode for PgPool {
         if version >= 26 {
             // Application metadata (BTreeMap<String, String>)
             pool.application_metadata = BTreeMap::decode(buf, features)?;
-            println!(
-                "  Debug: After application_metadata (v26), remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         if version >= 27 {
             // Create time
             pool.create_time = UTime::decode(buf, features)?;
-            println!(
-                "  Debug: After create_time (v27), remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         if version >= 28 {
@@ -1940,18 +1598,10 @@ impl VersionedEncode for PgPool {
             let _pg_num_dec_last_epoch_clean = buf.get_u32_le(); // Always 0 in recent versions
             pool.last_force_op_resend = buf.get_u32_le();
             pool.pg_autoscale_mode = buf.get_u8();
-            println!(
-                "  Debug: After v28 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         if version >= 29 {
             pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
-            println!(
-                "  Debug: After v29 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         // Version 30 fields (special handling)
@@ -1960,10 +1610,6 @@ impl VersionedEncode for PgPool {
             pool.peering_crush_bucket_target = buf.get_u32_le();
             pool.peering_crush_bucket_barrier = buf.get_u32_le();
             pool.peering_crush_mandatory_member = buf.get_i32_le();
-            println!(
-                "  Debug: After v30 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         // Version 31+ fields (optional tuple)
@@ -1976,33 +1622,15 @@ impl VersionedEncode for PgPool {
                 pool.peering_crush_bucket_barrier = barrier;
                 pool.peering_crush_mandatory_member = mandatory;
             }
-            println!(
-                "  Debug: After v31 fields, remaining bytes: {}",
-                buf.remaining()
-            );
         }
 
         // Version 32+ fields
         if version >= 32 {
-            println!(
-                "  Debug: About to decode nonprimary_shards, remaining bytes: {}",
-                buf.remaining()
-            );
             if buf.remaining() >= 2 {
-                let peek_bytes: Vec<u8> = buf.chunk()[..buf.remaining().min(10)].to_vec();
-                println!("  Debug: Next bytes: {:02x?}", peek_bytes);
+                let _peek_bytes: Vec<u8> = buf.chunk()[..buf.remaining().min(10)].to_vec();
             }
             pool.nonprimary_shards = ShardIdSet::decode(buf, features)?;
-            println!(
-                "  Debug: After v32 fields (nonprimary_shards), remaining bytes: {}",
-                buf.remaining()
-            );
         }
-
-        println!(
-            "  Debug: Decode completed, remaining bytes: {}",
-            buf.remaining()
-        );
 
         Ok(pool)
     }
@@ -2012,7 +1640,7 @@ impl VersionedEncode for PgPool {
     }
 }
 // Manual Denc implementation for PgPool (uses VersionedEncode)
-impl crate::denc::Denc for PgPool {
+impl denc::Denc for PgPool {
     const USES_VERSIONING: bool = true;
     const FEATURE_DEPENDENT: bool = <PgPool as VersionedEncode>::FEATURE_DEPENDENT;
 
@@ -2159,7 +1787,7 @@ impl VersionedEncode for PgMergeMeta {
     }
 }
 // Manual Denc implementation for PgMergeMeta (uses VersionedEncode)
-impl crate::denc::Denc for PgMergeMeta {
+impl denc::Denc for PgMergeMeta {
     const USES_VERSIONING: bool = true;
     const FEATURE_DEPENDENT: bool = <PgMergeMeta as VersionedEncode>::FEATURE_DEPENDENT;
 
@@ -2189,18 +1817,18 @@ pub struct SnapIntervalSet {
 }
 
 // DencMut implementation for SnapIntervalSet
-impl crate::denc::Denc for SnapIntervalSet {
+impl denc::Denc for SnapIntervalSet {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        <Vec<SnapInterval> as crate::denc::Denc>::encode(&self.intervals, buf, features)
+        <Vec<SnapInterval> as denc::Denc>::encode(&self.intervals, buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let intervals = <Vec<SnapInterval> as crate::denc::Denc>::decode(buf, features)?;
+        let intervals = <Vec<SnapInterval> as denc::Denc>::decode(buf, features)?;
         Ok(SnapIntervalSet { intervals })
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        <Vec<SnapInterval> as crate::denc::Denc>::encoded_size(&self.intervals, features)
+        <Vec<SnapInterval> as denc::Denc>::encoded_size(&self.intervals, features)
     }
 }
 
@@ -2326,7 +1954,7 @@ impl OSDMapIncremental {
     pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
         // Update epoch
         base.epoch = self.epoch;
-        base.modified = self.modified.clone();
+        base.modified = self.modified;
 
         // Update pool max
         if self.new_pool_max >= 0 {
@@ -2406,11 +2034,11 @@ impl OSDMapIncremental {
 
         // Update timestamps
         if self.new_last_up_change.sec != 0 {
-            base.last_up_change = self.new_last_up_change.clone();
+            base.last_up_change = self.new_last_up_change;
         }
 
         if self.new_last_in_change.sec != 0 {
-            base.last_in_change = self.new_last_in_change.clone();
+            base.last_in_change = self.new_last_in_change;
         }
 
         Ok(())
@@ -2949,14 +2577,9 @@ impl VersionedEncode for OSDMap {
         map.epoch = client_bytes.get_u32_le();
         map.created = UTime::decode(&mut client_bytes, features)?;
         map.modified = UTime::decode(&mut client_bytes, features)?;
-        println!(
-            "map.modified = {}",
-            format_utime_as_timestamp(&map.modified)
-        );
 
         // Decode pools (BTreeMap<u64, PgPool>)
         map.pools = BTreeMap::decode(&mut client_bytes, features)?;
-        println!("  Debug: map.pools = {:?}", map.pools);
 
         // Decode pool_name (BTreeMap<u64, String>)
         map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
@@ -3041,7 +2664,7 @@ impl VersionedEncode for OSDMap {
                 }
                 Err(e) => {
                     // Log the error but continue - CRUSH map parsing is optional for now
-                    eprintln!("Warning: Failed to parse CRUSH map: {:?}", e);
+                    tracing::warn!("Failed to parse CRUSH map: {:?}", e);
                     map.crush = None;
                 }
             }
@@ -3226,10 +2849,6 @@ impl VersionedEncode for OSDMap {
 // This allows tools to detect versioning and feature dependency at compile time
 
 // Level 1: Simple types (no versioning, no feature dependency)
-mark_simple_encoding!(PgId);
-mark_simple_encoding!(EVersion);
-mark_simple_encoding!(UTime);
-mark_simple_encoding!(UuidD);
 mark_simple_encoding!(OsdInfo);
 mark_simple_encoding!(SnapInterval);
 mark_simple_encoding!(SnapIntervalSet);

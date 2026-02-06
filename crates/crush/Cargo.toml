@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 bytes = { workspace = true }
+denc = { path = "../denc" }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

@@ -51,7 +51,7 @@ pub struct OSDClient {
     /// Cluster FSID for OSDMap validation
     fsid: denc::UuidD,
     /// Current OSDMap
-    osdmap: Arc<RwLock<Option<Arc<denc::osdmap::OSDMap>>>>,
+    osdmap: Arc<RwLock<Option<Arc<crate::osdmap::OSDMap>>>>,
     /// Global message bus for inter-component messaging
     message_bus: Arc<MessageBus>,
     /// Notification for OSDMap arrival
@@ -145,7 +145,7 @@ impl OSDClient {
     }
 
     /// Get the current OSDMap
-    pub async fn get_osdmap(&self) -> Result<Arc<denc::osdmap::OSDMap>> {
+    pub async fn get_osdmap(&self) -> Result<Arc<crate::osdmap::OSDMap>> {
         let osdmap_guard = self.osdmap.read().await;
         match osdmap_guard.as_ref() {
             Some(map) => Ok(Arc::clone(map)),
@@ -165,7 +165,7 @@ impl OSDClient {
     pub async fn wait_for_osdmap(
         &self,
         timeout: std::time::Duration,
-    ) -> Result<Arc<denc::osdmap::OSDMap>> {
+    ) -> Result<Arc<crate::osdmap::OSDMap>> {
         wait_for_condition(
             || async {
                 let osdmap_guard = self.osdmap.read().await;
@@ -1204,7 +1204,7 @@ impl OSDClient {
                         info!("Applying incremental OSDMap for epoch {}", e);
                         let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
 
-                        match denc::osdmap::OSDMapIncremental::decode_versioned(
+                        match crate::osdmap::OSDMapIncremental::decode_versioned(
                             &mut inc_bl.as_ref(),
                             0,
                         ) {
@@ -1234,7 +1234,7 @@ impl OSDClient {
                         // Use full map
                         info!("Using full OSDMap for epoch {}", e);
                         let full_bl = mosdmap.maps.get(&e).unwrap();
-                        match denc::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+                        match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                             Ok(full_map) => {
                                 info!("✓ Decoded full OSDMap: epoch={}", full_map.epoch);
                                 *osdmap_guard = Some(Arc::new(full_map));
@@ -1253,7 +1253,7 @@ impl OSDClient {
                 if let Some((&latest_epoch, full_bl)) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)
                 {
                     info!("Using latest full OSDMap (epoch {})", latest_epoch);
-                    match denc::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+                    match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                         Ok(full_map) => {
                             info!("✓ Initial OSDMap loaded: epoch={}", full_map.epoch);
                             *osdmap_guard = Some(Arc::new(full_map));

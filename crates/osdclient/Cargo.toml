@@ -11,6 +11,7 @@ tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 bitflags = "2.4"
+serde = { workspace = true }
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }

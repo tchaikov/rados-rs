@@ -10,8 +10,8 @@ use bytes::{Buf, BufMut};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-// Import specific types from osdmap to avoid conflicts
-use crate::osdmap::{Epoch, FsId, UTime};
+// Import specific types from types module
+use crate::types::{Epoch, FsId, UTime};
 
 /// Monitor feature flags (mon_feature_t in C++)
 /// Uses versioned encoding (ENCODE_START/DECODE_START)

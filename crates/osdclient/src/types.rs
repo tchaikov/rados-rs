@@ -136,8 +136,8 @@ impl ObjectId {
     }
 }
 
-// Re-export PgId from denc (consolidated definition)
-pub use denc::PgId;
+// Re-export PgId from crush
+pub use crush::PgId;
 
 /// Striped placement group ID (corresponds to spg_t in Ceph)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
