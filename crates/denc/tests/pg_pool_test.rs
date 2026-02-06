@@ -1,5 +1,6 @@
 use bytes::BytesMut;
-use denc::{Denc, PgPool};
+use denc::Denc;
+use osdclient::PgPool;
 use std::fs;
 use std::path::PathBuf;
 

@@ -1,4 +1,5 @@
-use denc::{Denc, PgMergeMeta};
+use denc::Denc;
+use osdclient::PgMergeMeta;
 use std::fs;
 use std::path::Path;
 

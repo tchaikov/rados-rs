@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use denc::{OSDMap, VersionedEncode};
+use crush::PgId;
+use denc::VersionedEncode;
+use osdclient::OSDMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -123,7 +125,7 @@ fn test_osdmap_helper_methods() {
     assert!(osdmap.get_pool_crush_rule(1).is_none());
 
     // Test pg_to_osds returns error when no CRUSH map
-    let pg = denc::PgId { pool: 1, seed: 0 };
+    let pg = PgId { pool: 1, seed: 0 };
     let result = osdmap.pg_to_osds(&pg);
     assert!(result.is_err());
 

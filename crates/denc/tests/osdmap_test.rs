@@ -1,5 +1,6 @@
 use bytes::Bytes;
-use denc::{OSDMap, OSDMapIncremental, VersionedEncode};
+use denc::VersionedEncode;
+use osdclient::{OSDMap, OSDMapIncremental};
 use std::fs;
 use std::path::PathBuf;
 

@@ -1,5 +1,7 @@
 use bytes::Bytes;
-use denc::{OSDMap, PgId, VersionedEncode};
+use crush::PgId;
+use denc::VersionedEncode;
+use osdclient::OSDMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -71,7 +73,7 @@ fn test_object_placement_pipeline() {
 
                             // Verify PG is within valid range
                             assert_eq!(
-                                pg.pool, *pool_id as u64,
+                                pg.pool, *pool_id,
                                 "PG pool ID should match input pool ID"
                             );
                             assert!(

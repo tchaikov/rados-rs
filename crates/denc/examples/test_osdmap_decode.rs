@@ -1,6 +1,6 @@
 use bytes::Bytes;
-use denc::denc::VersionedEncode;
-use denc::osdmap::OSDMap;
+use denc::VersionedEncode;
+use osdclient::OSDMap;
 use std::fs;
 
 fn main() {
