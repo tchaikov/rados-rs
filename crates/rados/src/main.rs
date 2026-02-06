@@ -301,9 +301,9 @@ async fn main() -> Result<()> {
 }
 
 /// Parse pool name or ID
-async fn parse_pool(pool: &str, osd_client: &Arc<osdclient::OSDClient>) -> Result<i64> {
+async fn parse_pool(pool: &str, osd_client: &Arc<osdclient::OSDClient>) -> Result<u64> {
     // Try parsing as integer first
-    if let Ok(id) = pool.parse::<i64>() {
+    if let Ok(id) = pool.parse::<u64>() {
         return Ok(id);
     }
 
