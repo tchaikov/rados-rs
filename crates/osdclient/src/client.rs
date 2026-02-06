@@ -270,7 +270,7 @@ impl OSDClient {
     }
 
     /// Map an object to OSDs using CRUSH
-    async fn object_to_osds(&self, pool: i64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
+    async fn object_to_osds(&self, pool: u64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
         // Get current OSDMap from MonClient
         let osdmap = self
             .get_osdmap()
@@ -327,7 +327,7 @@ impl OSDClient {
         // These override CRUSH placement for various reasons (rebalancing, failures, manual overrides)
         // Convert crush::PgId to denc::PgId for looking up in OSDMap
         let pgid = denc::PgId {
-            pool: pg.pool as u64,
+            pool: pg.pool,
             seed: pg.seed,
         };
 
@@ -425,7 +425,7 @@ impl OSDClient {
     /// Returns the OpResult after handling all redirects
     async fn execute_op(
         &self,
-        pool: i64,
+        pool: u64,
         oid: &str,
         ops: Vec<OSDOp>,
     ) -> Result<crate::types::OpResult> {
@@ -516,7 +516,7 @@ impl OSDClient {
     }
 
     /// Read data from an object
-    pub async fn read(&self, pool: i64, oid: &str, offset: u64, len: u64) -> Result<ReadResult> {
+    pub async fn read(&self, pool: u64, oid: &str, offset: u64, len: u64) -> Result<ReadResult> {
         debug!(
             "read pool={} oid={} offset={} len={}",
             pool, oid, offset, len
@@ -559,7 +559,7 @@ impl OSDClient {
     /// reading sparse objects (e.g., VM disk images with holes).
     pub async fn sparse_read(
         &self,
-        pool: i64,
+        pool: u64,
         oid: &str,
         offset: u64,
         len: u64,
@@ -635,7 +635,7 @@ impl OSDClient {
     /// Write data to an object
     pub async fn write(
         &self,
-        pool: i64,
+        pool: u64,
         oid: &str,
         offset: u64,
         data: bytes::Bytes,
@@ -666,7 +666,7 @@ impl OSDClient {
     /// Write full object (overwrite)
     pub async fn write_full(
         &self,
-        pool: i64,
+        pool: u64,
         oid: &str,
         data: bytes::Bytes,
     ) -> Result<WriteResult> {
@@ -688,7 +688,7 @@ impl OSDClient {
     }
 
     /// Get object statistics
-    pub async fn stat(&self, pool: i64, oid: &str) -> Result<StatResult> {
+    pub async fn stat(&self, pool: u64, oid: &str) -> Result<StatResult> {
         debug!("stat pool={} oid={}", pool, oid);
         let ops = vec![OSDOp::stat()];
         let result = self.execute_op(pool, oid, ops).await?;
@@ -726,7 +726,7 @@ impl OSDClient {
     }
 
     /// Delete an object
-    pub async fn delete(&self, pool: i64, oid: &str) -> Result<()> {
+    pub async fn delete(&self, pool: u64, oid: &str) -> Result<()> {
         debug!("delete pool={} oid={}", pool, oid);
         let ops = vec![OSDOp::delete()];
         let result = self.execute_op(pool, oid, ops).await?;
@@ -753,7 +753,7 @@ impl OSDClient {
     /// * `max_entries` - Maximum number of entries to return
     pub async fn list(
         &self,
-        pool: i64,
+        pool: u64,
         cursor: Option<String>,
         max_entries: u64,
     ) -> Result<ListResult> {

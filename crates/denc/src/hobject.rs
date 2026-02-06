@@ -34,8 +34,8 @@ pub struct HObject {
     pub max: bool,
     /// Namespace (usually empty)
     pub nspace: String,
-    /// Pool ID (-1 for meta, >= 0 for data pools)
-    pub pool: i64,
+    /// Pool ID (u64::MAX for meta pool, >= 0 for data pools)
+    pub pool: u64,
 }
 
 impl PartialOrd for HObject {
@@ -117,7 +117,7 @@ pub const SNAP_DIR: u64 = u64::MAX; // -1 in two's complement
 
 impl HObject {
     /// Create an empty hobject_t for use as initial cursor
-    pub fn empty_cursor(pool: i64) -> Self {
+    pub fn empty_cursor(pool: u64) -> Self {
         Self {
             key: String::new(),
             oid: String::new(),
@@ -130,7 +130,7 @@ impl HObject {
     }
 
     /// Create a new hobject_t for a specific object
-    pub fn new(pool: i64, oid: String, hash: u32) -> Self {
+    pub fn new(pool: u64, oid: String, hash: u32) -> Self {
         Self {
             key: String::new(),
             oid,
@@ -187,8 +187,9 @@ impl VersionedEncode for HObject {
         // encode(nspace, bl)
         Denc::encode(&self.nspace, buf, features)?;
 
-        // encode(pool, bl)
-        Denc::encode(&self.pool, buf, features)?;
+        // encode(pool, bl) - convert u64 to i64 for wire format
+        // Note: Large u64 values are reinterpreted as negative i64 values
+        Denc::encode(&(self.pool as i64), buf, features)?;
 
         Ok(())
     }
@@ -228,9 +229,12 @@ impl VersionedEncode for HObject {
                 p = i64::MIN;
             }
 
-            (ns, p)
+            // Convert i64 to u64 (wire format uses i64, internal representation uses u64)
+            // Note: Negative values are reinterpreted as large u64 values
+            (ns, p as u64)
         } else {
-            (String::new(), -1)
+            // Default to u64::MAX (equivalent to -1 in i64)
+            (String::new(), u64::MAX)
         };
 
         Ok(Self {

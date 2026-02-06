@@ -27,46 +27,8 @@ pub use crate::types::{
     CEPH_ENTITY_TYPE_MON, CEPH_ENTITY_TYPE_OSD,
 };
 
-// ============= PgId (pg_t) =============
-
-impl Denc for PgId {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // pg_t encoding: version byte + pool (i64) + seed (u32) + preferred (i32, always -1)
-        1u8.encode(buf, 0)?; // version
-        self.pool.encode(buf, 0)?;
-        self.seed.encode(buf, 0)?;
-        (-1i32).encode(buf, 0)?; // preferred (deprecated, always -1)
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let version = u8::decode(buf, 0)?;
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unknown pg_t version: {}",
-                version
-            )));
-        }
-
-        let pool = i64::decode(buf, 0)?;
-        let seed = u32::decode(buf, 0)?;
-        let _preferred = i32::decode(buf, 0)?; // deprecated
-
-        Ok(PgId { pool, seed })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // version + pool + seed + preferred
-        Some(
-            1u8.encoded_size(0)? // version
-                + self.pool.encoded_size(0)?
-                + self.seed.encoded_size(0)?
-                + (-1i32).encoded_size(0)?, // preferred (deprecated, always -1)
-        )
-    }
-}
+// PgId Denc implementation is now in the denc crate (osdmap.rs)
+// We just re-export and use it here
 
 // ============= StripedPgId (spg_t) =============
 
@@ -296,7 +258,7 @@ impl VersionedEncode for ObjectLocator {
         let hash = i64::decode(buf, 0)?;
 
         Ok(ObjectLocator {
-            pool,
+            pool: pool as u64,
             key,
             nspace,
             hash,
@@ -628,7 +590,7 @@ mod tests {
 
     #[test]
     fn test_pgid_roundtrip() {
-        let pgid = PgId::new(3, 0);
+        let pgid = PgId { pool: 3, seed: 0 };
         let mut buf = BytesMut::new();
 
         pgid.encode(&mut buf, 0).unwrap();
@@ -768,7 +730,7 @@ mod tests {
         locator.encode(&mut buf, 0).unwrap();
 
         let decoded = ObjectLocator::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.pool, -1);
+        assert_eq!(decoded.pool, u64::MAX);
         assert_eq!(decoded.key, "");
         assert_eq!(decoded.nspace, "");
         assert_eq!(decoded.hash, -1);

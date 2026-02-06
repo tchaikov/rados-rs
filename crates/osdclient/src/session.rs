@@ -75,7 +75,7 @@ pub struct PendingOp {
     /// Used to validate retry_attempt in replies
     pub attempts: i32,
     /// Pool ID for OSDMap rescanning
-    pub pool_id: i64,
+    pub pool_id: u64,
     /// Object ID for OSDMap rescanning
     pub object_id: String,
     /// OSDMap epoch this operation was submitted against
@@ -698,7 +698,7 @@ impl OSDSession {
     ///
     /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
     /// Used by OSDClient to determine which operations need rescanning.
-    pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, i64, String, u32)> {
+    pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
         let pending = self.pending_ops.read().await;
         pending
             .iter()

@@ -155,9 +155,9 @@ async fn create_osd_client(
 async fn parse_pool(
     pool: &str,
     osd_client: &Arc<osdclient::OSDClient>,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     // Try parsing as integer first
-    if let Ok(id) = pool.parse::<i64>() {
+    if let Ok(id) = pool.parse::<u64>() {
         return Ok(id);
     }
 

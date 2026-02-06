@@ -194,41 +194,51 @@ pub struct PgId {
 // DencMut implementation for PgId
 impl crate::denc::Denc for PgId {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 17 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for PgId: need 17, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u8(1); // Version byte
-        buf.put_u64_le(self.pool);
-        buf.put_u32_le(self.seed);
-        buf.put_i32_le(-1); // deprecated preferred field
+        // Encode version byte
+        1u8.encode(buf, 0)?;
+
+        // Encode pool (u64)
+        self.pool.encode(buf, 0)?;
+
+        // Encode seed (u32)
+        self.seed.encode(buf, 0)?;
+
+        // Encode deprecated preferred field (i32, always -1)
+        (-1i32).encode(buf, 0)?;
+
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 17 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for PgId: need 17, have {}",
-                buf.remaining()
-            )));
-        }
-        let version = buf.get_u8();
+        // Decode version byte
+        let version = u8::decode(buf, 0)?;
         if version != 1 {
             return Err(RadosError::Protocol(format!(
                 "Unsupported PgId version: {}",
                 version
             )));
         }
-        let pool = buf.get_u64_le();
-        let seed = buf.get_u32_le();
-        buf.advance(4); // Skip deprecated preferred field
+
+        // Decode pool (u64)
+        let pool = u64::decode(buf, 0)?;
+
+        // Decode seed (u32)
+        let seed = u32::decode(buf, 0)?;
+
+        // Decode and discard deprecated preferred field (i32)
+        let _preferred = i32::decode(buf, 0)?;
+
         Ok(PgId { pool, seed })
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(17)
+        // version (u8) + pool (u64) + seed (u32) + preferred (i32) = 1 + 8 + 4 + 4 = 17
+        Some(
+            1u8.encoded_size(0)?
+                + self.pool.encoded_size(0)?
+                + self.seed.encoded_size(0)?
+                + (-1i32).encoded_size(0)?,
+        )
     }
 }
 
@@ -2286,9 +2296,9 @@ pub struct OSDMapIncremental {
 
     // Incremental changes
     pub new_max_osd: i32,
-    pub new_pools: BTreeMap<i64, PgPool>,
-    pub new_pool_names: BTreeMap<i64, String>,
-    pub old_pools: Vec<i64>,
+    pub new_pools: BTreeMap<u64, PgPool>,
+    pub new_pool_names: BTreeMap<u64, String>,
+    pub old_pools: Vec<u64>,
 
     pub new_up_client: BTreeMap<i32, EntityAddrvec>,
     pub new_state: BTreeMap<i32, u32>,
@@ -2305,8 +2315,8 @@ pub struct OSDMapIncremental {
     pub new_pg_upmap_items: BTreeMap<PgId, Vec<(i32, i32)>>,
     pub old_pg_upmap_items: Vec<PgId>,
 
-    pub new_removed_snaps: BTreeMap<i64, SnapIntervalSet>,
-    pub new_purged_snaps: BTreeMap<i64, SnapIntervalSet>,
+    pub new_removed_snaps: BTreeMap<u64, SnapIntervalSet>,
+    pub new_purged_snaps: BTreeMap<u64, SnapIntervalSet>,
 
     pub new_last_up_change: UTime,
     pub new_last_in_change: UTime,
@@ -2578,7 +2588,7 @@ impl VersionedEncode for OSDMapIncremental {
                 for _ in 0..count {
                     let pool_id = i64::decode(&mut client_cursor, features)?;
                     let pool_name = String::decode(&mut client_cursor, features)?;
-                    inc.new_pool_names.insert(pool_id, pool_name);
+                    inc.new_pool_names.insert(pool_id as u64, pool_name);
                 }
             } else if client_v >= 6 {
                 // Version 6+: standard decode
@@ -2591,7 +2601,7 @@ impl VersionedEncode for OSDMapIncremental {
                 let count = u32::decode(&mut client_cursor, features)? as usize;
                 for _ in 0..count {
                     let pool_id = i64::decode(&mut client_cursor, features)?;
-                    inc.old_pools.push(pool_id);
+                    inc.old_pools.push(pool_id as u64);
                 }
             } else {
                 // Version 6+: standard decode
@@ -2763,8 +2773,8 @@ pub struct OSDMap {
     pub created: UTime,
     pub modified: UTime,
 
-    pub pools: BTreeMap<i64, PgPool>,
-    pub pool_name: BTreeMap<i64, String>,
+    pub pools: BTreeMap<u64, PgPool>,
+    pub pool_name: BTreeMap<u64, String>,
     pub pool_max: i32,
 
     pub flags: u32,
@@ -2790,8 +2800,8 @@ pub struct OSDMap {
     pub crush_version: i32,
 
     // Version 7+ fields
-    pub new_removed_snaps: BTreeMap<i64, SnapIntervalSet>,
-    pub new_purged_snaps: BTreeMap<i64, SnapIntervalSet>,
+    pub new_removed_snaps: BTreeMap<u64, SnapIntervalSet>,
+    pub new_purged_snaps: BTreeMap<u64, SnapIntervalSet>,
 
     // Version 9+ fields
     pub last_up_change: UTime,
@@ -2854,23 +2864,23 @@ impl OSDMap {
     }
 
     /// Get a pool by ID
-    pub fn get_pool(&self, pool_id: i64) -> Option<&PgPool> {
+    pub fn get_pool(&self, pool_id: u64) -> Option<&PgPool> {
         self.pools.get(&pool_id)
     }
 
     /// Get a pool name by ID
-    pub fn get_pool_name(&self, pool_id: i64) -> Option<&String> {
+    pub fn get_pool_name(&self, pool_id: u64) -> Option<&String> {
         self.pool_name.get(&pool_id)
     }
 
     /// Get the CRUSH rule ID for a pool
-    pub fn get_pool_crush_rule(&self, pool_id: i64) -> Option<u8> {
+    pub fn get_pool_crush_rule(&self, pool_id: u64) -> Option<u8> {
         self.pools.get(&pool_id).map(|p| p.crush_rule)
     }
 
     /// Calculate object to PG mapping
     /// Maps an object name to its placement group within a pool
-    pub fn object_to_pg(&self, pool_id: i64, object_name: &str) -> Result<PgId, RadosError> {
+    pub fn object_to_pg(&self, pool_id: u64, object_name: &str) -> Result<PgId, RadosError> {
         // Get the pool
         let pool = self
             .get_pool(pool_id)
@@ -2892,7 +2902,7 @@ impl OSDMap {
     /// This is the complete object placement function that combines:
     /// 1. Object name -> PG mapping (hashing)
     /// 2. PG -> OSD set mapping (CRUSH)
-    pub fn object_to_osds(&self, pool_id: i64, object_name: &str) -> Result<Vec<i32>, RadosError> {
+    pub fn object_to_osds(&self, pool_id: u64, object_name: &str) -> Result<Vec<i32>, RadosError> {
         // First, map object to PG
         let pg = self.object_to_pg(pool_id, object_name)?;
 
@@ -2905,7 +2915,7 @@ impl OSDMap {
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         // Get the pool
         let pool = self
-            .get_pool(pg.pool as i64)
+            .get_pool(pg.pool)
             .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
 
         // Get the CRUSH map
@@ -3003,11 +3013,11 @@ impl VersionedEncode for OSDMap {
             format_utime_as_timestamp(&map.modified)
         );
 
-        // Decode pools (BTreeMap<i64, PgPool>)
+        // Decode pools (BTreeMap<u64, PgPool>)
         map.pools = BTreeMap::decode(&mut client_bytes, features)?;
         println!("  Debug: map.pools = {:?}", map.pools);
 
-        // Decode pool_name (BTreeMap<i64, String>)
+        // Decode pool_name (BTreeMap<u64, String>)
         map.pool_name = BTreeMap::decode(&mut client_bytes, features)?;
 
         map.pool_max = client_bytes.get_i32_le();
@@ -3138,7 +3148,7 @@ impl VersionedEncode for OSDMap {
             for _ in 0..removed_snaps_len {
                 let pool_id = client_bytes.get_i64_le();
                 let snap_set = SnapIntervalSet::decode(&mut client_bytes, features)?;
-                map.new_removed_snaps.insert(pool_id, snap_set);
+                map.new_removed_snaps.insert(pool_id as u64, snap_set);
             }
 
             // Decode new_purged_snaps
@@ -3146,7 +3156,7 @@ impl VersionedEncode for OSDMap {
             for _ in 0..purged_snaps_len {
                 let pool_id = client_bytes.get_i64_le();
                 let snap_set = SnapIntervalSet::decode(&mut client_bytes, features)?;
-                map.new_purged_snaps.insert(pool_id, snap_set);
+                map.new_purged_snaps.insert(pool_id as u64, snap_set);
             }
         }
 

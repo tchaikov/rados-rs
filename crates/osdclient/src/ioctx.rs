@@ -58,7 +58,7 @@ pub struct IoCtx {
     client: Arc<OSDClient>,
 
     /// Pool ID this context is associated with
-    pool_id: i64,
+    pool_id: u64,
 
     /// Pool name (cached)
     pool_name: Arc<RwLock<Option<String>>>,
@@ -82,7 +82,7 @@ impl IoCtx {
     /// # Returns
     ///
     /// Returns a new IoCtx instance
-    pub async fn new(client: Arc<OSDClient>, pool_id: i64) -> Result<Self> {
+    pub async fn new(client: Arc<OSDClient>, pool_id: u64) -> Result<Self> {
         info!("Creating IoCtx for pool {}", pool_id);
 
         Ok(Self {
@@ -95,7 +95,7 @@ impl IoCtx {
     }
 
     /// Get the pool ID
-    pub fn pool_id(&self) -> i64 {
+    pub fn pool_id(&self) -> u64 {
         self.pool_id
     }
 

@@ -81,8 +81,8 @@ bitflags::bitflags! {
 /// Object identification (corresponds to hobject_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectId {
-    /// Pool ID
-    pub pool: i64,
+    /// Pool ID (u64::MAX for sentinel/invalid pool)
+    pub pool: u64,
     /// Object name
     pub oid: String,
     /// Snapshot ID (SNAP_HEAD for current version)
@@ -103,7 +103,7 @@ pub const SNAP_HEAD: u64 = u64::MAX - 1; // -2 in two's complement
 
 impl ObjectId {
     /// Create a new ObjectId for the current version of an object
-    pub fn new(pool: i64, oid: impl Into<String>) -> Self {
+    pub fn new(pool: u64, oid: impl Into<String>) -> Self {
         Self {
             pool,
             oid: oid.into(),
@@ -115,7 +115,7 @@ impl ObjectId {
     }
 
     /// Create ObjectId with explicit namespace
-    pub fn with_namespace(pool: i64, oid: impl Into<String>, namespace: impl Into<String>) -> Self {
+    pub fn with_namespace(pool: u64, oid: impl Into<String>, namespace: impl Into<String>) -> Self {
         Self {
             pool,
             oid: oid.into(),
@@ -136,41 +136,26 @@ impl ObjectId {
     }
 }
 
-/// Placement group ID (corresponds to pg_t in Ceph)
-///
-/// This is the base PG identifier without shard information.
-/// For erasure-coded pools, use StripedPgId which includes shard.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PgId {
-    /// Pool ID
-    pub pool: i64,
-    /// PG seed (ps)
-    pub seed: u32,
-}
-
-impl PgId {
-    pub fn new(pool: i64, seed: u32) -> Self {
-        Self { pool, seed }
-    }
-}
+// Re-export PgId from denc (consolidated definition)
+pub use denc::PgId;
 
 /// Striped placement group ID (corresponds to spg_t in Ceph)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct StripedPgId {
     /// Placement group ID
-    pub pool: i64,
+    pub pool: u64,
     pub seed: u32,
     /// OSD shard ID (-1 for replicated pools)
     pub shard: i8,
 }
 
 impl StripedPgId {
-    pub fn new(pool: i64, seed: u32, shard: i8) -> Self {
+    pub fn new(pool: u64, seed: u32, shard: i8) -> Self {
         Self { pool, seed, shard }
     }
 
     /// Create from PgId (for replicated pools)
-    pub fn from_pg(pool: i64, seed: u32) -> Self {
+    pub fn from_pg(pool: u64, seed: u32) -> Self {
         Self {
             pool,
             seed,
@@ -282,8 +267,8 @@ impl BlkinTraceInfo {
 /// the object goes in, and optionally namespace, key, or hash position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectLocator {
-    /// Pool ID
-    pub pool: i64,
+    /// Pool ID (u64::MAX for invalid/default)
+    pub pool: u64,
     /// Key string (if non-empty) - specify either hash or key, not both
     pub key: String,
     /// Namespace
@@ -293,10 +278,10 @@ pub struct ObjectLocator {
 }
 
 impl ObjectLocator {
-    /// Create an empty object locator
+    /// Create an empty object locator (with sentinel value for pool)
     pub fn new() -> Self {
         Self {
-            pool: -1,
+            pool: u64::MAX,
             key: String::new(),
             nspace: String::new(),
             hash: -1,
@@ -304,7 +289,7 @@ impl ObjectLocator {
     }
 
     /// Create an object locator for a specific pool
-    pub fn with_pool(pool: i64) -> Self {
+    pub fn with_pool(pool: u64) -> Self {
         Self {
             pool,
             key: String::new(),
@@ -315,7 +300,7 @@ impl ObjectLocator {
 
     /// Check if the locator is empty
     pub fn is_empty(&self) -> bool {
-        self.pool == -1 && self.key.is_empty() && self.nspace.is_empty() && self.hash == -1
+        self.pool == u64::MAX && self.key.is_empty() && self.nspace.is_empty() && self.hash == -1
     }
 }
 
@@ -804,7 +789,7 @@ pub struct OpReply {
 #[derive(Debug, Clone)]
 pub struct PoolInfo {
     /// Pool ID
-    pub pool_id: i64,
+    pub pool_id: u64,
     /// Pool name
     pub pool_name: String,
 }

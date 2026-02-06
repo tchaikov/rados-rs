@@ -73,9 +73,9 @@ impl TestConfig {
 async fn parse_pool(
     pool: &str,
     osd_client: &Arc<osdclient::OSDClient>,
-) -> Result<i64, Box<dyn std::error::Error>> {
+) -> Result<u64, Box<dyn std::error::Error>> {
     // If it's already a number, use it directly
-    if let Ok(id) = pool.parse::<i64>() {
+    if let Ok(id) = pool.parse::<u64>() {
         return Ok(id);
     }
 
@@ -96,7 +96,7 @@ async fn parse_pool(
 }
 
 /// Setup test environment
-async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, i64) {
+async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) {
     // Initialize tracing (ignore error if already initialized)
     let _ = tracing_subscriber::fmt().try_init();
 

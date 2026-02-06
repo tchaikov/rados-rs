@@ -11,7 +11,7 @@ use crate::types::CrushMap;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ObjectLocator {
     /// Pool ID
-    pub pool_id: i64,
+    pub pool_id: u64,
     /// Key string (if non-empty) - alternative to hash for placement
     pub key: String,
     /// Object namespace (empty string for default)
@@ -23,7 +23,7 @@ pub struct ObjectLocator {
 
 impl ObjectLocator {
     /// Create a new object locator with just a pool ID
-    pub fn new(pool_id: i64) -> Self {
+    pub fn new(pool_id: u64) -> Self {
         ObjectLocator {
             pool_id,
             key: String::new(),
@@ -33,7 +33,7 @@ impl ObjectLocator {
     }
 
     /// Create an object locator with pool ID and namespace
-    pub fn with_namespace(pool_id: i64, namespace: String) -> Self {
+    pub fn with_namespace(pool_id: u64, namespace: String) -> Self {
         ObjectLocator {
             pool_id,
             key: String::new(),
@@ -43,7 +43,7 @@ impl ObjectLocator {
     }
 
     /// Create an object locator with a key override
-    pub fn with_key(pool_id: i64, key: String) -> Self {
+    pub fn with_key(pool_id: u64, key: String) -> Self {
         ObjectLocator {
             pool_id,
             key,
@@ -53,7 +53,7 @@ impl ObjectLocator {
     }
 
     /// Create an object locator with a hash override
-    pub fn with_hash(pool_id: i64, hash: i64) -> Self {
+    pub fn with_hash(pool_id: u64, hash: i64) -> Self {
         ObjectLocator {
             pool_id,
             key: String::new(),
@@ -68,14 +68,14 @@ impl ObjectLocator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PgId {
     /// Pool ID
-    pub pool: i64,
+    pub pool: u64,
     /// PG seed/number within the pool
     pub seed: u32,
 }
 
 impl PgId {
     /// Create a new PG ID
-    pub fn new(pool: i64, seed: u32) -> Self {
+    pub fn new(pool: u64, seed: u32) -> Self {
         PgId { pool, seed }
     }
 }

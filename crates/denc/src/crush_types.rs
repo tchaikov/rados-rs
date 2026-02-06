@@ -61,12 +61,13 @@ impl VersionedEncode for crush::ObjectLocator {
             // Old format: int32_t pool, int16_t preferred
             let op = i32::decode(buf, features)?;
             let _pref = i16::decode(buf, features)?;
-            op as i64
+            op as u64
         } else {
             // New format: int64_t pool, int32_t preferred
+            // Note: Ceph wire format uses i64, but we convert to u64 internally
             let pool = i64::decode(buf, features)?;
             let _preferred = i32::decode(buf, features)?;
-            pool
+            pool as u64
         };
 
         // Decode key (present in all versions)

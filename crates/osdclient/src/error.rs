@@ -19,7 +19,7 @@ pub enum OSDClientError {
     ObjectNotFound(String),
 
     #[error("Pool not found: {0}")]
-    PoolNotFound(i64),
+    PoolNotFound(u64),
 
     #[error("No OSDs available")]
     NoOSDs,
