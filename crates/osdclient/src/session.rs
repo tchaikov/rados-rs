@@ -159,7 +159,13 @@ impl OSDSession {
 
         // Create new channel for this connection
         let (send_tx, send_rx) = mpsc::channel(100);
+        info!(
+            "Created new channel for OSD {} (old channel closed: {})",
+            self.osd_id,
+            self.send_tx.is_closed()
+        );
         self.send_tx = send_tx;
+        info!("Updated self.send_tx for OSD {}", self.osd_id);
 
         // Spawn I/O task that owns the connection
         // This task multiplexes send/receive using tokio::select!
@@ -208,17 +214,35 @@ impl OSDSession {
         mut send_rx: mpsc::Receiver<msgr2::message::Message>,
     ) {
         info!("I/O task started for OSD {}", ctx.osd_id);
+        info!(
+            "I/O task for OSD {} entering event loop, ready to receive messages",
+            ctx.osd_id
+        );
 
+        let mut loop_count = 0;
         loop {
+            loop_count += 1;
+            if loop_count % 100 == 1 {
+                debug!("OSD {} io_task loop iteration {}", ctx.osd_id, loop_count);
+            }
+
             tokio::select! {
                 // Handle outgoing messages (like try_write in Linux kernel)
-                Some(msg) = send_rx.recv() => {
-                    debug!("OSD {} sending message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
-                    if let Err(e) = connection.send_message(msg).await {
-                        error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
-                        break;
+                msg_opt = send_rx.recv() => {
+                    match msg_opt {
+                        Some(msg) => {
+                            info!("OSD {} RECV from channel: message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
+                            if let Err(e) = connection.send_message(msg).await {
+                                error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
+                                break;
+                            }
+                            info!("OSD {} message sent to OSD successfully", ctx.osd_id);
+                        }
+                        None => {
+                            error!("OSD {} send_rx channel closed - all senders dropped!", ctx.osd_id);
+                            break;
+                        }
                     }
-                    debug!("OSD {} message sent successfully", ctx.osd_id);
                 }
 
                 // Handle incoming messages - route based on message semantics
@@ -459,20 +483,31 @@ impl OSDSession {
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         info!(
-            "Submitting operation tid={} to OSD {} (channel closed: {})",
+            "Submitting operation tid={} to OSD {} (channel closed: {}, capacity: {}, max_capacity: {})",
             tid,
             self.osd_id,
-            self.send_tx.is_closed()
+            self.send_tx.is_closed(),
+            self.send_tx.capacity(),
+            self.send_tx.max_capacity()
         );
-        self.send_tx
-            .send(msg)
-            .await
-            .map_err(|_| OSDClientError::Connection("I/O task has exited".into()))?;
 
-        info!(
-            "Submitted operation tid={} to OSD {} successfully",
-            tid, self.osd_id
-        );
+        let send_result = self.send_tx.send(msg).await;
+
+        match send_result {
+            Ok(()) => {
+                info!(
+                    "Submitted operation tid={} to OSD {} successfully (channel still has {} capacity)",
+                    tid, self.osd_id, self.send_tx.capacity()
+                );
+            }
+            Err(_) => {
+                error!(
+                    "Failed to submit operation tid={} to OSD {} - channel closed!",
+                    tid, self.osd_id
+                );
+                return Err(OSDClientError::Connection("I/O task has exited".into()));
+            }
+        }
         Ok(rx)
     }
 
