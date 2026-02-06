@@ -2,14 +2,38 @@
 
 A Rust implementation of librados for Ceph cluster communication.
 
+## How to Use This Guide
+
+**For Claude Code Assistant:**
+- 📖 **First time in this project?** Read [Project Overview](#project-overview) and [Auto Memory](#auto-memory-learning-from-experience)
+- 🔨 **Starting a task?** Check [Decision Tree](#decision-tree-choosing-the-right-approach)
+- 🐛 **Hit an error?** See [Troubleshooting](#troubleshooting-common-issues)
+- ✅ **Before committing?** Review [Pre-Commit Checklist](#pre-commit-checklist)
+- 🔍 **Need to find something?** Use [Quick Reference](#quick-reference)
+
+**Important Principles:**
+1. **Always read before you write** - Never modify files you haven't read
+2. **Test after every change** - Run tests before committing
+3. **Use auto memory** - Record learnings for future reference
+4. **Prefer simple over clever** - Clean field names (e.g., `sec`/`nsec` over `tv_sec`/`tv_nsec`)
+
+---
+
 ## Table of Contents
 
+- [How to Use This Guide](#how-to-use-this-guide)
 - [Project Overview](#project-overview)
+- [Decision Tree](#decision-tree-choosing-the-right-approach)
+- [Auto Memory](#auto-memory-learning-from-experience)
 - [Local Resources](#local-resources)
+- [Development Workflow](#development-workflow)
 - [Development Cluster](#development-cluster)
 - [Coding Standards](#coding-standards)
+- [Troubleshooting](#troubleshooting-common-issues)
 - [Verification Workflow](#verification-workflow)
 - [Architecture Notes](#architecture-notes)
+- [Pre-Commit Checklist](#pre-commit-checklist)
+- [Quick Reference](#quick-reference)
 
 ---
 
@@ -22,6 +46,104 @@ Implement Ceph type encoding/decoding and librados functionality in Rust.
 - **Ceph Protocol**: msgr2 (messenger v2) for network communication
 - **Encoding**: Denc trait for efficient serialization/deserialization
 - **Authentication**: CephX authentication protocol
+
+### Project Structure
+```
+rados-rs/
+├── crates/
+│   ├── denc/          # Core encoding/decoding (Denc trait)
+│   ├── auth/          # CephX authentication
+│   ├── msgr2/         # Protocol v2 implementation
+│   ├── monclient/     # Monitor client
+│   ├── osdclient/     # OSD client
+│   └── rados/         # CLI tool
+```
+
+---
+
+## Decision Tree: Choosing the Right Approach
+
+### When Adding a New Type
+
+```
+Does the type have ALL fields as primitives/fixed-size?
+├─ YES → Can use #[derive(ZeroCopyDencode)]?
+│         ├─ YES → Use ZeroCopyDencode
+│         └─ NO → Implement Denc manually
+└─ NO (has String/Vec/Bytes)
+   └─ Implement Denc manually
+```
+
+### When Fixing Encoding Issues
+
+```
+Is there a corpus test failure?
+├─ YES → Check ceph-dencoder output
+│        └─ Compare JSON format
+│           ├─ Structural difference → Fix Denc implementation
+│           └─ Field name difference → Add custom Serialize impl
+└─ NO → Write a test first, then fix
+```
+
+### When Searching for Code
+
+```
+Do you know the exact symbol name?
+├─ YES → Use Grep tool with symbol name
+│        Example: Grep for "impl Denc for UTime"
+└─ NO → Use Task tool with Explore agent
+   Example: "Where are errors from the client handled?"
+```
+
+### When Making Changes
+
+```
+Is this a trivial fix (< 5 lines)?
+├─ YES → Make change → Test → Commit immediately
+└─ NO (complex/multi-file)
+   └─ Use EnterPlanMode
+      └─ Get approval → Implement → Test → Commit
+```
+
+---
+
+## Auto Memory: Learning from Experience
+
+Your auto memory is at: `/home/kefu/.claude/projects/-home-kefu-dev-rados-rs/memory/`
+
+### When to Update Memory
+
+**✅ DO record:**
+- Common mistakes and their solutions
+- Non-obvious encoding patterns
+- Type consolidation decisions (e.g., "UTime uses sec/nsec, not tv_sec/tv_nsec")
+- Corpus test quirks (e.g., "ceph-dencoder adds computed fields to pg_pool_t")
+- Build/test environment setup issues
+
+**❌ DON'T record:**
+- Obvious information from this guide
+- One-time issues
+- Information that changes frequently
+
+### Current Memory Files
+
+Check existing memories before starting work:
+```bash
+ls ~/.claude/projects/-home-kefu-dev-rados-rs/memory/
+```
+
+Example memory entry:
+```markdown
+# Type Naming Conventions
+
+## UTime Fields
+- Use `sec` and `nsec` (simple, clean)
+- NOT `tv_sec` and `tv_nsec` (too verbose)
+- Custom Serialize outputs "seconds" and "nanoseconds" for JSON
+
+Rationale: Simpler field names are better. The custom Serialize impl
+handles the JSON format requirement for corpus compatibility.
+```
 
 ---
 
@@ -54,19 +176,45 @@ Msgr2 protocol implemented in:
 ### Incremental Development Process
 
 **CRITICAL:** After EVERY code change:
-1. Run full unit test suite: `cargo test --workspace --lib`
-2. Run integration test suite (with cluster running):
-   - Denc corpus: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p denc --tests -- --ignored`
-   - MonClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p monclient --tests -- --ignored`
-   - Msgr2: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p msgr2 --tests -- --ignored`
-   - OSDClient: `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p osdclient --tests -- --ignored`
-3. If ALL tests pass → commit immediately with descriptive message
-4. If ANY test fails → revert the change and investigate
-5. Move to next change
+
+1. **Format code**: `cargo fmt`
+2. **Lint code**: `cargo clippy --all-targets --all-features`
+3. **Run unit tests**: `cargo test --workspace --lib`
+4. **Run integration tests** (with cluster running):
+   ```bash
+   export PATH="$HOME/dev/ceph/build/bin:$PATH"
+   export CEPH_LIB="$HOME/dev/ceph/build/lib"
+   export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
+   export CEPH_CONF="$HOME/dev/ceph/build/ceph.conf"
+
+   # Denc corpus test
+   cargo test -p denc --tests -- --ignored --nocapture
+
+   # Integration tests
+   cargo test -p monclient --tests -- --ignored --nocapture
+   cargo test -p msgr2 --tests -- --ignored --nocapture
+   cargo test -p osdclient --tests -- --ignored --nocapture
+   ```
+
+5. **If ALL tests pass** → Commit immediately with descriptive message
+6. **If ANY test fails** → Revert the change and investigate
 
 **Never** accumulate multiple changes in one commit. This makes it easy to identify which specific change caused a regression.
 
-**Note**: Integration tests MUST only use `CEPH_CONF` environment variable. Do not use `CEPH_MON_ADDR` or other individual settings - always load configuration from ceph.conf file.
+**Note**: Integration tests MUST use `CEPH_CONF` environment variable. Do not use `CEPH_MON_ADDR` or other individual settings.
+
+### Git Workflow
+
+```bash
+# After successful tests
+git add -A
+git diff --cached  # Review changes
+git commit -m "Descriptive message
+
+- What changed
+- Why it changed
+- Test results"
+```
 
 ---
 
@@ -106,6 +254,7 @@ To capture TCP traffic for cross-checking, use tcpdump with the official client.
 ### Primary Principle: Use Denc Everywhere
 
 **High-level code must use the Denc trait for ALL encoding/decoding.**
+
 Manual primitive operations (`get_u*_le`, `put_u*_le`, `buf.remaining() < N`) should only appear inside Denc trait implementations.
 
 ### Denc Trait Usage
@@ -153,6 +302,28 @@ impl Denc for PgId {
     }
 }
 ```
+
+### Field Naming Conventions
+
+**Prefer simple, clear names over verbose C-style names:**
+
+✅ GOOD:
+```rust
+pub struct UTime {
+    pub sec: u32,   // Simple and clear
+    pub nsec: u32,
+}
+```
+
+❌ BAD:
+```rust
+pub struct UTime {
+    pub tv_sec: u32,   // Unnecessarily verbose
+    pub tv_nsec: u32,
+}
+```
+
+**Rationale**: Since we use custom Serialize implementations for JSON compatibility, internal field names can be simple and idiomatic. The custom serializer handles the required output format.
 
 ### Zero-Copy Encoding with ZeroCopyDencode
 
@@ -343,6 +514,26 @@ fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
 
 **Rationale**: The Denc trait already provides descriptive error messages. Adding custom error handling for each field creates noise without adding value. The stack trace will show which decode() call failed.
 
+### ❌ Duplicate Type Definitions
+
+```rust
+// BAD: Same type defined in multiple crates
+// In crates/denc/src/types.rs
+pub struct UTime { pub sec: u32, pub nsec: u32 }
+
+// In crates/osdclient/src/denc_types.rs
+pub struct UTime { pub tv_sec: u32, pub tv_nsec: u32 }  // Duplicate!
+
+// GOOD: Single definition with re-exports
+// In crates/denc/src/types.rs
+pub struct UTime { pub sec: u32, pub nsec: u32 }
+
+// In crates/osdclient/src/denc_types.rs
+pub use denc::UTime;  // Re-export, no duplication
+```
+
+**Rationale**: Duplicate type definitions lead to incompatibilities and confusion. Always consolidate to a single canonical definition.
+
 ---
 
 ## Code Review Checklist
@@ -355,6 +546,8 @@ When reviewing code, investigate if you see:
 4. ❌ Repeated encoding patterns across functions
 5. ❌ Duplicate constant definitions
 6. ❌ Custom `.map_err()` for every field in `decode()`
+7. ❌ Duplicate type definitions across crates
+8. ❌ Verbose C-style field names when simpler names would work
 
 **Action**: Refactor to use Denc trait or consolidate into reusable structures.
 
@@ -364,6 +557,84 @@ When reviewing code, investigate if you see:
 2. **Helper functions in `crush` crate** - Avoids circular dependency
 3. **Low-level AES encryption/decryption** - Requires raw bytes
 4. **Test code** - May need manual encoding for specific test scenarios
+
+---
+
+## Troubleshooting: Common Issues
+
+### Corpus Test Failures
+
+**Problem**: `corpus_comparison_test` shows format mismatch
+
+**Solution**:
+1. Compare JSON outputs from error message
+2. Check if it's a field name difference → Add custom `Serialize` impl
+3. Check if it's a structural difference → Fix `Denc` implementation
+4. Use ceph-dencoder to inspect:
+   ```bash
+   cd ~/dev/ceph/build
+   env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
+       CEPH_LIB=$HOME/dev/ceph/build/lib \
+       bin/ceph-dencoder type <TYPE> \
+       import <CORPUS_FILE> decode dump_json
+   ```
+
+**Example**: UTime field name mismatch
+```
+Ceph output: {"nanoseconds": 123, "seconds": 456}
+Rust output: {"nsec": 123, "sec": 456}
+
+Fix: Add custom Serialize implementation:
+impl Serialize for UTime {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut state = serializer.serialize_struct("UTime", 2)?;
+        state.serialize_field("seconds", &self.sec)?;
+        state.serialize_field("nanoseconds", &self.nsec)?;
+        state.end()
+    }
+}
+```
+
+### Build Errors: Field Not Found
+
+**Problem**: `error[E0609]: no field 'sec' on type 'UTime'`
+
+**Cause**: Type consolidation changed field names
+
+**Solution**:
+1. Use `cargo build 2>&1 | grep "no field"` to find all occurrences
+2. Use global replace: `git grep -l "\.old_name" | xargs sed -i 's/\.old_name/.new_name/g'`
+3. Or use Edit tool with `replace_all: true`
+
+### Integration Test Failures
+
+**Problem**: Integration tests can't find ceph-dencoder
+
+**Solution**:
+```bash
+export PATH="$HOME/dev/ceph/build/bin:$PATH"
+export CEPH_LIB="$HOME/dev/ceph/build/lib"
+export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
+```
+
+**Problem**: Integration tests can't connect to cluster
+
+**Solution**:
+1. Check cluster is running: `cd ~/dev/ceph/build && ../src/vstart.sh -d --without-dashboard`
+2. Verify CEPH_CONF is set: `export CEPH_CONF="$HOME/dev/ceph/build/ceph.conf"`
+3. Check cluster status: `bin/ceph -s`
+
+### Type Consolidation Issues
+
+**Problem**: Duplicate type definitions causing conflicts
+
+**Solution**:
+1. Identify canonical location (usually `denc` crate for encoding types)
+2. Update canonical definition
+3. Replace duplicates with re-exports: `pub use denc::TypeName;`
+4. Search and update all references to use new field names
+5. Run tests to catch any remaining references
 
 ---
 
@@ -392,6 +663,9 @@ cargo test --workspace --lib
 
 # Integration tests (requires running cluster)
 export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf
+export PATH="$HOME/dev/ceph/build/bin:$PATH"
+export CEPH_LIB="$HOME/dev/ceph/build/lib"
+export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
 
 # Run all integration tests
 cargo test -p denc --tests -- --ignored --nocapture
@@ -414,6 +688,9 @@ cargo clippy --all-targets --all-features
 
 # Build
 cargo build --package <crate>
+
+# Check without building
+cargo check --workspace
 ```
 
 ---
@@ -473,6 +750,23 @@ Use this instead of manually parsing struct_v and magic.
 
 ---
 
+## Pre-Commit Checklist
+
+Before committing any code, verify:
+
+- [ ] Code formatted: `cargo fmt`
+- [ ] No clippy warnings: `cargo clippy --all-targets --all-features`
+- [ ] Unit tests pass: `cargo test --workspace --lib`
+- [ ] Integration tests pass (if applicable): `cargo test -p <package> --tests -- --ignored`
+- [ ] No duplicate types across crates
+- [ ] Using Denc trait instead of manual encoding
+- [ ] Field names are simple and clear (not verbose C-style)
+- [ ] Custom Serialize impl added if needed for corpus compatibility
+- [ ] Updated auto memory if learned something new
+- [ ] Commit message is descriptive
+
+---
+
 ## Guidelines Summary
 
 ### DO:
@@ -482,24 +776,54 @@ Use this instead of manually parsing struct_v and magic.
 ✅ Implement Denc for reusable patterns
 ✅ Test against corpus data
 ✅ Run cargo fmt and cargo clippy
+✅ Use simple field names (e.g., `sec`/`nsec`)
+✅ Consolidate duplicate types with re-exports
+✅ Add custom Serialize for JSON compatibility
+✅ Record learnings in auto memory
 
 ### DON'T:
 ❌ Use manual primitives (`get_u*_le`, `put_u*_le`) outside `impl Denc`
 ❌ Add manual buffer checks (`remaining() < N`)
 ❌ Wrap every field with `.map_err()`
 ❌ Duplicate constants across files
+❌ Duplicate type definitions across crates
+❌ Use verbose C-style field names when simpler names work
 ❌ Start from scratch - always fix existing code
 ❌ Tolerate test failures
+❌ Commit without running tests
 
 ---
 
 ## Quick Reference
 
+### Commands
+
 | Task | Command |
 |------|---------|
 | Start cluster | `cd ~/dev/ceph/build && ../src/vstart.sh -d --without-dashboard` |
 | Stop cluster | `cd ~/dev/ceph/build && ../src/stop.sh` |
-| Decode corpus | `cd ~/dev/ceph/build && bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json` |
-| Run tests | `CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p <PACKAGE> --tests -- --ignored` |
+| Decode corpus | `cd ~/dev/ceph/build && env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 CEPH_LIB=$HOME/dev/ceph/build/lib bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json` |
+| Unit tests | `cargo test --workspace --lib` |
+| Integration tests | `PATH="$HOME/dev/ceph/build/bin:$PATH" CEPH_LIB="$HOME/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="$HOME/dev/ceph/build/ceph.conf" cargo test -p <PACKAGE> --tests -- --ignored` |
 | Format code | `cargo fmt` |
 | Lint code | `cargo clippy --all-targets --all-features` |
+| Check syntax | `cargo check --workspace` |
+
+### File Locations
+
+| Resource | Path |
+|----------|------|
+| Cluster config | `/home/kefu/dev/ceph/build/ceph.conf` |
+| Ceph source | `~/dev/ceph` |
+| Ceph build | `~/dev/ceph/build` |
+| Corpus data | `~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/` |
+| Auto memory | `~/.claude/projects/-home-kefu-dev-rados-rs/memory/` |
+
+### Common Patterns
+
+| Pattern | Example |
+|---------|---------|
+| Custom Serialize | See [Troubleshooting: Corpus Test Failures](#corpus-test-failures) |
+| Type consolidation | `pub use denc::TypeName;` in dependent crate |
+| ZeroCopyDencode | `#[derive(ZeroCopyDencode)] #[repr(C, packed)]` |
+| Denc impl | See [Denc Implementation](#-good-denc-implementation-low-level) |
