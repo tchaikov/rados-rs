@@ -249,7 +249,7 @@ impl MOSDOpReply {
 
         // 10. For each op: rval (int32_t)
         let mut ops = Vec::with_capacity(num_ops);
-        for i in 0..num_ops {
+        for _i in 0..num_ops {
             let return_code = i32::decode(&mut cursor, 0)?;
             
 
@@ -317,9 +317,6 @@ impl MOSDOpReply {
                 }
                 op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
                 data_offset += len;
-                
-            } else {
-                
             }
         }
 
@@ -570,7 +567,7 @@ impl CephMessagePayload for MOSDOp {
         if encoded_bytes < 50 {
             let start = before_len;
             let locator_bytes: Vec<u8> = buf[start..after_len].to_vec();
-            let hex_str: String = locator_bytes
+            let _hex_str: String = locator_bytes
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
@@ -596,7 +593,7 @@ impl CephMessagePayload for MOSDOp {
             // Debug: print hex dump of this operation
             let op_end = buf.len();
             let op_bytes = &buf[op_start..op_end];
-            let hex_str: String = op_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            let _hex_str: String = op_bytes.iter().map(|b| format!("{:02x}", b)).collect();
             
             
         }
@@ -605,7 +602,7 @@ impl CephMessagePayload for MOSDOp {
         let first_op_start = buf.len() - (38 * self.ops.len());
         
         if !self.ops.is_empty() {
-            let op_check: String = buf[first_op_start..first_op_start + 38]
+            let _op_check: String = buf[first_op_start..first_op_start + 38]
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
@@ -627,18 +624,7 @@ impl CephMessagePayload for MOSDOp {
         // 16. features (set to 0 for now)
         0u64.encode(&mut buf, 0)?;
 
-        
 
-        // Debug: dump key sections of payload
-        let dump_len = std::cmp::min(buf.len(), 250);
-        let hex_str: String = buf[..dump_len]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        
-        for (i, chunk) in hex_str.as_bytes().chunks(64).enumerate() {
-            
-        }
 
         Ok(buf.freeze())
     }

@@ -2656,7 +2656,7 @@ mod pg_stat_support_tests {
             ..Default::default()
         };
 
-        pg_map.pg_stat.insert(pg_id.clone(), pg_stat);
+        pg_map.pg_stat.insert(pg_id, pg_stat);
 
         let mut buf = BytesMut::new();
         pg_map.encode(&mut buf, 0).unwrap();
