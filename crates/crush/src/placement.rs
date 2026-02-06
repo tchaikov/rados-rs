@@ -63,9 +63,12 @@ impl ObjectLocator {
     }
 }
 
-/// Placement group identifier
+/// Placement group identifier (pg_t in C++)
 /// Combines pool ID and PG number
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// This type is defined in the crush crate and has Denc encoding implemented
+/// in the denc crate's crush_types module.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct PgId {
     /// Pool ID
     pub pool: u64,

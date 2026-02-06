@@ -325,11 +325,8 @@ impl OSDClient {
 
         // Check for PG overrides in OSDMap
         // These override CRUSH placement for various reasons (rebalancing, failures, manual overrides)
-        // Convert crush::PgId to denc::PgId for looking up in OSDMap
-        let pgid = denc::PgId {
-            pool: pg.pool,
-            seed: pg.seed,
-        };
+        // Note: crush::PgId and denc::PgId are now the same type (crush::PgId is re-exported by denc)
+        let pgid = pg;
 
         // 1. Check pg_upmap (complete acting set override)
         if let Some(upmap_osds) = osdmap.pg_upmap.get(&pgid) {

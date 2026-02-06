@@ -6,6 +6,66 @@ use crate::denc::{Denc, VersionedEncode};
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 
+// ============= PgId (pg_t) =============
+
+/// Denc implementation for crush::PgId
+/// Encoding format matches pg_t::encode() in ~/dev/ceph/src/osd/osd_types.h
+impl Denc for crush::PgId {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // Encode version byte
+        1u8.encode(buf, 0)?;
+
+        // Encode pool (u64)
+        self.pool.encode(buf, 0)?;
+
+        // Encode seed (u32)
+        self.seed.encode(buf, 0)?;
+
+        // Encode deprecated preferred field (i32, always -1)
+        (-1i32).encode(buf, 0)?;
+
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        // Decode version byte
+        let version = u8::decode(buf, 0)?;
+        if version != 1 {
+            return Err(RadosError::Protocol(format!(
+                "Unsupported PgId version: {}",
+                version
+            )));
+        }
+
+        // Decode pool (u64)
+        let pool = u64::decode(buf, 0)?;
+
+        // Decode seed (u32)
+        let seed = u32::decode(buf, 0)?;
+
+        // Decode and discard deprecated preferred field (i32)
+        let _preferred = i32::decode(buf, 0)?;
+
+        Ok(crush::PgId { pool, seed })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // version (u8) + pool (u64) + seed (u32) + preferred (i32) = 1 + 8 + 4 + 4 = 17
+        Some(
+            1u8.encoded_size(0)?
+                + self.pool.encoded_size(0)?
+                + self.seed.encoded_size(0)?
+                + (-1i32).encoded_size(0)?,
+        )
+    }
+}
+
+impl crate::denc::FixedSize for crush::PgId {
+    const SIZE: usize = 17;
+}
+
+// ============= ObjectLocator (object_locator_t) =============
+
 /// Implement VersionedEncode for crush::ObjectLocator
 /// Matches C++ object_locator_t encoding from ~/dev/ceph/src/osd/osd_types.cc
 /// Uses version 6, compat 3 (or 6 if hash != -1), includes pool, preferred, key, nspace, and hash

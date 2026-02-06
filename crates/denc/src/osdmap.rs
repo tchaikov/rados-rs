@@ -183,68 +183,9 @@ impl Denc for ShardIdSet {
     }
 }
 
-/// Placement Group ID (pg_t in C++)
-/// Encoding format matches pg_t::encode() in osd_types.h
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord, Serialize)]
-pub struct PgId {
-    pub pool: u64,
-    pub seed: u32,
-}
-
-// DencMut implementation for PgId
-impl crate::denc::Denc for PgId {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // Encode version byte
-        1u8.encode(buf, 0)?;
-
-        // Encode pool (u64)
-        self.pool.encode(buf, 0)?;
-
-        // Encode seed (u32)
-        self.seed.encode(buf, 0)?;
-
-        // Encode deprecated preferred field (i32, always -1)
-        (-1i32).encode(buf, 0)?;
-
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        // Decode version byte
-        let version = u8::decode(buf, 0)?;
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported PgId version: {}",
-                version
-            )));
-        }
-
-        // Decode pool (u64)
-        let pool = u64::decode(buf, 0)?;
-
-        // Decode seed (u32)
-        let seed = u32::decode(buf, 0)?;
-
-        // Decode and discard deprecated preferred field (i32)
-        let _preferred = i32::decode(buf, 0)?;
-
-        Ok(PgId { pool, seed })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // version (u8) + pool (u64) + seed (u32) + preferred (i32) = 1 + 8 + 4 + 4 = 17
-        Some(
-            1u8.encoded_size(0)?
-                + self.pool.encoded_size(0)?
-                + self.seed.encoded_size(0)?
-                + (-1i32).encoded_size(0)?,
-        )
-    }
-}
-
-impl crate::denc::FixedSize for PgId {
-    const SIZE: usize = 17;
-}
+/// Re-export PgId from crush crate
+/// The Denc implementation is in crush_types.rs
+pub use crush::PgId;
 
 /// Event Version (eversion_t in C++)
 /// Note: In corpus data, only version and epoch are encoded (12 bytes total)
@@ -2450,7 +2391,7 @@ impl OSDMapIncremental {
             if osds.is_empty() {
                 base.pg_temp.remove(pgid);
             } else {
-                base.pg_temp.insert(pgid.clone(), osds.clone());
+                base.pg_temp.insert(*pgid, osds.clone());
             }
         }
 
@@ -2459,7 +2400,7 @@ impl OSDMapIncremental {
             if *osd == -1 {
                 base.primary_temp.remove(pgid);
             } else {
-                base.primary_temp.insert(pgid.clone(), *osd);
+                base.primary_temp.insert(*pgid, *osd);
             }
         }
 
