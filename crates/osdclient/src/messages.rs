@@ -151,15 +151,8 @@ impl MOSDOpReply {
     pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
         use denc::Denc;
 
-        eprintln!(
-            "DEBUG: MOSDOpReply::decode called: front.len()={}, data.len()={}",
-            front.len(),
-            data.len()
-        );
-        eprintln!(
-            "DEBUG: First 64 bytes of front: {:02x?}",
-            &front[..std::cmp::min(64, front.len())]
-        );
+        
+        
 
         let mut cursor = front;
         if cursor.remaining() < 16 {
@@ -204,7 +197,7 @@ impl MOSDOpReply {
 
         // 4. result (errorcode32_t = int32_t)
         let result = i32::decode(&mut cursor, 0)?;
-        eprintln!("DEBUG: Overall result code: {}", result);
+        
 
         // 5. bad_replay_version (eversion_t = epoch + version)
         // This is for backwards compatibility with old clients.
@@ -245,10 +238,7 @@ impl MOSDOpReply {
             // Skip to payload_len field (at offset 34)
             cursor.advance(34);
             let payload_len = u32::decode(&mut cursor, 0)?;
-            eprintln!(
-                "DEBUG: Op {} payload_len from osd_op structure: {}",
-                i, payload_len
-            );
+            
             payload_lens.push(payload_len as usize);
         }
 
@@ -261,7 +251,7 @@ impl MOSDOpReply {
         let mut ops = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
             let return_code = i32::decode(&mut cursor, 0)?;
-            eprintln!("DEBUG: Op {} return_code (rval): {}", i, return_code);
+            
 
             ops.push(OpReply {
                 return_code,
@@ -273,17 +263,11 @@ impl MOSDOpReply {
         // The epoch part is not currently used since we track OSDMap epoch separately
         let _replay_epoch = u32::decode(&mut cursor, 0)?;
         let version = u64::decode(&mut cursor, 0)?;
-        eprintln!(
-            "DEBUG: Decoded version from MOSDOpReply: epoch={}, version={}",
-            _replay_epoch, version
-        );
+        
 
         // 12. user_version (version_t = u64)
         let user_version = u64::decode(&mut cursor, 0)?;
-        eprintln!(
-            "DEBUG: Decoded user_version from MOSDOpReply: {}",
-            user_version
-        );
+        
 
         // 13. do_redirect (bool)
         let do_redirect = u8::decode(&mut cursor, 0)? != 0;
@@ -317,12 +301,7 @@ impl MOSDOpReply {
 
         // 16. Distribute data section to operations
         // The data section contains concatenated output data for all operations
-        eprintln!(
-            "DEBUG: Distributing data section: {} ops, data.len()={}, payload_lens={:?}",
-            ops.len(),
-            data.len(),
-            payload_lens
-        );
+        
         let mut data_offset = 0;
         for (i, op) in ops.iter_mut().enumerate() {
             let len = payload_lens[i];
@@ -338,9 +317,9 @@ impl MOSDOpReply {
                 }
                 op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
                 data_offset += len;
-                eprintln!("DEBUG: Op {}: assigned {} bytes of outdata", i, len);
+                
             } else {
-                eprintln!("DEBUG: Op {}: no outdata (payload_len=0)", i);
+                
             }
         }
 
@@ -531,10 +510,7 @@ impl CephMessagePayload for MOSDOp {
         let mut buf = BytesMut::new();
 
         // Debug logging for MOSDOp message
-        eprintln!(
-            "DEBUG encode MOSDOp: pgid={}:{}, hash={:#x}, snapid={:#x}, flags={:#x}",
-            self.pgid.pool, self.pgid.seed, self.object.hash, self.snapid, self.flags
-        );
+        
 
         // 1. spgid (spg_t) - with version header (1,1)
         self.pgid.encode(&mut buf, 0)?;
@@ -560,28 +536,22 @@ impl CephMessagePayload for MOSDOp {
         // 6. trace (blkin_trace_info) - 3 x u64 = 24 bytes
         let trace = BlkinTraceInfo::empty();
         trace.encode(&mut buf, 0)?;
-        eprintln!(
-            "DEBUG: After blkin_trace encoding, buf.len() = {}",
-            buf.len()
-        );
+        
 
         // 6b. otel_trace (jspan_context) - added in v9
         let otel_trace = JaegerSpanContext::invalid();
         otel_trace.encode(&mut buf, 0)?;
-        eprintln!(
-            "DEBUG: After otel_trace encoding, buf.len() = {}",
-            buf.len()
-        );
+        
 
         // --- Above decoded up front; below decoded post-dispatch ---
 
         // 7. client_inc
         self.client_inc.encode(&mut buf, 0)?;
-        eprintln!("DEBUG: After client_inc, buf.len() = {}", buf.len());
+        
 
         // 8. mtime (utime_t: timespec with sec as u32, nsec as u32)
         self.mtime.encode(&mut buf, 0)?;
-        eprintln!("DEBUG: After mtime, buf.len() = {}", buf.len());
+        
 
         // 9. object_locator_t (using Denc encoding)
         // Note: hash=-1 means "calculate from object name" which is the normal case
@@ -596,10 +566,7 @@ impl CephMessagePayload for MOSDOp {
         locator.encode(&mut buf, 0)?;
         let after_len = buf.len();
         let encoded_bytes = after_len - before_len;
-        eprintln!(
-            "DEBUG: Encoded ObjectLocator: pool={}, key='{}', namespace='{}', hash={}, encoded {} bytes",
-            locator.pool_id, locator.key, locator.namespace, locator.hash, encoded_bytes
-        );
+        
         if encoded_bytes < 50 {
             let start = before_len;
             let locator_bytes: Vec<u8> = buf[start..after_len].to_vec();
@@ -608,7 +575,7 @@ impl CephMessagePayload for MOSDOp {
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join("");
-            eprintln!("DEBUG: ObjectLocator bytes (hex): {}", hex_str);
+            
         }
 
         // 10. object name (object_t)
@@ -620,13 +587,7 @@ impl CephMessagePayload for MOSDOp {
             use denc::Denc;
 
             // Debug logging for PGLS operations
-            eprintln!(
-                "DEBUG encode: op={:#x} ({:?}), flags={:#x}, indata_len={}",
-                op.op.as_u16(),
-                op.op,
-                op.flags,
-                op.indata.len()
-            );
+            
 
             // Encode ceph_osd_op structure (38 bytes) using Denc
             let op_start = buf.len();
@@ -636,26 +597,19 @@ impl CephMessagePayload for MOSDOp {
             let op_end = buf.len();
             let op_bytes = &buf[op_start..op_end];
             let hex_str: String = op_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            eprintln!("DEBUG op bytes (38 bytes): {}", hex_str);
-            eprintln!(
-                "DEBUG: Operation at buffer offset {}-{}",
-                op_start,
-                op_end - 1
-            );
+            
+            
         }
 
         // Debug: Check operation bytes are still intact before continuing
         let first_op_start = buf.len() - (38 * self.ops.len());
-        eprintln!(
-            "DEBUG: Before adding snapid, checking operation bytes at offset {}...",
-            first_op_start
-        );
+        
         if !self.ops.is_empty() {
             let op_check: String = buf[first_op_start..first_op_start + 38]
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            eprintln!("DEBUG: Op bytes check: {}", op_check);
+            
         }
 
         // 12. snapid
@@ -673,7 +627,7 @@ impl CephMessagePayload for MOSDOp {
         // 16. features (set to 0 for now)
         0u64.encode(&mut buf, 0)?;
 
-        eprintln!("DEBUG: Final buf.len() before freeze = {}", buf.len());
+        
 
         // Debug: dump key sections of payload
         let dump_len = std::cmp::min(buf.len(), 250);
@@ -681,9 +635,9 @@ impl CephMessagePayload for MOSDOp {
             .iter()
             .map(|b| format!("{:02x}", b))
             .collect();
-        eprintln!("DEBUG: First {} bytes of payload (hex):", dump_len);
+        
         for (i, chunk) in hex_str.as_bytes().chunks(64).enumerate() {
-            eprintln!("  {:04x}: {}", i * 32, std::str::from_utf8(chunk).unwrap());
+            
         }
 
         Ok(buf.freeze())
@@ -795,11 +749,8 @@ mod tests {
 
         // Verify front section size
         // Expected: 216 bytes for v9 (based on actual encoding)
-        eprintln!("Encoded front size: {} bytes", msg.front.len());
-        eprintln!(
-            "Expected front size: {} bytes",
-            MOSDOp::expected_front_size_pgls()
-        );
+        
+        
         assert_eq!(
             msg.front.len(),
             MOSDOp::expected_front_size_pgls(),
@@ -807,7 +758,7 @@ mod tests {
         );
 
         // Verify data section (should contain the 39-byte HObject cursor)
-        eprintln!("Data section size: {} bytes", msg.data.len());
+        
         assert_eq!(
             msg.data.len(),
             39,
