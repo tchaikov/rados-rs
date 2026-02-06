@@ -516,7 +516,14 @@ impl CephMessagePayload for MOSDOp {
         self.object.hash.encode(&mut buf, 0)?;
 
         // 3. osdmap_epoch
+        eprintln!(">>> About to encode osdmap_epoch: {}", self.osdmap_epoch);
+        let epoch_start = buf.len();
         self.osdmap_epoch.encode(&mut buf, 0)?;
+        let epoch_end = buf.len();
+        eprintln!(">>> Encoded osdmap_epoch {} as {} bytes: {:?}", 
+            self.osdmap_epoch, 
+            epoch_end - epoch_start,
+            &buf[epoch_start..epoch_end]);
 
         // 4. flags
         self.flags.encode(&mut buf, 0)?;

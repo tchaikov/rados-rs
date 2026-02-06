@@ -215,8 +215,10 @@ impl OSDSession {
                 msg_opt = send_rx.recv() => {
                     match msg_opt {
                         Some(msg) => {
+                            eprintln!(">>> OSD {} sending message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
                             debug!("OSD {} sending message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
                             if let Err(e) = connection.send_message(msg).await {
+                                eprintln!(">>> Failed to send message to OSD {}: {}", ctx.osd_id, e);
                                 error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
                                 break;
                             }
@@ -233,6 +235,8 @@ impl OSDSession {
                     match result {
                         Ok(msg) => {
                             let msg_type = msg.msg_type();
+                            let tid = msg.tid();
+                            eprintln!(">>> OSD {} received message type 0x{:04x}, tid={}", ctx.osd_id, msg_type, tid);
                             debug!("OSD {} received message type 0x{:04x}", ctx.osd_id, msg_type);
 
                             // Route messages based on their scope (broadcast vs session-specific)
@@ -257,11 +261,13 @@ impl OSDSession {
                                     }
                                 }
                                 _ => {
+                                    eprintln!(">>> OSD {} sent unexpected message type: 0x{:04x}", ctx.osd_id, msg_type);
                                     warn!("OSD {} sent unexpected message type: 0x{:04x}", ctx.osd_id, msg_type);
                                 }
                             }
                         }
                         Err(e) => {
+                            eprintln!(">>> Failed to receive message from OSD {}: {}", ctx.osd_id, e);
                             error!("Failed to receive message from OSD {}: {}", ctx.osd_id, e);
                             break;
                         }
@@ -403,6 +409,12 @@ impl OSDSession {
                 .with_tid(tid);
         msg.header.compat_version = ceph_msg.header.compat_version;
         msg.data = ceph_msg.data;
+
+        let version = msg.header.version;
+        let compat_version = msg.header.compat_version;
+        eprintln!(">>> encode_operation: front.len()={}, data.len()={}, version={}, compat_version={}",
+            msg.front.len(), msg.data.len(), version, compat_version);
+        eprintln!(">>> encode_operation: front[0..20] = {:?}", &msg.front[0..20.min(msg.front.len())]);
 
         Ok(msg)
     }

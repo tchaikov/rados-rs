@@ -164,6 +164,7 @@ impl StripedPgId {
     }
 }
 
+
 /// Entity name (corresponds to entity_name_t in Ceph)
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
