@@ -4,16 +4,32 @@
 //! C++ ceph-dencoder tool from the Ceph project.
 //!
 //! Requirements:
-//! - ceph-common package must be installed (provides ceph-dencoder)
+//! - ceph-dencoder binary must be in PATH
 //! - ceph-object-corpus repository must be cloned
 //!
 //! To run this test:
+//!
+//! ## Option 1: Using system-installed ceph-common
 //! ```bash
 //! # Install ceph-common (Ubuntu/Debian)
 //! sudo apt-get install ceph-common
 //!
 //! # Clone corpus repository
 //! git clone https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus
+//!
+//! # Run the test
+//! cargo test --test corpus_comparison_test -- --ignored --nocapture
+//! ```
+//!
+//! ## Option 2: Using locally-built ceph (development)
+//! ```bash
+//! # Add ceph build directory to PATH
+//! export PATH="$HOME/dev/ceph/build/bin:$PATH"
+//! export CEPH_LIB="$HOME/dev/ceph/build/lib"
+//! export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
+//!
+//! # Clone corpus repository if not already present
+//! git clone https://github.com/ceph/ceph-object-corpus.git ~/dev/ceph/ceph-object-corpus
 //!
 //! # Run the test
 //! cargo test --test corpus_comparison_test -- --ignored --nocapture
