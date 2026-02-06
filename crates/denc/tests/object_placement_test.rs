@@ -72,10 +72,7 @@ fn test_object_placement_pipeline() {
                             println!("    {} -> PG {}.{:x}", obj_name, pg.pool, pg.seed);
 
                             // Verify PG is within valid range
-                            assert_eq!(
-                                pg.pool, *pool_id,
-                                "PG pool ID should match input pool ID"
-                            );
+                            assert_eq!(pg.pool, *pool_id, "PG pool ID should match input pool ID");
                             assert!(
                                 pg.seed < pool.pg_num,
                                 "PG seed {} should be less than pg_num {}",

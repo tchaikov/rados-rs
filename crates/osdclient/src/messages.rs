@@ -151,9 +151,6 @@ impl MOSDOpReply {
     pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
         use denc::Denc;
 
-        
-        
-
         let mut cursor = front;
         if cursor.remaining() < 16 {
             return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
@@ -197,7 +194,6 @@ impl MOSDOpReply {
 
         // 4. result (errorcode32_t = int32_t)
         let result = i32::decode(&mut cursor, 0)?;
-        
 
         // 5. bad_replay_version (eversion_t = epoch + version)
         // This is for backwards compatibility with old clients.
@@ -238,7 +234,7 @@ impl MOSDOpReply {
             // Skip to payload_len field (at offset 34)
             cursor.advance(34);
             let payload_len = u32::decode(&mut cursor, 0)?;
-            
+
             payload_lens.push(payload_len as usize);
         }
 
@@ -251,7 +247,6 @@ impl MOSDOpReply {
         let mut ops = Vec::with_capacity(num_ops);
         for _i in 0..num_ops {
             let return_code = i32::decode(&mut cursor, 0)?;
-            
 
             ops.push(OpReply {
                 return_code,
@@ -263,11 +258,9 @@ impl MOSDOpReply {
         // The epoch part is not currently used since we track OSDMap epoch separately
         let _replay_epoch = u32::decode(&mut cursor, 0)?;
         let version = u64::decode(&mut cursor, 0)?;
-        
 
         // 12. user_version (version_t = u64)
         let user_version = u64::decode(&mut cursor, 0)?;
-        
 
         // 13. do_redirect (bool)
         let do_redirect = u8::decode(&mut cursor, 0)? != 0;
@@ -301,7 +294,7 @@ impl MOSDOpReply {
 
         // 16. Distribute data section to operations
         // The data section contains concatenated output data for all operations
-        
+
         let mut data_offset = 0;
         for (i, op) in ops.iter_mut().enumerate() {
             let len = payload_lens[i];
@@ -507,7 +500,6 @@ impl CephMessagePayload for MOSDOp {
         let mut buf = BytesMut::new();
 
         // Debug logging for MOSDOp message
-        
 
         // 1. spgid (spg_t) - with version header (1,1)
         self.pgid.encode(&mut buf, 0)?;
@@ -533,22 +525,18 @@ impl CephMessagePayload for MOSDOp {
         // 6. trace (blkin_trace_info) - 3 x u64 = 24 bytes
         let trace = BlkinTraceInfo::empty();
         trace.encode(&mut buf, 0)?;
-        
 
         // 6b. otel_trace (jspan_context) - added in v9
         let otel_trace = JaegerSpanContext::invalid();
         otel_trace.encode(&mut buf, 0)?;
-        
 
         // --- Above decoded up front; below decoded post-dispatch ---
 
         // 7. client_inc
         self.client_inc.encode(&mut buf, 0)?;
-        
 
         // 8. mtime (utime_t: timespec with sec as u32, nsec as u32)
         self.mtime.encode(&mut buf, 0)?;
-        
 
         // 9. object_locator_t (using Denc encoding)
         // Note: hash=-1 means "calculate from object name" which is the normal case
@@ -563,7 +551,7 @@ impl CephMessagePayload for MOSDOp {
         locator.encode(&mut buf, 0)?;
         let after_len = buf.len();
         let encoded_bytes = after_len - before_len;
-        
+
         if encoded_bytes < 50 {
             let start = before_len;
             let locator_bytes: Vec<u8> = buf[start..after_len].to_vec();
@@ -572,7 +560,6 @@ impl CephMessagePayload for MOSDOp {
                 .map(|b| format!("{:02x}", b))
                 .collect::<Vec<_>>()
                 .join("");
-            
         }
 
         // 10. object name (object_t)
@@ -584,7 +571,6 @@ impl CephMessagePayload for MOSDOp {
             use denc::Denc;
 
             // Debug logging for PGLS operations
-            
 
             // Encode ceph_osd_op structure (38 bytes) using Denc
             let op_start = buf.len();
@@ -594,19 +580,16 @@ impl CephMessagePayload for MOSDOp {
             let op_end = buf.len();
             let op_bytes = &buf[op_start..op_end];
             let _hex_str: String = op_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-            
-            
         }
 
         // Debug: Check operation bytes are still intact before continuing
         let first_op_start = buf.len() - (38 * self.ops.len());
-        
+
         if !self.ops.is_empty() {
             let _op_check: String = buf[first_op_start..first_op_start + 38]
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
-            
         }
 
         // 12. snapid
@@ -623,8 +606,6 @@ impl CephMessagePayload for MOSDOp {
 
         // 16. features (set to 0 for now)
         0u64.encode(&mut buf, 0)?;
-
-
 
         Ok(buf.freeze())
     }
@@ -735,8 +716,7 @@ mod tests {
 
         // Verify front section size
         // Expected: 216 bytes for v9 (based on actual encoding)
-        
-        
+
         assert_eq!(
             msg.front.len(),
             MOSDOp::expected_front_size_pgls(),
@@ -744,7 +724,7 @@ mod tests {
         );
 
         // Verify data section (should contain the 39-byte HObject cursor)
-        
+
         assert_eq!(
             msg.data.len(),
             39,
