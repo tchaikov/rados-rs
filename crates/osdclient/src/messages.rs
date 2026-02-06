@@ -500,6 +500,14 @@ impl CephMessagePayload for MOSDOp {
         let mut buf = BytesMut::new();
 
         // Debug logging for MOSDOp message
+        eprintln!(
+            ">>> Encoding MOSDOp: pgid={:?}, object={}, osdmap_epoch={}",
+            self.pgid, self.object.oid, self.osdmap_epoch
+        );
+        debug!(
+            "Encoding MOSDOp: pgid={:?}, object={}, osdmap_epoch={}",
+            self.pgid, self.object.oid, self.osdmap_epoch
+        );
 
         // 1. spgid (spg_t) - with version header (1,1)
         self.pgid.encode(&mut buf, 0)?;

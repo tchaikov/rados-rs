@@ -446,6 +446,15 @@ impl OSDClient {
             .await
             .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
+        eprintln!(
+            ">>> execute_op: Creating MOSDOp with osdmap_epoch={} for object {} in pool {}",
+            osdmap.epoch, oid, pool
+        );
+        debug!(
+            "execute_op: Creating MOSDOp with osdmap_epoch={} for object {} in pool {}",
+            osdmap.epoch, oid, pool
+        );
+
         // Build initial message
         let flags = MOSDOp::calculate_flags(&ops);
         let mut msg = MOSDOp::new(

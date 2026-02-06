@@ -56,7 +56,7 @@ services:
 
       [osd]
       debug ms = 1
-      debug osd = 25
+      debug osd = 10/10
       debug monc = 20
       debug mgrc = 20
       osd_check_max_object_name_len_on_startup = false
