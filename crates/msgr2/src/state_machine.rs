@@ -662,7 +662,7 @@ impl State for AuthConnecting {
 
                         // For no-auth with CRC mode, skip directly to session connecting
                         // For SECURE mode, we'd need signature exchange but that doesn't make sense with no-auth
-                        if con_mode == crate::ConnectionMode::Secure.as_u32() {
+                        if con_mode == crate::ConnectionMode::Secure.into() {
                             tracing::warn!(
                                 "SECURE mode with AuthMethod::None is unusual, skipping to session"
                             );
@@ -737,13 +737,13 @@ impl State for AuthConnecting {
 
     fn enter(&mut self) -> Result<StateResult> {
         // Send initial AUTH_REQUEST frame
-        let preferred_modes: Vec<u32> = self.preferred_modes.iter().map(|m| m.as_u32()).collect();
+        let preferred_modes: Vec<u32> = self.preferred_modes.iter().map(|m| (*m).into()).collect();
 
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
                 // For no-auth, send empty payload
-                (crate::AuthMethod::None.as_u32(), Bytes::new())
+                (crate::AuthMethod::None.into(), Bytes::new())
             }
             crate::AuthMethod::Cephx => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::Cephx");
@@ -754,7 +754,7 @@ impl State for AuthConnecting {
                 let payload = provider
                     .build_auth_payload(0, self.service_id) // Initial request uses global_id=0
                     .map_err(|e| Error::protocol_error(&e.to_string()))?;
-                (crate::AuthMethod::Cephx.as_u32(), payload)
+                (crate::AuthMethod::Cephx.into(), payload)
             }
             _ => {
                 return Err(Error::protocol_error(&format!(
@@ -1141,7 +1141,7 @@ impl SessionConnecting {
             peer_gid: 0,
             peer_global_seq: 0,
             negotiated_features: 0,
-            connection_mode: crate::ConnectionMode::Crc.as_u32(),
+            connection_mode: crate::ConnectionMode::Crc.into(),
             session_key: None,
             connection_secret: None,
             expected_server_signature: None,
@@ -1706,7 +1706,7 @@ impl State for AuthAccepting {
                         );
                         let auth_done = AuthDoneFrame::new(
                             1001,
-                            crate::ConnectionMode::Crc.as_u32(),
+                            crate::ConnectionMode::Crc.into(),
                             Bytes::new(),
                         );
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
@@ -1734,7 +1734,7 @@ impl State for AuthAccepting {
                         let auth_done_payload = handler
                             .build_auth_done_response(
                                 global_id,
-                                crate::ConnectionMode::Crc.as_u32() as u8,
+                                crate::ConnectionMode::Crc as u8,
                                 &session_key,
                                 auth_payload,
                             )
@@ -1744,7 +1744,7 @@ impl State for AuthAccepting {
 
                         let auth_done = AuthDoneFrame::new(
                             global_id,
-                            crate::ConnectionMode::Crc.as_u32(),
+                            crate::ConnectionMode::Crc.into(),
                             auth_done_payload,
                         );
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);

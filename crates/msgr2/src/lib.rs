@@ -70,12 +70,6 @@ pub enum AuthMethod {
     Gss = 0x4,
 }
 
-impl AuthMethod {
-    pub fn as_u32(self) -> u32 {
-        self.into()
-    }
-}
-
 /// Connection mode enum
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
@@ -85,12 +79,6 @@ pub enum ConnectionMode {
     Unknown = 0x0,
     Crc = 0x1,
     Secure = 0x2,
-}
-
-impl ConnectionMode {
-    pub fn as_u32(self) -> u32 {
-        self.into()
-    }
 }
 
 // FeatureSet wrapper type for msgr2 features

@@ -4,10 +4,11 @@
 //! C++ ceph-dencoder tool from the Ceph project.
 //!
 //! Requirements:
-//! - ceph-dencoder binary must be in PATH
+//! - ceph-dencoder binary must be in PATH or specified via CEPH_DENCODER
 //! - ceph-object-corpus repository will be cloned automatically if not present
 //!
 //! Environment variables:
+//! - CEPH_DENCODER: Path to ceph-dencoder binary (default: search in PATH)
 //! - CORPUS_VERSION: Version to test (default: test 18.2.0 and 19.2.0)
 //! - CORPUS_ROOT: Root directory of corpus (default: /tmp/ceph-object-corpus)
 //! - CORPUS_TYPE: Specific type to test (default: test all types)
@@ -15,6 +16,9 @@
 //! To run this test:
 //!
 //! ```bash
+//! # Test with custom ceph-dencoder path
+//! CEPH_DENCODER=/path/to/ceph-dencoder cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
+//!
 //! # Test with specific version
 //! CORPUS_VERSION=18.2.0 cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
 //!
@@ -115,6 +119,20 @@ fn get_corpus_path(corpus_root: &Path, version: &str) -> Result<PathBuf, String>
 
 /// Check if ceph-dencoder is available
 fn check_ceph_dencoder() -> Result<PathBuf, String> {
+    // Check if path is provided via environment variable
+    if let Ok(path_str) = env::var("CEPH_DENCODER") {
+        let path = PathBuf::from(path_str);
+        if path.exists() {
+            return Ok(path);
+        } else {
+            return Err(format!(
+                "CEPH_DENCODER path does not exist: {}",
+                path.display()
+            ));
+        }
+    }
+
+    // Otherwise, search in PATH
     let output = Command::new("which")
         .arg("ceph-dencoder")
         .output()
@@ -124,7 +142,7 @@ fn check_ceph_dencoder() -> Result<PathBuf, String> {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         Ok(PathBuf::from(path))
     } else {
-        Err("ceph-dencoder not found. Install with: sudo apt-get install ceph-common".to_string())
+        Err("ceph-dencoder not found. Install with: sudo apt-get install ceph-common\nOr specify path with: CEPH_DENCODER=/path/to/ceph-dencoder".to_string())
     }
 }
 
