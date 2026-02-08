@@ -201,84 +201,6 @@ impl VersionedEncode for JaegerSpanContext {
 
 denc::impl_denc_for_versioned!(JaegerSpanContext);
 
-// ============= ObjectLocator (object_locator_t) =============
-
-impl VersionedEncode for ObjectLocator {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        6
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        3
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // Encode pool (i64)
-        self.pool.encode(buf, 0)?;
-
-        // Encode preferred (i32, always -1, deprecated field)
-        (-1i32).encode(buf, 0)?;
-
-        // Encode key (String)
-        self.key.encode(buf, features)?;
-
-        // Encode nspace (String)
-        self.nspace.encode(buf, features)?;
-
-        // Encode hash (i64)
-        self.hash.encode(buf, 0)?;
-
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        // Decode pool (i64)
-        let pool = i64::decode(buf, 0)?;
-
-        // Decode preferred (i32, deprecated)
-        let _preferred = i32::decode(buf, 0)?;
-
-        // Decode key (String)
-        let key = String::decode(buf, features)?;
-
-        // Decode nspace (String)
-        let nspace = String::decode(buf, features)?;
-
-        // Decode hash (i64)
-        let hash = i64::decode(buf, 0)?;
-
-        Ok(ObjectLocator {
-            pool: pool as u64,
-            key,
-            nspace,
-            hash,
-        })
-    }
-
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        // pool + preferred + key + nspace + hash
-        Some(
-            self.pool.encoded_size(0)? // pool (i64)
-                + (-1i32).encoded_size(0)? // preferred (deprecated, always -1)
-                + self.key.encoded_size(features)?
-                + self.nspace.encoded_size(features)?
-                + self.hash.encoded_size(0)?, // hash (i64)
-        )
-    }
-}
-
-denc::impl_denc_for_versioned!(ObjectLocator);
-
 // ============= RequestRedirect (request_redirect_t) =============
 
 impl VersionedEncode for RequestRedirect {
@@ -683,9 +605,9 @@ mod tests {
     #[test]
     fn test_object_locator_roundtrip() {
         let locator = ObjectLocator {
-            pool: 3,
+            pool_id: 3,
             key: "test_key".to_string(),
-            nspace: "test_nspace".to_string(),
+            namespace: "test_nspace".to_string(),
             hash: -1,
         };
         let mut buf = BytesMut::new();
@@ -693,23 +615,23 @@ mod tests {
         locator.encode(&mut buf, 0).unwrap();
 
         let decoded = ObjectLocator::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.pool, 3);
+        assert_eq!(decoded.pool_id, 3);
         assert_eq!(decoded.key, "test_key");
-        assert_eq!(decoded.nspace, "test_nspace");
+        assert_eq!(decoded.namespace, "test_nspace");
         assert_eq!(decoded.hash, -1);
     }
 
     #[test]
     fn test_object_locator_empty() {
-        let locator = ObjectLocator::new();
+        let locator = ObjectLocator::default();
         let mut buf = BytesMut::new();
 
         locator.encode(&mut buf, 0).unwrap();
 
         let decoded = ObjectLocator::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.pool, u64::MAX);
+        assert_eq!(decoded.pool_id, u64::MAX);
         assert_eq!(decoded.key, "");
-        assert_eq!(decoded.nspace, "");
+        assert_eq!(decoded.namespace, "");
         assert_eq!(decoded.hash, -1);
         assert!(decoded.is_empty());
     }
@@ -718,9 +640,9 @@ mod tests {
     fn test_request_redirect_roundtrip() {
         let redirect = RequestRedirect {
             redirect_locator: ObjectLocator {
-                pool: 5,
-                key: "redirect_key".to_string(),
-                nspace: "redirect_nspace".to_string(),
+                pool_id: 5,
+                key: String::new(),
+                namespace: "redirect_nspace".to_string(),
                 hash: 42,
             },
             redirect_object: "redirect_obj".to_string(),
@@ -730,9 +652,9 @@ mod tests {
         redirect.encode(&mut buf, 0).unwrap();
 
         let decoded = RequestRedirect::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.redirect_locator.pool, 5);
-        assert_eq!(decoded.redirect_locator.key, "redirect_key");
-        assert_eq!(decoded.redirect_locator.nspace, "redirect_nspace");
+        assert_eq!(decoded.redirect_locator.pool_id, 5);
+        assert_eq!(decoded.redirect_locator.key, "");
+        assert_eq!(decoded.redirect_locator.namespace, "redirect_nspace");
         assert_eq!(decoded.redirect_locator.hash, 42);
         assert_eq!(decoded.redirect_object, "redirect_obj");
     }

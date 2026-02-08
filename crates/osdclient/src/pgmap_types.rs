@@ -1669,48 +1669,8 @@ mod tests {
 
 // ========== Supporting types for pg_stat_t ==========
 
-/// Shard ID (shard_id_t in C++)
-/// Represents a shard identifier for erasure-coded pools
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
-pub struct ShardId(pub i8);
-
-impl ShardId {
-    /// NO_SHARD constant indicates no shard (replicated pool)
-    pub const NO_SHARD: ShardId = ShardId(-1);
-
-    pub fn new(id: i8) -> Self {
-        ShardId(id)
-    }
-}
-
-impl Denc for ShardId {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient buffer space for ShardId".to_string(),
-            ));
-        }
-        buf.put_i8(self.0);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for ShardId".to_string(),
-            ));
-        }
-        Ok(ShardId(buf.get_i8()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(1)
-    }
-}
-
-impl FixedSize for ShardId {
-    const SIZE: usize = 1;
-}
+// Re-export ShardId from osdmap module (canonical definition)
+use crate::osdmap::ShardId;
 
 /// PG shard identifier (pg_shard_t in C++)
 /// Identifies a specific shard of a PG on a specific OSD

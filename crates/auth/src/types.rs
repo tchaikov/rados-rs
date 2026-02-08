@@ -37,8 +37,19 @@ pub use entity_type as service_id;
 /// Global ID type for Ceph entities
 pub type GlobalId = u64;
 
-/// Entity name type
-/// Corresponds to C++ `EntityName` struct in `/src/common/entity_name.h`
+/// Entity name for authentication protocol (hybrid format: numeric type + string ID)
+///
+/// This is a hybrid representation used specifically in the CephX authentication protocol.
+/// It combines a numeric entity type with a string ID, matching the C++ `EntityName` struct
+/// in `/src/common/entity_name.h`.
+///
+/// **When to use:** For authentication-related operations, especially when encoding/decoding
+/// CephX protocol messages.
+///
+/// **Related types:**
+/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
+/// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
+/// - `denc::types::EntityName` - General encoding version (typed)
 ///
 /// C++ encoding format:
 /// - `__u32 type` - Entity type (CEPH_ENTITY_TYPE_CLIENT=1, etc.)

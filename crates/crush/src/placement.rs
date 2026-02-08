@@ -12,7 +12,7 @@ use denc::{Denc, RadosError, VersionedEncode};
 /// Contains pool ID, namespace, key, and hash for object placement
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ObjectLocator {
-    /// Pool ID
+    /// Pool ID (u64::MAX for invalid/default)
     pub pool_id: u64,
     /// Key string (if non-empty) - alternative to hash for placement
     pub key: String,
@@ -61,6 +61,30 @@ impl ObjectLocator {
             key: String::new(),
             namespace: String::new(),
             hash,
+        }
+    }
+
+    /// Create an object locator for a specific pool (alias for new())
+    pub fn with_pool(pool_id: u64) -> Self {
+        Self::new(pool_id)
+    }
+
+    /// Check if the locator is empty (has sentinel values)
+    pub fn is_empty(&self) -> bool {
+        self.pool_id == u64::MAX
+            && self.key.is_empty()
+            && self.namespace.is_empty()
+            && self.hash == -1
+    }
+}
+
+impl Default for ObjectLocator {
+    fn default() -> Self {
+        ObjectLocator {
+            pool_id: u64::MAX,
+            key: String::new(),
+            namespace: String::new(),
+            hash: -1,
         }
     }
 }

@@ -3,7 +3,19 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-/// Entity name (e.g., "client.admin", "osd.0")
+/// Entity name for human-readable display and parsing (e.g., "client.admin", "osd.0")
+///
+/// This is the runtime representation used for display purposes and parsing user input.
+/// It uses String-based fields for both entity type and ID, making it suitable for
+/// human-readable formats and configuration files.
+///
+/// **When to use:** For displaying entity names to users, parsing configuration,
+/// or when you need the human-readable string representation.
+///
+/// **Related types:**
+/// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
+/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
+/// - `denc::types::EntityName` - General encoding version (typed)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityName {
     pub entity_type: String,

@@ -2,7 +2,7 @@ use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
 use denc::{
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
-    EntityAddr, EntityAddrvec, Padding, RadosError, VersionedEncode,
+    EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -53,11 +53,15 @@ fn encode_varint<B: BufMut>(mut v: u64, buf: &mut B) -> Result<(), RadosError> {
 
 /// Shard ID type (shard_id_t in C++)
 /// Wraps an i8 value representing a shard identifier
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Default)]
 pub struct ShardId(pub i8);
 
 impl ShardId {
     pub const NO_SHARD: ShardId = ShardId(-1);
+
+    pub fn new(id: i8) -> Self {
+        ShardId(id)
+    }
 }
 
 impl Denc for ShardId {
@@ -78,6 +82,10 @@ impl Denc for ShardId {
     fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(1)
     }
+}
+
+impl FixedSize for ShardId {
+    const SIZE: usize = 1;
 }
 
 /// Shard ID Set (shard_id_set in C++)

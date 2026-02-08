@@ -383,9 +383,9 @@ impl OSDClient {
     /// in C++ Objecter (~/dev/ceph/src/osd/osd_types.h).
     fn apply_redirect(op: &mut MOSDOp, redirect: &RequestRedirect) {
         // Update object locator from redirect
-        op.object.pool = redirect.redirect_locator.pool;
+        op.object.pool = redirect.redirect_locator.pool_id;
         op.object.key = redirect.redirect_locator.key.clone();
-        op.object.namespace = redirect.redirect_locator.nspace.clone();
+        op.object.namespace = redirect.redirect_locator.namespace.clone();
 
         // If redirect specifies a different object name, use it
         if !redirect.redirect_object.is_empty() {
@@ -496,7 +496,7 @@ impl OSDClient {
             if let Some(redirect) = result.redirect {
                 debug!(
                     "Received redirect to pool={}, object={}, retrying",
-                    redirect.redirect_locator.pool,
+                    redirect.redirect_locator.pool_id,
                     if redirect.redirect_object.is_empty() {
                         msg.object.oid.as_str()
                     } else {

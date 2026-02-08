@@ -249,6 +249,19 @@ impl fmt::Display for EntityType {
     }
 }
 
+/// Entity name for general encoding/decoding (typed version with EntityType newtype)
+///
+/// This is a typed representation that uses the EntityType newtype wrapper for better
+/// type safety. It's suitable for general-purpose encoding/decoding operations where
+/// you want compile-time type checking.
+///
+/// **When to use:** For general encoding/decoding operations where type safety is
+/// important and you're not in a performance-critical path requiring zero-copy.
+///
+/// **Related types:**
+/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
+/// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
+/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct EntityName {
     pub entity_type: EntityType,

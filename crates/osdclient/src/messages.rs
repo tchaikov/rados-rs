@@ -283,10 +283,10 @@ impl MOSDOpReply {
                 OSDClientError::Decoding(format!("Failed to decode redirect: {}", e))
             })?;
             debug!(
-                "Received redirect: pool={}, key={}, nspace={}, object={}",
-                r.redirect_locator.pool,
+                "Received redirect: pool={}, key={}, namespace={}, object={}",
+                r.redirect_locator.pool_id,
                 r.redirect_locator.key,
-                r.redirect_locator.nspace,
+                r.redirect_locator.namespace,
                 r.redirect_object
             );
             Some(r)

@@ -168,7 +168,19 @@ impl StripedPgId {
     }
 }
 
-/// Entity name (corresponds to entity_name_t in Ceph)
+/// Entity name for zero-copy wire protocol encoding (packed struct)
+///
+/// This is the most efficient representation for network communication, using a packed
+/// struct with numeric fields. It's designed for zero-copy encoding/decoding in message
+/// headers and protocol buffers.
+///
+/// **When to use:** For encoding/decoding entity names in network messages, especially
+/// in performance-critical paths where zero-copy operations are important.
+///
+/// **Related types:**
+/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
+/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
+/// - `denc::types::EntityName` - General encoding version (typed)
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
 #[derive(Debug, Clone, PartialEq, Eq, denc::ZeroCopyDencode)]
@@ -267,52 +279,8 @@ impl BlkinTraceInfo {
 
 /// Object locator (corresponds to object_locator_t in Ceph)
 ///
-/// A locator constrains the placement of an object. Mainly specifies which pool
-/// the object goes in, and optionally namespace, key, or hash position.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObjectLocator {
-    /// Pool ID (u64::MAX for invalid/default)
-    pub pool: u64,
-    /// Key string (if non-empty) - specify either hash or key, not both
-    pub key: String,
-    /// Namespace
-    pub nspace: String,
-    /// Hash position (if >= 0) - specify either hash or key, not both
-    pub hash: i64,
-}
-
-impl ObjectLocator {
-    /// Create an empty object locator (with sentinel value for pool)
-    pub fn new() -> Self {
-        Self {
-            pool: u64::MAX,
-            key: String::new(),
-            nspace: String::new(),
-            hash: -1,
-        }
-    }
-
-    /// Create an object locator for a specific pool
-    pub fn with_pool(pool: u64) -> Self {
-        Self {
-            pool,
-            key: String::new(),
-            nspace: String::new(),
-            hash: -1,
-        }
-    }
-
-    /// Check if the locator is empty
-    pub fn is_empty(&self) -> bool {
-        self.pool == u64::MAX && self.key.is_empty() && self.nspace.is_empty() && self.hash == -1
-    }
-}
-
-impl Default for ObjectLocator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+// Re-export ObjectLocator from crush (canonical definition with Denc implementation)
+pub use crush::placement::ObjectLocator;
 
 /// Request redirect (corresponds to request_redirect_t in Ceph)
 ///
@@ -330,7 +298,7 @@ impl RequestRedirect {
     /// Create an empty redirect
     pub fn new() -> Self {
         Self {
-            redirect_locator: ObjectLocator::new(),
+            redirect_locator: ObjectLocator::default(),
             redirect_object: String::new(),
         }
     }
@@ -798,30 +766,8 @@ pub struct PoolInfo {
     pub pool_name: String,
 }
 
-/// Single object entry from listing
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListObjectEntry {
-    /// Namespace (usually empty)
-    pub nspace: String,
-    /// Object name
-    pub oid: String,
-    /// Object locator key (usually empty)
-    pub locator: String,
-}
-
-impl ListObjectEntry {
-    pub fn new(
-        nspace: impl Into<String>,
-        oid: impl Into<String>,
-        locator: impl Into<String>,
-    ) -> Self {
-        Self {
-            nspace: nspace.into(),
-            oid: oid.into(),
-            locator: locator.into(),
-        }
-    }
-}
+// Re-export ListObjectImpl from denc as ListObjectEntry (canonical definition)
+pub use denc::pg_nls_response::ListObjectImpl as ListObjectEntry;
 
 /// Result of a list operation
 #[derive(Debug, Clone)]
