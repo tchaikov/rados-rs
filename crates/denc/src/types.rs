@@ -208,17 +208,9 @@ impl EntityType {
     pub const TYPE_OSD: Self = Self(0x04);
     pub const TYPE_CLIENT: Self = Self(0x08);
     pub const TYPE_MGR: Self = Self(0x10);
-}
 
-impl From<u32> for EntityType {
-    fn from(value: u32) -> Self {
-        Self(value)
-    }
-}
-
-impl From<EntityType> for u32 {
-    fn from(entity_type: EntityType) -> Self {
-        entity_type.0
+    pub const fn value(self) -> u32 {
+        self.0
     }
 }
 
