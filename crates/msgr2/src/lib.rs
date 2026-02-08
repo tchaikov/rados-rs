@@ -39,24 +39,63 @@ cephconfig::define_options! {
 }
 
 // MSGR2 Protocol features (from include/msgr.h)
-/// msgr2.1 protocol revision
-pub const MSGR2_FEATURE_REVISION_1: u64 = 1 << 0; // bit 0
-/// On-wire compression support
-pub const MSGR2_FEATURE_COMPRESSION: u64 = 1 << 1; // bit 1
-
-/// All msgr2 features (REVISION_1 | COMPRESSION)
-pub const MSGR2_ALL_FEATURES: u64 = MSGR2_FEATURE_REVISION_1 | MSGR2_FEATURE_COMPRESSION;
-
-/// Features we support
-pub const MSGR2_SUPPORTED_FEATURES: u64 = MSGR2_FEATURE_REVISION_1 | MSGR2_FEATURE_COMPRESSION;
-
-/// Features we require (empty for now)
-pub const MSGR2_REQUIRED_FEATURES: u64 = 0;
-
-/// Check if a feature is supported
-pub fn has_msgr2_feature(features: u64, feature: u64) -> bool {
-    (features & feature) == feature
+bitflags::bitflags! {
+    /// msgr2 protocol feature flags
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct FeatureSet: u64 {
+        /// msgr2.1 protocol revision
+        const REVISION_1 = 1 << 0; // bit 0
+        /// On-wire compression support
+        const COMPRESSION = 1 << 1; // bit 1
+    }
 }
+
+impl FeatureSet {
+    /// Empty feature set (no features)
+    pub const EMPTY: Self = Self::empty();
+
+    /// All msgr2 features (REVISION_1 | COMPRESSION)
+    pub const ALL: Self = Self::REVISION_1.union(Self::COMPRESSION);
+
+    /// Features we support
+    pub const MSGR2: Self = Self::REVISION_1.union(Self::COMPRESSION);
+}
+
+impl From<u64> for FeatureSet {
+    fn from(value: u64) -> Self {
+        Self::from_bits_truncate(value)
+    }
+}
+
+impl From<FeatureSet> for u64 {
+    fn from(features: FeatureSet) -> Self {
+        features.bits()
+    }
+}
+
+impl denc::Denc for FeatureSet {
+    fn encode<B: bytes::BufMut>(
+        &self,
+        buf: &mut B,
+        features: u64,
+    ) -> std::result::Result<(), denc::RadosError> {
+        self.bits().encode(buf, features)
+    }
+
+    fn decode<B: bytes::Buf>(
+        buf: &mut B,
+        features: u64,
+    ) -> std::result::Result<Self, denc::RadosError> {
+        Ok(Self::from_bits_truncate(u64::decode(buf, features)?))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        self.bits().encoded_size(features)
+    }
+}
+
+// Implement ZeroCopyDencode marker to indicate this type is safe for zerocopy
+impl denc::zerocopy::ZeroCopyDencode for FeatureSet {}
 
 /// Authentication method enum (from include/ceph_fs.h)
 #[derive(
@@ -80,89 +119,6 @@ pub enum ConnectionMode {
     Crc = 0x1,
     Secure = 0x2,
 }
-
-// FeatureSet wrapper type for msgr2 features
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FeatureSet(u64);
-
-impl FeatureSet {
-    pub const EMPTY: Self = Self(0);
-    pub const MSGR2: Self = Self(MSGR2_SUPPORTED_FEATURES);
-
-    pub fn has_feature(self, feature: u64) -> bool {
-        (self.0 & feature) != 0
-    }
-
-    pub fn with_feature(mut self, feature: u64) -> Self {
-        self.0 |= feature;
-        self
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-}
-
-impl From<u64> for FeatureSet {
-    fn from(value: u64) -> Self {
-        Self(value)
-    }
-}
-
-impl From<FeatureSet> for u64 {
-    fn from(features: FeatureSet) -> Self {
-        features.0
-    }
-}
-
-impl std::ops::BitAnd for FeatureSet {
-    type Output = Self;
-
-    fn bitand(self, rhs: Self) -> Self::Output {
-        Self(self.0 & rhs.0)
-    }
-}
-
-impl std::ops::BitOr for FeatureSet {
-    type Output = Self;
-
-    fn bitor(self, rhs: Self) -> Self::Output {
-        Self(self.0 | rhs.0)
-    }
-}
-
-impl std::ops::Not for FeatureSet {
-    type Output = Self;
-
-    fn not(self) -> Self::Output {
-        Self(!self.0)
-    }
-}
-
-impl denc::Denc for FeatureSet {
-    fn encode<B: bytes::BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-    ) -> std::result::Result<(), denc::RadosError> {
-        self.0.encode(buf, features)
-    }
-
-    fn decode<B: bytes::Buf>(
-        buf: &mut B,
-        features: u64,
-    ) -> std::result::Result<Self, denc::RadosError> {
-        Ok(Self(u64::decode(buf, features)?))
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        self.0.encoded_size(features)
-    }
-}
-
-// Implement ZeroCopyDencode marker to indicate this type is safe for zerocopy
-impl denc::zerocopy::ZeroCopyDencode for FeatureSet {}
 
 /// Configuration for msgr2 connection behavior
 ///
@@ -264,7 +220,7 @@ impl Default for ConnectionConfig {
         };
 
         Self {
-            supported_features: MSGR2_ALL_FEATURES,
+            supported_features: FeatureSet::ALL.bits(),
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
@@ -279,7 +235,7 @@ impl ConnectionConfig {
     /// Create config with compression disabled
     pub fn without_compression() -> Self {
         Self {
-            supported_features: MSGR2_FEATURE_REVISION_1,
+            supported_features: FeatureSet::REVISION_1.bits(),
             ..Default::default()
         }
     }
@@ -308,7 +264,7 @@ impl ConnectionConfig {
     /// Create config with both compression and encryption disabled
     pub fn minimal() -> Self {
         Self {
-            supported_features: MSGR2_FEATURE_REVISION_1,
+            supported_features: FeatureSet::REVISION_1.bits(),
             preferred_modes: vec![ConnectionMode::Crc],
             ..Default::default()
         }
@@ -536,21 +492,16 @@ mod tests {
     #[test]
     fn test_connection_config_default() {
         let config = ConnectionConfig::default();
-        assert_eq!(config.supported_features, MSGR2_ALL_FEATURES);
+        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
         assert_eq!(config.required_features, 0);
         assert_eq!(
             config.preferred_modes,
             vec![ConnectionMode::Secure, ConnectionMode::Crc]
         );
         assert!(config.throttle_config.is_none());
-        assert!(has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_REVISION_1
-        ));
-        assert!(has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_COMPRESSION
-        ));
+        let features = FeatureSet::from(config.supported_features);
+        assert!(features.contains(FeatureSet::REVISION_1));
+        assert!(features.contains(FeatureSet::COMPRESSION));
     }
 
     #[test]
@@ -577,51 +528,42 @@ mod tests {
     #[test]
     fn test_connection_config_without_compression() {
         let config = ConnectionConfig::without_compression();
-        assert_eq!(config.supported_features, MSGR2_FEATURE_REVISION_1);
+        assert_eq!(config.supported_features, FeatureSet::REVISION_1.bits());
         assert_eq!(config.required_features, 0);
-        assert!(has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_REVISION_1
-        ));
-        assert!(!has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_COMPRESSION
-        ));
+        let features = FeatureSet::from(config.supported_features);
+        assert!(features.contains(FeatureSet::REVISION_1));
+        assert!(!features.contains(FeatureSet::COMPRESSION));
     }
 
     #[test]
     fn test_connection_config_with_compression() {
         let config = ConnectionConfig::with_compression();
-        assert_eq!(config.supported_features, MSGR2_ALL_FEATURES);
-        assert!(has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_COMPRESSION
-        ));
+        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
+        let features = FeatureSet::from(config.supported_features);
+        assert!(features.contains(FeatureSet::COMPRESSION));
     }
 
     #[test]
     fn test_connection_config_prefer_crc_mode() {
         let config = ConnectionConfig::prefer_crc_mode();
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Crc]);
-        assert_eq!(config.supported_features, MSGR2_ALL_FEATURES);
+        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
     }
 
     #[test]
     fn test_connection_config_prefer_secure_mode() {
         let config = ConnectionConfig::prefer_secure_mode();
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Secure]);
-        assert_eq!(config.supported_features, MSGR2_ALL_FEATURES);
+        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
     }
 
     #[test]
     fn test_connection_config_minimal() {
         let config = ConnectionConfig::minimal();
-        assert_eq!(config.supported_features, MSGR2_FEATURE_REVISION_1);
+        assert_eq!(config.supported_features, FeatureSet::REVISION_1.bits());
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Crc]);
-        assert!(!has_msgr2_feature(
-            config.supported_features,
-            MSGR2_FEATURE_COMPRESSION
-        ));
+        let features = FeatureSet::from(config.supported_features);
+        assert!(!features.contains(FeatureSet::COMPRESSION));
     }
 
     #[test]
@@ -736,8 +678,8 @@ mod tests {
     #[test]
     fn test_connection_config_validate_required_features_not_supported() {
         let config = ConnectionConfig {
-            supported_features: MSGR2_FEATURE_REVISION_1,
-            required_features: MSGR2_FEATURE_COMPRESSION,
+            supported_features: FeatureSet::REVISION_1.bits(),
+            required_features: FeatureSet::COMPRESSION.bits(),
             ..Default::default()
         };
         assert!(config.validate().is_err());

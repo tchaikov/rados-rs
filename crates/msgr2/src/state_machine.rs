@@ -1013,10 +1013,8 @@ impl State for AuthConnectingSign {
                     "DEBUG: peer_supported_features = 0x{:x}",
                     self.peer_supported_features
                 );
-                if crate::has_msgr2_feature(
-                    self.peer_supported_features,
-                    crate::MSGR2_FEATURE_COMPRESSION,
-                ) {
+                let peer_features = crate::FeatureSet::from(self.peer_supported_features);
+                if peer_features.contains(crate::FeatureSet::COMPRESSION) {
                     tracing::debug!(
                         "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
@@ -2013,28 +2011,25 @@ impl StateMachine {
     /// Set peer's supported msgr2 features (from banner exchange)
     pub fn set_peer_supported_features(&mut self, features: u64) {
         self.peer_supported_features = features;
+        let feature_set = crate::FeatureSet::from(features);
         tracing::debug!(
             "Peer supported features set: 0x{:x} (REVISION_1={}, COMPRESSION={})",
             features,
-            crate::has_msgr2_feature(features, crate::MSGR2_FEATURE_REVISION_1),
-            crate::has_msgr2_feature(features, crate::MSGR2_FEATURE_COMPRESSION)
+            feature_set.contains(crate::FeatureSet::REVISION_1),
+            feature_set.contains(crate::FeatureSet::COMPRESSION)
         );
     }
 
     /// Check if peer supports compression feature
     pub fn peer_supports_compression(&self) -> bool {
-        crate::has_msgr2_feature(
-            self.peer_supported_features,
-            crate::MSGR2_FEATURE_COMPRESSION,
-        )
+        let features = crate::FeatureSet::from(self.peer_supported_features);
+        features.contains(crate::FeatureSet::COMPRESSION)
     }
 
     /// Check if we (client) support compression feature
     pub fn we_support_compression(&self) -> bool {
-        crate::has_msgr2_feature(
-            self.config.supported_features,
-            crate::MSGR2_FEATURE_COMPRESSION,
-        )
+        let features = crate::FeatureSet::from(self.config.supported_features);
+        features.contains(crate::FeatureSet::COMPRESSION)
     }
 
     /// Check if both we and peer support compression
