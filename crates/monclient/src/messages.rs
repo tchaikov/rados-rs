@@ -411,12 +411,9 @@ impl PaxosServiceMessage for MMonCommand {
 
         // Decode command array using Denc
         let cmd_count = u32::decode(data, 0)? as usize;
-        let mut cmd = Vec::with_capacity(cmd_count);
-
-        for _ in 0..cmd_count {
-            let s = String::decode(data, 0)?;
-            cmd.push(s);
-        }
+        let cmd = (0..cmd_count)
+            .map(|_| String::decode(data, 0).map_err(MonClientError::from))
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Self {
             paxos,
@@ -498,13 +495,13 @@ impl PaxosServiceMessage for MMonCommandAck {
         let cmd_count = u32::decode(data, 0)? as usize;
         tracing::debug!("cmd_count={}, remaining={}", cmd_count, data.remaining());
 
-        let mut cmd = Vec::with_capacity(cmd_count);
-        for i in 0..cmd_count {
-            let s = String::decode(data, 0).map_err(|e| {
-                MonClientError::DecodingError(format!("Failed to decode cmd[{}]: {}", i, e))
-            })?;
-            cmd.push(s);
-        }
+        let cmd = (0..cmd_count)
+            .map(|i| {
+                String::decode(data, 0).map_err(|e| {
+                    MonClientError::DecodingError(format!("Failed to decode cmd[{}]: {}", i, e))
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(Self { paxos, r, rs, cmd })
     }
