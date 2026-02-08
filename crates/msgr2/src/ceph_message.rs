@@ -154,12 +154,12 @@ pub trait CephMessagePayload: Sized {
     /// Get the message type constant
     fn msg_type() -> u16;
 
-    /// Get the message version
-    fn msg_version() -> u16;
+    /// Get the message version (may depend on negotiated features)
+    fn msg_version(features: u64) -> u16;
 
     /// Get the compat version (defaults to msg_version if not overridden)
-    fn msg_compat_version() -> u16 {
-        Self::msg_version()
+    fn msg_compat_version(features: u64) -> u16 {
+        Self::msg_version(features)
     }
 
     /// Encode the payload (front section) of the message
@@ -207,8 +207,8 @@ impl CephMessage {
         let data = payload.encode_data(features)?;
 
         // Create header with proper version and compat_version
-        let mut header = CephMsgHeader::new(T::msg_type(), T::msg_version());
-        header.compat_version = T::msg_compat_version();
+        let mut header = CephMsgHeader::new(T::msg_type(), T::msg_version(features));
+        header.compat_version = T::msg_compat_version(features);
         header.front_len = front.len() as u32;
         header.middle_len = middle.len() as u32;
         header.data_len = data.len() as u32;
@@ -364,7 +364,7 @@ impl CephMessagePayload for MPing {
         CEPH_MSG_PING
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         1
     }
 
@@ -391,7 +391,7 @@ impl CephMessagePayload for MPingAck {
         CEPH_MSG_PING_ACK
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         1
     }
 

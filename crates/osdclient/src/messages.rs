@@ -122,10 +122,14 @@ impl MOSDOp {
     /// Get the expected front section size for a PGLS operation
     ///
     /// This is useful for verifying the encoding is correct.
-    /// The size should be 216 bytes for v9 (based on actual encoding)
-    pub fn expected_front_size_pgls() -> usize {
-        // Calculated from actual v9 encoding
-        216
+    /// - v8: 209 bytes (without OpenTelemetry trace)
+    /// - v9: 216 bytes (with OpenTelemetry trace, 7 bytes for JaegerSpanContext)
+    pub fn expected_front_size_pgls(version: u16) -> usize {
+        match version {
+            8 => 209, // v8 format (Ceph v18)
+            9 => 216, // v9 format (Ceph v19+)
+            _ => panic!("Unsupported MOSDOp version: {}", version),
+        }
     }
 }
 
@@ -490,11 +494,18 @@ impl CephMessagePayload for MOSDOp {
         CEPH_MSG_OSD_OP
     }
 
-    fn msg_version() -> u16 {
-        Self::VERSION
+    fn msg_version(features: u64) -> u16 {
+        // Return v9 if SERVER_SQUID feature is present (Ceph v19+)
+        // Return v8 otherwise for backward compatibility with Ceph v18
+        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
+        if features & CEPH_FEATUREMASK_SERVER_SQUID != 0 {
+            9
+        } else {
+            8
+        }
     }
 
-    fn msg_compat_version() -> u16 {
+    fn msg_compat_version(_features: u64) -> u16 {
         Self::COMPAT_VERSION
     }
 
@@ -534,9 +545,12 @@ impl CephMessagePayload for MOSDOp {
         let trace = BlkinTraceInfo::empty();
         trace.encode(&mut buf, 0)?;
 
-        // 6b. otel_trace (jspan_context) - added in v9
-        let otel_trace = JaegerSpanContext::invalid();
-        otel_trace.encode(&mut buf, 0)?;
+        // 6b. otel_trace (jspan_context) - added in v9, only encode if SERVER_SQUID feature is present
+        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
+        if features & CEPH_FEATUREMASK_SERVER_SQUID != 0 {
+            let otel_trace = JaegerSpanContext::invalid();
+            otel_trace.encode(&mut buf, 0)?;
+        }
 
         // --- Above decoded up front; below decoded post-dispatch ---
 
@@ -649,7 +663,7 @@ impl CephMessagePayload for MOSDOpReply {
         CEPH_MSG_OSD_OPREPLY
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         Self::VERSION
     }
 
@@ -674,7 +688,7 @@ impl CephMessagePayload for MOSDBackoff {
         CEPH_MSG_OSD_BACKOFF
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         Self::VERSION
     }
 
@@ -719,16 +733,16 @@ mod tests {
             0,
         );
 
-        // Encode using CephMessage framework
+        // Encode using CephMessage framework with features=0 (v8 format)
         let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();
 
         // Verify front section size
-        // Expected: 216 bytes for v9 (based on actual encoding)
+        // Expected: 209 bytes for v8 (without OpenTelemetry trace)
 
         assert_eq!(
             msg.front.len(),
-            MOSDOp::expected_front_size_pgls(),
-            "Front section should be 216 bytes for v9"
+            MOSDOp::expected_front_size_pgls(8),
+            "Front section should be 209 bytes for v8"
         );
 
         // Verify data section (should contain the 39-byte HObject cursor)
@@ -779,7 +793,7 @@ mod tests {
 
         let mosdop = MOSDOp::new(1, 1, 0, object, pgid, ops, reqid, 0);
 
-        // Create a complete message using CephMessage framework
+        // Create a complete message using CephMessage framework with features=0 (v8)
         let msg = CephMessage::from_payload(&mosdop, 0, CrcFlags::ALL).unwrap();
 
         // Verify message structure
@@ -787,7 +801,7 @@ mod tests {
         let msg_type = msg.header.msg_type;
         let version = msg.header.version;
         assert_eq!(msg_type, CEPH_MSG_OSD_OP);
-        assert_eq!(version, MOSDOp::VERSION);
+        assert_eq!(version, 8, "Version should be 8 with features=0");
         assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0); // No data for read operation
@@ -843,5 +857,53 @@ mod tests {
         // Verify data section contains write data
         assert_eq!(msg.data.len(), 1024);
         assert_eq!(msg.data, write_data);
+    }
+
+    #[test]
+    fn test_mosdop_encoding_v9_with_squid_features() {
+        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
+        use msgr2::ceph_message::{CephMessage, CrcFlags};
+
+        // Create a PGLS operation using the helper function
+        let object = ObjectId::new(3, "");
+        let pgid = StripedPgId::from_pg(3, 0);
+        let ops = vec![OSDOp::pgls(100, denc::HObject::empty_cursor(3), 20)];
+        let reqid = RequestId::new("client.0", 1, 1);
+
+        let mosdop = MOSDOp::new(
+            1,
+            20,
+            MOSDOp::calculate_flags(&ops),
+            object,
+            pgid,
+            ops,
+            reqid,
+            0,
+        );
+
+        // Encode with SERVER_SQUID features (v9 format)
+        let msg = CephMessage::from_payload(&mosdop, CEPH_FEATUREMASK_SERVER_SQUID, CrcFlags::ALL)
+            .unwrap();
+
+        // Verify message version is 9
+        let version = msg.header.version;
+        assert_eq!(
+            version, 9,
+            "Message version should be 9 with SERVER_SQUID features"
+        );
+
+        // Verify front section size is 216 bytes (v9 with OpenTelemetry trace)
+        assert_eq!(
+            msg.front.len(),
+            MOSDOp::expected_front_size_pgls(9),
+            "Front section should be 216 bytes for v9"
+        );
+
+        // Verify data section (should contain the 39-byte HObject cursor)
+        assert_eq!(
+            msg.data.len(),
+            39,
+            "Data section should contain 39-byte HObject cursor"
+        );
     }
 }

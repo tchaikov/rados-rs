@@ -38,7 +38,7 @@ impl CephMessagePayload for MMonSubscribe {
         CEPH_MSG_MON_SUBSCRIBE
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_SUBSCRIBE_VERSION
     }
 
@@ -62,7 +62,7 @@ impl CephMessagePayload for MMonSubscribeAck {
         CEPH_MSG_MON_SUBSCRIBE_ACK
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_SUBSCRIBE_ACK_VERSION
     }
 
@@ -86,7 +86,7 @@ impl CephMessagePayload for MMonGetVersion {
         CEPH_MSG_MON_GET_VERSION
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_GET_VERSION_VERSION
     }
 
@@ -110,7 +110,7 @@ impl CephMessagePayload for MMonGetVersionReply {
         CEPH_MSG_MON_GET_VERSION_REPLY
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_GET_VERSION_REPLY_VERSION
     }
 
@@ -134,7 +134,7 @@ impl CephMessagePayload for MMonMap {
         msgr2::message::CEPH_MSG_MON_MAP
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_MAP_VERSION
     }
 
@@ -158,7 +158,7 @@ impl CephMessagePayload for MOSDMap {
         msgr2::message::CEPH_MSG_OSD_MAP
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MOSD_MAP_VERSION
     }
 
@@ -183,7 +183,7 @@ impl CephMessagePayload for MMonCommand {
         msgr2::message::CEPH_MSG_MON_COMMAND
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_COMMAND_VERSION
     }
 
@@ -213,7 +213,7 @@ impl CephMessagePayload for MMonCommandAck {
         msgr2::message::CEPH_MSG_MON_COMMAND_ACK
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MMON_COMMAND_ACK_VERSION
     }
 
@@ -243,7 +243,7 @@ impl CephMessagePayload for MPoolOp {
         msgr2::message::CEPH_MSG_POOLOP
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MPOOL_OP_VERSION
     }
 
@@ -267,7 +267,7 @@ impl CephMessagePayload for MPoolOpReply {
         msgr2::message::CEPH_MSG_POOLOP_REPLY
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         MPOOL_OP_REPLY_VERSION
     }
 
@@ -292,7 +292,7 @@ impl CephMessagePayload for MAuth {
         CEPH_MSG_AUTH
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         1
     }
 
@@ -317,7 +317,7 @@ impl CephMessagePayload for MAuthReply {
         CEPH_MSG_AUTH_REPLY
     }
 
-    fn msg_version() -> u16 {
+    fn msg_version(_features: u64) -> u16 {
         1
     }
 
