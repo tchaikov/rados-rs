@@ -810,11 +810,15 @@ pub struct ListObjectEntry {
 }
 
 impl ListObjectEntry {
-    pub fn new(nspace: String, oid: String, locator: String) -> Self {
+    pub fn new(
+        nspace: impl Into<String>,
+        oid: impl Into<String>,
+        locator: impl Into<String>,
+    ) -> Self {
         Self {
-            nspace,
-            oid,
-            locator,
+            nspace: nspace.into(),
+            oid: oid.into(),
+            locator: locator.into(),
         }
     }
 }

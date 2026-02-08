@@ -1323,7 +1323,7 @@ impl MonClient {
         drop(state);
 
         // Use unified CephMessage framework
-        let msg = MMonGetVersion::new(req_id, what.to_string());
+        let msg = MMonGetVersion::new(req_id, what);
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
         let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
 

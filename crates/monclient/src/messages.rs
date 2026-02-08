@@ -164,8 +164,11 @@ pub struct MMonGetVersion {
 }
 
 impl MMonGetVersion {
-    pub fn new(tid: u64, what: String) -> Self {
-        Self { tid, what }
+    pub fn new(tid: u64, what: impl Into<String>) -> Self {
+        Self {
+            tid,
+            what: what.into(),
+        }
     }
 
     pub fn encode(&self) -> Result<Bytes> {

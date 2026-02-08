@@ -368,7 +368,7 @@ mod tests {
 
     #[test]
     fn test_mmon_get_version_message_encoding() {
-        let get_version = MMonGetVersion::new(1, "osdmap".to_string());
+        let get_version = MMonGetVersion::new(1, "osdmap");
 
         // Create a complete message
         let msg = CephMessage::from_payload(&get_version, 0, CrcFlags::ALL).unwrap();
