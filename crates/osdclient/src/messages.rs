@@ -108,6 +108,14 @@ impl MOSDOp {
             flags |= OsdOpFlags::PGOP;
         }
 
+        // Add compatibility flags required by OSDs
+        // ONDISK: Required for compatibility with pre-luminous OSDs
+        flags |= OsdOpFlags::ONDISK;
+        // KNOWN_REDIR: Indicates client understands redirects
+        flags |= OsdOpFlags::KNOWN_REDIR;
+        // SUPPORTSPOOLEIO: Indicates client understands pool EIO behavior
+        flags |= OsdOpFlags::SUPPORTSPOOLEIO;
+
         flags.bits()
     }
 
@@ -490,7 +498,7 @@ impl CephMessagePayload for MOSDOp {
         Self::COMPAT_VERSION
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use crate::denc_types::OsdReqId;
         use crate::types::{
             BlkinTraceInfo, EntityName, JaegerSpanContext, CEPH_ENTITY_TYPE_CLIENT,
@@ -604,8 +612,8 @@ impl CephMessagePayload for MOSDOp {
         // 15. retry_attempt
         self.retry_attempt.encode(&mut buf, 0)?;
 
-        // 16. features (set to 0 for now)
-        0u64.encode(&mut buf, 0)?;
+        // 16. features (encode actual connection features)
+        features.encode(&mut buf, 0)?;
 
         Ok(buf.freeze())
     }

@@ -46,6 +46,10 @@ bitflags::bitflags! {
         const IGNORE_OVERLAY = 0x20000;
         /// Operation has been redirected (for EC pools)
         const REDIRECTED = 0x200000;
+        /// Redirect bit is authoritative
+        const KNOWN_REDIR = 0x400000;
+        /// Client understands pool EIO flag
+        const SUPPORTSPOOLEIO = 0x8000000;
     }
 }
 
