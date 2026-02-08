@@ -107,10 +107,10 @@ pub const SNAP_HEAD: u64 = u64::MAX - 1; // -2 in two's complement
 
 impl ObjectId {
     /// Create a new ObjectId for the current version of an object
-    pub fn new(pool: u64, oid: impl Into<String>) -> Self {
+    pub fn new(pool: u64, oid: &str) -> Self {
         Self {
             pool,
-            oid: oid.into(),
+            oid: oid.to_string(),
             snap: SNAP_HEAD,
             hash: 0, // Will be calculated from oid
             namespace: String::new(),
@@ -119,13 +119,13 @@ impl ObjectId {
     }
 
     /// Create ObjectId with explicit namespace
-    pub fn with_namespace(pool: u64, oid: impl Into<String>, namespace: impl Into<String>) -> Self {
+    pub fn with_namespace(pool: u64, oid: &str, namespace: &str) -> Self {
         Self {
             pool,
-            oid: oid.into(),
+            oid: oid.to_string(),
             snap: SNAP_HEAD,
             hash: 0,
-            namespace: namespace.into(),
+            namespace: namespace.to_string(),
             key: String::new(),
         }
     }
@@ -245,9 +245,9 @@ pub struct RequestId {
 }
 
 impl RequestId {
-    pub fn new(entity_name: impl Into<String>, tid: u64, inc: i32) -> Self {
+    pub fn new(entity_name: &str, tid: u64, inc: i32) -> Self {
         Self {
-            entity_name: entity_name.into(),
+            entity_name: entity_name.to_string(),
             tid,
             inc,
         }
@@ -950,11 +950,7 @@ mod tests {
     #[test]
     fn test_list_object_entry() {
         // Test creating a ListObjectEntry
-        let entry = ListObjectEntry::new(
-            "namespace".to_string(),
-            "object-name".to_string(),
-            "locator".to_string(),
-        );
+        let entry = ListObjectEntry::new("namespace", "object-name", "locator");
 
         assert_eq!(entry.nspace, "namespace");
         assert_eq!(entry.oid, "object-name");

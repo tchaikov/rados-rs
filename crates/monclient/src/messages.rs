@@ -164,10 +164,10 @@ pub struct MMonGetVersion {
 }
 
 impl MMonGetVersion {
-    pub fn new(tid: u64, what: impl Into<String>) -> Self {
+    pub fn new(tid: u64, what: &str) -> Self {
         Self {
             tid,
-            what: what.into(),
+            what: what.to_string(),
         }
     }
 

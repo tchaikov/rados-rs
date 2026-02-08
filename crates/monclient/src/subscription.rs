@@ -115,8 +115,8 @@ impl MonSub {
     /// Add a new subscription
     ///
     /// Returns true if this is a new or changed subscription
-    pub fn want(&mut self, what: impl Into<String>, start: u64, flags: u8) -> bool {
-        let what = what.into();
+    pub fn want(&mut self, what: &str, start: u64, flags: u8) -> bool {
+        let what = what.to_string();
         let new_item = SubscribeItem { start, flags };
 
         // Check if already in sub_new with same params
@@ -139,8 +139,8 @@ impl MonSub {
     /// Increment subscription start version
     ///
     /// Only updates if the new start is greater than current
-    pub fn inc_want(&mut self, what: impl Into<String>, start: u64, flags: u8) -> bool {
-        let what = what.into();
+    pub fn inc_want(&mut self, what: &str, start: u64, flags: u8) -> bool {
+        let what = what.to_string();
 
         // Check sub_new first
         if let Some(item) = self.sub_new.get_mut(&what) {

@@ -923,7 +923,11 @@ impl OSDClient {
 
             // Convert entries to ListObjectEntry
             for entry in response.entries {
-                all_entries.push(ListObjectEntry::new(entry.nspace, entry.oid, entry.locator));
+                all_entries.push(ListObjectEntry::new(
+                    &entry.nspace,
+                    &entry.oid,
+                    &entry.locator,
+                ));
             }
 
             // Check if we have enough entries

@@ -27,15 +27,11 @@ pub struct ListObjectImpl {
 
 impl ListObjectImpl {
     /// Create a new ListObjectImpl
-    pub fn new(
-        nspace: impl Into<String>,
-        oid: impl Into<String>,
-        locator: impl Into<String>,
-    ) -> Self {
+    pub fn new(nspace: &str, oid: &str, locator: &str) -> Self {
         Self {
-            nspace: nspace.into(),
-            oid: oid.into(),
-            locator: locator.into(),
+            nspace: nspace.to_string(),
+            oid: oid.to_string(),
+            locator: locator.to_string(),
         }
     }
 }
@@ -189,9 +185,9 @@ mod tests {
         };
 
         let entries = vec![
-            ListObjectImpl::new(String::new(), "obj1".to_string(), String::new()),
-            ListObjectImpl::new(String::new(), "obj2".to_string(), "key2".to_string()),
-            ListObjectImpl::new("ns3".to_string(), "obj3".to_string(), String::new()),
+            ListObjectImpl::new("", "obj1", ""),
+            ListObjectImpl::new("", "obj2", "key2"),
+            ListObjectImpl::new("ns3", "obj3", ""),
         ];
 
         let response = PgNlsResponse::with_entries(handle.clone(), entries.clone());
@@ -211,11 +207,7 @@ mod tests {
     #[test]
     fn test_encoded_size() {
         let handle = HObject::empty_cursor(3);
-        let entries = vec![ListObjectImpl::new(
-            String::new(),
-            "test".to_string(),
-            String::new(),
-        )];
+        let entries = vec![ListObjectImpl::new("", "test", "")];
         let response = PgNlsResponse::with_entries(handle, entries);
 
         let mut buf = BytesMut::new();
