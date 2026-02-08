@@ -113,10 +113,9 @@ impl MonConnection {
         // Create connection config with authentication
         let config = if let Some(keyring) = keyring_path {
             // Load keyring and create auth provider
-            let mut mon_auth =
-                auth::MonitorAuthProvider::new(entity_name.clone()).map_err(|e| {
-                    MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
-                })?;
+            let mut mon_auth = auth::MonitorAuthProvider::new(&entity_name).map_err(|e| {
+                MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
+            })?;
             mon_auth
                 .set_secret_key_from_keyring(&keyring)
                 .map_err(|e| {

@@ -114,7 +114,7 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
 
                             if Path::new(&keyring_path).exists() {
                                 // Check if readable by trying to load auth provider
-                                match auth::MonitorAuthProvider::new("client.admin".to_string()) {
+                                match auth::MonitorAuthProvider::new("client.admin") {
                                     Ok(mut mon_auth) => {
                                         match mon_auth.set_secret_key_from_keyring(&keyring_path) {
                                             Ok(_) => {

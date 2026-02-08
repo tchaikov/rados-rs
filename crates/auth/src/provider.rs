@@ -67,7 +67,7 @@ pub struct MonitorAuthProvider {
 
 impl MonitorAuthProvider {
     /// Create a new monitor auth provider
-    pub fn new(entity_name: String) -> Result<Self> {
+    pub fn new(entity_name: &str) -> Result<Self> {
         let handler =
             crate::client::CephXClientHandler::new(entity_name, crate::protocol::AuthMode::Mon)?;
         Ok(Self {

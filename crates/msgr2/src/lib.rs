@@ -147,7 +147,7 @@ pub enum ConnectionMode {
 /// let config = ConnectionConfig::with_no_auth();
 ///
 /// // CephX authentication with auth provider
-/// let mut mon_auth = MonitorAuthProvider::new("client.admin".to_string())?;
+/// let mut mon_auth = MonitorAuthProvider::new("client.admin")?;
 /// mon_auth.set_secret_key_from_base64("AQA...")?;
 /// let config = ConnectionConfig::with_auth_provider(Box::new(mon_auth));
 ///
@@ -298,7 +298,7 @@ impl ConnectionConfig {
     /// use msgr2::ConnectionConfig;
     /// use auth::MonitorAuthProvider;
     ///
-    /// let mut mon_auth = MonitorAuthProvider::new("client.admin".to_string())?;
+    /// let mut mon_auth = MonitorAuthProvider::new("client.admin")?;
     /// mon_auth.set_secret_key_from_base64("AQA...")?;
     /// let config = ConnectionConfig::with_auth_provider(Box::new(mon_auth));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -650,8 +650,7 @@ mod tests {
         let mut config = ConnectionConfig::with_no_auth();
         // Manually create an inconsistent state
         use auth::MonitorAuthProvider;
-        let mon_auth =
-            MonitorAuthProvider::new("client.admin".to_string()).expect("Failed to create auth");
+        let mon_auth = MonitorAuthProvider::new("client.admin").expect("Failed to create auth");
         config.auth_provider = Some(Box::new(mon_auth));
         // supported_auth_methods is still [None] but provider is set
         assert!(config.validate().is_err());

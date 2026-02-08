@@ -49,7 +49,7 @@ impl CephXClientHandler {
     /// # Arguments
     /// * `entity_name_str` - Entity name (e.g., "client.admin")
     /// * `auth_mode` - Auth mode (AuthMode::Mon for monitors, AuthMode::Authorizer for OSDs)
-    pub fn new(entity_name_str: String, auth_mode: AuthMode) -> Result<Self> {
+    pub fn new(entity_name_str: &str, auth_mode: AuthMode) -> Result<Self> {
         let entity_name = entity_name_str.parse()?;
         Ok(Self {
             entity_name,

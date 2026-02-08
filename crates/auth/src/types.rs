@@ -68,12 +68,15 @@ pub const CEPH_ENTITY_TYPE_CLIENT: u32 = 0x08;
 pub const CEPH_ENTITY_TYPE_MGR: u32 = 0x10;
 
 impl EntityName {
-    pub fn new(entity_type: u32, id: String) -> Self {
-        Self { entity_type, id }
+    pub fn new(entity_type: u32, id: &str) -> Self {
+        Self {
+            entity_type,
+            id: id.to_string(),
+        }
     }
 
     /// Create a client entity (most common case)
-    pub fn client(id: String) -> Self {
+    pub fn client(id: &str) -> Self {
         Self::new(CEPH_ENTITY_TYPE_CLIENT, id)
     }
 
@@ -123,7 +126,7 @@ impl std::str::FromStr for EntityName {
             }
         };
 
-        Ok(Self::new(entity_type, parts[1].to_string()))
+        Ok(Self::new(entity_type, parts[1]))
     }
 }
 
@@ -164,7 +167,7 @@ impl Denc for EntityName {
         let id = String::from_utf8(id_bytes)
             .map_err(|e| RadosError::Protocol(format!("Invalid UTF-8 in EntityName: {}", e)))?;
 
-        Ok(Self::new(entity_type, id))
+        Ok(Self::new(entity_type, &id))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
