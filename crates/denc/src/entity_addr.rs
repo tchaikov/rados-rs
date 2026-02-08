@@ -19,15 +19,20 @@ pub enum EntityAddrType {
     Cidr = 4,
 }
 
-impl From<u32> for EntityAddrType {
-    fn from(value: u32) -> Self {
+impl TryFrom<u32> for EntityAddrType {
+    type Error = RadosError;
+
+    fn try_from(value: u32) -> Result<Self, Self::Error> {
         match value {
-            0 => EntityAddrType::None,
-            1 => EntityAddrType::Legacy,
-            2 => EntityAddrType::Msgr2,
-            3 => EntityAddrType::Any,
-            4 => EntityAddrType::Cidr,
-            _ => EntityAddrType::None,
+            0 => Ok(EntityAddrType::None),
+            1 => Ok(EntityAddrType::Legacy),
+            2 => Ok(EntityAddrType::Msgr2),
+            3 => Ok(EntityAddrType::Any),
+            4 => Ok(EntityAddrType::Cidr),
+            _ => Err(RadosError::InvalidData(format!(
+                "Invalid EntityAddrType value: {}",
+                value
+            ))),
         }
     }
 }
@@ -41,7 +46,7 @@ impl Denc for EntityAddrType {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         let val = <u32 as Denc>::decode(buf, features)?;
-        Ok(EntityAddrType::from(val))
+        EntityAddrType::try_from(val)
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

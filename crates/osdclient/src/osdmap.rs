@@ -780,12 +780,17 @@ pub enum PoolType {
     Erasure = 3,
 }
 
-impl From<u8> for PoolType {
-    fn from(value: u8) -> Self {
+impl TryFrom<u8> for PoolType {
+    type Error = denc::RadosError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => PoolType::Replicated,
-            3 => PoolType::Erasure,
-            _ => PoolType::Replicated, // Default fallback
+            1 => Ok(PoolType::Replicated),
+            3 => Ok(PoolType::Erasure),
+            _ => Err(denc::RadosError::InvalidData(format!(
+                "Invalid PoolType value: {}",
+                value
+            ))),
         }
     }
 }
