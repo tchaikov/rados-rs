@@ -86,12 +86,11 @@ fn get_available_versions(corpus_root: &Path) -> Result<Vec<String>, String> {
     let mut versions = Vec::new();
     for entry in fs::read_dir(&archive_dir)
         .map_err(|e| format!("Failed to read archive directory: {}", e))?
+        .flatten()
     {
-        if let Ok(entry) = entry {
-            if entry.path().is_dir() {
-                if let Some(name) = entry.file_name().to_str() {
-                    versions.push(name.to_string());
-                }
+        if entry.path().is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                versions.push(name.to_string());
             }
         }
     }
