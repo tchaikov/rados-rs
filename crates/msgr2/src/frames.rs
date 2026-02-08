@@ -352,29 +352,42 @@ impl Preamble {
         buf.freeze()
     }
 
-    pub fn decode(mut buf: Bytes) -> Result<Self, RadosError> {
+    pub fn decode(buf: Bytes) -> Result<Self, RadosError> {
         use denc::Denc;
         if buf.len() < PREAMBLE_SIZE {
             return Err(RadosError::Protocol("Preamble too short".to_string()));
         }
 
-        let tag = Tag::try_from(u8::decode(&mut buf, 0)?)?;
-        let num_segments = u8::decode(&mut buf, 0)?;
+        // Verify CRC BEFORE decoding (need original buffer)
+        // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
+        // Use Ceph's non-standard CRC32C algorithm: !crc32c_append(0xFFFFFFFF, data)
+        let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+
+        // Now decode the fields
+        let mut cursor = buf;
+        let tag = Tag::try_from(u8::decode(&mut cursor, 0)?)?;
+        let num_segments = u8::decode(&mut cursor, 0)?;
 
         let mut segments = [SegmentDescriptor {
             logical_len: 0,
             align: 0,
         }; MAX_NUM_SEGMENTS];
         for segment in segments.iter_mut() {
-            segment.logical_len = u32::decode(&mut buf, 0)?;
-            segment.align = u16::decode(&mut buf, 0)?;
+            segment.logical_len = u32::decode(&mut cursor, 0)?;
+            segment.align = u16::decode(&mut cursor, 0)?;
         }
 
-        let flags = u8::decode(&mut buf, 0)?;
-        let reserved = u8::decode(&mut buf, 0)?;
-        let crc = u32::decode(&mut buf, 0)?;
+        let flags = u8::decode(&mut cursor, 0)?;
+        let reserved = u8::decode(&mut cursor, 0)?;
+        let received_crc = u32::decode(&mut cursor, 0)?;
 
-        // TODO: Verify CRC
+        // Verify CRC matches
+        if calculated_crc != received_crc {
+            return Err(RadosError::Protocol(format!(
+                "Preamble CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                calculated_crc, received_crc
+            )));
+        }
 
         Ok(Self {
             tag,
@@ -382,7 +395,7 @@ impl Preamble {
             segments,
             flags,
             reserved,
-            crc,
+            crc: received_crc,
         })
     }
 }
@@ -1102,5 +1115,28 @@ mod tests {
         // Decode and verify preamble CRC
         let preamble = Preamble::decode(wire_bytes.slice(..PREAMBLE_SIZE)).unwrap();
         assert_ne!(preamble.crc, 0); // CRC should be calculated
+    }
+
+    #[test]
+    fn test_preamble_crc_validation_failure() {
+        let frame = HelloFrame::new(1, denc::EntityAddr::default());
+        let mut assembler = FrameAssembler::new(true);
+        let features = 0;
+        let wire_bytes = assembler.to_wire(&frame, features).unwrap();
+
+        // Corrupt the CRC field (last 4 bytes of preamble)
+        let preamble_bytes = wire_bytes.slice(..PREAMBLE_SIZE);
+        let mut corrupted = BytesMut::from(&preamble_bytes[..]);
+        // Flip some bits in the CRC field
+        corrupted[28] ^= 0xFF;
+        corrupted[29] ^= 0xFF;
+
+        // Attempt to decode - should fail with CRC mismatch
+        let result = Preamble::decode(corrupted.freeze());
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Preamble CRC mismatch"));
     }
 }
