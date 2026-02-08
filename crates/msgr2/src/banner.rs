@@ -52,10 +52,10 @@ impl Banner {
         16u16.encode(dst, 0)?;
 
         // Supported features (8 bytes, little-endian)
-        self.supported_features.value().encode(dst, 0)?;
+        u64::from(self.supported_features).encode(dst, 0)?;
 
         // Required features (8 bytes, little-endian)
-        self.required_features.value().encode(dst, 0)?;
+        u64::from(self.required_features).encode(dst, 0)?;
 
         Ok(())
     }
@@ -114,8 +114,8 @@ impl Banner {
             if payload_size > 16 {
                 src.advance(payload_size - 16);
             }
-            let supported_features = FeatureSet::new(u64::decode(src, 0)?);
-            let required_features = FeatureSet::new(u64::decode(src, 0)?);
+            let supported_features = FeatureSet::from(u64::decode(src, 0)?);
+            let required_features = FeatureSet::from(u64::decode(src, 0)?);
             Ok(Self {
                 banner: Bytes::from(banner_bytes),
                 supported_features,
@@ -230,7 +230,7 @@ impl ConnectReplyMessage {
     pub fn encode(&self, dst: &mut impl BufMut) -> Result<()> {
         use denc::Denc;
         self.tag.encode(dst, 0)?;
-        self.features.value().encode(dst, 0)?;
+        u64::from(self.features).encode(dst, 0)?;
         self.global_seq.encode(dst, 0)?;
         self.connect_seq.encode(dst, 0)?;
         self.protocol_version.encode(dst, 0)?;
@@ -246,7 +246,7 @@ impl ConnectReplyMessage {
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
         use denc::Denc;
         let tag = u8::decode(src, 0)?;
-        let features = FeatureSet::new(u64::decode(src, 0)?);
+        let features = FeatureSet::from(u64::decode(src, 0)?);
         let global_seq = u32::decode(src, 0)?;
         let connect_seq = u32::decode(src, 0)?;
         let protocol_version = u32::decode(src, 0)?;
@@ -306,7 +306,7 @@ impl fmt::Display for ConnectReplyMessage {
             f,
             "ConnectReply(tag={}, features={:x})",
             tag_name,
-            self.features.value()
+            u64::from(self.features)
         )
     }
 }

@@ -962,8 +962,8 @@ impl Connection {
     ) -> Result<()> {
         // Send our banner with configured features
         let banner = Banner::new_with_features(
-            FeatureSet::new(config.supported_features),
-            FeatureSet::new(config.required_features),
+            FeatureSet::from(config.supported_features),
+            FeatureSet::from(config.required_features),
         );
 
         let mut buf = BytesMut::with_capacity(64);
@@ -977,8 +977,8 @@ impl Connection {
         stream.flush().await?;
         tracing::info!(
             "✓ Sent msgr2 banner with features: supported={:x}, required={:x}",
-            banner.supported_features.value(),
-            banner.required_features.value()
+            u64::from(banner.supported_features),
+            u64::from(banner.required_features)
         );
 
         // Read server banner response
@@ -995,22 +995,22 @@ impl Connection {
 
         tracing::info!(
             "✓ Received server banner: supported={:x}, required={:x}",
-            server_banner.supported_features.value(),
-            server_banner.required_features.value()
+            u64::from(server_banner.supported_features),
+            u64::from(server_banner.required_features)
         );
 
         // Check if we can meet server requirements
-        let our_features = FeatureSet::new(config.supported_features);
+        let our_features = FeatureSet::from(config.supported_features);
         let missing = server_banner.required_features & !our_features;
         if !missing.is_empty() {
             return Err(Error::Protocol(format!(
                 "Missing required features: {:x}",
-                missing.value()
+                u64::from(missing)
             )));
         }
 
         // Store peer's supported features for later use (e.g., compression negotiation)
-        state_machine.set_peer_supported_features(server_banner.supported_features.value());
+        state_machine.set_peer_supported_features(u64::from(server_banner.supported_features));
 
         Ok(())
     }
@@ -1037,27 +1037,27 @@ impl Connection {
 
         tracing::info!(
             "✓ Received client banner: supported={:x}, required={:x}",
-            client_banner.supported_features.value(),
-            client_banner.required_features.value()
+            u64::from(client_banner.supported_features),
+            u64::from(client_banner.required_features)
         );
 
         // Check if we can meet client requirements
-        let our_features = FeatureSet::new(config.supported_features);
+        let our_features = FeatureSet::from(config.supported_features);
         let missing = client_banner.required_features & !our_features;
         if !missing.is_empty() {
             return Err(Error::Protocol(format!(
                 "Missing required features: {:x}",
-                missing.value()
+                u64::from(missing)
             )));
         }
 
         // Store peer's supported features for later use (e.g., compression negotiation)
-        state_machine.set_peer_supported_features(client_banner.supported_features.value());
+        state_machine.set_peer_supported_features(u64::from(client_banner.supported_features));
 
         // Send our banner response
         let banner = Banner::new_with_features(
-            FeatureSet::new(config.supported_features),
-            FeatureSet::new(config.required_features),
+            FeatureSet::from(config.supported_features),
+            FeatureSet::from(config.required_features),
         );
 
         let mut buf = BytesMut::with_capacity(64);
@@ -1071,8 +1071,8 @@ impl Connection {
         stream.flush().await?;
         tracing::info!(
             "✓ Sent msgr2 banner with features: supported={:x}, required={:x}",
-            banner.supported_features.value(),
-            banner.required_features.value()
+            u64::from(banner.supported_features),
+            u64::from(banner.required_features)
         );
 
         Ok(())

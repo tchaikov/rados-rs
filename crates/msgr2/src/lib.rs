@@ -90,14 +90,6 @@ impl FeatureSet {
     pub const EMPTY: Self = Self(0);
     pub const MSGR2: Self = Self(MSGR2_SUPPORTED_FEATURES);
 
-    pub fn new(value: u64) -> Self {
-        Self(value)
-    }
-
-    pub fn value(self) -> u64 {
-        self.0
-    }
-
     pub fn has_feature(self, feature: u64) -> bool {
         (self.0 & feature) != 0
     }
@@ -109,6 +101,18 @@ impl FeatureSet {
 
     pub fn is_empty(self) -> bool {
         self.0 == 0
+    }
+}
+
+impl From<u64> for FeatureSet {
+    fn from(value: u64) -> Self {
+        Self(value)
+    }
+}
+
+impl From<FeatureSet> for u64 {
+    fn from(features: FeatureSet) -> Self {
+        features.0
     }
 }
 
