@@ -97,6 +97,9 @@ jobs:
   corpus-test:
     name: Corpus Comparison Test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        corpus_version: ['18.2.0', '19.2.0-404-g78ddc7f9027']
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -135,4 +138,7 @@ jobs:
         run: cargo build -p dencoder
 
       - name: Run corpus comparison test
-        run: cd crates/denc && cargo test --test corpus_comparison_test -- --ignored --nocapture
+        env:
+          CORPUS_ROOT: /tmp/ceph-object-corpus
+          CORPUS_VERSION: ${{ matrix.corpus_version }}
+        run: cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
