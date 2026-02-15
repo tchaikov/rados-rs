@@ -766,6 +766,36 @@ impl MonClient {
         Ok(())
     }
 
+    /// Notify that a map has been received
+    ///
+    /// Called by clients (e.g., OSDClient) after successfully processing a map update.
+    /// This updates subscription tracking and triggers renewal if needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `what` - Map type (e.g., "osdmap", "monmap")
+    /// * `epoch` - Epoch of the received map
+    pub async fn notify_map_received(&self, what: &str, epoch: u64) -> Result<()> {
+        let mut state = self.state.write().await;
+
+        debug!("Map received: {} epoch {}", what, epoch);
+
+        // Update subscription tracking - this increments the start epoch
+        state.subscriptions.got(what, epoch);
+
+        // Check if subscriptions need renewal
+        if state.subscriptions.need_renew() {
+            debug!(
+                "Subscriptions need renewal after receiving {} epoch {}",
+                what, epoch
+            );
+            drop(state);
+            self.send_subscriptions().await?;
+        }
+
+        Ok(())
+    }
+
     /// Send pending subscriptions
     async fn send_subscriptions(&self) -> Result<()> {
         let mut state = self.state.write().await;
@@ -796,47 +826,6 @@ impl MonClient {
         active_con.send_message(message).await?;
 
         debug!("Sent subscriptions");
-        Ok(())
-    }
-
-    /// Helper to renew a subscription from within spawned tasks
-    /// This doesn't require &self, so it can be called from the message loop
-    /// NOTE: Currently only used by handle_osdmap which will move to OSDClient
-    #[allow(dead_code)]
-    async fn renew_subscription(
-        state_arc: &Arc<RwLock<MonClientState>>,
-        what: &str,
-        epoch: u64,
-    ) -> Result<()> {
-        let mut state = state_arc.write().await;
-
-        // Update subscription
-        state.subscriptions.want(what, epoch, 0);
-
-        let active_con = match state.active_con.as_ref() {
-            Some(con) => con.clone(),
-            None => {
-                tracing::warn!("Cannot renew subscription: not connected");
-                return Ok(()); // Don't fail, just skip
-            }
-        };
-
-        // Build subscription message
-        let mut msg = MMonSubscribe::new();
-        for (what, item) in state.subscriptions.get_subs() {
-            msg.add(what.clone(), *item);
-        }
-
-        state.subscriptions.renewed();
-        drop(state);
-
-        // Send subscription message
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let message = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        active_con.send_message(message).await?;
-
-        debug!("Renewed subscription for {} at epoch {}", what, epoch);
         Ok(())
     }
 

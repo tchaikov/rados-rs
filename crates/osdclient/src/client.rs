@@ -1298,6 +1298,19 @@ impl OSDClient {
             // Notify waiters that OSDMap is available
             self.osdmap_notify.notify_waiters();
 
+            // Notify MonClient that we received this osdmap epoch
+            // This allows MonClient to track subscription state and renew if needed
+            if let Err(e) = self
+                .mon_client
+                .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
+                .await
+            {
+                warn!(
+                    "Failed to notify MonClient of osdmap epoch {}: {}",
+                    final_epoch, e
+                );
+            }
+
             // TODO: Rescan all sessions for pending operations
             // This will be implemented when we add rescan() method to OSDSession
         }
