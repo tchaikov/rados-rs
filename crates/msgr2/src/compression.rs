@@ -94,8 +94,7 @@ impl Compressor for SnappyCompressor {
                 if decompressed_len != original_size {
                     return Err(Error::compression_error(&format!(
                         "Snappy fallback decompression size mismatch: expected {}, got {}",
-                        original_size,
-                        decompressed_len,
+                        original_size, decompressed_len,
                     )));
                 }
                 Ok(output)
