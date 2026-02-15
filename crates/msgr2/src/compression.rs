@@ -80,19 +80,17 @@ impl Compressor for SnappyCompressor {
 
     fn decompress(&self, data: &[u8], original_size: usize) -> Result<Vec<u8>> {
         let mut decoder = snap::raw::Decoder::new();
-        let mut output = vec![0u8; original_size];
-        let decompressed_len = decoder.decompress(data, &mut output).map_err(|e| {
-            Error::compression_error(&format!("Snappy decompression failed: {}", e))
-        })?;
-
-        if decompressed_len != original_size {
-            return Err(Error::compression_error(&format!(
-                "Snappy decompression size mismatch: expected {}, got {}",
-                original_size, decompressed_len
-            )));
+        match decoder.decompress_vec(data) {
+            Ok(output) => Ok(output),
+            Err(_) => {
+                let mut output = vec![0u8; original_size];
+                let decompressed_len = decoder.decompress(data, &mut output).map_err(|e| {
+                    Error::compression_error(&format!("Snappy decompression failed: {}", e))
+                })?;
+                output.truncate(decompressed_len);
+                Ok(output)
+            }
         }
-
-        Ok(output)
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -150,7 +148,8 @@ impl Compressor for Lz4Compressor {
     }
 
     fn decompress(&self, data: &[u8], original_size: usize) -> Result<Vec<u8>> {
-        lz4::block::decompress(data, Some(original_size as i32))
+        lz4::block::decompress(data, None)
+            .or_else(|_| lz4::block::decompress(data, Some(original_size as i32)))
             .map_err(|e| Error::compression_error(&format!("LZ4 decompression failed: {}", e)))
     }
 
