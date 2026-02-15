@@ -253,6 +253,19 @@ fn test_all_algorithms_roundtrip() {
 }
 
 #[test]
+fn test_snappy_decompress_with_incorrect_size_hint() {
+    let data = b"Snappy decompression should not depend on caller size hint. ".repeat(40);
+    let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+
+    let compressed = ctx.compress(&data).expect("Compression should succeed");
+    let decompressed = ctx
+        .decompress(&compressed, 1)
+        .expect("Decompression should succeed even with bad size hint");
+
+    assert_eq!(&decompressed[..], &data[..]);
+}
+
+#[test]
 fn test_frame_to_wire_preserves_compression_flag() {
     let data = b"Test data ".repeat(100);
     let payload = Bytes::from(data.to_vec());
