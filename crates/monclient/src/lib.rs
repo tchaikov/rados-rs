@@ -41,6 +41,7 @@ pub mod ceph_message_impl;
 pub mod client;
 pub mod connection;
 pub mod defaults;
+pub mod dns_srv;
 pub mod error;
 pub mod messages;
 pub mod monmap;
@@ -50,6 +51,7 @@ pub mod types;
 pub mod wait_helper;
 
 pub use client::{MonClient, MonClientConfig, PoolOpResult};
+pub use dns_srv::{resolve_mon_addrs_via_dns_srv, DEFAULT_MON_DNS_SRV_NAME};
 pub use error::{MonClientError, Result};
 pub use messages::{
     MAuth, MAuthReply, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply, MMonMap,

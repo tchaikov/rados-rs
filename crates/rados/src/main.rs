@@ -109,17 +109,19 @@ async fn main() -> Result<()> {
     };
 
     // Get monitor addresses (CLI arg > ceph.conf)
-    let mon_addrs = if let Some(mon_host) = cli.mon_host {
+    let mon_addrs: Vec<String> = if let Some(mon_host) = cli.mon_host {
         mon_host.split(',').map(|s| s.trim().to_string()).collect()
     } else if let Some(ref config) = ceph_config {
-        config
-            .mon_addrs()
-            .context("Failed to get monitor addresses from ceph.conf")?
+        config.mon_addrs().unwrap_or_default()
     } else {
-        return Err(anyhow!(
-            "Monitor address not specified. Use --mon-host or provide a valid ceph.conf"
-        ));
+        Vec::new()
     };
+
+    // Get DNS SRV service name from config (used as fallback when mon_addrs is empty)
+    let dns_srv_name = ceph_config
+        .as_ref()
+        .map(|c| c.mon_dns_srv_name())
+        .unwrap_or_else(|| "ceph-mon".to_string());
 
     info!("Connecting to monitors: {:?}", mon_addrs);
 
@@ -141,10 +143,12 @@ async fn main() -> Result<()> {
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     // Create MonClient with map channel
+    // When mon_addrs is empty, MonClient will automatically try DNS SRV discovery
     let mon_config = monclient::MonClientConfig {
         entity_name: cli.name.clone(),
         mon_addrs,
         keyring_path: keyring_path.clone(),
+        dns_srv_name,
         ..Default::default()
     };
 
