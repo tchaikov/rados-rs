@@ -200,7 +200,7 @@ impl OSDSession {
     /// - Linux Kernel: Explicit OSD context passing to handlers
     ///
     /// We route messages based on their semantic scope:
-    /// - OSDMAP: Broadcast message → MessageBus (shared with MonClient)
+    /// - OSDMAP: Broadcast message → osdmap_tx channel (shared with OSDClient)
     /// - OPREPLY/BACKOFF: Session-specific → Direct dispatch with osd_id context
     ///
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2() and ~/dev/linux/net/ceph/osd_client.c
@@ -319,7 +319,7 @@ impl OSDSession {
     /// Handle an operation reply and check if retry is needed
     ///
     /// Returns Some((pending_op, modified_flags)) if the operation should be retried with modified flags
-    /// This is called by OSDClient when it receives OPREPLY messages from MessageBus
+    /// This is called by OSDClient when it receives OPREPLY messages from OSD connections
     pub async fn handle_osd_op_reply(
         &self,
         tid: u64,

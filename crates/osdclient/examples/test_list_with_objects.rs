@@ -9,7 +9,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     println!("\n🧪 List Test with Objects\n");
 
-    // Create shared MessageBus
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     let mon_config = monclient::MonClientConfig {

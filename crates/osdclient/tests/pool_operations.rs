@@ -69,10 +69,8 @@ impl TestConfig {
 async fn create_osd_client(
     config: &TestConfig,
 ) -> Result<(Arc<osdclient::OSDClient>, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
-    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
-    // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
@@ -84,8 +82,6 @@ async fn create_osd_client(
 
     // Initialize connection
     mon_client.init().await?;
-
-    // Register MonClient handlers on MessageBus
 
     info!("✓ Connected to monitor");
 
@@ -115,7 +111,6 @@ async fn create_osd_client(
     // Get FSID from MonClient
     let fsid = mon_client.get_fsid().await;
 
-    // Create OSDClient with the SAME MessageBus that MonClient is using
     let osd_client = osdclient::OSDClient::new(
         osd_config,
         fsid,
@@ -126,10 +121,7 @@ async fn create_osd_client(
     .await?;
     info!("✓ OSD client created");
 
-    // Register OSDClient on MessageBus to receive OSDMap messages
-    info!("✓ OSDClient registered on MessageBus");
-
-    // NOW subscribe to OSDMap - OSDClient is ready to receive
+    // Subscribe to OSDMap - OSDClient is ready to receive
     mon_client.subscribe("osdmap", 0, 0).await?;
 
     // Wait for OSDMap to arrive - use event-driven wait

@@ -21,7 +21,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. Create MonClient and connect to monitors
     println!("1️⃣  Connecting to monitor...");
 
-    // Create shared MessageBus
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     let mon_config = monclient::MonClientConfig {

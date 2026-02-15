@@ -25,10 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🚀 RADOS OSD Client Example");
     println!("==========================\n");
 
-    // 1. Create shared MessageBus and MonClient
-    println!("1️⃣  Creating MessageBus and connecting to monitor...");
+    // 1. Create MonClient and connect to monitor
+    println!("1️⃣  Connecting to monitor...");
 
-    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     let mon_config = monclient::MonClientConfig {
@@ -42,8 +41,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize connection
     mon_client.init().await?;
-
-    // Register MonClient handlers on MessageBus
 
     println!("   ✓ Connected to monitor\n");
 
@@ -71,8 +68,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         osdmap_rx,
     )
     .await?;
-
-    // Register OSDClient handlers on MessageBus
 
     println!("   ✓ OSD client created\n");
 

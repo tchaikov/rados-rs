@@ -1,12 +1,10 @@
 //! Type-safe channels for routing Ceph map messages.
 //!
 //! Provides compile-time type safety for routing specific message types
-//! (e.g., MOSDMap, MMDSMap) from connections to consumers, replacing the
-//! runtime-dispatched MessageBus pattern.
+//! (e.g., MOSDMap, MMDSMap) from connections to consumers.
 
 use std::marker::PhantomData;
 use tokio::sync::mpsc;
-use tracing::warn;
 
 use crate::Message;
 
@@ -36,19 +34,6 @@ impl<T: MapMessage> MapSender<T> {
     /// Returns Ok(()) if sent, Err(message) if the receiver was dropped.
     pub async fn send(&self, msg: Message) -> Result<(), Message> {
         self.tx.send(msg).await.map_err(|e| e.0)
-    }
-
-    /// Try to send a message without blocking.
-    ///
-    /// Returns Ok(()) if sent immediately, Err(message) if full or receiver dropped.
-    pub fn try_send(&self, msg: Message) -> Result<(), Message> {
-        self.tx.try_send(msg).map_err(|e| match e {
-            mpsc::error::TrySendError::Full(msg) => {
-                warn!("{} channel full, dropping message", T::NAME);
-                msg
-            }
-            mpsc::error::TrySendError::Closed(msg) => msg,
-        })
     }
 }
 

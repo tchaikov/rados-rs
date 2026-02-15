@@ -102,10 +102,8 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
 
     let config = TestConfig::from_env();
 
-    // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
-    // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
@@ -133,16 +131,13 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
     // Wait a moment for MonMap to arrive (contains FSID)
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
-    // Create MessageBus and OSDClient BEFORE subscribing to osdmap
-    // This ensures OSDClient is registered to receive OSDMap messages
+    // Create OSDClient BEFORE subscribing to osdmap
     let osd_config = osdclient::OSDClientConfig {
         entity_name: config.entity_name.clone(),
         ..Default::default()
     };
 
     let fsid = mon_client.get_fsid().await;
-    // Use the SAME message_bus that MonClient is using
-
     let osd_client = osdclient::OSDClient::new(
         osd_config,
         fsid,

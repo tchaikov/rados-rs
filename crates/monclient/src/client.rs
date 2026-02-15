@@ -406,9 +406,6 @@ impl MonClient {
 
         drop(state);
 
-        // NOTE: register_handlers() must be called separately after init()
-        // This ensures MonClient is registered on MessageBus to receive messages
-
         // Start tick loop for periodic keepalive and auth renewal
         self.start_tick_loop();
 
@@ -419,9 +416,7 @@ impl MonClient {
         info!("Subscribing to monmap...");
         self.subscribe("monmap", 0, 0).await?;
 
-        // NOTE: OSDMap subscription removed - OSDClient handles this via MessageBus
-        // Applications should explicitly subscribe to osdmap after registering OSDClient
-        // on the MessageBus to avoid race conditions with message routing
+        // OSDMap subscription is handled by the application after OSDClient is ready
 
         info!("MonClient initialized successfully");
         Ok(())
@@ -833,8 +828,6 @@ impl MonClient {
         debug!("Renewed subscription for {} at epoch {}", what, epoch);
         Ok(())
     }
-
-    /// Register MonClient as a handler on the MessageBus for messages it handles
 
     /// Start background tick loop for periodic maintenance
     fn start_tick_loop(&self) {
@@ -1668,7 +1661,6 @@ impl std::fmt::Debug for MonClient {
     }
 }
 
-/// Implement Dispatcher trait for MonClient to handle monitor-specific messages
 #[cfg(test)]
 mod tests {
     use super::*;
