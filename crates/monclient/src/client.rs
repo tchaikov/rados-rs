@@ -103,6 +103,24 @@ impl Default for MonClientConfig {
     }
 }
 
+impl MonClientConfig {
+    fn mon_client_hunt_interval(&self) -> Duration {
+        self.hunt_interval
+    }
+
+    fn mon_client_ping_interval(&self) -> Duration {
+        self.keepalive_interval
+    }
+
+    fn mon_client_ping_timeout(&self) -> Duration {
+        self.keepalive_timeout
+    }
+
+    fn rados_mon_op_timeout(&self) -> Duration {
+        self.command_timeout
+    }
+}
+
 /// Monitor client
 pub struct MonClient {
     /// Configuration
@@ -169,12 +187,35 @@ pub enum MapEvent {
     ConfigUpdated { keys: Vec<String> },
 }
 
+trait RuntimeOptionValue: Sized {
+    fn parse_option(value: &str) -> Option<Self>;
+}
+
+impl RuntimeOptionValue for Duration {
+    fn parse_option(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        let numeric = trimmed.strip_suffix('s').unwrap_or(trimmed);
+        let seconds = numeric.parse::<f64>().ok()?;
+        // is_finite() rejects both NaN and +/-infinity values.
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        Some(Duration::from_secs_f64(seconds))
+    }
+}
+
+impl RuntimeOptionValue for u64 {
+    fn parse_option(value: &str) -> Option<Self> {
+        value.trim().parse::<u64>().ok()
+    }
+}
+
 macro_rules! runtime_mon_client_config_options {
-    ($({ field: $field:ident, config: $config_field:ident, option: $option_name:literal, parser: $parser:ident }),+ $(,)?) => {
+    ($( $field:ident : $type:ty ),+ $(,)?) => {
         #[derive(Debug, Clone, Copy)]
         struct RuntimeMonClientConfig {
             $(
-                $field: Duration,
+                $field: $type,
             )+
         }
 
@@ -182,7 +223,7 @@ macro_rules! runtime_mon_client_config_options {
             fn from_config(config: &MonClientConfig) -> Self {
                 Self {
                     $(
-                        $field: config.$config_field,
+                        $field: config.$field(),
                     )+
                 }
             }
@@ -191,8 +232,8 @@ macro_rules! runtime_mon_client_config_options {
                 for (key, value) in config {
                     match key.as_str() {
                         $(
-                            $option_name => {
-                                if let Some(parsed) = Self::$parser(value) {
+                            stringify!($field) => {
+                                if let Some(parsed) = Self::parse_option::<$type>(value) {
                                     self.$field = parsed;
                                 }
                             }
@@ -206,29 +247,15 @@ macro_rules! runtime_mon_client_config_options {
 }
 
 runtime_mon_client_config_options! {
-    { field: hunt_interval, config: hunt_interval, option: "mon_client_hunt_interval", parser: parse_duration_option },
-    { field: keepalive_interval, config: keepalive_interval, option: "mon_client_ping_interval", parser: parse_duration_option },
-    { field: keepalive_timeout, config: keepalive_timeout, option: "mon_client_ping_timeout", parser: parse_duration_option },
-    { field: command_timeout, config: command_timeout, option: "rados_mon_op_timeout", parser: parse_duration_option },
+    mon_client_hunt_interval: Duration,
+    mon_client_ping_interval: Duration,
+    mon_client_ping_timeout: Duration,
+    rados_mon_op_timeout: Duration,
 }
 
 impl RuntimeMonClientConfig {
-    fn parse_option<T: std::str::FromStr>(value: &str) -> Option<T> {
-        value.trim().parse::<T>().ok()
-    }
-
-    fn parse_duration_option(value: &str) -> Option<Duration> {
-        let trimmed = value.trim();
-        let seconds = if let Some(stripped) = trimmed.strip_suffix('s') {
-            Self::parse_option::<f64>(stripped)?
-        } else {
-            Self::parse_option::<f64>(trimmed)?
-        };
-        // is_finite() rejects both NaN and +/-infinity values.
-        if !seconds.is_finite() || seconds < 0.0 {
-            return None;
-        }
-        Some(Duration::from_secs_f64(seconds))
+    fn parse_option<T: RuntimeOptionValue>(value: &str) -> Option<T> {
+        T::parse_option(value)
     }
 }
 
@@ -554,7 +581,7 @@ impl MonClient {
                     let elapsed = last_attempt.elapsed();
                     let hunt_delay = state
                         .runtime_config
-                        .hunt_interval
+                        .mon_client_hunt_interval
                         .mul_f64(state.reopen_interval_multiplier);
 
                     if elapsed < hunt_delay {
@@ -727,10 +754,10 @@ impl MonClient {
         };
 
         // Create keepalive policy from config
-        let keepalive_policy = if runtime_config.keepalive_interval.as_secs() > 0 {
+        let keepalive_policy = if runtime_config.mon_client_ping_interval.as_secs() > 0 {
             KeepalivePolicy::new(
-                runtime_config.keepalive_interval,
-                runtime_config.keepalive_timeout,
+                runtime_config.mon_client_ping_interval,
+                runtime_config.mon_client_ping_timeout,
             )
         } else {
             KeepalivePolicy::disabled()
@@ -908,7 +935,7 @@ impl MonClient {
 
     async fn command_timeout(&self) -> Duration {
         let state = self.state.read().await;
-        state.runtime_config.command_timeout
+        state.runtime_config.rados_mon_op_timeout
     }
 
     /// Start background tick loop for periodic maintenance
@@ -1808,27 +1835,42 @@ mod tests {
 
         runtime_config.update_from_map(&updates);
 
-        assert_eq!(runtime_config.hunt_interval, Duration::from_secs(5));
-        assert_eq!(runtime_config.keepalive_interval, Duration::from_secs(11));
-        assert_eq!(runtime_config.keepalive_timeout, Duration::from_secs(22));
-        assert_eq!(runtime_config.command_timeout, Duration::from_secs(33));
+        assert_eq!(
+            runtime_config.mon_client_hunt_interval,
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            runtime_config.mon_client_ping_interval,
+            Duration::from_secs(11)
+        );
+        assert_eq!(
+            runtime_config.mon_client_ping_timeout,
+            Duration::from_secs(22)
+        );
+        assert_eq!(runtime_config.rados_mon_op_timeout, Duration::from_secs(33));
     }
 
     #[test]
     fn test_parse_duration_option() {
         assert_eq!(
-            RuntimeMonClientConfig::parse_duration_option("1.5s"),
+            RuntimeMonClientConfig::parse_option::<Duration>("1.5s"),
             Some(Duration::from_secs_f64(1.5))
         );
         assert_eq!(
-            RuntimeMonClientConfig::parse_duration_option("2.25"),
+            RuntimeMonClientConfig::parse_option::<Duration>("2.25"),
             Some(Duration::from_secs_f64(2.25))
         );
-        assert_eq!(RuntimeMonClientConfig::parse_duration_option("-1"), None);
-        assert_eq!(RuntimeMonClientConfig::parse_duration_option("inf"), None);
-        assert_eq!(RuntimeMonClientConfig::parse_duration_option("NaN"), None);
+        assert_eq!(RuntimeMonClientConfig::parse_option::<Duration>("-1"), None);
         assert_eq!(
-            RuntimeMonClientConfig::parse_duration_option("not-a-duration"),
+            RuntimeMonClientConfig::parse_option::<Duration>("inf"),
+            None
+        );
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("NaN"),
+            None
+        );
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("not-a-duration"),
             None
         );
     }
