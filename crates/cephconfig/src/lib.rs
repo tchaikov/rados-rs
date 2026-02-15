@@ -384,6 +384,18 @@ impl CephConfig {
             .to_string()
     }
 
+    /// Get the DNS SRV service name for monitor discovery
+    ///
+    /// Returns the value of the `mon_dns_srv_name` configuration option,
+    /// which defaults to `"ceph-mon"` if not specified.
+    /// The name may include a domain suffix separated by `_`,
+    /// e.g., `"ceph-mon_example.com"`.
+    pub fn mon_dns_srv_name(&self) -> String {
+        self.get_with_fallback(&["global", "client"], "mon_dns_srv_name")
+            .unwrap_or("ceph-mon")
+            .to_string()
+    }
+
     /// Get all sections in the configuration
     pub fn sections(&self) -> Vec<&str> {
         self.sections.keys().map(|s| s.as_str()).collect()
@@ -627,6 +639,23 @@ debug mon = 20
         let entity_name = config.entity_name();
 
         assert_eq!(entity_name, "client.admin");
+    }
+
+    #[test]
+    fn test_mon_dns_srv_name_default() {
+        let config = CephConfig::parse(TEST_CONFIG).unwrap();
+        // Should return default value when not configured
+        assert_eq!(config.mon_dns_srv_name(), "ceph-mon");
+    }
+
+    #[test]
+    fn test_mon_dns_srv_name_configured() {
+        let config_str = r#"
+[global]
+mon_dns_srv_name = ceph-mon_example.com
+"#;
+        let config = CephConfig::parse(config_str).unwrap();
+        assert_eq!(config.mon_dns_srv_name(), "ceph-mon_example.com");
     }
 
     #[test]

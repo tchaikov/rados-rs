@@ -23,6 +23,9 @@ auth = { path = "../auth" }
 denc = { path = "../denc" }
 hex = "0.4.3"
 
+# DNS SRV resolution
+hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
+
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tokio-test = "0.4"

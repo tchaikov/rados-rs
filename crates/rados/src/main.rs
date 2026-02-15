@@ -108,17 +108,41 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Get monitor addresses (CLI arg > ceph.conf)
+    // Get monitor addresses (CLI arg > ceph.conf > DNS SRV)
     let mon_addrs = if let Some(mon_host) = cli.mon_host {
         mon_host.split(',').map(|s| s.trim().to_string()).collect()
     } else if let Some(ref config) = ceph_config {
-        config
-            .mon_addrs()
-            .context("Failed to get monitor addresses from ceph.conf")?
+        config.mon_addrs().unwrap_or_default()
     } else {
-        return Err(anyhow!(
-            "Monitor address not specified. Use --mon-host or provide a valid ceph.conf"
-        ));
+        Vec::new()
+    };
+
+    // If no addresses found from config/CLI, try DNS SRV discovery
+    let mon_addrs = if mon_addrs.is_empty() {
+        let srv_name = ceph_config
+            .as_ref()
+            .map(|c| c.mon_dns_srv_name())
+            .unwrap_or_else(|| "ceph-mon".to_string());
+        debug!(
+            "Attempting DNS SRV discovery with service name: {}",
+            srv_name
+        );
+        let monmap = monclient::resolve_mon_addrs_via_dns_srv(&srv_name)
+            .await
+            .context(
+                "Monitor address not specified and DNS SRV discovery failed. \
+                 Use --mon-host, set 'mon host' in ceph.conf, or configure DNS SRV records for _ceph-mon._tcp",
+            )?;
+        // Extract addresses from the discovered monmap
+        let mut addrs = Vec::new();
+        for mon in &monmap.monitors {
+            for addr in &mon.addrs.addrs {
+                addrs.push(addr.to_string());
+            }
+        }
+        addrs
+    } else {
+        mon_addrs
     };
 
     info!("Connecting to monitors: {:?}", mon_addrs);
