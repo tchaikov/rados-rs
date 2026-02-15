@@ -73,36 +73,66 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
                     merge_meta.target_version.epoch, merge_meta.target_version.version
                 );
 
+                // Following Ceph's readable.sh pattern:
+                // Serialize original decoded struct to JSON
+                let json1 = match serde_json::to_string_pretty(&merge_meta) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        println!("  ✗ Failed to serialize original to JSON: {}", e);
+                        mismatch_count += 1;
+                        continue;
+                    }
+                };
+
                 // Try to encode back (PgMergeMeta always uses version 1, so features don't matter)
                 let mut encoded_buf = bytes::BytesMut::new();
                 match merge_meta.encode(&mut encoded_buf, 0) {
                     Ok(()) => {
                         let encoded_bytes = encoded_buf.to_vec();
 
-                        println!("  Original bytes: {}", hex::encode(&original_data));
-                        println!("  Encoded bytes:  {}", hex::encode(&encoded_bytes));
+                        // Decode the re-encoded bytes
+                        let mut re_encoded_bytes = bytes::Bytes::from(encoded_bytes.clone());
+                        match PgMergeMeta::decode(&mut re_encoded_bytes, 0) {
+                            Ok(merge_meta_roundtrip) => {
+                                // Serialize roundtrip decoded struct to JSON
+                                let json2 =
+                                    match serde_json::to_string_pretty(&merge_meta_roundtrip) {
+                                        Ok(j) => j,
+                                        Err(e) => {
+                                            println!(
+                                                "  ✗ Failed to serialize roundtrip to JSON: {}",
+                                                e
+                                            );
+                                            mismatch_count += 1;
+                                            continue;
+                                        }
+                                    };
 
-                        if encoded_bytes == original_data {
-                            println!("  ✓ Perfect roundtrip");
-                            success_count += 1;
-                        } else {
-                            println!("  ✗ Roundtrip mismatch");
-                            mismatch_count += 1;
-                            println!(
-                                "    Original len: {}, Encoded len: {}",
-                                original_data.len(),
-                                encoded_bytes.len()
-                            );
+                                // Compare JSON representations (following Ceph's pattern)
+                                if json1 == json2 {
+                                    println!("  ✓ Roundtrip successful (JSON match)");
+                                    success_count += 1;
+                                } else {
+                                    println!("  ✗ Roundtrip mismatch (JSON differs)");
+                                    mismatch_count += 1;
+                                    println!(
+                                        "    Original len: {}, Encoded len: {}",
+                                        original_data.len(),
+                                        encoded_bytes.len()
+                                    );
 
-                            // Show first few bytes for debugging
-                            let orig_hex = hex::encode(
-                                &original_data[..std::cmp::min(32, original_data.len())],
-                            );
-                            let enc_hex = hex::encode(
-                                &encoded_bytes[..std::cmp::min(32, encoded_bytes.len())],
-                            );
-                            println!("    Original: {}", orig_hex);
-                            println!("    Encoded:  {}", enc_hex);
+                                    // Show JSON diff
+                                    println!("  Original bytes: {}", hex::encode(&original_data));
+                                    println!("  Encoded bytes:  {}", hex::encode(&encoded_bytes));
+                                    println!("    JSON diff:");
+                                    println!("    Original JSON: {}", json1);
+                                    println!("    Roundtrip JSON: {}", json2);
+                                }
+                            }
+                            Err(e) => {
+                                println!("  ✗ Failed to decode re-encoded bytes: {}", e);
+                                mismatch_count += 1;
+                            }
                         }
                     }
                     Err(e) => {

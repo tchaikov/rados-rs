@@ -146,33 +146,70 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                     features_for_version(original_version, pg_pool.is_stretch_pool());
                 println!("  Using features: 0x{:x} for re-encoding", encode_features);
 
+                // Following Ceph's readable.sh pattern:
+                // 1. Decode original to get struct (already done: pg_pool)
+                // 2. Encode the struct
+                // 3. Decode the encoded bytes
+                // 4. Compare JSON of original decode vs re-encode-decode
+
+                // Serialize original decoded struct to JSON
+                let json1 = match serde_json::to_string_pretty(&pg_pool) {
+                    Ok(j) => j,
+                    Err(e) => {
+                        println!("  ✗ Failed to serialize original to JSON: {}", e);
+                        mismatch_count += 1;
+                        continue;
+                    }
+                };
+
                 // Try to encode back with the same features
                 let mut encoded_buf = BytesMut::new();
                 match pg_pool.encode(&mut encoded_buf, encode_features) {
                     Ok(()) => {
                         let encoded_bytes = encoded_buf.freeze();
 
-                        if encoded_bytes.as_ref() == original_data.as_slice() {
-                            println!("  ✓ Perfect roundtrip");
-                            success_count += 1;
-                        } else {
-                            println!("  ✗ Roundtrip mismatch");
-                            mismatch_count += 1;
-                            println!(
-                                "    Original len: {}, Encoded len: {}",
-                                original_data.len(),
-                                encoded_bytes.len()
-                            );
+                        // Decode the re-encoded bytes
+                        let mut re_encoded_bytes = encoded_bytes.clone();
+                        match PgPool::decode(&mut re_encoded_bytes, 0) {
+                            Ok(pg_pool_roundtrip) => {
+                                // Serialize roundtrip decoded struct to JSON
+                                let json2 = match serde_json::to_string_pretty(&pg_pool_roundtrip) {
+                                    Ok(j) => j,
+                                    Err(e) => {
+                                        println!(
+                                            "  ✗ Failed to serialize roundtrip to JSON: {}",
+                                            e
+                                        );
+                                        mismatch_count += 1;
+                                        continue;
+                                    }
+                                };
 
-                            // Show first few bytes for debugging
-                            let orig_hex = hex::encode(
-                                &original_data[..std::cmp::min(32, original_data.len())],
-                            );
-                            let enc_hex = hex::encode(
-                                &encoded_bytes[..std::cmp::min(32, encoded_bytes.len())],
-                            );
-                            println!("    Original: {}", orig_hex);
-                            println!("    Encoded:  {}", enc_hex);
+                                // Compare JSON representations (following Ceph's pattern)
+                                if json1 == json2 {
+                                    println!("  ✓ Roundtrip successful (JSON match)");
+                                    success_count += 1;
+                                } else {
+                                    println!("  ✗ Roundtrip mismatch (JSON differs)");
+                                    mismatch_count += 1;
+                                    println!(
+                                        "    Original len: {}, Encoded len: {}",
+                                        original_data.len(),
+                                        encoded_bytes.len()
+                                    );
+
+                                    // Show JSON diff for debugging
+                                    println!("    JSON diff:");
+                                    println!("    Original JSON (first 500 chars):");
+                                    println!("      {}", &json1[..std::cmp::min(500, json1.len())]);
+                                    println!("    Roundtrip JSON (first 500 chars):");
+                                    println!("      {}", &json2[..std::cmp::min(500, json2.len())]);
+                                }
+                            }
+                            Err(e) => {
+                                println!("  ✗ Failed to decode re-encoded bytes: {}", e);
+                                mismatch_count += 1;
+                            }
                         }
                     }
                     Err(e) => {
