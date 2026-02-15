@@ -1229,7 +1229,9 @@ impl MonClient {
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        let mconfig = MConfig::decode(&msg.front)?;
+        let mconfig: MConfig = msg.decode_payload().map_err(|e| {
+            MonClientError::DecodingError(format!("Failed to decode MConfig: {}", e))
+        })?;
         let has_receivers = map_events.receiver_count() > 0;
         let mut state_guard = state.write().await;
         state_guard.runtime_config.update_from_map(&mconfig.config);
