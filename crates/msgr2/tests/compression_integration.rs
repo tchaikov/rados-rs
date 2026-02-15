@@ -253,7 +253,7 @@ fn test_all_algorithms_roundtrip() {
 }
 
 #[test]
-fn test_snappy_decompress_tolerates_incorrect_size_hint() {
+fn test_snappy_decompress_with_incorrect_size_hint() {
     let data = b"Snappy decompression should not depend on caller size hint. ".repeat(40);
     let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
 
