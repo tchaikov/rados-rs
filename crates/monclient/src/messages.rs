@@ -34,6 +34,9 @@ pub struct MMonSubscribe {
 }
 
 impl MMonSubscribe {
+    /// Message version
+    const VERSION: u16 = 3;
+
     pub fn new() -> Self {
         Self {
             what: HashMap::new(),
@@ -120,16 +123,13 @@ impl Default for MMonSubscribe {
     }
 }
 
-/// MMonSubscribe message version
-const MMON_SUBSCRIBE_VERSION: u16 = 3;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
     fn msg_type() -> u16 {
         CEPH_MSG_MON_SUBSCRIBE
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_SUBSCRIBE_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -155,6 +155,9 @@ pub struct MMonSubscribeAck {
 }
 
 impl MMonSubscribeAck {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(interval: u32, fsid: Uuid) -> Self {
         Self { interval, fsid }
     }
@@ -183,16 +186,13 @@ impl MMonSubscribeAck {
     }
 }
 
-/// MMonSubscribeAck message version
-const MMON_SUBSCRIBE_ACK_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
     fn msg_type() -> u16 {
         CEPH_MSG_MON_SUBSCRIBE_ACK
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_SUBSCRIBE_ACK_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -218,6 +218,9 @@ pub struct MMonGetVersion {
 }
 
 impl MMonGetVersion {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(tid: u64, what: &str) -> Self {
         Self {
             tid,
@@ -253,16 +256,13 @@ impl MMonGetVersion {
     }
 }
 
-/// MMonGetVersion message version
-const MMON_GET_VERSION_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
     fn msg_type() -> u16 {
         CEPH_MSG_MON_GET_VERSION
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_GET_VERSION_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -289,6 +289,9 @@ pub struct MMonGetVersionReply {
 }
 
 impl MMonGetVersionReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(tid: u64, version: u64, oldest_version: u64) -> Self {
         Self {
             tid,
@@ -321,16 +324,13 @@ impl MMonGetVersionReply {
     }
 }
 
-/// MMonGetVersionReply message version
-const MMON_GET_VERSION_REPLY_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
     fn msg_type() -> u16 {
         CEPH_MSG_MON_GET_VERSION_REPLY
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_GET_VERSION_REPLY_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -355,6 +355,9 @@ pub struct MMonMap {
 }
 
 impl MMonMap {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(monmap_bl: Bytes) -> Self {
         Self { monmap_bl }
     }
@@ -376,16 +379,13 @@ impl MMonMap {
     }
 }
 
-/// MMonMap message version
-const MMON_MAP_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonMap {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_MON_MAP
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_MAP_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -449,6 +449,9 @@ pub struct MOSDMap {
 }
 
 impl MOSDMap {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn decode(mut data: &[u8]) -> Result<Self> {
         use denc::Denc;
 
@@ -528,16 +531,13 @@ impl msgr2::MapMessage for MOSDMap {
     const NAME: &'static str = "MOSDMap";
 }
 
-/// MOSDMap message version
-const MOSD_MAP_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_OSD_MAP
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MOSD_MAP_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -569,6 +569,9 @@ pub struct MMonCommand {
 }
 
 impl MMonCommand {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(_tid: u64, cmd: Vec<String>, inbl: Bytes, fsid: UuidD) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -631,16 +634,13 @@ impl PaxosServiceMessage for MMonCommand {
     }
 }
 
-/// MMonCommand message version
-const MMON_COMMAND_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonCommand {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_MON_COMMAND
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_COMMAND_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -677,6 +677,9 @@ pub struct MMonCommandAck {
 }
 
 impl MMonCommandAck {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(_tid: u64, retval: i32, outs: String, _outbl: Bytes) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -747,16 +750,13 @@ impl PaxosServiceMessage for MMonCommandAck {
     }
 }
 
-/// MMonCommandAck message version
-const MMON_COMMAND_ACK_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MMonCommandAck {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_MON_COMMAND_ACK
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MMON_COMMAND_ACK_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -794,6 +794,9 @@ pub struct MPoolOp {
 }
 
 impl MPoolOp {
+    /// Message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
+    const VERSION: u16 = 4;
+
     /// Create a new pool operation message
     pub fn new(fsid: [u8; 16], pool: u32, name: String, op: u32, version: u64) -> Self {
         Self {
@@ -934,16 +937,13 @@ impl PaxosServiceMessage for MPoolOp {
     }
 }
 
-/// MPoolOp message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
-const MPOOL_OP_VERSION: u16 = 4;
-
 impl msgr2::ceph_message::CephMessagePayload for MPoolOp {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_POOLOP
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MPOOL_OP_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -979,6 +979,9 @@ pub struct MPoolOpReply {
 }
 
 impl MPoolOpReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(fsid: [u8; 16], reply_code: u32, epoch: u32, version: u64) -> Self {
         Self {
             paxos: PaxosFields::with_version(version),
@@ -1053,16 +1056,13 @@ impl PaxosServiceMessage for MPoolOpReply {
     }
 }
 
-/// MPoolOpReply message version
-const MPOOL_OP_REPLY_VERSION: u16 = 1;
-
 impl msgr2::ceph_message::CephMessagePayload for MPoolOpReply {
     fn msg_type() -> u16 {
         msgr2::message::CEPH_MSG_POOLOP_REPLY
     }
 
     fn msg_version(_features: u64) -> u16 {
-        MPOOL_OP_REPLY_VERSION
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -1099,6 +1099,9 @@ pub struct MAuth {
 }
 
 impl MAuth {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(protocol: u32, auth_payload: Bytes) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -1154,7 +1157,7 @@ impl msgr2::ceph_message::CephMessagePayload for MAuth {
     }
 
     fn msg_version(_features: u64) -> u16 {
-        1
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -1186,6 +1189,9 @@ pub struct MAuthReply {
 }
 
 impl MAuthReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(
         protocol: u32,
         result: i32,
@@ -1251,7 +1257,7 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
     }
 
     fn msg_version(_features: u64) -> u16 {
-        1
+        Self::VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -1341,7 +1347,7 @@ mod tests {
         let msg_type = msg.header.msg_type;
         let version = msg.header.version;
         assert_eq!(msg_type, CEPH_MSG_MON_SUBSCRIBE);
-        assert_eq!(version, MMON_SUBSCRIBE_VERSION);
+        assert_eq!(version, MMonSubscribe::VERSION);
         assert!(!msg.front.is_empty());
         assert_eq!(msg.middle.len(), 0);
         assert_eq!(msg.data.len(), 0);
@@ -1365,7 +1371,7 @@ mod tests {
         let msg_type = msg.header.msg_type;
         let version = msg.header.version;
         assert_eq!(msg_type, CEPH_MSG_MON_GET_VERSION);
-        assert_eq!(version, MMON_GET_VERSION_VERSION);
+        assert_eq!(version, MMonGetVersion::VERSION);
         assert!(!msg.front.is_empty());
     }
 }
