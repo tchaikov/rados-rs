@@ -7,9 +7,14 @@
 //! 1. Decode correctness: Rust decode matches Ceph decode
 //! 2. Ceph roundtrip consistency: Ceph's decode == decode→encode→decode
 //! 3. Rust roundtrip consistency: Rust's decode == decode→encode→decode
+//! 4. Cross-implementation interoperability:
+//!    - Rust-encoded binary can be decoded by Ceph
+//!    - Ceph-encoded binary can be decoded by Rust
 //!
 //! This matches Ceph's readable.sh which tests that for each implementation,
 //! the roundtrip (decode→encode→decode) produces the same result as just decode.
+//! Additionally, we test full interoperability by verifying that binaries
+//! encoded by one implementation can be decoded by the other.
 //!
 //! Requirements:
 //! - ceph-dencoder binary must be in PATH or specified via CEPH_DENCODER
@@ -333,6 +338,126 @@ fn compare_json_outputs(
     Ok(())
 }
 
+/// Export encoded binary from a dencoder to a temporary file
+/// Returns the path to the temporary file
+fn export_encoded_binary(
+    dencoder: &Path,
+    type_name: &str,
+    corpus_file: &Path,
+    features: Option<u64>,
+) -> Result<PathBuf, String> {
+    use std::env;
+
+    // Create a unique temporary file
+    let temp_dir = env::temp_dir();
+    let temp_file = temp_dir.join(format!(
+        "dencoder_export_{}_{}.bin",
+        type_name,
+        std::process::id()
+    ));
+
+    let mut cmd = Command::new(dencoder);
+    cmd.arg("type").arg(type_name);
+
+    if let Some(f) = features {
+        cmd.arg("set_features").arg(format!("0x{:x}", f));
+    }
+
+    cmd.arg("import")
+        .arg(corpus_file)
+        .arg("decode")
+        .arg("encode")
+        .arg("export")
+        .arg(&temp_file);
+
+    let output = cmd
+        .output()
+        .map_err(|e| format!("Failed to run dencoder export: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "dencoder export failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    if !temp_file.exists() {
+        return Err(format!("Export file was not created: {:?}", temp_file));
+    }
+
+    Ok(temp_file)
+}
+
+/// Test cross-implementation decode: Rust encodes → Ceph decodes
+/// Returns Ok(()) if successful, Err with details if failed
+fn test_rust_encode_ceph_decode(
+    rust_dencoder: &Path,
+    ceph_dencoder: &Path,
+    type_name: &str,
+    corpus_file: &Path,
+    features: Option<u64>,
+    original_rust_json: &str,
+    is_exception: bool,
+) -> Result<(), String> {
+    // Export Rust-encoded binary
+    let rust_encoded_file = export_encoded_binary(rust_dencoder, type_name, corpus_file, features)
+        .map_err(|e| format!("Rust export failed: {}", e))?;
+
+    // Decode with Ceph
+    let ceph_decoded_json =
+        run_ceph_dencoder(ceph_dencoder, type_name, &rust_encoded_file, features).map_err(|e| {
+            let _ = fs::remove_file(&rust_encoded_file);
+            format!("Ceph decode of Rust-encoded failed: {}", e)
+        })?;
+
+    // Clean up temp file
+    let _ = fs::remove_file(&rust_encoded_file);
+
+    // Compare: Ceph's decode of Rust-encoded should match original Rust decode
+    compare_json_outputs(
+        original_rust_json,
+        &ceph_decoded_json,
+        type_name,
+        "rust→ceph",
+        is_exception,
+    )
+}
+
+/// Test cross-implementation decode: Ceph encodes → Rust decodes
+/// Returns Ok(()) if successful, Err with details if failed
+fn test_ceph_encode_rust_decode(
+    ceph_dencoder: &Path,
+    rust_dencoder: &Path,
+    type_name: &str,
+    corpus_file: &Path,
+    features: Option<u64>,
+    original_ceph_json: &str,
+    is_exception: bool,
+) -> Result<(), String> {
+    // Export Ceph-encoded binary
+    let ceph_encoded_file = export_encoded_binary(ceph_dencoder, type_name, corpus_file, features)
+        .map_err(|e| format!("Ceph export failed: {}", e))?;
+
+    // Decode with Rust
+    let rust_decoded_json =
+        run_rust_dencoder(rust_dencoder, type_name, &ceph_encoded_file, features).map_err(|e| {
+            let _ = fs::remove_file(&ceph_encoded_file);
+            format!("Rust decode of Ceph-encoded failed: {}", e)
+        })?;
+
+    // Clean up temp file
+    let _ = fs::remove_file(&ceph_encoded_file);
+
+    // Compare: Rust's decode of Ceph-encoded should match original Ceph decode
+    compare_json_outputs(
+        original_ceph_json,
+        &rust_decoded_json,
+        type_name,
+        "ceph→rust",
+        is_exception,
+    )
+}
+
 /// Test a single type across all its corpus samples
 fn test_type(
     type_name: &str,
@@ -431,9 +556,38 @@ fn test_type(
             }
         };
 
-        // Overall success requires decode match AND both roundtrips to be consistent
-        if decode_matches && ceph_roundtrip_consistent && rust_roundtrip_consistent {
-            eprintln!("    ✓ {} (decode + roundtrip)", file_name);
+        // Test 3: Cross-implementation decode (interoperability)
+        // Check if Rust-encoded can be decoded by Ceph, and vice versa
+        let rust_to_ceph_works = test_rust_encode_ceph_decode(
+            rust_dencoder,
+            ceph_dencoder,
+            type_name,
+            &corpus_file,
+            features,
+            &rust_json,
+            is_exception,
+        )
+        .is_ok();
+
+        let ceph_to_rust_works = test_ceph_encode_rust_decode(
+            ceph_dencoder,
+            rust_dencoder,
+            type_name,
+            &corpus_file,
+            features,
+            &ceph_json,
+            is_exception,
+        )
+        .is_ok();
+
+        // Overall success requires all tests to pass
+        if decode_matches
+            && ceph_roundtrip_consistent
+            && rust_roundtrip_consistent
+            && rust_to_ceph_works
+            && ceph_to_rust_works
+        {
+            eprintln!("    ✓ {} (decode + roundtrip + cross-decode)", file_name);
             matched += 1;
         } else {
             // Format mismatch - both decoded but outputs differ
@@ -450,6 +604,12 @@ fn test_type(
                 }
                 if !rust_roundtrip_consistent {
                     reasons.push("rust roundtrip inconsistent");
+                }
+                if !rust_to_ceph_works {
+                    reasons.push("rust→ceph interop failed");
+                }
+                if !ceph_to_rust_works {
+                    reasons.push("ceph→rust interop failed");
                 }
                 eprintln!(
                     "    {} {} - {} (showing first only)",
@@ -511,6 +671,34 @@ fn test_type(
                                 eprintln!("      Rust roundtrip: {}", e);
                             }
                         }
+                    }
+                }
+
+                // Show cross-decode issues
+                if !rust_to_ceph_works {
+                    if let Err(e) = test_rust_encode_ceph_decode(
+                        rust_dencoder,
+                        ceph_dencoder,
+                        type_name,
+                        &corpus_file,
+                        features,
+                        &rust_json,
+                        is_exception,
+                    ) {
+                        eprintln!("      Rust→Ceph: {}", e);
+                    }
+                }
+                if !ceph_to_rust_works {
+                    if let Err(e) = test_ceph_encode_rust_decode(
+                        ceph_dencoder,
+                        rust_dencoder,
+                        type_name,
+                        &corpus_file,
+                        features,
+                        &ceph_json,
+                        is_exception,
+                    ) {
+                        eprintln!("      Ceph→Rust: {}", e);
                     }
                 }
             }
