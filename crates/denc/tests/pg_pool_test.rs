@@ -30,52 +30,51 @@ const CORPUS_VERSION: &str = "19.2.0-404-g78ddc7f9027";
 /// Determine the features needed to encode a pg_pool_t with the given version
 /// Based on the encoding_version logic in PgPool::encoding_version
 fn features_for_version(version: u8, _is_stretch_pool: bool) -> u64 {
-    // Start with all significant features
-    let mut features = SIGNIFICANT_FEATURES;
+    // Build features progressively based on version
+    // Start with base features that don't affect version selection
+    let mut features = CEPH_FEATUREMASK_PGID64
+        | CEPH_FEATUREMASK_PGPOOL3
+        | CEPH_FEATUREMASK_OSDENC
+        | CEPH_FEATUREMASK_OSD_POOLRESEND
+        | CEPH_FEATUREMASK_MSG_ADDR2;
 
-    // Remove features based on version to match the encoding_version logic
+    // Add features based on version
+    // The encoding_version logic checks these features in order:
+    // SERVER_TENTACLE, NEW_OSDOP_ENCODING, SERVER_LUMINOUS, SERVER_MIMIC, SERVER_NAUTILUS
     match version {
         ..=21 => {
             // Version 21 or below: no NEW_OSDOP_ENCODING
-            features &= !CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
-            features &= !CEPH_FEATUREMASK_SERVER_LUMINOUS;
-            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
-            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+            // Keep only base features
         }
         22..=24 => {
             // Version 24: has NEW_OSDOP_ENCODING, no SERVER_LUMINOUS
-            features &= !CEPH_FEATUREMASK_SERVER_LUMINOUS;
-            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
-            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+            features |= CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
         }
         25..=26 => {
             // Version 26: has SERVER_LUMINOUS, no SERVER_MIMIC
-            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
-            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+            features |= CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
+            features |= CEPH_FEATUREMASK_SERVER_LUMINOUS;
         }
         27..=28 => {
             // Version 27: has SERVER_MIMIC, no SERVER_NAUTILUS
-            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+            features |= CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
+            features |= CEPH_FEATUREMASK_SERVER_LUMINOUS;
+            features |= CEPH_FEATUREMASK_SERVER_MIMIC;
         }
-        29 => {
-            // Version 29: has SERVER_NAUTILUS, no SERVER_TENTACLE, not stretch pool
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
-        }
-        30 => {
-            // Version 30: has SERVER_NAUTILUS, no SERVER_TENTACLE, is stretch pool
-            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
-        }
-        31 => {
-            // Version 31: has SERVER_TENTACLE
-            // All features enabled (note: version 31 uses optional encoding for stretch pool)
+        29..=30 => {
+            // Version 29-30: has SERVER_NAUTILUS, no SERVER_TENTACLE
+            // Also include OCTOPUS and SQUID since they're in SIGNIFICANT_FEATURES
+            // but don't affect version selection
+            features |= CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
+            features |= CEPH_FEATUREMASK_SERVER_LUMINOUS;
+            features |= CEPH_FEATUREMASK_SERVER_MIMIC;
+            features |= CEPH_FEATUREMASK_SERVER_NAUTILUS;
+            features |= CEPH_FEATUREMASK_SERVER_OCTOPUS;
+            features |= CEPH_FEATUREMASK_SERVER_SQUID;
         }
         _ => {
-            // Version 32+: has SERVER_TENTACLE and all features
-            // All features enabled
+            // Version 31+: has SERVER_TENTACLE and all features
+            features = SIGNIFICANT_FEATURES;
         }
     }
 
@@ -212,4 +211,44 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         total_count > 0,
         "No test files were found in the corpus directory"
     );
+}
+
+#[test]
+fn test_features_for_version() {
+    use osdclient::PgPool;
+    use denc::VersionedEncode;
+    
+    // Test that features_for_version produces the expected version
+    // when used with PgPool::encoding_version
+    
+    // Version 21: no NEW_OSDOP_ENCODING
+    let features_21 = features_for_version(21, false);
+    let pool = PgPool::new();
+    assert_eq!(pool.encoding_version(features_21), 21, 
+               "Features for v21 should produce v21, got features=0x{:x}", features_21);
+    
+    // Version 24: has NEW_OSDOP_ENCODING, no SERVER_LUMINOUS
+    let features_24 = features_for_version(24, false);
+    assert_eq!(pool.encoding_version(features_24), 24,
+               "Features for v24 should produce v24, got features=0x{:x}", features_24);
+    
+    // Version 26: has SERVER_LUMINOUS, no SERVER_MIMIC
+    let features_26 = features_for_version(26, false);
+    assert_eq!(pool.encoding_version(features_26), 26,
+               "Features for v26 should produce v26, got features=0x{:x}", features_26);
+    
+    // Version 27: has SERVER_MIMIC, no SERVER_NAUTILUS
+    let features_27 = features_for_version(27, false);
+    assert_eq!(pool.encoding_version(features_27), 27,
+               "Features for v27 should produce v27, got features=0x{:x}", features_27);
+    
+    // Version 29: has SERVER_NAUTILUS, no SERVER_TENTACLE, not stretch
+    let features_29 = features_for_version(29, false);
+    assert_eq!(pool.encoding_version(features_29), 29,
+               "Features for v29 should produce v29, got features=0x{:x}", features_29);
+    
+    // Version 32: all features
+    let features_32 = features_for_version(32, false);
+    assert_eq!(pool.encoding_version(features_32), 32,
+               "Features for v32 should produce v32, got features=0x{:x}", features_32);
 }
