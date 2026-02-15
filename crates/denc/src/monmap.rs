@@ -735,7 +735,7 @@ mod tests {
     #[test]
     fn test_monmap_roundtrip() {
         let monmap = MonMap {
-            epoch: 1,
+            epoch: crate::ids::Epoch::new(1),
             fsid: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             ..Default::default()
         };

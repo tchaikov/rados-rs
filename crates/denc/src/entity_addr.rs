@@ -3,6 +3,7 @@
 //! This is a migration from the old Denc trait to the new Denc trait,
 //! which provides zero-allocation encoding by writing directly to buffers.
 
+use crate::constants::sockaddr::{AF_INET, AF_INET6, LEGACY_ENTITY_ADDR_SIZE, STORAGE_SIZE};
 use crate::denc::Denc;
 use crate::error::RadosError;
 use crate::features::CEPH_FEATURE_MSG_ADDR2;
@@ -81,7 +82,7 @@ impl EntityAddr {
         let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
 
         match af {
-            2 => {
+            AF_INET => {
                 // AF_INET (IPv4)
                 // Bytes [2-3]: port (big-endian)
                 let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
@@ -99,7 +100,7 @@ impl EntityAddr {
                     "(unrecognized address family 0)".to_string()
                 }
             }
-            10 => {
+            AF_INET6 => {
                 // AF_INET6 (IPv6)
                 // Bytes [2-3]: port (big-endian)
                 let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
@@ -132,7 +133,7 @@ impl EntityAddr {
         let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
 
         match af {
-            2 => {
+            AF_INET => {
                 // AF_INET (IPv4)
                 let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
                 if self.sockaddr_data.len() >= 8 {
@@ -147,7 +148,7 @@ impl EntityAddr {
                     None
                 }
             }
-            10 => {
+            AF_INET6 => {
                 // AF_INET6 (IPv6)
                 let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
                 if self.sockaddr_data.len() >= 24 {
@@ -166,13 +167,13 @@ impl EntityAddr {
     pub fn from_socket_addr(addr_type: EntityAddrType, addr: std::net::SocketAddr) -> Self {
         use std::net::IpAddr;
 
-        let mut sockaddr_data = vec![0u8; 128];
+        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
 
         match addr.ip() {
             IpAddr::V4(ip) => {
-                // AF_INET = 2 (little-endian)
-                sockaddr_data[0] = 2;
-                sockaddr_data[1] = 0;
+                // AF_INET (little-endian)
+                sockaddr_data[0] = AF_INET as u8;
+                sockaddr_data[1] = (AF_INET >> 8) as u8;
                 // Port (big-endian)
                 let port_bytes = addr.port().to_be_bytes();
                 sockaddr_data[2] = port_bytes[0];
@@ -182,9 +183,9 @@ impl EntityAddr {
                 sockaddr_data[4..8].copy_from_slice(&octets);
             }
             IpAddr::V6(ip) => {
-                // AF_INET6 = 10 (little-endian)
-                sockaddr_data[0] = 10;
-                sockaddr_data[1] = 0;
+                // AF_INET6 (little-endian)
+                sockaddr_data[0] = AF_INET6 as u8;
+                sockaddr_data[1] = (AF_INET6 >> 8) as u8;
                 // Port (big-endian)
                 let port_bytes = addr.port().to_be_bytes();
                 sockaddr_data[2] = port_bytes[0];
@@ -221,14 +222,14 @@ impl EntityAddr {
 
         let nonce = buf.get_u32_le();
 
-        // Read sockaddr_storage (128 bytes)
-        if buf.remaining() < 128 {
+        // Read sockaddr_storage (STORAGE_SIZE bytes)
+        if buf.remaining() < STORAGE_SIZE {
             return Err(RadosError::Protocol(
                 "Insufficient bytes for sockaddr_storage".to_string(),
             ));
         }
 
-        let mut sockaddr_data = vec![0u8; 128];
+        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
         buf.copy_to_slice(&mut sockaddr_data);
 
         Ok(Self {
@@ -289,10 +290,11 @@ impl EntityAddr {
 
     /// Encode in legacy format
     fn encode_legacy<B: BufMut>(&self, buf: &mut B) -> Result<(), RadosError> {
-        // Check buffer space: marker (4) + nonce (4) + sockaddr (128) = 136
-        if buf.remaining_mut() < 136 {
+        // Check buffer space: marker (4) + nonce (4) + sockaddr (STORAGE_SIZE) = LEGACY_ENTITY_ADDR_SIZE
+        if buf.remaining_mut() < LEGACY_ENTITY_ADDR_SIZE {
             return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for legacy EntityAddr: need 136, have {}",
+                "Insufficient buffer space for legacy EntityAddr: need {}, have {}",
+                LEGACY_ENTITY_ADDR_SIZE,
                 buf.remaining_mut()
             )));
         }
@@ -300,9 +302,9 @@ impl EntityAddr {
         buf.put_u32_le(0); // marker
         buf.put_u32_le(self.nonce);
 
-        // Pad sockaddr_storage to 128 bytes
+        // Pad sockaddr_storage to STORAGE_SIZE bytes
         let mut sockaddr = self.sockaddr_data.clone();
-        sockaddr.resize(128, 0);
+        sockaddr.resize(STORAGE_SIZE, 0);
         buf.put_slice(&sockaddr);
 
         Ok(())
@@ -400,8 +402,8 @@ impl Denc for EntityAddr {
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
         if (features & CEPH_FEATURE_MSG_ADDR2) == 0 {
-            // Legacy: marker (4) + nonce (4) + sockaddr (128) = 136
-            Some(136)
+            // Legacy: marker (4) + nonce (4) + sockaddr (STORAGE_SIZE) = LEGACY_ENTITY_ADDR_SIZE
+            Some(LEGACY_ENTITY_ADDR_SIZE)
         } else {
             // MSG_ADDR2: marker (1) + version (1) + compat (1) + len (4) + content
             // Content: addr_type (4) + nonce (4) + len (4) + sockaddr_data
@@ -535,14 +537,14 @@ mod tests {
         // Encode with legacy features (no MSG_ADDR2)
         Denc::encode(&addr, &mut buf, 0).unwrap();
 
-        // Should be 136 bytes (4 marker + 4 nonce + 128 sockaddr)
-        assert_eq!(buf.len(), 136);
+        // Should be LEGACY_ENTITY_ADDR_SIZE bytes (4 marker + 4 nonce + STORAGE_SIZE sockaddr)
+        assert_eq!(buf.len(), LEGACY_ENTITY_ADDR_SIZE);
 
         // Decode
         let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Legacy);
         assert_eq!(decoded.nonce, 0x12345678);
-        assert_eq!(decoded.sockaddr_data.len(), 128);
+        assert_eq!(decoded.sockaddr_data.len(), STORAGE_SIZE);
         assert_eq!(&decoded.sockaddr_data[0..4], &[1, 2, 3, 4]);
     }
 
@@ -574,8 +576,11 @@ mod tests {
             sockaddr_data: vec![1, 2, 3],
         };
 
-        // Legacy size: 4 + 4 + 128 = 136
-        assert_eq!(<EntityAddr as Denc>::encoded_size(&addr, 0), Some(136));
+        // Legacy size: 4 + 4 + STORAGE_SIZE = LEGACY_ENTITY_ADDR_SIZE
+        assert_eq!(
+            <EntityAddr as Denc>::encoded_size(&addr, 0),
+            Some(LEGACY_ENTITY_ADDR_SIZE)
+        );
 
         // MSG_ADDR2 size: 1 + 1 + 1 + 4 + 4 + 4 + 4 + 3 = 22
         assert_eq!(

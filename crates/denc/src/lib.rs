@@ -1,9 +1,12 @@
+pub mod constants;
 pub mod denc;
 pub mod encoding_metadata;
 pub mod entity_addr;
 pub mod error;
 pub mod features;
 pub mod hobject;
+pub mod ids;
+pub mod macros;
 pub mod monmap;
 pub mod padding;
 pub mod pg_nls_response;

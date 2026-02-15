@@ -258,7 +258,7 @@ impl MonMap {
 
         denc::MonMap {
             fsid,
-            epoch: self.epoch,
+            epoch: denc::Epoch::new(self.epoch),
             last_changed: UTime {
                 sec: (self.modified / 1000) as u32,
                 nsec: ((self.modified % 1000) * 1_000_000) as u32,
@@ -332,7 +332,7 @@ impl MonMap {
 
         let mut monmap = Self {
             fsid,
-            epoch: denc_monmap.epoch,
+            epoch: denc_monmap.epoch.as_u32(),
             created,
             modified,
             monitors,

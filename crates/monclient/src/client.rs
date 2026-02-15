@@ -3,6 +3,7 @@
 //! Main MonClient struct and implementation.
 
 use crate::connection::{KeepalivePolicy, MonConnection};
+use crate::defaults;
 use crate::error::{MonClientError, Result};
 use crate::messages::*;
 use crate::monmap::MonMap;
@@ -81,11 +82,11 @@ impl Default for MonClientConfig {
             mon_addrs: Vec::new(),
             keyring_path: String::new(), // Must be provided by caller
             connect_timeout: Duration::from_secs(30),
-            command_timeout: Duration::from_secs(60),
-            hunt_interval: Duration::from_secs(3),
-            hunt_parallel: 3, // Try 3 monitors in parallel by default
-            keepalive_interval: Duration::from_secs(10),
-            keepalive_timeout: Duration::from_secs(30),
+            command_timeout: defaults::COMMAND_TIMEOUT,
+            hunt_interval: defaults::HUNT_INTERVAL,
+            hunt_parallel: defaults::HUNT_PARALLEL,
+            keepalive_interval: defaults::KEEPALIVE_INTERVAL,
+            keepalive_timeout: defaults::KEEPALIVE_TIMEOUT,
             tick_interval: None, // Defaults to hunt_interval
             hunt_interval_backoff: 1.5,
             hunt_interval_min_multiple: 1.0,

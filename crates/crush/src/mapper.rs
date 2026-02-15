@@ -5,6 +5,7 @@ use crate::bucket::bucket_choose;
 use crate::error::Result;
 use crate::hash::crush_hash32_2;
 use crate::types::{CrushMap, RuleOp};
+use denc::constants::crush::{FIXED_POINT_MASK, FIXED_POINT_ONE};
 
 /// Check if an OSD is "out" (failed, fully offloaded)
 fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
@@ -14,8 +15,8 @@ fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
 
     let w = weight[item as usize];
 
-    // Weight >= 0x10000 (1.0 in 16.16 fixed point) means fully in
-    if w >= 0x10000 {
+    // Weight >= FIXED_POINT_ONE (1.0 in 16.16 fixed point) means fully in
+    if w >= FIXED_POINT_ONE {
         return false;
     }
 
@@ -27,7 +28,7 @@ fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
     // Probabilistic: use hash to determine if item is in or out
     // This allows gradual weight changes
     let hash = crush_hash32_2(x, item as u32);
-    (hash & 0xffff) >= w
+    (hash & FIXED_POINT_MASK) >= w
 }
 
 /// Execute a CRUSH rule to map a PG to OSDs
@@ -226,19 +227,26 @@ fn crush_choose_firstn(
         let r = if stable != 0 { 0 } else { rep as u32 };
         let mut current_bucket = bucket;
 
-        eprintln!("RUST_CRUSH: === crush_choose_firstn rep={} START ===", rep);
-        eprintln!(
-            "RUST_CRUSH:   bucket_id={}, x={}, numrep={}, item_type={}",
-            bucket_id, x, numrep, item_type
+        tracing::trace!("=== crush_choose_firstn rep={} START ===", rep);
+        tracing::trace!(
+            "  bucket_id={}, x={}, numrep={}, item_type={}",
+            bucket_id,
+            x,
+            numrep,
+            item_type
         );
 
         // Try multiple times to find a valid item
         'tries: for ftotal in 0..tries {
             let r_prime = if vary_r != 0 { r + ftotal } else { r };
 
-            eprintln!(
-                "RUST_CRUSH:   rep={}: r_prime = r({}) + ftotal({}) = {}, vary_r={}",
-                rep, r, ftotal, r_prime, vary_r
+            tracing::trace!(
+                "  rep={}: r_prime = r({}) + ftotal({}) = {}, vary_r={}",
+                rep,
+                r,
+                ftotal,
+                r_prime,
+                vary_r
             );
 
             // Inner loop for descending through bucket hierarchy
@@ -325,10 +333,7 @@ fn crush_choose_firstn(
 
                 // Success - add this item to output
                 tracing::debug!("Found valid item {}", item);
-                eprintln!(
-                    "RUST_CRUSH: crush_choose_firstn: rep={}, item={} SELECTED",
-                    rep, item
-                );
+                tracing::trace!("crush_choose_firstn: rep={}, item={} SELECTED", rep, item);
                 out.push(item);
                 found = true;
                 break 'tries;

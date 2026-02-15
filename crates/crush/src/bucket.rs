@@ -3,6 +3,7 @@
 
 use crate::hash::{crush_hash32_2, crush_hash32_3, crush_hash32_4};
 use crate::types::{BucketAlgorithm, BucketData, CrushBucket};
+use denc::constants::crush::{FIXED_POINT_MASK, LN_LOOKUP_OFFSET};
 
 /// Select an item from a bucket using the appropriate algorithm
 pub fn bucket_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
@@ -67,11 +68,11 @@ fn crush_ln(xin: u32) -> u64 {
 /// Uses inversion method: -ln(U) / lambda where U is uniform random
 fn generate_exponential_distribution(_hash_type: u32, x: u32, y: i32, z: u32, weight: u32) -> i64 {
     let mut u = crush_hash32_3(x, y as u32, z);
-    u &= 0xffff;
+    u &= FIXED_POINT_MASK;
 
     // Natural log lookup maps [0,0xffff] to [0, 0xffffffffffff]
     // corresponding to real numbers [-11.090355, 0]
-    let ln = crush_ln(u) as i64 - 0x1000000000000i64;
+    let ln = crush_ln(u) as i64 - LN_LOOKUP_OFFSET;
 
     // Divide by 16.16 fixed-point weight
     // ln is negative, so larger weight means larger (less negative) draw
@@ -91,9 +92,12 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         _ => return None,
     };
 
-    eprintln!(
-        "RUST_CRUSH: bucket_straw2_choose: bucket_id={}, x={}, r={}, size={}",
-        bucket.id, x, r, bucket.size
+    tracing::trace!(
+        "bucket_straw2_choose: bucket_id={}, x={}, r={}, size={}",
+        bucket.id,
+        x,
+        r,
+        bucket.size
     );
 
     let mut high = 0usize;
@@ -107,8 +111,8 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
             i64::MIN
         };
 
-        eprintln!(
-            "RUST_CRUSH:   item[{}]: id={}, weight=0x{:x}, draw={}{}",
+        tracing::trace!(
+            "  item[{}]: id={}, weight=0x{:x}, draw={}{}",
             i,
             bucket.items[i],
             weight,
@@ -126,9 +130,10 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         }
     }
 
-    eprintln!(
-        "RUST_CRUSH: bucket_straw2_choose: SELECTED index={}, item_id={}",
-        high, bucket.items[high]
+    tracing::trace!(
+        "bucket_straw2_choose: SELECTED index={}, item_id={}",
+        high,
+        bucket.items[high]
     );
 
     Some(bucket.items[high])

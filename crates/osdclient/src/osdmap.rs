@@ -642,7 +642,7 @@ impl VersionedEncode for OsdXInfo {
         // Version 4+ fields
         if version >= 4 {
             self.last_purged_snaps_scrub.encode(buf, features)?;
-            buf.put_u32_le(self.dead_epoch);
+            buf.put_u32_le(self.dead_epoch.as_u32());
         }
 
         Ok(())
@@ -682,7 +682,7 @@ impl VersionedEncode for OsdXInfo {
         // Version 4+ fields
         if version >= 4 {
             xinfo.last_purged_snaps_scrub = UTime::decode(buf, features)?;
-            xinfo.dead_epoch = buf.get_u32_le();
+            xinfo.dead_epoch = denc::Epoch::new(buf.get_u32_le());
         }
 
         Ok(xinfo)
@@ -739,12 +739,12 @@ impl denc::Denc for OsdInfo {
             )));
         }
         buf.put_u8(1); // struct_v = 1
-        buf.put_u32_le(self.last_clean_begin);
-        buf.put_u32_le(self.last_clean_end);
-        buf.put_u32_le(self.up_from);
-        buf.put_u32_le(self.up_thru);
-        buf.put_u32_le(self.down_at);
-        buf.put_u32_le(self.lost_at);
+        buf.put_u32_le(self.last_clean_begin.as_u32());
+        buf.put_u32_le(self.last_clean_end.as_u32());
+        buf.put_u32_le(self.up_from.as_u32());
+        buf.put_u32_le(self.up_thru.as_u32());
+        buf.put_u32_le(self.down_at.as_u32());
+        buf.put_u32_le(self.lost_at.as_u32());
         Ok(())
     }
 
@@ -763,12 +763,12 @@ impl denc::Denc for OsdInfo {
         let lost_at = buf.get_u32_le();
 
         Ok(OsdInfo {
-            last_clean_begin,
-            last_clean_end,
-            up_from,
-            up_thru,
-            down_at,
-            lost_at,
+            last_clean_begin: denc::Epoch::new(last_clean_begin),
+            last_clean_end: denc::Epoch::new(last_clean_end),
+            up_from: denc::Epoch::new(up_from),
+            up_thru: denc::Epoch::new(up_thru),
+            down_at: denc::Epoch::new(down_at),
+            lost_at: denc::Epoch::new(lost_at),
         })
     }
 
@@ -1251,9 +1251,9 @@ impl VersionedEncode for PgPool {
         buf.put_u32_le(self.pgp_num);
         buf.put_u32_le(self.lpg_num); // always 0
         buf.put_u32_le(self.lpgp_num); // always 0
-        buf.put_u32_le(self.last_change);
+        buf.put_u32_le(self.last_change.as_u32());
         buf.put_u64_le(self.snap_seq);
-        buf.put_u32_le(self.snap_epoch);
+        buf.put_u32_le(self.snap_epoch.as_u32());
 
         // Encode snaps and removed_snaps using generic implementations
         self.snaps.encode(buf, features)?;
@@ -1296,7 +1296,7 @@ impl VersionedEncode for PgPool {
 
         self.erasure_code_profile.encode(buf, features)?;
 
-        buf.put_u32_le(self.last_force_op_resend_preluminous);
+        buf.put_u32_le(self.last_force_op_resend_preluminous.as_u32());
         buf.put_i32_le(self.min_read_recency_for_promote);
         buf.put_u64_le(self.expected_num_objects);
 
@@ -1326,7 +1326,7 @@ impl VersionedEncode for PgPool {
             buf.put_slice(&self.opts_data);
         }
         if version >= 25 {
-            buf.put_u32_le(self.last_force_op_resend_prenautilus);
+            buf.put_u32_le(self.last_force_op_resend_prenautilus.as_u32());
         }
         if version >= 26 {
             // Application metadata using generic BTreeMap implementation
@@ -1341,7 +1341,7 @@ impl VersionedEncode for PgPool {
             buf.put_u32_le(self.pg_num_pending);
             buf.put_u32_le(0); // pg_num_dec_last_epoch_started (always 0)
             buf.put_u32_le(0); // pg_num_dec_last_epoch_clean (always 0)
-            buf.put_u32_le(self.last_force_op_resend);
+            buf.put_u32_le(self.last_force_op_resend.as_u32());
             buf.put_u8(self.pg_autoscale_mode);
         }
         if version >= 29 {
@@ -1397,9 +1397,9 @@ impl VersionedEncode for PgPool {
         pool.pgp_num = buf.get_u32_le();
         pool.lpg_num = buf.get_u32_le();
         pool.lpgp_num = buf.get_u32_le();
-        pool.last_change = buf.get_u32_le();
+        pool.last_change = denc::Epoch::new(buf.get_u32_le());
         pool.snap_seq = buf.get_u64_le();
-        pool.snap_epoch = buf.get_u32_le();
+        pool.snap_epoch = denc::Epoch::new(buf.get_u32_le());
 
         // Version-dependent fields following C++ decode logic
         if version >= 3 {
@@ -1514,9 +1514,9 @@ impl VersionedEncode for PgPool {
         }
 
         if version >= 15 {
-            pool.last_force_op_resend_preluminous = buf.get_u32_le();
+            pool.last_force_op_resend_preluminous = denc::Epoch::new(buf.get_u32_le());
         } else {
-            pool.last_force_op_resend_preluminous = 0;
+            pool.last_force_op_resend_preluminous = denc::Epoch::new(0);
         }
 
         if version >= 16 {
@@ -1586,7 +1586,7 @@ impl VersionedEncode for PgPool {
 
         // Try to continue with remaining fields if there are enough bytes
         if version >= 25 && buf.remaining() >= 4 {
-            pool.last_force_op_resend_prenautilus = buf.get_u32_le();
+            pool.last_force_op_resend_prenautilus = denc::Epoch::new(buf.get_u32_le());
         } else {
             pool.last_force_op_resend_prenautilus = pool.last_force_op_resend_preluminous;
         }
@@ -1609,7 +1609,7 @@ impl VersionedEncode for PgPool {
             pool.pg_num_pending = buf.get_u32_le();
             let _pg_num_dec_last_epoch_started = buf.get_u32_le(); // Always 0 in recent versions
             let _pg_num_dec_last_epoch_clean = buf.get_u32_le(); // Always 0 in recent versions
-            pool.last_force_op_resend = buf.get_u32_le();
+            pool.last_force_op_resend = denc::Epoch::new(buf.get_u32_le());
             pool.pg_autoscale_mode = buf.get_u8();
         }
 
@@ -1745,9 +1745,9 @@ impl VersionedEncode for PgMergeMeta {
         // Encode all fields in order
         self.source_pgid.encode(buf, features)?;
 
-        buf.put_u32_le(self.ready_epoch);
-        buf.put_u32_le(self.last_epoch_started);
-        buf.put_u32_le(self.last_epoch_clean);
+        buf.put_u32_le(self.ready_epoch.as_u32());
+        buf.put_u32_le(self.last_epoch_started.as_u32());
+        buf.put_u32_le(self.last_epoch_clean.as_u32());
 
         self.source_version.encode(buf, features)?;
 
@@ -1785,9 +1785,9 @@ impl VersionedEncode for PgMergeMeta {
 
         Ok(PgMergeMeta {
             source_pgid,
-            ready_epoch,
-            last_epoch_started,
-            last_epoch_clean,
+            ready_epoch: denc::Epoch::new(ready_epoch),
+            last_epoch_started: denc::Epoch::new(last_epoch_started),
+            last_epoch_clean: denc::Epoch::new(last_epoch_clean),
             source_version,
             target_version,
             extra_field,
@@ -2126,7 +2126,7 @@ impl VersionedEncode for OSDMapIncremental {
         // Extract outer content into Bytes
         let outer_bytes = buf.copy_to_bytes(struct_len);
         let mut outer_cursor = &outer_bytes[..];
-        let mut inc = OSDMapIncremental::new(0);
+        let mut inc = OSDMapIncremental::new(denc::Epoch::new(0));
 
         // Client-usable data section (version 9)
         {
@@ -2587,7 +2587,7 @@ impl VersionedEncode for OSDMap {
 
         // Decode client-usable fields
         map.fsid = UuidD::decode(&mut client_bytes, features)?;
-        map.epoch = client_bytes.get_u32_le();
+        map.epoch = denc::Epoch::new(client_bytes.get_u32_le());
         map.created = UTime::decode(&mut client_bytes, features)?;
         map.modified = UTime::decode(&mut client_bytes, features)?;
 
@@ -2780,7 +2780,7 @@ impl VersionedEncode for OSDMap {
         // Decode cluster_addrs
         map.osd_addrs_cluster = Vec::decode(&mut osd_bytes, features)?;
 
-        map.cluster_snapshot_epoch = osd_bytes.get_u32_le();
+        map.cluster_snapshot_epoch = denc::Epoch::new(osd_bytes.get_u32_le());
         map.cluster_snapshot = String::decode(&mut osd_bytes, features)?;
 
         // Decode osd_uuid

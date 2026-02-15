@@ -450,7 +450,7 @@ impl OSDClient {
         let flags = MOSDOp::calculate_flags(&ops);
         let mut msg = MOSDOp::new(
             self.config.client_inc,
-            osdmap.epoch,
+            osdmap.epoch.as_u32(),
             flags,
             object.clone(),
             StripedPgId::from_pg(object.pool, 0), // Will be set in loop
@@ -854,7 +854,11 @@ impl OSDClient {
             // Create pgls operation
             // Request up to max_entries total, but we may get less per PG
             let remaining = max_entries.saturating_sub(all_entries.len() as u64);
-            let ops = vec![OSDOp::pgls(remaining, hobject_cursor.clone(), osdmap_epoch)];
+            let ops = vec![OSDOp::pgls(
+                remaining,
+                hobject_cursor.clone(),
+                osdmap_epoch.as_u32(),
+            )];
 
             // Acquire throttle permit
             let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await;
@@ -871,7 +875,7 @@ impl OSDClient {
             let flags = MOSDOp::calculate_flags(&ops);
             let msg = MOSDOp::new(
                 self.config.client_inc,
-                osdmap.epoch,
+                osdmap.epoch.as_u32(),
                 flags,
                 object,
                 spgid,
@@ -1037,7 +1041,7 @@ impl OSDClient {
             let osdmap_guard = self.osdmap.read().await;
             osdmap_guard
                 .as_ref()
-                .map(|map| map.epoch as u64)
+                .map(|map| map.epoch.as_u32() as u64)
                 .unwrap_or(0)
         };
 
@@ -1106,7 +1110,7 @@ impl OSDClient {
                 .map(|(id, _)| *id as u32)
                 .ok_or_else(|| OSDClientError::Other(format!("Pool '{}' not found", pool_name)))?;
 
-            let version = osdmap.epoch as u64;
+            let version = osdmap.epoch.as_u32() as u64;
 
             (pool_id, version)
         };
@@ -1174,9 +1178,9 @@ impl OSDClient {
             .await
             .as_ref()
             .map(|m| m.epoch)
-            .unwrap_or(0);
+            .unwrap_or(denc::Epoch::new(0));
 
-        if mosdmap.get_last() <= current_epoch {
+        if mosdmap.get_last() <= current_epoch.as_u32() {
             info!(
                 "Ignoring OSDMap epochs [{}..{}] <= current epoch {}",
                 mosdmap.get_first(),
@@ -1198,12 +1202,17 @@ impl OSDClient {
         {
             let mut osdmap_guard = self.osdmap.write().await;
 
-            if current_epoch > 0 {
+            if current_epoch.as_u32() > 0 {
                 // We have a current map, apply updates sequentially
-                for e in (current_epoch + 1)..=mosdmap.get_last() {
-                    let current_map_epoch = osdmap_guard.as_ref().map(|m| m.epoch).unwrap_or(0);
+                for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
+                    let current_map_epoch = osdmap_guard
+                        .as_ref()
+                        .map(|m| m.epoch)
+                        .unwrap_or(denc::Epoch::new(0));
 
-                    if current_map_epoch == e - 1 && mosdmap.incremental_maps.contains_key(&e) {
+                    if current_map_epoch == denc::Epoch::new(e - 1)
+                        && mosdmap.incremental_maps.contains_key(&e)
+                    {
                         // Apply incremental
                         info!("Applying incremental OSDMap for epoch {}", e);
                         let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
@@ -1279,7 +1288,7 @@ impl OSDClient {
                 .await
                 .as_ref()
                 .map(|m| m.epoch)
-                .unwrap_or(0);
+                .unwrap_or(denc::Epoch::new(0));
             info!(
                 "OSDMap updated to epoch {}, rescanning pending operations",
                 final_epoch

@@ -35,7 +35,7 @@ fn test_osdmap_decode() {
             println!("  Remaining bytes: {}", bytes.len());
 
             // Verify against expected values from C++ dencoder output
-            assert_eq!(osdmap.epoch, 0, "Epoch should be 0");
+            assert_eq!(osdmap.epoch, denc::Epoch::new(0), "Epoch should be 0");
             assert_eq!(osdmap.max_osd, 0, "Max OSD should be 0");
             assert_eq!(osdmap.pools.len(), 0, "Should have 0 pools");
             assert_eq!(osdmap.flags, 0, "Flags should be 0");
@@ -149,7 +149,7 @@ fn test_osdmap_incremental_with_old_pools() {
             println!("  Remaining bytes: {}", bytes.len());
 
             // Verify against expected values from C++ dencoder output
-            assert_eq!(inc.epoch, 347, "Epoch should be 347");
+            assert_eq!(inc.epoch, denc::Epoch::new(347), "Epoch should be 347");
             assert_eq!(inc.new_pools.len(), 18, "Should have 18 new pools");
             assert_eq!(inc.old_pools.len(), 5, "Should have 5 old pools");
             assert_eq!(

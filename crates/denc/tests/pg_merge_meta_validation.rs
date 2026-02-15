@@ -58,12 +58,12 @@ fn validate_pg_merge_meta_against_ceph_dencoder() {
     // Validate file 1 values against ceph-dencoder output
     assert_eq!(merge_meta1.source_pgid.pool, 2);
     assert_eq!(merge_meta1.source_pgid.seed, 1);
-    assert_eq!(merge_meta1.ready_epoch, 1);
-    assert_eq!(merge_meta1.last_epoch_started, 2);
-    assert_eq!(merge_meta1.last_epoch_clean, 3);
-    assert_eq!(merge_meta1.source_version.epoch, 4);
+    assert_eq!(merge_meta1.ready_epoch, denc::Epoch::new(1));
+    assert_eq!(merge_meta1.last_epoch_started, denc::Epoch::new(2));
+    assert_eq!(merge_meta1.last_epoch_clean, denc::Epoch::new(3));
+    assert_eq!(merge_meta1.source_version.epoch, denc::Epoch::new(4));
     assert_eq!(merge_meta1.source_version.version, 5);
-    assert_eq!(merge_meta1.target_version.epoch, 6);
+    assert_eq!(merge_meta1.target_version.epoch, denc::Epoch::new(6));
     assert_eq!(merge_meta1.target_version.version, 7);
 
     // File 2: f76105741a846b08ff2b262929d0a196

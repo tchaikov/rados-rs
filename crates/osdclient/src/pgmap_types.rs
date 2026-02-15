@@ -2508,10 +2508,10 @@ mod pg_stat_support_tests {
         let pg_stat = PgStat {
             version: EVersion {
                 version: 100,
-                epoch: 10,
+                epoch: denc::Epoch::new(10),
             },
             reported_seq: 50,
-            reported_epoch: 10,
+            reported_epoch: denc::Epoch::new(10),
             state: 0x123456789ABCDEF0u64, // Test full 64-bit state
             up_primary: 1,
             acting_primary: 2,
@@ -2528,7 +2528,7 @@ mod pg_stat_support_tests {
         let decoded = PgStat::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.version, pg_stat.version);
         assert_eq!(decoded.reported_seq, 50);
-        assert_eq!(decoded.reported_epoch, 10);
+        assert_eq!(decoded.reported_epoch, denc::Epoch::new(10));
         assert_eq!(decoded.state, 0x123456789ABCDEF0u64);
         assert_eq!(decoded.up_primary, 1);
         assert_eq!(decoded.acting_primary, 2);
@@ -2600,15 +2600,15 @@ mod pg_stat_support_tests {
         let pg_stat = PgStat {
             version: EVersion {
                 version: 10,
-                epoch: 5,
+                epoch: denc::Epoch::new(5),
             },
             ..Default::default()
         };
 
         let mut pg_map = PgMap {
             version: 123,
-            last_osdmap_epoch: 50,
-            last_pg_scan: 49,
+            last_osdmap_epoch: denc::Epoch::new(50),
+            last_pg_scan: denc::Epoch::new(49),
             stamp: UTime {
                 sec: 1000,
                 nsec: 500,
@@ -2623,8 +2623,8 @@ mod pg_stat_support_tests {
 
         let decoded = PgMap::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.version, 123);
-        assert_eq!(decoded.last_osdmap_epoch, 50);
-        assert_eq!(decoded.last_pg_scan, 49);
+        assert_eq!(decoded.last_osdmap_epoch, denc::Epoch::new(50));
+        assert_eq!(decoded.last_pg_scan, denc::Epoch::new(49));
         assert_eq!(decoded.stamp.sec, 1000);
         assert_eq!(decoded.stamp.nsec, 500);
         assert_eq!(decoded.pg_stat.len(), 1);

@@ -1,5 +1,6 @@
 // Re-export types from other modules for consistency
 pub use crate::entity_addr::{EntityAddr, EntityAddrType};
+pub use crate::ids::{Epoch, GlobalId, OsdId, PoolId};
 
 use crate::denc::Denc;
 use crate::error::RadosError;
@@ -13,9 +14,6 @@ use std::fmt;
 
 /// Filesystem ID - 16-byte UUID
 pub type FsId = [u8; 16];
-
-/// Epoch number for versioning cluster state
-pub type Epoch = u32;
 
 /// Generic version number
 pub type Version = u64;
