@@ -2,7 +2,6 @@
 //!
 //! This module implements encoding/decoding for MOSDOp and MOSDOpReply messages.
 
-use crate::error::{OSDClientError, Result};
 use crate::types::{
     OSDOp, ObjectId, OpReply, OpResult, PgId, RequestId, RequestRedirect, StripedPgId,
 };
@@ -152,202 +151,6 @@ impl MOSDOpReply {
     /// Message version (from MOSDOpReply.h HEAD_VERSION)
     pub const VERSION: u16 = 8;
 
-    /// Decode MOSDOpReply from front and data sections
-    ///
-    /// This implements v8 decoding format for MOSDOpReply.
-    /// Reference: ~/dev/ceph/src/messages/MOSDOpReply.h lines 199-230
-    ///
-    /// # Arguments
-    /// * `front` - The front (payload) section of the message
-    /// * `data` - The data section of the message (contains operation output data)
-    pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
-        use denc::Denc;
-
-        let mut cursor = front;
-        if cursor.remaining() < 16 {
-            return Err(OSDClientError::Decoding("Incomplete MOSDOpReply".into()));
-        }
-
-        // According to MOSDOpReply.h line 200, the encoding is:
-        // encode(oid, payload);
-        // encode(pgid, payload);
-        // encode(flags, payload);
-        // encode(result, payload);
-        // encode(bad_replay_version, payload);
-        // encode(osdmap_epoch, payload);
-        // encode(num_ops, payload);
-        // for each op: encode(ops[i].op, payload);
-        // encode(retry_attempt, payload);
-        // for each op: encode(ops[i].rval, payload);
-        // encode(replay_version, payload);
-        // encode(user_version, payload);
-        // encode(do_redirect, payload);
-        // if do_redirect: encode(redirect, payload);
-        // encode_trace(payload, features);
-
-        // 1. oid (object_t) - just the name as a string
-        let oid = String::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode oid: {}", e)))?;
-
-        // 2. pgid (pg_t) - use Denc infrastructure
-        let pgid_raw = PgId::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode pgid: {}", e)))?;
-
-        let pgid = StripedPgId {
-            pool: pgid_raw.pool,
-            seed: pgid_raw.seed,
-            shard: -1, // Not in pg_t, only in spg_t
-        };
-
-        // 3. flags (int64_t)
-        let flags = i64::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode flags: {}", e)))?
-            as u32;
-
-        // 4. result (errorcode32_t = int32_t)
-        let result = i32::decode(&mut cursor, 0)?;
-
-        // 5. bad_replay_version (eversion_t = epoch + version)
-        // This is for backwards compatibility with old clients.
-        // Modern clients should use replay_version (our 'version' field) and user_version instead.
-        // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
-        let _bad_replay_epoch = u32::decode(&mut cursor, 0)?;
-        let _bad_replay_version = u64::decode(&mut cursor, 0)?;
-
-        // 6. osdmap_epoch (epoch_t = u32)
-        let epoch = u32::decode(&mut cursor, 0)?;
-
-        // 7. num_ops (u32)
-        let num_ops = u32::decode(&mut cursor, 0)? as usize;
-
-        // 8. For each op: osd_op structure
-        // osd_op is defined in rados.h and has a fixed size
-        // struct ceph_osd_op {
-        //   __le16 op;           /* CEPH_OSD_OP_* */
-        //   __le32 flags;        /* CEPH_OSD_OP_FLAG_* */
-        //   union {
-        //     ... various 28-byte unions ...
-        //   } __attribute__ ((packed));
-        //   __le32 payload_len;
-        // } __attribute__ ((packed));
-        // Total size: 2 + 4 + 28 + 4 = 38 bytes
-        // Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
-
-        // Parse osd_op structures to get payload lengths
-        let mut payload_lens = Vec::with_capacity(num_ops);
-        for i in 0..num_ops {
-            if cursor.remaining() < 38 {
-                return Err(OSDClientError::Decoding(format!(
-                    "Incomplete osd_op {}: need 38 bytes, have {}",
-                    i,
-                    cursor.remaining()
-                )));
-            }
-            // Skip to payload_len field (at offset 34)
-            cursor.advance(34);
-            let payload_len = u32::decode(&mut cursor, 0)?;
-
-            payload_lens.push(payload_len as usize);
-        }
-
-        // 9. retry_attempt (int32_t)
-        // Used to validate that the reply matches the request attempt
-        // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
-        let retry_attempt = i32::decode(&mut cursor, 0)?;
-
-        // 10. For each op: rval (int32_t)
-        let mut ops = Vec::with_capacity(num_ops);
-        for _i in 0..num_ops {
-            let return_code = i32::decode(&mut cursor, 0)?;
-
-            ops.push(OpReply {
-                return_code,
-                outdata: Bytes::new(), // Will be filled from data section below
-            });
-        }
-
-        // 11. replay_version (eversion_t = epoch + version)
-        // The epoch part is not currently used since we track OSDMap epoch separately
-        let _replay_epoch = u32::decode(&mut cursor, 0)?;
-        let version = u64::decode(&mut cursor, 0)?;
-
-        // 12. user_version (version_t = u64)
-        let user_version = u64::decode(&mut cursor, 0)?;
-
-        // 13. do_redirect (bool)
-        let do_redirect = u8::decode(&mut cursor, 0)? != 0;
-
-        // 14. If do_redirect: redirect structure (request_redirect_t)
-        let redirect = if do_redirect {
-            let r = RequestRedirect::decode(&mut cursor, 0).map_err(|e| {
-                OSDClientError::Decoding(format!("Failed to decode redirect: {}", e))
-            })?;
-            debug!(
-                "Received redirect: pool={}, key={}, namespace={}, object={}",
-                r.redirect_locator.pool_id,
-                r.redirect_locator.key,
-                r.redirect_locator.namespace,
-                r.redirect_object
-            );
-            Some(r)
-        } else {
-            None
-        };
-
-        // 15. trace (blkin_trace_info: 3 x u64)
-        // The trace is used for distributed tracing (Zipkin/Jaeger)
-        // These fields could be exposed in the future for observability/debugging
-        // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
-        if cursor.remaining() >= 24 {
-            let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0).map_err(|e| {
-                OSDClientError::Decoding(format!("Failed to decode blkin_trace_info: {}", e))
-            })?;
-        }
-
-        // 16. Distribute data section to operations
-        // The data section contains concatenated output data for all operations
-
-        let mut data_offset = 0;
-        for (i, op) in ops.iter_mut().enumerate() {
-            let len = payload_lens[i];
-            if len > 0 {
-                if data_offset + len > data.len() {
-                    return Err(OSDClientError::Decoding(format!(
-                        "Insufficient data for op {}: need {} bytes at offset {}, have {} total",
-                        i,
-                        len,
-                        data_offset,
-                        data.len()
-                    )));
-                }
-                op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
-                data_offset += len;
-            }
-        }
-
-        let object = ObjectId {
-            pool: pgid_raw.pool,
-            oid,
-            snap: 0,
-            hash: 0,
-            namespace: String::new(),
-            key: String::new(),
-        };
-
-        Ok(Self {
-            object,
-            pgid,
-            flags,
-            result,
-            epoch,
-            version,
-            user_version,
-            retry_attempt,
-            redirect,
-            ops,
-        })
-    }
-
     /// Convert to OpResult
     pub fn to_op_result(self) -> OpResult {
         OpResult {
@@ -409,79 +212,6 @@ impl MOSDBackoff {
             begin,
             end,
         }
-    }
-
-    /// Decode MOSDBackoff from front section
-    ///
-    /// This implements v1 decoding format for MOSDBackoff.
-    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 63-72
-    ///
-    /// # Arguments
-    /// * `front` - The front (payload) section of the message
-    pub fn decode(front: &[u8]) -> Result<Self> {
-        use denc::Denc;
-
-        let mut cursor = front;
-
-        // 1. pgid (spg_t)
-        let pgid = StripedPgId::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode pgid: {}", e)))?;
-
-        // 2. map_epoch (epoch_t = u32)
-        let map_epoch = u32::decode(&mut cursor, 0)?;
-
-        // 3. op (uint8_t)
-        let op = u8::decode(&mut cursor, 0)?;
-
-        // 4. id (uint64_t)
-        let id = u64::decode(&mut cursor, 0)?;
-
-        // 5. begin (hobject_t)
-        let begin = denc::HObject::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode begin: {}", e)))?;
-
-        // 6. end (hobject_t)
-        let end = denc::HObject::decode(&mut cursor, 0)
-            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode end: {}", e)))?;
-
-        Ok(Self {
-            pgid,
-            map_epoch,
-            op,
-            id,
-            begin,
-            end,
-        })
-    }
-
-    /// Encode MOSDBackoff to bytes
-    ///
-    /// This implements v1 encoding format for MOSDBackoff.
-    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 53-61
-    pub fn encode(&self) -> Result<Bytes> {
-        use denc::Denc;
-
-        let mut buf = BytesMut::new();
-
-        // 1. pgid (spg_t)
-        self.pgid.encode(&mut buf, 0)?;
-
-        // 2. map_epoch (epoch_t = u32)
-        self.map_epoch.encode(&mut buf, 0)?;
-
-        // 3. op (uint8_t)
-        self.op.encode(&mut buf, 0)?;
-
-        // 4. id (uint64_t)
-        self.id.encode(&mut buf, 0)?;
-
-        // 5. begin (hobject_t)
-        self.begin.encode(&mut buf, 0)?;
-
-        // 6. end (hobject_t)
-        self.end.encode(&mut buf, 0)?;
-
-        Ok(buf.freeze())
     }
 }
 
@@ -678,8 +408,185 @@ impl CephMessagePayload for MOSDOpReply {
         _middle: &[u8],
         data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode(front, data)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDOpReply decode failed".into()))
+        use denc::Denc;
+
+        let mut cursor = front;
+        if cursor.remaining() < 16 {
+            return Err(msgr2::Error::Deserialization(
+                "Incomplete MOSDOpReply".into(),
+            ));
+        }
+
+        // According to MOSDOpReply.h line 200, the encoding is:
+        // encode(oid, payload);
+        // encode(pgid, payload);
+        // encode(flags, payload);
+        // encode(result, payload);
+        // encode(bad_replay_version, payload);
+        // encode(osdmap_epoch, payload);
+        // encode(num_ops, payload);
+        // for each op: encode(ops[i].op, payload);
+        // encode(retry_attempt, payload);
+        // for each op: encode(ops[i].rval, payload);
+        // encode(replay_version, payload);
+        // encode(user_version, payload);
+        // encode(do_redirect, payload);
+        // if do_redirect: encode(redirect, payload);
+        // encode_trace(payload, features);
+
+        // 1. oid (object_t) - just the name as a string
+        let oid = String::decode(&mut cursor, 0)?;
+
+        // 2. pgid (pg_t) - use Denc infrastructure
+        let pgid_raw = PgId::decode(&mut cursor, 0)?;
+
+        let pgid = StripedPgId {
+            pool: pgid_raw.pool,
+            seed: pgid_raw.seed,
+            shard: -1, // Not in pg_t, only in spg_t
+        };
+
+        // 3. flags (int64_t)
+        let flags = i64::decode(&mut cursor, 0)? as u32;
+
+        // 4. result (errorcode32_t = int32_t)
+        let result = i32::decode(&mut cursor, 0)?;
+
+        // 5. bad_replay_version (eversion_t = epoch + version)
+        // This is for backwards compatibility with old clients.
+        // Modern clients should use replay_version (our 'version' field) and user_version instead.
+        // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
+        let _bad_replay_epoch = u32::decode(&mut cursor, 0)?;
+        let _bad_replay_version = u64::decode(&mut cursor, 0)?;
+
+        // 6. osdmap_epoch (epoch_t = u32)
+        let epoch = u32::decode(&mut cursor, 0)?;
+
+        // 7. num_ops (u32)
+        let num_ops = u32::decode(&mut cursor, 0)? as usize;
+
+        // 8. For each op: osd_op structure
+        // osd_op is defined in rados.h and has a fixed size
+        // struct ceph_osd_op {
+        //   __le16 op;           /* CEPH_OSD_OP_* */
+        //   __le32 flags;        /* CEPH_OSD_OP_FLAG_* */
+        //   union {
+        //     ... various 28-byte unions ...
+        //   } __attribute__ ((packed));
+        //   __le32 payload_len;
+        // } __attribute__ ((packed));
+        // Total size: 2 + 4 + 28 + 4 = 38 bytes
+        // Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
+
+        // Parse osd_op structures to get payload lengths
+        let mut payload_lens = Vec::with_capacity(num_ops);
+        for i in 0..num_ops {
+            if cursor.remaining() < 38 {
+                return Err(msgr2::Error::Deserialization(format!(
+                    "Incomplete osd_op {}: need 38 bytes, have {}",
+                    i,
+                    cursor.remaining()
+                )));
+            }
+            // Skip to payload_len field (at offset 34)
+            cursor.advance(34);
+            let payload_len = u32::decode(&mut cursor, 0)?;
+
+            payload_lens.push(payload_len as usize);
+        }
+
+        // 9. retry_attempt (int32_t)
+        // Used to validate that the reply matches the request attempt
+        // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
+        let retry_attempt = i32::decode(&mut cursor, 0)?;
+
+        // 10. For each op: rval (int32_t)
+        let mut ops = Vec::with_capacity(num_ops);
+        for _i in 0..num_ops {
+            let return_code = i32::decode(&mut cursor, 0)?;
+
+            ops.push(OpReply {
+                return_code,
+                outdata: Bytes::new(), // Will be filled from data section below
+            });
+        }
+
+        // 11. replay_version (eversion_t = epoch + version)
+        // The epoch part is not currently used since we track OSDMap epoch separately
+        let _replay_epoch = u32::decode(&mut cursor, 0)?;
+        let version = u64::decode(&mut cursor, 0)?;
+
+        // 12. user_version (version_t = u64)
+        let user_version = u64::decode(&mut cursor, 0)?;
+
+        // 13. do_redirect (bool)
+        let do_redirect = u8::decode(&mut cursor, 0)? != 0;
+
+        // 14. If do_redirect: redirect structure (request_redirect_t)
+        let redirect = if do_redirect {
+            let r = RequestRedirect::decode(&mut cursor, 0)?;
+            debug!(
+                "Received redirect: pool={}, key={}, namespace={}, object={}",
+                r.redirect_locator.pool_id,
+                r.redirect_locator.key,
+                r.redirect_locator.namespace,
+                r.redirect_object
+            );
+            Some(r)
+        } else {
+            None
+        };
+
+        // 15. trace (blkin_trace_info: 3 x u64)
+        // The trace is used for distributed tracing (Zipkin/Jaeger)
+        // These fields could be exposed in the future for observability/debugging
+        // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
+        if cursor.remaining() >= 24 {
+            let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0)?;
+        }
+
+        // 16. Distribute data section to operations
+        // The data section contains concatenated output data for all operations
+
+        let mut data_offset = 0;
+        for (i, op) in ops.iter_mut().enumerate() {
+            let len = payload_lens[i];
+            if len > 0 {
+                if data_offset + len > data.len() {
+                    return Err(msgr2::Error::Deserialization(format!(
+                        "Insufficient data for op {}: need {} bytes at offset {}, have {} total",
+                        i,
+                        len,
+                        data_offset,
+                        data.len()
+                    )));
+                }
+                op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
+                data_offset += len;
+            }
+        }
+
+        let object = ObjectId {
+            pool: pgid_raw.pool,
+            oid,
+            snap: 0,
+            hash: 0,
+            namespace: String::new(),
+            key: String::new(),
+        };
+
+        Ok(Self {
+            object,
+            pgid,
+            flags,
+            result,
+            epoch,
+            version,
+            user_version,
+            retry_attempt,
+            redirect,
+            ops,
+        })
     }
 }
 
@@ -693,7 +600,29 @@ impl CephMessagePayload for MOSDBackoff {
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        self.encode().map_err(|_| msgr2::Error::Serialization)
+        use denc::Denc;
+
+        let mut buf = BytesMut::new();
+
+        // 1. pgid (spg_t)
+        self.pgid.encode(&mut buf, 0)?;
+
+        // 2. map_epoch (epoch_t = u32)
+        self.map_epoch.encode(&mut buf, 0)?;
+
+        // 3. op (uint8_t)
+        self.op.encode(&mut buf, 0)?;
+
+        // 4. id (uint64_t)
+        self.id.encode(&mut buf, 0)?;
+
+        // 5. begin (hobject_t)
+        self.begin.encode(&mut buf, 0)?;
+
+        // 6. end (hobject_t)
+        self.end.encode(&mut buf, 0)?;
+
+        Ok(buf.freeze())
     }
 
     fn decode_payload(
@@ -702,8 +631,36 @@ impl CephMessagePayload for MOSDBackoff {
         _middle: &[u8],
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
-        Self::decode(front)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDBackoff decode failed".into()))
+        use denc::Denc;
+
+        let mut cursor = front;
+
+        // 1. pgid (spg_t)
+        let pgid = StripedPgId::decode(&mut cursor, 0)?;
+
+        // 2. map_epoch (epoch_t = u32)
+        let map_epoch = u32::decode(&mut cursor, 0)?;
+
+        // 3. op (uint8_t)
+        let op = u8::decode(&mut cursor, 0)?;
+
+        // 4. id (uint64_t)
+        let id = u64::decode(&mut cursor, 0)?;
+
+        // 5. begin (hobject_t)
+        let begin = denc::HObject::decode(&mut cursor, 0)?;
+
+        // 6. end (hobject_t)
+        let end = denc::HObject::decode(&mut cursor, 0)?;
+
+        Ok(Self {
+            pgid,
+            map_epoch,
+            op,
+            id,
+            begin,
+            end,
+        })
     }
 }
 
