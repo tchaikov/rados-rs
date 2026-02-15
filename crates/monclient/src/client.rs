@@ -2,7 +2,7 @@
 //!
 //! Main MonClient struct and implementation.
 
-use crate::connection::{KeepalivePolicy, MonConnection};
+use crate::connection::{KeepalivePolicy, MonConnection, MonConnectionParams};
 use crate::defaults;
 use crate::error::{MonClientError, Result};
 use crate::messages::*;
@@ -296,7 +296,7 @@ impl MonClient {
     ///
     /// * `config` - MonClient configuration
     /// * `osdmap_tx` - Optional channel for routing MOSDMap messages to OSDClient.
-    ///                 Pass `None` for MonClient-only usage (e.g., `ceph` CLI command operations)
+    ///   Pass `None` for MonClient-only usage (e.g., `ceph` CLI command operations)
     pub async fn new(
         config: MonClientConfig,
         osdmap_tx: Option<MapSender<MOSDMap>>,
@@ -656,16 +656,16 @@ impl MonClient {
 
         // Create actual msgr2 connection
         let mon_con = Arc::new(
-            MonConnection::connect(
-                socket_addr,
+            MonConnection::connect(MonConnectionParams {
+                addr: socket_addr,
                 rank,
                 addrs,
-                self.config.entity_name.clone(),
+                entity_name: self.config.entity_name.clone(),
                 keyring_path,
                 keepalive_policy,
-                self.osdmap_tx.clone(),
-                self.mon_msg_tx.clone(),
-            )
+                osdmap_tx: self.osdmap_tx.clone(),
+                mon_msg_tx: self.mon_msg_tx.clone(),
+            })
             .await?,
         );
 

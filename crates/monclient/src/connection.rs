@@ -12,6 +12,27 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
+/// Parameters for creating a monitor connection
+#[derive(Clone)]
+pub struct MonConnectionParams {
+    /// Monitor socket address
+    pub addr: SocketAddr,
+    /// Monitor rank
+    pub rank: usize,
+    /// Monitor entity addresses
+    pub addrs: EntityAddrVec,
+    /// Entity name (e.g., "client.admin")
+    pub entity_name: String,
+    /// Path to keyring file
+    pub keyring_path: Option<String>,
+    /// Keepalive policy
+    pub keepalive_policy: KeepalivePolicy,
+    /// Channel for routing MOSDMap messages to OSDClient
+    pub osdmap_tx: Option<MapSender<MOSDMap>>,
+    /// Channel for routing monitor messages
+    pub mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
+}
+
 /// Keepalive policy for the connection
 ///
 /// This determines when the protocol layer sends keepalive frames and
@@ -104,24 +125,20 @@ pub enum AuthState {
 
 impl MonConnection {
     /// Create a new monitor connection by connecting to the given address
-    pub async fn connect(
-        addr: SocketAddr,
-        rank: usize,
-        addrs: EntityAddrVec,
-        entity_name: String,
-        keyring_path: Option<String>,
-        keepalive_policy: KeepalivePolicy,
-        osdmap_tx: Option<MapSender<MOSDMap>>,
-        mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
-    ) -> Result<Self> {
-        tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
+    pub async fn connect(params: MonConnectionParams) -> Result<Self> {
+        tracing::info!(
+            "Connecting to monitor rank {} at {}",
+            params.rank,
+            params.addr
+        );
 
         // Create connection config with authentication
-        let config = if let Some(keyring) = keyring_path {
+        let config = if let Some(keyring) = params.keyring_path {
             // Load keyring and create auth provider
-            let mut mon_auth = auth::MonitorAuthProvider::new(&entity_name).map_err(|e| {
-                MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
-            })?;
+            let mut mon_auth =
+                auth::MonitorAuthProvider::new(&params.entity_name).map_err(|e| {
+                    MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
+                })?;
             mon_auth
                 .set_secret_key_from_keyring(&keyring)
                 .map_err(|e| {
@@ -135,7 +152,7 @@ impl MonConnection {
         };
 
         // Connect using msgr2 (banner exchange only)
-        let mut connection = Msgr2Connection::connect(addr, config)
+        let mut connection = Msgr2Connection::connect(params.addr, config)
             .await
             .map_err(MonClientError::MessageError)?;
 
@@ -147,7 +164,7 @@ impl MonConnection {
             .await
             .map_err(MonClientError::MessageError)?;
 
-        tracing::info!("✓ Session established with monitor rank {}", rank);
+        tracing::info!("✓ Session established with monitor rank {}", params.rank);
 
         // Get the global_id from the connection
         let global_id = connection.global_id();
@@ -183,8 +200,9 @@ impl MonConnection {
         let mut connection_for_task = connection;
 
         // Clone channels for the background task
-        let osdmap_tx_for_task = osdmap_tx.clone();
-        let mon_msg_tx_for_task = mon_msg_tx.clone();
+        let osdmap_tx_for_task = params.osdmap_tx.clone();
+        let mon_msg_tx_for_task = params.mon_msg_tx.clone();
+        let keepalive_policy = params.keepalive_policy;
 
         // Spawn a unified task to handle sending, receiving, and keepalive
         tokio::spawn(async move {
@@ -308,8 +326,8 @@ impl MonConnection {
 
         let mon_conn = Self {
             connection: Arc::new(Mutex::new(None)), // Not used anymore
-            rank,
-            addrs,
+            rank: params.rank,
+            addrs: params.addrs,
             state: Arc::new(Mutex::new(ConnectionState {
                 auth_state: AuthState::Authenticated,
                 global_id, // Use the global_id from authentication
@@ -318,8 +336,8 @@ impl MonConnection {
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
-            osdmap_tx,
-            mon_msg_tx,
+            osdmap_tx: params.osdmap_tx,
+            mon_msg_tx: params.mon_msg_tx,
         };
 
         tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
