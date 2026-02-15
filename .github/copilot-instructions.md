@@ -7,9 +7,57 @@ This is a Rust native implementation of the RADOS (Reliable Autonomic Distribute
 ### Project Goal
 Implement a pure Rust librados client without C library dependencies, providing type-safe, async access to Ceph storage clusters.
 
-## Architecture
+## Key Guidelines
 
-The project is organized as a Cargo workspace with the following crates:
+When working on this project, follow these essential principles:
+
+1. **Minimal Changes**: Make the smallest possible changes to achieve the goal. Never start from scratch - always fix existing code.
+
+2. **Test Before Commit**: ALWAYS run the complete test suite before committing:
+   ```bash
+   cargo fmt --all
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo test --workspace --all-targets
+   ```
+
+3. **Cross-Validation**: When implementing Ceph protocol features, always cross-validate with Ceph's C++ reference implementation and use ceph-dencoder for encoding validation.
+
+4. **Type Safety**: Leverage Rust's type system for correctness. Use `thiserror` for custom errors, `anyhow` for application errors.
+
+5. **Async/Await**: All I/O operations must use Tokio's async runtime.
+
+6. **Code Style**: 
+   - Follow standard Rust formatting (enforced by `cargo fmt`)
+   - Address all Clippy warnings (CI runs with `-D warnings`)
+   - Use meaningful variable names that reflect Ceph terminology
+
+## Repository Structure
+
+The project is organized as a Cargo workspace:
+
+```
+rados-rs/
+├── crates/
+│   ├── denc/          # Core encoding/decoding (Denc trait)
+│   ├── denc-derive/   # Procedural macros for Denc
+│   ├── dencoder/      # Binary for testing Ceph type encoding
+│   ├── auth/          # CephX authentication
+│   ├── msgr2/         # Messenger protocol v2 implementation
+│   ├── monclient/     # Monitor client
+│   ├── osdclient/     # OSD client
+│   ├── crush/         # CRUSH algorithm implementation
+│   ├── cephconfig/    # Ceph configuration parsing
+│   └── rados/         # CLI tool
+├── .github/
+│   ├── copilot-instructions.md    # This file
+│   ├── copilot-setup-steps.yml    # Dependency pre-installation
+│   └── workflows/                 # CI/CD workflows
+├── docker/            # Docker-based Ceph cluster for testing
+├── docs/              # Additional documentation
+└── CLAUDE.md          # Detailed development guide
+```
+
+## Architecture
 
 ### Core Crates
 1. **`denc`** - Encoding/Decoding
@@ -34,16 +82,41 @@ The project is organized as a Cargo workspace with the following crates:
    - Keyring parsing and management
    - Service ticket handling
 
+5. **`monclient`** - Monitor Client
+   - Communication with Ceph monitors
+   - Cluster map retrieval (MonMap, OSDMap, CRUSH)
+
+6. **`osdclient`** - OSD Client
+   - Direct communication with Object Storage Daemons
+   - Object operations (read/write)
+
+7. **`crush`** - CRUSH Algorithm
+   - Object placement calculation
+   - PG mapping logic
+
 ## Development Environment
+
+### Required Before Each Commit
+Before committing any changes, you MUST run these commands to ensure code quality:
+
+1. **Format code**: `cargo fmt --all`
+2. **Lint code**: `cargo clippy --workspace --all-targets -- -D warnings`
+3. **Run tests**: `cargo test --workspace --all-targets`
+
+All three must pass without errors before committing.
 
 ### Building
 ```bash
-cargo build
+# Build entire workspace
+cargo build --workspace
+
+# Build specific crate
+cargo build -p denc
 ```
 
 ### Testing
 ```bash
-# Run all tests
+# Run all unit tests
 cargo test --workspace --all-targets
 
 # Run specific crate tests
@@ -51,8 +124,12 @@ cargo test -p denc
 cargo test -p msgr2
 cargo test -p auth
 
-# Run integration tests (requires ceph-object-corpus)
-cargo test -p denc --tests -- --ignored
+# Run integration tests (requires ceph-object-corpus to be cloned)
+# These tests are marked with #[ignore] and require additional setup
+cargo test -p denc --tests -- --ignored --nocapture
+cargo test -p monclient --tests -- --ignored --nocapture
+cargo test -p msgr2 --tests -- --ignored --nocapture
+cargo test -p osdclient --tests -- --ignored --nocapture
 
 # Run examples
 cargo run --example test_osdmap_decode -p denc
@@ -60,18 +137,49 @@ cargo run --example test_osdmap_decode -p denc
 
 ### Linting
 ```bash
-# Check formatting
+# Check formatting (use this before commit)
 cargo fmt --all --check
 
-# Run Clippy
+# Auto-fix formatting
+cargo fmt --all
+
+# Run Clippy (required before commit)
 cargo clippy --workspace --all-targets -- -D warnings
 ```
 
+### Full CI Check Locally
+To run the same checks as CI before pushing:
+```bash
+# Format check
+cargo fmt --all --check
+
+# Clippy check
+cargo clippy --workspace --all-targets -- -D warnings
+
+# Unit tests
+cargo test --workspace --all-targets
+
+# Corpus comparison tests (if ceph-object-corpus is available)
+export CORPUS_ROOT=/tmp/ceph-object-corpus
+export CORPUS_VERSION=19.2.0-404-g78ddc7f9027
+cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
+```
+
 ### CI Pipeline
-The project uses GitHub Actions for CI with three main checks:
-- Format checking (`cargo fmt`)
-- Clippy linting (`cargo clippy`)
-- Unit tests (`cargo test`)
+The project uses GitHub Actions for CI with these workflows:
+
+1. **Basic CI** (`.github/workflows/ci.yml`):
+   - Format checking (`cargo fmt --all --check`)
+   - Clippy linting (`cargo clippy --workspace --all-targets -- -D warnings`)
+   - Unit tests (`cargo test --workspace --all-targets`)
+   - Corpus comparison tests (multiple Ceph versions)
+
+2. **Integration Tests** (`.github/workflows/test-with-ceph.yml`):
+   - Starts a Docker-based Ceph cluster
+   - Runs integration tests with real Ceph cluster
+   - Tests with ceph-object-corpus
+
+Dependencies are pre-installed via `.github/copilot-setup-steps.yml`
 
 ## Coding Standards and Conventions
 
