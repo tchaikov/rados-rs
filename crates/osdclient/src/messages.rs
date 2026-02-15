@@ -435,13 +435,10 @@ impl CephMessagePayload for MOSDOpReply {
         // encode_trace(payload, features);
 
         // 1. oid (object_t) - just the name as a string
-        let oid = String::decode(&mut cursor, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDOpReply decode failed: oid".into()))?;
+        let oid = String::decode(&mut cursor, 0)?;
 
         // 2. pgid (pg_t) - use Denc infrastructure
-        let pgid_raw = PgId::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: pgid".into())
-        })?;
+        let pgid_raw = PgId::decode(&mut cursor, 0)?;
 
         let pgid = StripedPgId {
             pool: pgid_raw.pool,
@@ -450,35 +447,23 @@ impl CephMessagePayload for MOSDOpReply {
         };
 
         // 3. flags (int64_t)
-        let flags = i64::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: flags".into())
-        })? as u32;
+        let flags = i64::decode(&mut cursor, 0)? as u32;
 
         // 4. result (errorcode32_t = int32_t)
-        let result = i32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: result".into())
-        })?;
+        let result = i32::decode(&mut cursor, 0)?;
 
         // 5. bad_replay_version (eversion_t = epoch + version)
         // This is for backwards compatibility with old clients.
         // Modern clients should use replay_version (our 'version' field) and user_version instead.
         // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
-        let _bad_replay_epoch = u32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: bad_replay_epoch".into())
-        })?;
-        let _bad_replay_version = u64::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: bad_replay_version".into())
-        })?;
+        let _bad_replay_epoch = u32::decode(&mut cursor, 0)?;
+        let _bad_replay_version = u64::decode(&mut cursor, 0)?;
 
         // 6. osdmap_epoch (epoch_t = u32)
-        let epoch = u32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: epoch".into())
-        })?;
+        let epoch = u32::decode(&mut cursor, 0)?;
 
         // 7. num_ops (u32)
-        let num_ops = u32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: num_ops".into())
-        })? as usize;
+        let num_ops = u32::decode(&mut cursor, 0)? as usize;
 
         // 8. For each op: osd_op structure
         // osd_op is defined in rados.h and has a fixed size
@@ -505,9 +490,7 @@ impl CephMessagePayload for MOSDOpReply {
             }
             // Skip to payload_len field (at offset 34)
             cursor.advance(34);
-            let payload_len = u32::decode(&mut cursor, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDOpReply decode failed: payload_len".into())
-            })?;
+            let payload_len = u32::decode(&mut cursor, 0)?;
 
             payload_lens.push(payload_len as usize);
         }
@@ -515,16 +498,12 @@ impl CephMessagePayload for MOSDOpReply {
         // 9. retry_attempt (int32_t)
         // Used to validate that the reply matches the request attempt
         // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
-        let retry_attempt = i32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: retry_attempt".into())
-        })?;
+        let retry_attempt = i32::decode(&mut cursor, 0)?;
 
         // 10. For each op: rval (int32_t)
         let mut ops = Vec::with_capacity(num_ops);
         for _i in 0..num_ops {
-            let return_code = i32::decode(&mut cursor, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDOpReply decode failed: return_code".into())
-            })?;
+            let return_code = i32::decode(&mut cursor, 0)?;
 
             ops.push(OpReply {
                 return_code,
@@ -534,28 +513,18 @@ impl CephMessagePayload for MOSDOpReply {
 
         // 11. replay_version (eversion_t = epoch + version)
         // The epoch part is not currently used since we track OSDMap epoch separately
-        let _replay_epoch = u32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: replay_epoch".into())
-        })?;
-        let version = u64::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: version".into())
-        })?;
+        let _replay_epoch = u32::decode(&mut cursor, 0)?;
+        let version = u64::decode(&mut cursor, 0)?;
 
         // 12. user_version (version_t = u64)
-        let user_version = u64::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: user_version".into())
-        })?;
+        let user_version = u64::decode(&mut cursor, 0)?;
 
         // 13. do_redirect (bool)
-        let do_redirect = u8::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDOpReply decode failed: do_redirect".into())
-        })? != 0;
+        let do_redirect = u8::decode(&mut cursor, 0)? != 0;
 
         // 14. If do_redirect: redirect structure (request_redirect_t)
         let redirect = if do_redirect {
-            let r = RequestRedirect::decode(&mut cursor, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDOpReply decode failed: redirect".into())
-            })?;
+            let r = RequestRedirect::decode(&mut cursor, 0)?;
             debug!(
                 "Received redirect: pool={}, key={}, namespace={}, object={}",
                 r.redirect_locator.pool_id,
@@ -573,9 +542,7 @@ impl CephMessagePayload for MOSDOpReply {
         // These fields could be exposed in the future for observability/debugging
         // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
         if cursor.remaining() >= 24 {
-            let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDOpReply decode failed: trace".into())
-            })?;
+            let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0)?;
         }
 
         // 16. Distribute data section to operations
@@ -638,34 +605,22 @@ impl CephMessagePayload for MOSDBackoff {
         let mut buf = BytesMut::new();
 
         // 1. pgid (spg_t)
-        self.pgid
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.pgid.encode(&mut buf, 0)?;
 
         // 2. map_epoch (epoch_t = u32)
-        self.map_epoch
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.map_epoch.encode(&mut buf, 0)?;
 
         // 3. op (uint8_t)
-        self.op
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.op.encode(&mut buf, 0)?;
 
         // 4. id (uint64_t)
-        self.id
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.id.encode(&mut buf, 0)?;
 
         // 5. begin (hobject_t)
-        self.begin
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.begin.encode(&mut buf, 0)?;
 
         // 6. end (hobject_t)
-        self.end
-            .encode(&mut buf, 0)
-            .map_err(|_| msgr2::Error::Serialization)?;
+        self.end.encode(&mut buf, 0)?;
 
         Ok(buf.freeze())
     }
@@ -681,31 +636,22 @@ impl CephMessagePayload for MOSDBackoff {
         let mut cursor = front;
 
         // 1. pgid (spg_t)
-        let pgid = StripedPgId::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDBackoff decode failed: pgid".into())
-        })?;
+        let pgid = StripedPgId::decode(&mut cursor, 0)?;
 
         // 2. map_epoch (epoch_t = u32)
-        let map_epoch = u32::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDBackoff decode failed: map_epoch".into())
-        })?;
+        let map_epoch = u32::decode(&mut cursor, 0)?;
 
         // 3. op (uint8_t)
-        let op = u8::decode(&mut cursor, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDBackoff decode failed: op".into()))?;
+        let op = u8::decode(&mut cursor, 0)?;
 
         // 4. id (uint64_t)
-        let id = u64::decode(&mut cursor, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDBackoff decode failed: id".into()))?;
+        let id = u64::decode(&mut cursor, 0)?;
 
         // 5. begin (hobject_t)
-        let begin = denc::HObject::decode(&mut cursor, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDBackoff decode failed: begin".into())
-        })?;
+        let begin = denc::HObject::decode(&mut cursor, 0)?;
 
         // 6. end (hobject_t)
-        let end = denc::HObject::decode(&mut cursor, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDBackoff decode failed: end".into()))?;
+        let end = denc::HObject::decode(&mut cursor, 0)?;
 
         Ok(Self {
             pgid,

@@ -72,15 +72,12 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
         let mut buf = BytesMut::new();
 
         // Encode map size using Denc
-        (self.what.len() as u32)
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        (self.what.len() as u32).encode(&mut buf, 0)?;
 
         // Encode each subscription
         for (name, item) in &self.what {
             // Encode name using Denc
-            name.encode(&mut buf, 0)
-                .map_err(|_e| msgr2::Error::Serialization)?;
+            name.encode(&mut buf, 0)?;
             tracing::debug!(
                 "  📝 Subscription: '{}' start={} flags={}",
                 name,
@@ -89,18 +86,12 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
             );
 
             // Encode subscribe item using Denc
-            item.start
-                .encode(&mut buf, 0)
-                .map_err(|_e| msgr2::Error::Serialization)?;
-            item.flags
-                .encode(&mut buf, 0)
-                .map_err(|_e| msgr2::Error::Serialization)?;
+            item.start.encode(&mut buf, 0)?;
+            item.flags.encode(&mut buf, 0)?;
         }
 
         // Encode hostname (version 3) using Denc
-        self.hostname
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.hostname.encode(&mut buf, 0)?;
         tracing::debug!("  🖥️  Hostname: '{}'", self.hostname);
 
         Ok(buf.freeze())
@@ -115,24 +106,16 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
         use denc::Denc;
 
         let mut data = front;
-        let count = u32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonSubscribe decode failed: count".into())
-        })? as usize;
+        let count = u32::decode(&mut data, 0)? as usize;
         let mut what = HashMap::new();
 
         for _ in 0..count {
             // Decode name using Denc
-            let name = String::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MMonSubscribe decode failed: name".into())
-            })?;
+            let name = String::decode(&mut data, 0)?;
 
             // Decode subscribe item using Denc
-            let start = u64::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MMonSubscribe decode failed: start".into())
-            })?;
-            let flags = u8::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MMonSubscribe decode failed: flags".into())
-            })?;
+            let start = u64::decode(&mut data, 0)?;
+            let flags = u8::decode(&mut data, 0)?;
 
             what.insert(name, SubscribeItem { start, flags });
         }
@@ -176,15 +159,11 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.interval
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.interval.encode(&mut buf, 0)?;
 
         // Encode UUID using Denc
         let uuid_denc = UuidD::from_bytes(*self.fsid.as_bytes());
-        uuid_denc
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        uuid_denc.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -242,12 +221,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.tid
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
-        self.what
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.tid.encode(&mut buf, 0)?;
+        self.what.encode(&mut buf, 0)?;
         let result = buf.freeze();
         eprintln!(
             "DEBUG: MMonGetVersion::encode() tid={}, what='{}', payload={} bytes: {:02x?}",
@@ -312,15 +287,9 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.tid
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
-        self.version
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
-        self.oldest_version
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.tid.encode(&mut buf, 0)?;
+        self.version.encode(&mut buf, 0)?;
+        self.oldest_version.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -381,9 +350,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonMap {
         use denc::Denc;
         let mut buf = BytesMut::new();
         // Use Denc for Bytes which handles length prefix automatically
-        self.monmap_bl
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.monmap_bl.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -397,8 +364,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonMap {
 
         let mut data = front;
         // Use Denc for Bytes which handles length prefix automatically
-        let monmap_bl = Bytes::decode(&mut data, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MMonMap decode failed".into()))?;
+        let monmap_bl = Bytes::decode(&mut data, 0)?;
         Ok(Self { monmap_bl })
     }
 }
@@ -430,15 +396,10 @@ impl msgr2::ceph_message::CephMessagePayload for MConfig {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        (self.config.len() as u32)
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        (self.config.len() as u32).encode(&mut buf, 0)?;
         for (key, value) in &self.config {
-            key.encode(&mut buf, 0)
-                .map_err(|_e| msgr2::Error::Serialization)?;
-            value
-                .encode(&mut buf, 0)
-                .map_err(|_e| msgr2::Error::Serialization)?;
+            key.encode(&mut buf, 0)?;
+            value.encode(&mut buf, 0)?;
         }
         Ok(buf.freeze())
     }
@@ -451,16 +412,11 @@ impl msgr2::ceph_message::CephMessagePayload for MConfig {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        let count = u32::decode(&mut data, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MConfig decode failed: count".into()))?
-            as usize;
+        let count = u32::decode(&mut data, 0)? as usize;
         let mut config = HashMap::with_capacity(count);
         for _ in 0..count {
-            let key = String::decode(&mut data, 0)
-                .map_err(|_e| msgr2::Error::Deserialization("MConfig decode failed: key".into()))?;
-            let value = String::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MConfig decode failed: value".into())
-            })?;
+            let key = String::decode(&mut data, 0)?;
+            let value = String::decode(&mut data, 0)?;
             config.insert(key, value);
         }
         Ok(Self { config })
@@ -537,53 +493,36 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
 
         let mut data = front;
         // Decode fsid using Denc (16 bytes)
-        let fsid_denc = UuidD::decode(&mut data, 0)
-            .map_err(|_e| msgr2::Error::Deserialization("MOSDMap decode failed: fsid".into()))?;
+        let fsid_denc = UuidD::decode(&mut data, 0)?;
         let fsid = fsid_denc.bytes;
 
         // Decode incremental_maps (map<epoch_t, buffer::list>)
-        let inc_count = u32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDMap decode failed: inc_count".into())
-        })? as usize;
+        let inc_count = u32::decode(&mut data, 0)? as usize;
         let mut incremental_maps = HashMap::new();
         for _ in 0..inc_count {
-            let epoch = u32::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: inc epoch".into())
-            })?;
-            let map_data = Bytes::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: inc map_data".into())
-            })?;
+            let epoch = u32::decode(&mut data, 0)?;
+            let map_data = Bytes::decode(&mut data, 0)?;
             incremental_maps.insert(epoch, map_data);
         }
 
         // Decode maps (map<epoch_t, buffer::list>)
-        let maps_count = u32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MOSDMap decode failed: maps_count".into())
-        })? as usize;
+        let maps_count = u32::decode(&mut data, 0)? as usize;
         let mut maps = HashMap::new();
         for _ in 0..maps_count {
-            let epoch = u32::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: map epoch".into())
-            })?;
-            let map_data = Bytes::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: map_data".into())
-            })?;
+            let epoch = u32::decode(&mut data, 0)?;
+            let map_data = Bytes::decode(&mut data, 0)?;
             maps.insert(epoch, map_data);
         }
 
         // Decode cluster_osdmap_trim_lower_bound and newest_map (version >= 2)
         let cluster_osdmap_trim_lower_bound = if data.remaining() >= 4 {
-            u32::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: trim_lower_bound".into())
-            })?
+            u32::decode(&mut data, 0)?
         } else {
             0
         };
 
         let newest_map = if data.remaining() >= 4 {
-            u32::decode(&mut data, 0).map_err(|_e| {
-                msgr2::Error::Deserialization("MOSDMap decode failed: newest_map".into())
-            })?
+            u32::decode(&mut data, 0)?
         } else {
             0
         };
@@ -1264,25 +1203,15 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
         use denc::Denc;
         let mut buf = BytesMut::new();
 
-        self.protocol
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
-        self.result
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
-        self.global_id
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.protocol.encode(&mut buf, 0)?;
+        self.result.encode(&mut buf, 0)?;
+        self.global_id.encode(&mut buf, 0)?;
 
         // Encode result_msg as length-prefixed string
         let msg_bytes = Bytes::from(self.result_msg.as_bytes().to_vec());
-        msg_bytes
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        msg_bytes.encode(&mut buf, 0)?;
 
-        self.auth_payload
-            .encode(&mut buf, 0)
-            .map_err(|_e| msgr2::Error::Serialization)?;
+        self.auth_payload.encode(&mut buf, 0)?;
 
         Ok(buf.freeze())
     }
