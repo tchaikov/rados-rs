@@ -755,6 +755,36 @@ impl MonClient {
         Ok(())
     }
 
+    /// Notify that a map has been received
+    ///
+    /// Called by clients (e.g., OSDClient) after successfully processing a map update.
+    /// This updates subscription tracking and triggers renewal if needed.
+    ///
+    /// # Arguments
+    ///
+    /// * `what` - Map type (e.g., "osdmap", "monmap")
+    /// * `epoch` - Epoch of the received map
+    pub async fn notify_map_received(&self, what: &str, epoch: u64) -> Result<()> {
+        let mut state = self.state.write().await;
+
+        debug!("Map received: {} epoch {}", what, epoch);
+
+        // Update subscription tracking - this increments the start epoch
+        state.subscriptions.got(what, epoch);
+
+        // Check if subscriptions need renewal
+        if state.subscriptions.need_renew() {
+            debug!(
+                "Subscriptions need renewal after receiving {} epoch {}",
+                what, epoch
+            );
+            drop(state);
+            self.send_subscriptions().await?;
+        }
+
+        Ok(())
+    }
+
     /// Send pending subscriptions
     async fn send_subscriptions(&self) -> Result<()> {
         let mut state = self.state.write().await;
