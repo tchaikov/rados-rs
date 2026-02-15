@@ -150,32 +150,6 @@ impl Message {
     pub fn total_size(&self) -> u64 {
         self.total_len() as u64
     }
-
-    /// Decode the message payload using the CephMessagePayload trait.
-    ///
-    /// Constructs a CephMsgHeader from the msgr2 MsgHeader for use with the
-    /// CephMessagePayload::decode_payload() trait method. Fields not present
-    /// in MsgHeader (src_type, src_num, reserved, crc) are zeroed as they
-    /// are not used by decode_payload implementations.
-    pub fn decode_payload<T: crate::ceph_message::CephMessagePayload>(&self) -> Result<T> {
-        let header = crate::ceph_message::CephMsgHeader {
-            seq: self.header.seq,
-            tid: self.header.tid,
-            msg_type: self.header.msg_type,
-            priority: self.header.priority,
-            version: self.header.version,
-            front_len: self.front.len() as u32,
-            middle_len: self.middle.len() as u32,
-            data_len: self.data.len() as u32,
-            data_off: self.header.data_off,
-            src_type: 0,
-            src_num: 0,
-            compat_version: self.header.compat_version,
-            reserved: 0,
-            crc: 0,
-        };
-        T::decode_payload(&header, &self.front, &self.middle, &self.data)
-    }
 }
 
 impl fmt::Display for Message {
