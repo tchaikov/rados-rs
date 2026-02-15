@@ -410,6 +410,9 @@ pub struct MConfig {
 }
 
 impl MConfig {
+    /// Message version (HEAD_VERSION = 1, COMPAT_VERSION = 1)
+    const VERSION: u16 = 1;
+
     pub fn new(config: HashMap<String, String>) -> Self {
         Self { config }
     }
@@ -435,6 +438,30 @@ impl MConfig {
             config.insert(key, value);
         }
         Ok(Self { config })
+    }
+}
+
+impl msgr2::ceph_message::CephMessagePayload for MConfig {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_CONFIG
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MConfig decode failed".into()))
     }
 }
 
@@ -1329,6 +1356,41 @@ mod tests {
         assert_eq!(
             decoded.config.get("rados_mon_op_timeout"),
             Some(&"60".to_string())
+        );
+    }
+
+    #[test]
+    fn test_mconfig_message_encoding() {
+        use msgr2::ceph_message::{CephMessage, CephMessagePayload, CrcFlags};
+
+        let mut config = HashMap::new();
+        config.insert("mon_client_hunt_interval".to_string(), "3".to_string());
+        let msg = MConfig::new(config);
+
+        // Create a complete message
+        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL).unwrap();
+
+        // Verify message structure
+        let msg_type = ceph_msg.header.msg_type;
+        let version = ceph_msg.header.version;
+        assert_eq!(msg_type, msgr2::message::CEPH_MSG_CONFIG);
+        assert_eq!(version, MConfig::VERSION);
+        assert!(!ceph_msg.front.is_empty());
+        assert_eq!(ceph_msg.middle.len(), 0);
+        assert_eq!(ceph_msg.data.len(), 0);
+
+        // Round-trip: decode the payload back and verify
+        let decoded = MConfig::decode_payload(
+            &ceph_msg.header,
+            &ceph_msg.front,
+            &ceph_msg.middle,
+            &ceph_msg.data,
+        )
+        .unwrap();
+        assert_eq!(decoded.config.len(), 1);
+        assert_eq!(
+            decoded.config.get("mon_client_hunt_interval"),
+            Some(&"3".to_string())
         );
     }
 
