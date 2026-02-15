@@ -818,47 +818,6 @@ impl MonClient {
         Ok(())
     }
 
-    /// Helper to renew a subscription from within spawned tasks
-    /// This doesn't require &self, so it can be called from the message loop
-    /// NOTE: Currently only used by handle_osdmap which will move to OSDClient
-    #[allow(dead_code)]
-    async fn renew_subscription(
-        state_arc: &Arc<RwLock<MonClientState>>,
-        what: &str,
-        epoch: u64,
-    ) -> Result<()> {
-        let mut state = state_arc.write().await;
-
-        // Update subscription
-        state.subscriptions.want(what, epoch, 0);
-
-        let active_con = match state.active_con.as_ref() {
-            Some(con) => con.clone(),
-            None => {
-                tracing::warn!("Cannot renew subscription: not connected");
-                return Ok(()); // Don't fail, just skip
-            }
-        };
-
-        // Build subscription message
-        let mut msg = MMonSubscribe::new();
-        for (what, item) in state.subscriptions.get_subs() {
-            msg.add(what.clone(), *item);
-        }
-
-        state.subscriptions.renewed();
-        drop(state);
-
-        // Send subscription message
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let message = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        active_con.send_message(message).await?;
-
-        debug!("Renewed subscription for {} at epoch {}", what, epoch);
-        Ok(())
-    }
-
     /// Start background tick loop for periodic maintenance
     fn start_tick_loop(&self) {
         let state = Arc::clone(&self.state);
