@@ -1302,7 +1302,7 @@ impl OSDClient {
             // This allows MonClient to track subscription state and renew if needed
             if let Err(e) = self
                 .mon_client
-                .notify_map_received("osdmap", u32::from(final_epoch) as u64)
+                .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
                 .await
             {
                 warn!(
