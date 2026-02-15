@@ -3,6 +3,10 @@
 //! This test validates that our Rust implementation of dencoding matches the official
 //! C++ ceph-dencoder tool from the Ceph project.
 //!
+//! Following Ceph's readable.sh pattern, this test verifies both:
+//! 1. Decode correctness: decode → dump_json
+//! 2. Roundtrip correctness: decode → encode → decode → dump_json
+//!
 //! Requirements:
 //! - ceph-dencoder binary must be in PATH or specified via CEPH_DENCODER
 //! - ceph-object-corpus repository will be cloned automatically if not present
@@ -190,6 +194,20 @@ fn run_ceph_dencoder(
     corpus_file: &Path,
     features: Option<u64>,
 ) -> Result<String, String> {
+    run_ceph_dencoder_with_ops(ceph_dencoder, type_name, corpus_file, features, false)
+}
+
+/// Run ceph-dencoder with optional roundtrip (encode before final decode)
+/// Following Ceph's readable.sh pattern:
+/// - Normal: import decode dump_json
+/// - Roundtrip: import decode encode decode dump_json
+fn run_ceph_dencoder_with_ops(
+    ceph_dencoder: &Path,
+    type_name: &str,
+    corpus_file: &Path,
+    features: Option<u64>,
+    roundtrip: bool,
+) -> Result<String, String> {
     let mut cmd = Command::new(ceph_dencoder);
     cmd.arg("type").arg(type_name);
 
@@ -197,10 +215,13 @@ fn run_ceph_dencoder(
         cmd.arg("set_features").arg(format!("0x{:x}", f));
     }
 
-    cmd.arg("import")
-        .arg(corpus_file)
-        .arg("decode")
-        .arg("dump_json");
+    cmd.arg("import").arg(corpus_file).arg("decode");
+
+    if roundtrip {
+        cmd.arg("encode").arg("decode");
+    }
+
+    cmd.arg("dump_json");
 
     let output = cmd
         .output()
@@ -223,6 +244,17 @@ fn run_rust_dencoder(
     corpus_file: &Path,
     features: Option<u64>,
 ) -> Result<String, String> {
+    run_rust_dencoder_with_ops(rust_dencoder, type_name, corpus_file, features, false)
+}
+
+/// Run our Rust dencoder with optional roundtrip (encode before final decode)
+fn run_rust_dencoder_with_ops(
+    rust_dencoder: &Path,
+    type_name: &str,
+    corpus_file: &Path,
+    features: Option<u64>,
+    roundtrip: bool,
+) -> Result<String, String> {
     let mut cmd = Command::new(rust_dencoder);
     cmd.arg("type").arg(type_name);
 
@@ -230,10 +262,13 @@ fn run_rust_dencoder(
         cmd.arg("set_features").arg(format!("0x{:x}", f));
     }
 
-    cmd.arg("import")
-        .arg(corpus_file)
-        .arg("decode")
-        .arg("dump_json");
+    cmd.arg("import").arg(corpus_file).arg("decode");
+
+    if roundtrip {
+        cmd.arg("encode").arg("decode");
+    }
+
+    cmd.arg("dump_json");
 
     let output = cmd
         .output()
@@ -352,23 +387,93 @@ fn test_type(
         // Both decoders succeeded
         both_decoded += 1;
 
-        // Compare outputs (strict comparison)
-        match compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name, is_exception) {
-            Ok(()) => {
-                eprintln!("    ✓ {}", file_name);
-                matched += 1;
+        // Test 1: Compare decode outputs (decode correctness)
+        let decode_matches =
+            compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name, is_exception)
+                .is_ok();
+
+        // Test 2: Compare roundtrip outputs (encode/decode correctness)
+        // Following Ceph's readable.sh: import decode encode decode dump_json
+        let roundtrip_matches = match (
+            run_ceph_dencoder_with_ops(ceph_dencoder, type_name, &corpus_file, features, true),
+            run_rust_dencoder_with_ops(rust_dencoder, type_name, &corpus_file, features, true),
+        ) {
+            (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => compare_json_outputs(
+                &ceph_roundtrip_json,
+                &rust_roundtrip_json,
+                type_name,
+                &file_name,
+                is_exception,
+            )
+            .is_ok(),
+            _ => {
+                // Roundtrip failed for one or both decoders
+                false
             }
-            Err(e) => {
-                // Format mismatch - both decoded but outputs differ
-                format_mismatch += 1;
-                // Only show first mismatch details to avoid spam
-                if format_mismatch == 1 {
-                    let marker = "⚠";
-                    eprintln!(
-                        "    {} {} - format mismatch (showing first only)",
-                        marker, file_name
-                    );
-                    eprintln!("      {}", e);
+        };
+
+        // Overall success requires both decode AND roundtrip to match
+        if decode_matches && roundtrip_matches {
+            eprintln!("    ✓ {} (decode + roundtrip)", file_name);
+            matched += 1;
+        } else {
+            // Format mismatch - both decoded but outputs differ
+            format_mismatch += 1;
+            // Only show first mismatch details to avoid spam
+            if format_mismatch == 1 {
+                let marker = "⚠";
+                let reason = match (decode_matches, roundtrip_matches) {
+                    (false, false) => "decode and roundtrip mismatch",
+                    (false, true) => "decode mismatch",
+                    (true, false) => "roundtrip mismatch",
+                    _ => unreachable!(),
+                };
+                eprintln!(
+                    "    {} {} - {} (showing first only)",
+                    marker, file_name, reason
+                );
+
+                // Show decode mismatch if that's the issue
+                if !decode_matches {
+                    if let Err(e) = compare_json_outputs(
+                        &ceph_json,
+                        &rust_json,
+                        type_name,
+                        &file_name,
+                        is_exception,
+                    ) {
+                        eprintln!("      Decode: {}", e);
+                    }
+                }
+
+                // Show roundtrip mismatch if that's the issue
+                if !roundtrip_matches {
+                    if let (Ok(ceph_rt), Ok(rust_rt)) = (
+                        run_ceph_dencoder_with_ops(
+                            ceph_dencoder,
+                            type_name,
+                            &corpus_file,
+                            features,
+                            true,
+                        ),
+                        run_rust_dencoder_with_ops(
+                            rust_dencoder,
+                            type_name,
+                            &corpus_file,
+                            features,
+                            true,
+                        ),
+                    ) {
+                        if let Err(e) = compare_json_outputs(
+                            &ceph_rt,
+                            &rust_rt,
+                            type_name,
+                            &file_name,
+                            is_exception,
+                        ) {
+                            eprintln!("      Roundtrip: {}", e);
+                        }
+                    }
                 }
             }
         }
