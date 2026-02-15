@@ -117,7 +117,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
 
         // Read original data
         let original_data = fs::read(&path).expect("Failed to read test file");
-        
+
         // Extract version from the original data (first byte of versioned encoding)
         if original_data.len() < 6 {
             println!("  ✗ File too small for versioned encoding");
@@ -125,9 +125,12 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         }
         let original_version = original_data[0];
         let original_compat = original_data[1];
-        
-        println!("  Original encoding: version={}, compat={}", original_version, original_compat);
-        
+
+        println!(
+            "  Original encoding: version={}, compat={}",
+            original_version, original_compat
+        );
+
         let mut bytes = bytes::Bytes::from(original_data.clone());
 
         // Try to decode
@@ -139,7 +142,8 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                 );
 
                 // Determine features to use for encoding based on the original version
-                let encode_features = features_for_version(original_version, pg_pool.is_stretch_pool());
+                let encode_features =
+                    features_for_version(original_version, pg_pool.is_stretch_pool());
                 println!("  Using features: 0x{:x} for re-encoding", encode_features);
 
                 // Try to encode back with the same features
@@ -194,7 +198,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         "pg_pool_t Results: {}/{} files processed successfully",
         success_count, total_count
     );
-    
+
     if mismatch_count > 0 {
         println!("⚠ {} files had roundtrip mismatches", mismatch_count);
     }
@@ -205,7 +209,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         "Roundtrip test failed: {} files had mismatches",
         mismatch_count
     );
-    
+
     // We should have processed at least some files
     assert!(
         total_count > 0,
@@ -215,40 +219,64 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
 
 #[test]
 fn test_features_for_version() {
-    use osdclient::PgPool;
     use denc::VersionedEncode;
-    
+    use osdclient::PgPool;
+
     // Test that features_for_version produces the expected version
     // when used with PgPool::encoding_version
-    
+
     // Version 21: no NEW_OSDOP_ENCODING
     let features_21 = features_for_version(21, false);
     let pool = PgPool::new();
-    assert_eq!(pool.encoding_version(features_21), 21, 
-               "Features for v21 should produce v21, got features=0x{:x}", features_21);
-    
+    assert_eq!(
+        pool.encoding_version(features_21),
+        21,
+        "Features for v21 should produce v21, got features=0x{:x}",
+        features_21
+    );
+
     // Version 24: has NEW_OSDOP_ENCODING, no SERVER_LUMINOUS
     let features_24 = features_for_version(24, false);
-    assert_eq!(pool.encoding_version(features_24), 24,
-               "Features for v24 should produce v24, got features=0x{:x}", features_24);
-    
+    assert_eq!(
+        pool.encoding_version(features_24),
+        24,
+        "Features for v24 should produce v24, got features=0x{:x}",
+        features_24
+    );
+
     // Version 26: has SERVER_LUMINOUS, no SERVER_MIMIC
     let features_26 = features_for_version(26, false);
-    assert_eq!(pool.encoding_version(features_26), 26,
-               "Features for v26 should produce v26, got features=0x{:x}", features_26);
-    
+    assert_eq!(
+        pool.encoding_version(features_26),
+        26,
+        "Features for v26 should produce v26, got features=0x{:x}",
+        features_26
+    );
+
     // Version 27: has SERVER_MIMIC, no SERVER_NAUTILUS
     let features_27 = features_for_version(27, false);
-    assert_eq!(pool.encoding_version(features_27), 27,
-               "Features for v27 should produce v27, got features=0x{:x}", features_27);
-    
+    assert_eq!(
+        pool.encoding_version(features_27),
+        27,
+        "Features for v27 should produce v27, got features=0x{:x}",
+        features_27
+    );
+
     // Version 29: has SERVER_NAUTILUS, no SERVER_TENTACLE, not stretch
     let features_29 = features_for_version(29, false);
-    assert_eq!(pool.encoding_version(features_29), 29,
-               "Features for v29 should produce v29, got features=0x{:x}", features_29);
-    
+    assert_eq!(
+        pool.encoding_version(features_29),
+        29,
+        "Features for v29 should produce v29, got features=0x{:x}",
+        features_29
+    );
+
     // Version 32: all features
     let features_32 = features_for_version(32, false);
-    assert_eq!(pool.encoding_version(features_32), 32,
-               "Features for v32 should produce v32, got features=0x{:x}", features_32);
+    assert_eq!(
+        pool.encoding_version(features_32),
+        32,
+        "Features for v32 should produce v32, got features=0x{:x}",
+        features_32
+    );
 }

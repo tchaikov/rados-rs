@@ -32,7 +32,7 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
 
         // Read original data
         let original_data = fs::read(&path).expect("Failed to read test file");
-        
+
         // Extract version from the original data (first byte of versioned encoding)
         if original_data.len() < 6 {
             println!("  ✗ File too small for versioned encoding");
@@ -42,12 +42,15 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
         let original_compat = original_data[1];
 
         println!("  File size: {} bytes", original_data.len());
-        println!("  Original encoding: version={}, compat={}", original_version, original_compat);
+        println!(
+            "  Original encoding: version={}, compat={}",
+            original_version, original_compat
+        );
         println!(
             "  Data: {}",
             hex::encode(&original_data[..std::cmp::min(32, original_data.len())])
         );
-        
+
         let mut bytes = bytes::Bytes::from(original_data.clone());
 
         // Try to decode
@@ -120,7 +123,7 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
         "pg_merge_meta_t Results: {}/{} files processed successfully",
         success_count, total_count
     );
-    
+
     if mismatch_count > 0 {
         println!("⚠ {} files had roundtrip mismatches", mismatch_count);
     }
@@ -131,12 +134,9 @@ fn test_pg_merge_meta_decode_encode_roundtrip() {
         "Roundtrip test failed: {} files had mismatches",
         mismatch_count
     );
-    
+
     // We should have processed at least some files
     if total_count > 0 {
-        assert!(
-            success_count > 0,
-            "No test files roundtripped successfully"
-        );
+        assert!(success_count > 0, "No test files roundtripped successfully");
     }
 }

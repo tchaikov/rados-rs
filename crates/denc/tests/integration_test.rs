@@ -74,7 +74,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
 
                 // Try to encode back with different feature combinations
                 let features_to_test = [0u64, 1u64 << 59]; // without and with MSG_ADDR2
-                
+
                 let mut found_match = false;
                 for features in features_to_test {
                     let mut encoded_buf = bytes::BytesMut::new();
@@ -111,7 +111,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
                         }
                     }
                 }
-                
+
                 if !found_match {
                     mismatch_count += 1;
                 }
@@ -128,7 +128,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
         "Results: {}/{} files processed successfully",
         success_count, total_count
     );
-    
+
     if mismatch_count > 0 {
         println!("⚠ {} files had roundtrip mismatches", mismatch_count);
     }
