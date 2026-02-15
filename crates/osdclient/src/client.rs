@@ -2,15 +2,15 @@
 //!
 //! Main entry point for performing object operations against a Ceph cluster.
 
-use async_trait::async_trait;
 use monclient::wait_helper::wait_for_condition;
+use monclient::MOSDMap;
+use msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, warn};
 
 use denc::{Denc, VersionedEncode};
-use msgr2::{Dispatcher, MessageBus};
 
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
@@ -52,8 +52,8 @@ pub struct OSDClient {
     fsid: denc::UuidD,
     /// Current OSDMap
     osdmap: Arc<RwLock<Option<Arc<crate::osdmap::OSDMap>>>>,
-    /// Global message bus for inter-component messaging
-    message_bus: Arc<MessageBus>,
+    /// Channel for routing MOSDMap messages to sessions
+    osdmap_tx: MapSender<MOSDMap>,
     /// Notification for OSDMap arrival
     osdmap_notify: Arc<tokio::sync::Notify>,
     /// Weak self-reference for session creation
@@ -66,7 +66,8 @@ impl OSDClient {
         config: OSDClientConfig,
         fsid: denc::UuidD,
         mon_client: Arc<monclient::MonClient>,
-        message_bus: Arc<MessageBus>,
+        osdmap_tx: MapSender<MOSDMap>,
+        mut osdmap_rx: MapReceiver<MOSDMap>,
     ) -> Result<Arc<Self>> {
         info!("Creating OSDClient for {}", config.entity_name);
 
@@ -93,28 +94,28 @@ impl OSDClient {
             global_id,
             fsid,
             osdmap: Arc::new(RwLock::new(None)),
-            message_bus,
+            osdmap_tx,
             osdmap_notify: Arc::new(tokio::sync::Notify::new()),
             self_weak: weak.clone(),
         });
 
+        // Spawn drain task for OSDMap messages
+        let client_weak = Arc::downgrade(&client);
+        tokio::spawn(async move {
+            while let Some(msg) = osdmap_rx.recv().await {
+                if let Some(client_arc) = client_weak.upgrade() {
+                    if let Err(e) = client_arc.handle_osdmap(msg).await {
+                        error!("Failed to handle OSDMap: {}", e);
+                    }
+                } else {
+                    info!("OSDClient dropped, terminating OSDMap drain task");
+                    break;
+                }
+            }
+            info!("OSDClient OSDMap drain task terminated");
+        });
+
         Ok(client)
-    }
-
-    /// Register this OSDClient as a handler for broadcast messages on the message bus
-    ///
-    /// Note: Session-specific messages (OPREPLY, BACKOFF) are dispatched directly
-    /// from io_task with OSD context, following the Linux kernel pattern
-    pub async fn register_handlers(self: Arc<Self>) -> Result<()> {
-        info!("Registering OSDClient for broadcast messages on MessageBus");
-
-        // Register only for OSDMap updates (broadcast message)
-        // Session-specific messages (OPREPLY, BACKOFF) are handled via dispatch_from_osd()
-        self.message_bus
-            .register(msgr2::message::CEPH_MSG_OSD_MAP, self.clone())
-            .await;
-
-        Ok(())
     }
 
     /// Dispatch a session-specific message from an OSD
@@ -220,7 +221,7 @@ impl OSDClient {
             self.config.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
-            Arc::clone(&self.message_bus),
+            self.osdmap_tx.clone(),
             self.self_weak.clone(),
         );
 
@@ -1481,34 +1482,5 @@ impl OSDClient {
         }
 
         Ok(())
-    }
-}
-
-/// Implement Dispatcher trait for OSDClient to handle broadcast messages
-///
-/// Only handles OSDMAP (broadcast message).
-/// Session-specific messages (OPREPLY, BACKOFF) are dispatched via dispatch_from_osd()
-#[async_trait]
-impl Dispatcher for OSDClient {
-    async fn dispatch(
-        &self,
-        msg: msgr2::message::Message,
-    ) -> std::result::Result<(), denc::RadosError> {
-        let msg_type = msg.msg_type();
-
-        match msg_type {
-            msgr2::message::CEPH_MSG_OSD_MAP => {
-                // OSDMap updates from monitors or OSDs (broadcast message)
-                self.handle_osdmap(msg).await.map_err(Into::into)
-            }
-            _ => {
-                // Session-specific messages should not come through MessageBus
-                warn!(
-                    "OSDClient MessageBus received unexpected message type: 0x{:04x} (should use dispatch_from_osd)",
-                    msg_type
-                );
-                Ok(())
-            }
-        }
     }
 }

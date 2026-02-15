@@ -3,9 +3,10 @@
 //! Wraps a msgr2 connection with monitor-specific state.
 
 use crate::error::{MonClientError, Result};
+use crate::messages::{MOSDMap, CEPH_MSG_OSD_MAP};
 use crate::types::EntityAddrVec;
 use msgr2::protocol::Connection as Msgr2Connection;
-use msgr2::{ConnectionConfig, MessageBus};
+use msgr2::{ConnectionConfig, MapSender};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -71,11 +72,15 @@ pub struct MonConnection {
     /// The background task sends () when a keepalive timeout occurs
     timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
 
-    /// Message bus for routing ALL messages
-    /// ALL messages received from the monitor are dispatched to the MessageBus
+    /// Channel for routing MOSDMap messages to OSDClient
     /// Note: Used by the background task closure, so #[allow(dead_code)] is needed
     #[allow(dead_code)]
-    message_bus: Arc<MessageBus>,
+    osdmap_tx: Option<MapSender<MOSDMap>>,
+
+    /// Channel for routing all other monitor messages to MonClient
+    /// Note: Used by the background task closure, so #[allow(dead_code)] is needed
+    #[allow(dead_code)]
+    mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
 }
 
 #[derive(Debug)]
@@ -106,7 +111,8 @@ impl MonConnection {
         entity_name: String,
         keyring_path: Option<String>,
         keepalive_policy: KeepalivePolicy,
-        message_bus: Arc<MessageBus>,
+        osdmap_tx: Option<MapSender<MOSDMap>>,
+        mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
     ) -> Result<Self> {
         tracing::info!("Connecting to monitor rank {} at {}", rank, addr);
 
@@ -176,11 +182,11 @@ impl MonConnection {
 
         let mut connection_for_task = connection;
 
-        // Clone message_bus for the background task
-        let message_bus_for_task = Arc::clone(&message_bus);
+        // Clone channels for the background task
+        let osdmap_tx_for_task = osdmap_tx.clone();
+        let mon_msg_tx_for_task = mon_msg_tx.clone();
 
         // Spawn a unified task to handle sending, receiving, and keepalive
-        // ALL received messages are forwarded to the MessageBus
         tokio::spawn(async move {
             tracing::debug!("Send/Receive/Keepalive task started");
 
@@ -207,17 +213,32 @@ impl MonConnection {
                         tracing::trace!("Send/Recv task: Message sent successfully");
                     }
 
-                    // Handle incoming messages - forward ALL to MessageBus
+                    // Handle incoming messages - route based on type
                     result = connection_for_task.recv_message() => {
                         match result {
                             Ok(msg) => {
                                 let msg_type = msg.header.msg_type;
-                                tracing::trace!("Received message type 0x{:04x}, forwarding to MessageBus", msg_type);
+                                tracing::trace!("Received message type 0x{:04x}, routing to appropriate channel", msg_type);
 
-                                // Forward ALL messages to MessageBus
-                                if let Err(e) = message_bus_for_task.dispatch(msg).await {
-                                    tracing::error!("Failed to dispatch message 0x{:04x} to MessageBus: {}", msg_type, e);
-                                    // Continue processing other messages even if one fails
+                                // Route based on message type
+                                match msg_type {
+                                    CEPH_MSG_OSD_MAP => {
+                                        // Route MOSDMap to OSDClient if configured
+                                        if let Some(ref tx) = osdmap_tx_for_task {
+                                            if let Err(e) = tx.send(msg).await {
+                                                tracing::error!("Failed to send MOSDMap to OSDClient: {:?}", e);
+                                            }
+                                        } else {
+                                            tracing::debug!("Received MOSDMap but no osdmap_tx configured, dropping");
+                                        }
+                                    }
+                                    _ => {
+                                        // Route all other messages to MonClient
+                                        if let Err(e) = mon_msg_tx_for_task.send(msg) {
+                                            tracing::error!("Failed to send message 0x{:04x} to MonClient: {}", msg_type, e);
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             Err(e) => {
@@ -297,7 +318,8 @@ impl MonConnection {
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
-            message_bus,
+            osdmap_tx,
+            mon_msg_tx,
         };
 
         tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");

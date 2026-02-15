@@ -77,7 +77,7 @@ async fn create_osd_client(
     config: &TestConfig,
 ) -> Result<(Arc<osdclient::OSDClient>, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
     // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
-    let message_bus = Arc::new(msgr2::MessageBus::new());
+    let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
@@ -87,14 +87,12 @@ async fn create_osd_client(
         ..Default::default()
     };
 
-    let mon_client =
-        Arc::new(monclient::MonClient::new(mon_config, Arc::clone(&message_bus)).await?);
+    let mon_client = monclient::MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
 
     // Initialize connection
     mon_client.init().await?;
 
     // Register MonClient handlers on MessageBus
-    mon_client.clone().register_handlers().await?;
 
     info!("✓ Connected to monitor");
 
@@ -130,13 +128,13 @@ async fn create_osd_client(
         osd_config,
         fsid,
         Arc::clone(&mon_client),
-        Arc::clone(&message_bus),
+        osdmap_tx,
+        osdmap_rx,
     )
     .await?;
     info!("✓ OSD client created");
 
     // Register OSDClient on MessageBus to receive OSDMap messages
-    osd_client.clone().register_handlers().await?;
     info!("✓ OSDClient registered on MessageBus");
 
     // NOW subscribe to OSDMap - OSDClient is ready to receive

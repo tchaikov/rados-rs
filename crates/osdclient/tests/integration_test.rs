@@ -103,7 +103,7 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
     let config = TestConfig::from_env();
 
     // Create shared MessageBus FIRST - both MonClient and OSDClient must use the same bus
-    let message_bus = Arc::new(msgr2::MessageBus::new());
+    let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     // Create MonClient with shared MessageBus
     let mon_config = monclient::MonClientConfig {
@@ -113,24 +113,15 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
         ..Default::default()
     };
 
-    let mon_client = Arc::new(
-        monclient::MonClient::new(mon_config, Arc::clone(&message_bus))
-            .await
-            .expect("Failed to create MonClient"),
-    );
+    let mon_client = monclient::MonClient::new(mon_config, Some(osdmap_tx.clone()))
+        .await
+        .expect("Failed to create MonClient");
 
     // Initialize connection
     mon_client
         .init()
         .await
         .expect("Failed to initialize MonClient");
-
-    // Register MonClient handlers on MessageBus
-    mon_client
-        .clone()
-        .register_handlers()
-        .await
-        .expect("Failed to register MonClient handlers");
 
     // Wait for authentication to fully complete with all service tickets
     // This ensures OSD service tickets are available before creating OSDClient
@@ -156,17 +147,11 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
         osd_config,
         fsid,
         Arc::clone(&mon_client),
-        Arc::clone(&message_bus),
+        osdmap_tx,
+        osdmap_rx,
     )
     .await
     .expect("Failed to create OSDClient");
-
-    // Register OSDClient on MessageBus BEFORE subscribing to osdmap
-    osd_client
-        .clone()
-        .register_handlers()
-        .await
-        .expect("Failed to register OSDClient handlers");
 
     // NOW subscribe to OSDMap - OSDClient is ready to receive
     mon_client

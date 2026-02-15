@@ -352,6 +352,12 @@ impl MOSDMap {
     }
 }
 
+/// Implement MapMessage for MOSDMap to enable type-safe routing
+impl msgr2::MapMessage for MOSDMap {
+    const MSG_TYPE: u16 = CEPH_MSG_OSD_MAP;
+    const NAME: &'static str = "MOSDMap";
+}
+
 /// MMonCommand - Execute command on monitor
 #[derive(Debug, Clone)]
 pub struct MMonCommand {
