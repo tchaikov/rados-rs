@@ -3,9 +3,13 @@
 //! This test validates that our Rust implementation of dencoding matches the official
 //! C++ ceph-dencoder tool from the Ceph project.
 //!
-//! Following Ceph's readable.sh pattern, this test verifies both:
-//! 1. Decode correctness: decode → dump_json
-//! 2. Roundtrip correctness: decode → encode → decode → dump_json
+//! Following Ceph's readable.sh pattern, this test verifies:
+//! 1. Decode correctness: Rust decode matches Ceph decode
+//! 2. Ceph roundtrip consistency: Ceph's decode == decode→encode→decode
+//! 3. Rust roundtrip consistency: Rust's decode == decode→encode→decode
+//!
+//! This matches Ceph's readable.sh which tests that for each implementation,
+//! the roundtrip (decode→encode→decode) produces the same result as just decode.
 //!
 //! Requirements:
 //! - ceph-dencoder binary must be in PATH or specified via CEPH_DENCODER
@@ -392,28 +396,43 @@ fn test_type(
             compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name, is_exception)
                 .is_ok();
 
-        // Test 2: Compare roundtrip outputs (encode/decode correctness)
-        // Following Ceph's readable.sh: import decode encode decode dump_json
-        let roundtrip_matches = match (
+        // Test 2: Roundtrip consistency (following Ceph's readable.sh)
+        // Check if decode == decode→encode→decode for each implementation
+        let (ceph_roundtrip_consistent, rust_roundtrip_consistent) = match (
             run_ceph_dencoder_with_ops(ceph_dencoder, type_name, &corpus_file, features, true),
             run_rust_dencoder_with_ops(rust_dencoder, type_name, &corpus_file, features, true),
         ) {
-            (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => compare_json_outputs(
-                &ceph_roundtrip_json,
-                &rust_roundtrip_json,
-                type_name,
-                &file_name,
-                is_exception,
-            )
-            .is_ok(),
+            (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => {
+                // Check Ceph's roundtrip consistency
+                let ceph_consistent = compare_json_outputs(
+                    &ceph_json,
+                    &ceph_roundtrip_json,
+                    type_name,
+                    &file_name,
+                    is_exception,
+                )
+                .is_ok();
+
+                // Check Rust's roundtrip consistency
+                let rust_consistent = compare_json_outputs(
+                    &rust_json,
+                    &rust_roundtrip_json,
+                    type_name,
+                    &file_name,
+                    is_exception,
+                )
+                .is_ok();
+
+                (ceph_consistent, rust_consistent)
+            }
             _ => {
                 // Roundtrip failed for one or both decoders
-                false
+                (false, false)
             }
         };
 
-        // Overall success requires both decode AND roundtrip to match
-        if decode_matches && roundtrip_matches {
+        // Overall success requires decode match AND both roundtrips to be consistent
+        if decode_matches && ceph_roundtrip_consistent && rust_roundtrip_consistent {
             eprintln!("    ✓ {} (decode + roundtrip)", file_name);
             matched += 1;
         } else {
@@ -422,15 +441,21 @@ fn test_type(
             // Only show first mismatch details to avoid spam
             if format_mismatch == 1 {
                 let marker = "⚠";
-                let reason = match (decode_matches, roundtrip_matches) {
-                    (false, false) => "decode and roundtrip mismatch",
-                    (false, true) => "decode mismatch",
-                    (true, false) => "roundtrip mismatch",
-                    _ => unreachable!(),
-                };
+                let mut reasons = Vec::new();
+                if !decode_matches {
+                    reasons.push("decode mismatch");
+                }
+                if !ceph_roundtrip_consistent {
+                    reasons.push("ceph roundtrip inconsistent");
+                }
+                if !rust_roundtrip_consistent {
+                    reasons.push("rust roundtrip inconsistent");
+                }
                 eprintln!(
                     "    {} {} - {} (showing first only)",
-                    marker, file_name, reason
+                    marker,
+                    file_name,
+                    reasons.join(", ")
                 );
 
                 // Show decode mismatch if that's the issue
@@ -446,8 +471,8 @@ fn test_type(
                     }
                 }
 
-                // Show roundtrip mismatch if that's the issue
-                if !roundtrip_matches {
+                // Show roundtrip issues
+                if !ceph_roundtrip_consistent || !rust_roundtrip_consistent {
                     if let (Ok(ceph_rt), Ok(rust_rt)) = (
                         run_ceph_dencoder_with_ops(
                             ceph_dencoder,
@@ -464,14 +489,27 @@ fn test_type(
                             true,
                         ),
                     ) {
-                        if let Err(e) = compare_json_outputs(
-                            &ceph_rt,
-                            &rust_rt,
-                            type_name,
-                            &file_name,
-                            is_exception,
-                        ) {
-                            eprintln!("      Roundtrip: {}", e);
+                        if !ceph_roundtrip_consistent {
+                            if let Err(e) = compare_json_outputs(
+                                &ceph_json,
+                                &ceph_rt,
+                                type_name,
+                                &file_name,
+                                is_exception,
+                            ) {
+                                eprintln!("      Ceph roundtrip: {}", e);
+                            }
+                        }
+                        if !rust_roundtrip_consistent {
+                            if let Err(e) = compare_json_outputs(
+                                &rust_json,
+                                &rust_rt,
+                                type_name,
+                                &file_name,
+                                is_exception,
+                            ) {
+                                eprintln!("      Rust roundtrip: {}", e);
+                            }
                         }
                     }
                 }
