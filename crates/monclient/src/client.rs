@@ -169,24 +169,50 @@ pub enum MapEvent {
     ConfigUpdated { keys: Vec<String> },
 }
 
-#[derive(Debug, Clone, Copy)]
-struct RuntimeMonClientConfig {
-    hunt_interval: Duration,
-    keepalive_interval: Duration,
-    keepalive_timeout: Duration,
-    command_timeout: Duration,
+macro_rules! runtime_mon_client_config_options {
+    ($({ field: $field:ident, config: $config_field:ident, option: $option_name:literal, parser: $parser:ident }),+ $(,)?) => {
+        #[derive(Debug, Clone, Copy)]
+        struct RuntimeMonClientConfig {
+            $(
+                $field: Duration,
+            )+
+        }
+
+        impl RuntimeMonClientConfig {
+            fn from_config(config: &MonClientConfig) -> Self {
+                Self {
+                    $(
+                        $field: config.$config_field,
+                    )+
+                }
+            }
+
+            fn update_from_map(&mut self, config: &HashMap<String, String>) {
+                for (key, value) in config {
+                    match key.as_str() {
+                        $(
+                            $option_name => {
+                                if let Some(parsed) = Self::$parser(value) {
+                                    self.$field = parsed;
+                                }
+                            }
+                        )+
+                        _ => {}
+                    }
+                }
+            }
+        }
+    };
+}
+
+runtime_mon_client_config_options! {
+    { field: hunt_interval, config: hunt_interval, option: "mon_client_hunt_interval", parser: parse_duration_option },
+    { field: keepalive_interval, config: keepalive_interval, option: "mon_client_ping_interval", parser: parse_duration_option },
+    { field: keepalive_timeout, config: keepalive_timeout, option: "mon_client_ping_timeout", parser: parse_duration_option },
+    { field: command_timeout, config: command_timeout, option: "rados_mon_op_timeout", parser: parse_duration_option },
 }
 
 impl RuntimeMonClientConfig {
-    fn from_config(config: &MonClientConfig) -> Self {
-        Self {
-            hunt_interval: config.hunt_interval,
-            keepalive_interval: config.keepalive_interval,
-            keepalive_timeout: config.keepalive_timeout,
-            command_timeout: config.command_timeout,
-        }
-    }
-
     fn parse_option<T: std::str::FromStr>(value: &str) -> Option<T> {
         value.trim().parse::<T>().ok()
     }
@@ -203,32 +229,6 @@ impl RuntimeMonClientConfig {
             return None;
         }
         Some(Duration::from_secs_f64(seconds))
-    }
-
-    fn update_from_map(&mut self, config: &HashMap<String, String>) {
-        macro_rules! update_duration_options {
-            ($key:expr, $value:expr, $target:expr, { $($opt:literal => $field:ident),+ $(,)? }) => {
-                match $key {
-                    $(
-                        $opt => {
-                            if let Some(duration) = RuntimeMonClientConfig::parse_duration_option($value) {
-                                $target.$field = duration;
-                            }
-                        }
-                    )+
-                    _ => {}
-                }
-            };
-        }
-
-        for (key, value) in config {
-            update_duration_options!(key.as_str(), value, self, {
-                "mon_client_hunt_interval" => hunt_interval,
-                "mon_client_ping_interval" => keepalive_interval,
-                "mon_client_ping_timeout" => keepalive_timeout,
-                "rados_mon_op_timeout" => command_timeout,
-            });
-        }
     }
 }
 
