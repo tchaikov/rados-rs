@@ -129,6 +129,30 @@ impl ConfigValue for String {
     }
 }
 
+/// Trait for values parsed from runtime monitor config updates.
+pub trait RuntimeOptionValue: Sized {
+    fn parse_runtime_option(value: &str) -> Option<Self>;
+}
+
+impl RuntimeOptionValue for std::time::Duration {
+    /// Parse runtime duration option values in seconds (e.g. `5`, `5.5`, `5s`, `5.5s`).
+    fn parse_runtime_option(value: &str) -> Option<Self> {
+        let trimmed = value.trim();
+        let numeric = trimmed.strip_suffix('s').unwrap_or(trimmed);
+        let seconds = numeric.parse::<f64>().ok()?;
+        if !seconds.is_finite() || seconds < 0.0 {
+            return None;
+        }
+        Some(std::time::Duration::from_secs_f64(seconds))
+    }
+}
+
+impl RuntimeOptionValue for u64 {
+    fn parse_runtime_option(value: &str) -> Option<Self> {
+        value.trim().parse::<u64>().ok()
+    }
+}
+
 /// A configuration option with name, type, and default value
 pub struct ConfigOption<T: ConfigValue> {
     /// The option name (used in ceph.conf)
@@ -506,6 +530,50 @@ macro_rules! define_options {
         impl Default for $name {
             fn default() -> Self {
                 Self::new()
+            }
+        }
+    };
+}
+
+/// Define a runtime-updatable config struct where field names map directly to option names.
+#[macro_export]
+macro_rules! runtime_config_options {
+    (
+        $(#[$meta:meta])*
+        $vis:vis struct $name:ident {
+            $(
+                $field:ident: $ty:ty
+            ),* $(,)?
+        }
+    ) => {
+        $(#[$meta])*
+        $vis struct $name {
+            $(
+                pub $field: $ty,
+            )*
+        }
+
+        impl $name {
+            pub fn update_from_map(
+                &mut self,
+                config: &std::collections::HashMap<String, String>,
+            ) {
+                for (key, value) in config {
+                    match key.as_str() {
+                        $(
+                            stringify!($field) => {
+                                if let Some(parsed) = Self::parse_option::<$ty>(value) {
+                                    self.$field = parsed;
+                                }
+                            }
+                        )*
+                        _ => {}
+                    }
+                }
+            }
+
+            pub fn parse_option<T: $crate::RuntimeOptionValue>(value: &str) -> Option<T> {
+                T::parse_runtime_option(value)
             }
         }
     };

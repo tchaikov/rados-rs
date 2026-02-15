@@ -187,75 +187,24 @@ pub enum MapEvent {
     ConfigUpdated { keys: Vec<String> },
 }
 
-trait RuntimeOptionValue: Sized {
-    fn parse_option(value: &str) -> Option<Self>;
-}
-
-impl RuntimeOptionValue for Duration {
-    fn parse_option(value: &str) -> Option<Self> {
-        let trimmed = value.trim();
-        let numeric = trimmed.strip_suffix('s').unwrap_or(trimmed);
-        let seconds = numeric.parse::<f64>().ok()?;
-        // is_finite() rejects both NaN and +/-infinity values.
-        if !seconds.is_finite() || seconds < 0.0 {
-            return None;
-        }
-        Some(Duration::from_secs_f64(seconds))
-    }
-}
-
-impl RuntimeOptionValue for u64 {
-    fn parse_option(value: &str) -> Option<Self> {
-        value.trim().parse::<u64>().ok()
-    }
-}
-
-macro_rules! runtime_mon_client_config_options {
-    ($( $field:ident : $type:ty ),+ $(,)?) => {
-        #[derive(Debug, Clone, Copy)]
-        struct RuntimeMonClientConfig {
-            $(
-                $field: $type,
-            )+
-        }
-
-        impl RuntimeMonClientConfig {
-            fn from_config(config: &MonClientConfig) -> Self {
-                Self {
-                    $(
-                        $field: config.$field(),
-                    )+
-                }
-            }
-
-            fn update_from_map(&mut self, config: &HashMap<String, String>) {
-                for (key, value) in config {
-                    match key.as_str() {
-                        $(
-                            stringify!($field) => {
-                                if let Some(parsed) = Self::parse_option::<$type>(value) {
-                                    self.$field = parsed;
-                                }
-                            }
-                        )+
-                        _ => {}
-                    }
-                }
-            }
-        }
-    };
-}
-
-runtime_mon_client_config_options! {
+cephconfig::runtime_config_options! {
+    #[derive(Debug, Clone, Copy)]
+    struct RuntimeMonClientConfig {
     mon_client_hunt_interval: Duration,
     mon_client_ping_interval: Duration,
     mon_client_ping_timeout: Duration,
     rados_mon_op_timeout: Duration,
 }
+}
 
 impl RuntimeMonClientConfig {
-    fn parse_option<T: RuntimeOptionValue>(value: &str) -> Option<T> {
-        T::parse_option(value)
+    fn from_config(config: &MonClientConfig) -> Self {
+        Self {
+            mon_client_hunt_interval: config.mon_client_hunt_interval(),
+            mon_client_ping_interval: config.mon_client_ping_interval(),
+            mon_client_ping_timeout: config.mon_client_ping_timeout(),
+            rados_mon_op_timeout: config.rados_mon_op_timeout(),
+        }
     }
 }
 
