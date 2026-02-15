@@ -118,7 +118,7 @@ async fn main() -> Result<()> {
     };
 
     // Get DNS SRV service name from config (used as fallback when mon_addrs is empty)
-    let mon_dns_srv_name = ceph_config
+    let dns_srv_name = ceph_config
         .as_ref()
         .map(|c| c.mon_dns_srv_name())
         .unwrap_or_else(|| "ceph-mon".to_string());
@@ -148,7 +148,7 @@ async fn main() -> Result<()> {
         entity_name: cli.name.clone(),
         mon_addrs,
         keyring_path: keyring_path.clone(),
-        mon_dns_srv_name,
+        dns_srv_name,
         ..Default::default()
     };
 

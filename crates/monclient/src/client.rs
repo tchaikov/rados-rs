@@ -79,7 +79,7 @@ pub struct MonClientConfig {
     /// Default: "ceph-mon" (queries `_ceph-mon._tcp`)
     /// May include a domain suffix separated by `_`,
     /// e.g., `"ceph-mon_example.com"` queries `_ceph-mon._tcp.example.com`.
-    pub mon_dns_srv_name: String,
+    pub dns_srv_name: String,
 }
 
 impl Default for MonClientConfig {
@@ -98,7 +98,7 @@ impl Default for MonClientConfig {
             hunt_interval_backoff: 1.5,
             hunt_interval_min_multiple: 1.0,
             hunt_interval_max_multiple: 10.0,
-            mon_dns_srv_name: crate::dns_srv::DEFAULT_MON_DNS_SRV_NAME.to_string(),
+            dns_srv_name: crate::dns_srv::DEFAULT_MON_DNS_SRV_NAME.to_string(),
         }
     }
 }
@@ -323,9 +323,9 @@ impl MonClient {
         } else {
             info!(
                 "No monitor addresses configured, trying DNS SRV discovery with service name: {}",
-                config.mon_dns_srv_name
+                config.dns_srv_name
             );
-            crate::dns_srv::resolve_mon_addrs_via_dns_srv(&config.mon_dns_srv_name).await?
+            crate::dns_srv::resolve_mon_addrs_via_dns_srv(&config.dns_srv_name).await?
         };
 
         info!("Initial monmap has {} monitors", monmap.size());
