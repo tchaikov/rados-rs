@@ -21,6 +21,7 @@ futures = { workspace = true }
 msgr2 = { path = "../msgr2" }
 auth = { path = "../auth" }
 denc = { path = "../denc" }
+cephconfig = { path = "../cephconfig" }
 hex = "0.4.3"
 
 # DNS SRV resolution
@@ -29,5 +30,4 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["to
 [dev-dependencies]
 tracing-subscriber = { workspace = true }
 tokio-test = "0.4"
-cephconfig = { path = "../cephconfig" }
 rand = { workspace = true }

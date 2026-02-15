@@ -103,6 +103,24 @@ impl Default for MonClientConfig {
     }
 }
 
+impl MonClientConfig {
+    fn mon_client_hunt_interval(&self) -> Duration {
+        self.hunt_interval
+    }
+
+    fn mon_client_ping_interval(&self) -> Duration {
+        self.keepalive_interval
+    }
+
+    fn mon_client_ping_timeout(&self) -> Duration {
+        self.keepalive_timeout
+    }
+
+    fn rados_mon_op_timeout(&self) -> Duration {
+        self.command_timeout
+    }
+}
+
 /// Monitor client
 pub struct MonClient {
     /// Configuration
@@ -166,6 +184,28 @@ pub enum MapEvent {
     OsdMapUpdated { epoch: u64 },
     MgrMapUpdated { epoch: u64 },
     MdsMapUpdated { epoch: u64 },
+    ConfigUpdated { keys: Vec<String> },
+}
+
+cephconfig::runtime_config_options! {
+    #[derive(Debug, Clone, Copy)]
+    struct RuntimeMonClientConfig {
+    mon_client_hunt_interval: Duration,
+    mon_client_ping_interval: Duration,
+    mon_client_ping_timeout: Duration,
+    rados_mon_op_timeout: Duration,
+}
+}
+
+impl RuntimeMonClientConfig {
+    fn from_config(config: &MonClientConfig) -> Self {
+        Self {
+            mon_client_hunt_interval: config.mon_client_hunt_interval(),
+            mon_client_ping_interval: config.mon_client_ping_interval(),
+            mon_client_ping_timeout: config.mon_client_ping_timeout(),
+            rados_mon_op_timeout: config.rados_mon_op_timeout(),
+        }
+    }
 }
 
 /// Keepalive state tracking
@@ -235,6 +275,9 @@ struct MonClientState {
     last_hunt_attempt: Option<std::time::Instant>,
     /// Whether we've ever had a successful connection (for backoff logic)
     had_a_connection: bool,
+
+    /// Runtime configuration values updated via MConfig
+    runtime_config: RuntimeMonClientConfig,
 }
 
 struct MapWaiter {
@@ -358,6 +401,7 @@ impl MonClient {
             reopen_interval_multiplier: config.hunt_interval_min_multiple,
             last_hunt_attempt: None,
             had_a_connection: false,
+            runtime_config: RuntimeMonClientConfig::from_config(&config),
         };
 
         let client = Arc::new(Self {
@@ -423,9 +467,11 @@ impl MonClient {
         // Start hunting process (connects to monitor)
         self.start_hunting().await?;
 
-        // Send initial subscriptions (monmap and osdmap)
+        // Send initial subscriptions (monmap and config)
         info!("Subscribing to monmap...");
         self.subscribe("monmap", 0, 0).await?;
+        info!("Subscribing to config...");
+        self.subscribe("config", 0, 0).await?;
 
         // OSDMap subscription is handled by the application after OSDClient is ready
 
@@ -482,9 +528,9 @@ impl MonClient {
             if state.had_a_connection {
                 if let Some(last_attempt) = state.last_hunt_attempt {
                     let elapsed = last_attempt.elapsed();
-                    let hunt_delay = self
-                        .config
-                        .hunt_interval
+                    let hunt_delay = state
+                        .runtime_config
+                        .mon_client_hunt_interval
                         .mul_f64(state.reopen_interval_multiplier);
 
                     if elapsed < hunt_delay {
@@ -644,6 +690,7 @@ impl MonClient {
 
         let socket_addr = addr.addr;
         let addrs = mon_info.addrs.clone();
+        let runtime_config = state.runtime_config;
         drop(state);
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
@@ -656,10 +703,10 @@ impl MonClient {
         };
 
         // Create keepalive policy from config
-        let keepalive_policy = if self.config.keepalive_interval.as_secs() > 0 {
+        let keepalive_policy = if runtime_config.mon_client_ping_interval.as_secs() > 0 {
             KeepalivePolicy::new(
-                self.config.keepalive_interval,
-                self.config.keepalive_timeout,
+                runtime_config.mon_client_ping_interval,
+                runtime_config.mon_client_ping_timeout,
             )
         } else {
             KeepalivePolicy::disabled()
@@ -708,6 +755,8 @@ impl MonClient {
         // Authentication was completed during MonConnection::connect() -> establish_session()
         state.authenticated = true;
         state.global_id = global_id; // Store global_id in MonClient
+                                     // Move previously-acked subscriptions back to pending so they are resent on reconnect.
+        let should_send_subscriptions = state.subscriptions.reload();
 
         // Clear any pending connections (from parallel hunt)
         state.pending_cons.clear();
@@ -732,6 +781,10 @@ impl MonClient {
 
         // Notify waiters that authentication is complete (after releasing lock)
         self.auth_notify.notify_waiters();
+
+        if should_send_subscriptions {
+            self.send_subscriptions().await?;
+        }
 
         info!("Successfully connected to mon.{}", rank);
         Ok(())
@@ -827,6 +880,11 @@ impl MonClient {
 
         debug!("Sent subscriptions");
         Ok(())
+    }
+
+    async fn command_timeout(&self) -> Duration {
+        let state = self.state.read().await;
+        state.runtime_config.rados_mon_op_timeout
     }
 
     /// Start background tick loop for periodic maintenance
@@ -1093,6 +1151,10 @@ impl MonClient {
                 );
                 Self::handle_poolop_reply(state, map_events, msg).await?;
             }
+            msgr2::message::CEPH_MSG_CONFIG => {
+                debug!("Received CEPH_MSG_CONFIG");
+                Self::handle_config(state, map_events, msg).await?;
+            }
             _ => {
                 return Err(MonClientError::Other(format!(
                     "Received unknown message type 0x{:04x} - this is a bug! MonClient should only receive messages it subscribed for",
@@ -1158,6 +1220,24 @@ impl MonClient {
         let mut state_guard = state.write().await;
         state_guard.subscriptions.acked(ack.interval);
 
+        Ok(())
+    }
+
+    /// Handle config update message
+    async fn handle_config(
+        state: &Arc<RwLock<MonClientState>>,
+        map_events: &broadcast::Sender<MapEvent>,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        let mconfig = MConfig::decode(&msg.front)?;
+        let has_receivers = map_events.receiver_count() > 0;
+        let mut state_guard = state.write().await;
+        state_guard.runtime_config.update_from_map(&mconfig.config);
+        drop(state_guard);
+        if has_receivers {
+            let keys: Vec<String> = mconfig.config.keys().cloned().collect();
+            let _ = map_events.send(MapEvent::ConfigUpdated { keys });
+        }
         Ok(())
     }
 
@@ -1315,7 +1395,7 @@ impl MonClient {
         active_con.send_message(message).await?;
 
         // Wait for response with timeout
-        let result = tokio::time::timeout(self.config.command_timeout, rx)
+        let result = tokio::time::timeout(self.command_timeout().await, rx)
             .await
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))?;
@@ -1416,7 +1496,7 @@ impl MonClient {
         tracing::trace!("send_command: Command message sent successfully, waiting for response");
 
         // Wait for response with timeout
-        let result = tokio::time::timeout(self.config.command_timeout, rx)
+        let result = tokio::time::timeout(self.command_timeout().await, rx)
             .await
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))?;
@@ -1469,7 +1549,7 @@ impl MonClient {
         active_con.send_message(message).await?;
 
         // Wait for response with timeout
-        let result = tokio::time::timeout(self.config.command_timeout, rx)
+        let result = tokio::time::timeout(self.command_timeout().await, rx)
             .await
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))?;
@@ -1664,6 +1744,7 @@ impl std::fmt::Debug for MonClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[tokio::test]
     async fn test_create_client() {
@@ -1689,5 +1770,63 @@ mod tests {
 
         // Should fail before init
         assert!(client.subscribe("osdmap", 0, 0).await.is_err());
+    }
+
+    #[test]
+    fn test_runtime_config_update_from_map() {
+        let config = MonClientConfig::default();
+        let mut runtime_config = RuntimeMonClientConfig::from_config(&config);
+        let mut updates = HashMap::new();
+        updates.insert("mon_client_hunt_interval".to_string(), "5".to_string());
+        updates.insert("mon_client_ping_interval".to_string(), "11".to_string());
+        updates.insert("mon_client_ping_timeout".to_string(), "22".to_string());
+        updates.insert("rados_mon_op_timeout".to_string(), "33".to_string());
+
+        runtime_config.update_from_map(&updates);
+
+        assert_eq!(
+            runtime_config.mon_client_hunt_interval,
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            runtime_config.mon_client_ping_interval,
+            Duration::from_secs(11)
+        );
+        assert_eq!(
+            runtime_config.mon_client_ping_timeout,
+            Duration::from_secs(22)
+        );
+        assert_eq!(runtime_config.rados_mon_op_timeout, Duration::from_secs(33));
+    }
+
+    #[test]
+    fn test_parse_duration_option() {
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("1.5s"),
+            Some(Duration::from_secs_f64(1.5))
+        );
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("2.25"),
+            Some(Duration::from_secs_f64(2.25))
+        );
+        assert_eq!(RuntimeMonClientConfig::parse_option::<Duration>("-1"), None);
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("inf"),
+            None
+        );
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("NaN"),
+            None
+        );
+        assert_eq!(
+            RuntimeMonClientConfig::parse_option::<Duration>("not-a-duration"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_parse_option_generic() {
+        assert_eq!(RuntimeMonClientConfig::parse_option::<u64>("42"), Some(42));
+        assert_eq!(RuntimeMonClientConfig::parse_option::<u64>("abc"), None);
     }
 }

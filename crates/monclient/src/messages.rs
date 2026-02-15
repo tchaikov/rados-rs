@@ -268,6 +268,41 @@ impl MMonMap {
     }
 }
 
+/// MConfig - Runtime configuration update
+#[derive(Debug, Clone)]
+pub struct MConfig {
+    pub config: HashMap<String, String>,
+}
+
+impl MConfig {
+    pub fn new(config: HashMap<String, String>) -> Self {
+        Self { config }
+    }
+
+    pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
+        let mut buf = BytesMut::new();
+        (self.config.len() as u32).encode(&mut buf, 0)?;
+        for (key, value) in &self.config {
+            key.encode(&mut buf, 0)?;
+            value.encode(&mut buf, 0)?;
+        }
+        Ok(buf.freeze())
+    }
+
+    pub fn decode(mut data: &[u8]) -> Result<Self> {
+        use denc::Denc;
+        let count = u32::decode(&mut data, 0)? as usize;
+        let mut config = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let key = String::decode(&mut data, 0)?;
+            let value = String::decode(&mut data, 0)?;
+            config.insert(key, value);
+        }
+        Ok(Self { config })
+    }
+}
+
 /// MOSDMap - OSD map message
 #[derive(Debug, Clone)]
 pub struct MOSDMap {
@@ -942,5 +977,26 @@ mod tests {
         assert_eq!(decoded.tid, 42);
         assert_eq!(decoded.version, 100);
         assert_eq!(decoded.oldest_version, 50);
+    }
+
+    #[test]
+    fn test_config_encode_decode() {
+        let mut config = HashMap::new();
+        config.insert("mon_client_hunt_interval".to_string(), "3".to_string());
+        config.insert("rados_mon_op_timeout".to_string(), "60".to_string());
+        let msg = MConfig::new(config);
+
+        let encoded = msg.encode().unwrap();
+        let decoded = MConfig::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.config.len(), 2);
+        assert_eq!(
+            decoded.config.get("mon_client_hunt_interval"),
+            Some(&"3".to_string())
+        );
+        assert_eq!(
+            decoded.config.get("rados_mon_op_timeout"),
+            Some(&"60".to_string())
+        );
     }
 }

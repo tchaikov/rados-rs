@@ -11,6 +11,7 @@ pub const CEPH_MSG_MON_COMMAND: u16 = 50;
 pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 51;
 pub const CEPH_MSG_POOLOP_REPLY: u16 = 48;
 pub const CEPH_MSG_POOLOP: u16 = 49;
+pub const CEPH_MSG_CONFIG: u16 = 62;
 pub const CEPH_MSG_AUTH: u16 = 0x0011;
 pub const CEPH_MSG_AUTH_REPLY: u16 = 0x0012;
 
@@ -160,6 +161,7 @@ impl fmt::Display for Message {
             CEPH_MSG_MON_MAP => "MON_MAP",
             CEPH_MSG_MON_COMMAND => "MON_COMMAND",
             CEPH_MSG_MON_COMMAND_ACK => "MON_COMMAND_ACK",
+            CEPH_MSG_CONFIG => "CONFIG",
             CEPH_MSG_AUTH => "AUTH",
             CEPH_MSG_AUTH_REPLY => "AUTH_REPLY",
             t => {
