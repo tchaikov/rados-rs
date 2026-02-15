@@ -50,22 +50,6 @@ impl MMonSubscribe {
     pub fn add(&mut self, name: String, item: SubscribeItem) {
         self.what.insert(name, item);
     }
-
-    /// Encode to bytes for message payload (convenience wrapper)
-    pub fn encode(&self) -> Result<Bytes> {
-        use msgr2::ceph_message::CephMessagePayload;
-        self.encode_payload(0)
-            .map_err(|_| MonClientError::EncodingError)
-    }
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        // Create a dummy header (not used in decode_payload for this message type)
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MMonSubscribe decode failed: {}", e)))
-    }
 }
 
 impl Default for MMonSubscribe {
@@ -177,14 +161,6 @@ impl MMonSubscribeAck {
 
     pub fn new(interval: u32, fsid: Uuid) -> Self {
         Self { interval, fsid }
-    }
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MMonSubscribeAck decode failed: {}", e)))
     }
 }
 
@@ -322,21 +298,6 @@ impl MMonGetVersionReply {
             oldest_version,
         }
     }
-
-    /// Encode to bytes for message payload (convenience wrapper)
-    pub fn encode(&self) -> Result<Bytes> {
-        use msgr2::ceph_message::CephMessagePayload;
-        self.encode_payload(0)
-            .map_err(|_| MonClientError::EncodingError)
-    }
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MMonGetVersionReply decode failed: {}", e)))
-    }
 }
 
 impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
@@ -405,14 +366,6 @@ impl MMonMap {
     pub fn new(monmap_bl: Bytes) -> Self {
         Self { monmap_bl }
     }
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MMonMap decode failed: {}", e)))
-    }
 }
 
 impl msgr2::ceph_message::CephMessagePayload for MMonMap {
@@ -462,21 +415,6 @@ impl MConfig {
 
     pub fn new(config: HashMap<String, String>) -> Self {
         Self { config }
-    }
-
-    /// Encode to bytes for message payload (convenience wrapper)
-    pub fn encode(&self) -> Result<Bytes> {
-        use msgr2::ceph_message::CephMessagePayload;
-        self.encode_payload(0)
-            .map_err(|_| MonClientError::EncodingError)
-    }
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MConfig decode failed: {}", e)))
     }
 }
 
@@ -542,14 +480,6 @@ pub struct MOSDMap {
 impl MOSDMap {
     /// Message version
     const VERSION: u16 = 1;
-
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, data, &[], &[])
-            .map_err(|e| MonClientError::DecodingError(format!("MOSDMap decode failed: {}", e)))
-    }
 
     /// Get the first (oldest) epoch in this message
     pub fn get_first(&self) -> u32 {
@@ -1404,6 +1334,8 @@ mod tests {
 
     #[test]
     fn test_subscribe_encode_decode() {
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+
         let mut msg = MMonSubscribe::new();
         msg.add(
             "osdmap".to_string(),
@@ -1414,8 +1346,9 @@ mod tests {
         );
         msg.add("monmap".to_string(), SubscribeItem { start: 5, flags: 1 });
 
-        let encoded = msg.encode().unwrap();
-        let decoded = MMonSubscribe::decode(&encoded).unwrap();
+        let encoded = msg.encode_payload(0).unwrap();
+        let header = CephMsgHeader::new(MMonSubscribe::msg_type(), MMonSubscribe::msg_version(0));
+        let decoded = MMonSubscribe::decode_payload(&header, &encoded, &[], &[]).unwrap();
 
         assert_eq!(decoded.what.len(), 2);
         assert_eq!(decoded.what.get("osdmap").unwrap().start, 10);
@@ -1424,9 +1357,15 @@ mod tests {
 
     #[test]
     fn test_version_reply_encode_decode() {
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+
         let msg = MMonGetVersionReply::new(42, 100, 50);
-        let encoded = msg.encode().unwrap();
-        let decoded = MMonGetVersionReply::decode(&encoded).unwrap();
+        let encoded = msg.encode_payload(0).unwrap();
+        let header = CephMsgHeader::new(
+            MMonGetVersionReply::msg_type(),
+            MMonGetVersionReply::msg_version(0),
+        );
+        let decoded = MMonGetVersionReply::decode_payload(&header, &encoded, &[], &[]).unwrap();
 
         assert_eq!(decoded.tid, 42);
         assert_eq!(decoded.version, 100);
@@ -1435,13 +1374,16 @@ mod tests {
 
     #[test]
     fn test_config_encode_decode() {
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+
         let mut config = HashMap::new();
         config.insert("mon_client_hunt_interval".to_string(), "3".to_string());
         config.insert("rados_mon_op_timeout".to_string(), "60".to_string());
         let msg = MConfig::new(config);
 
-        let encoded = msg.encode().unwrap();
-        let decoded = MConfig::decode(&encoded).unwrap();
+        let encoded = msg.encode_payload(0).unwrap();
+        let header = CephMsgHeader::new(MConfig::msg_type(), MConfig::msg_version(0));
+        let decoded = MConfig::decode_payload(&header, &encoded, &[], &[]).unwrap();
 
         assert_eq!(decoded.config.len(), 2);
         assert_eq!(

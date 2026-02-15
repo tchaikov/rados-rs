@@ -2,7 +2,6 @@
 //!
 //! This module implements encoding/decoding for MOSDOp and MOSDOpReply messages.
 
-use crate::error::{OSDClientError, Result};
 use crate::types::{
     OSDOp, ObjectId, OpReply, OpResult, PgId, RequestId, RequestRedirect, StripedPgId,
 };
@@ -152,14 +151,6 @@ impl MOSDOpReply {
     /// Message version (from MOSDOpReply.h HEAD_VERSION)
     pub const VERSION: u16 = 8;
 
-    /// Decode from message payload (convenience wrapper)
-    pub fn decode(front: &[u8], data: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, front, &[], data)
-            .map_err(|e| OSDClientError::Decoding(format!("MOSDOpReply decode failed: {}", e)))
-    }
-
     /// Convert to OpResult
     pub fn to_op_result(self) -> OpResult {
         OpResult {
@@ -221,30 +212,6 @@ impl MOSDBackoff {
             begin,
             end,
         }
-    }
-
-    /// Decode MOSDBackoff from front section
-    ///
-    /// This implements v1 decoding format for MOSDBackoff.
-    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 63-72
-    ///
-    /// # Arguments
-    /// * `front` - The front (payload) section of the message
-    pub fn decode(front: &[u8]) -> Result<Self> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(Self::msg_type(), Self::msg_version(0));
-        Self::decode_payload(&header, front, &[], &[])
-            .map_err(|e| OSDClientError::Decoding(format!("MOSDBackoff decode failed: {}", e)))
-    }
-
-    /// Encode MOSDBackoff to bytes
-    ///
-    /// This implements v1 encoding format for MOSDBackoff.
-    /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h lines 53-61
-    pub fn encode(&self) -> Result<Bytes> {
-        use msgr2::ceph_message::CephMessagePayload;
-        self.encode_payload(0)
-            .map_err(|e| OSDClientError::Encoding(format!("MOSDBackoff encode failed: {}", e)))
     }
 }
 

@@ -1153,7 +1153,9 @@ impl OSDClient {
         info!("Handling OSDMap message ({} bytes)", msg.front.len());
 
         // Decode MOSDMap
-        let mosdmap = MOSDMap::decode(&msg.front)
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MOSDMap::msg_type(), MOSDMap::msg_version(0));
+        let mosdmap = MOSDMap::decode_payload(&header, &msg.front, &[], &[])
             .map_err(|e| OSDClientError::Decoding(format!("Failed to decode MOSDMap: {}", e)))?;
         info!(
             "Received MOSDMap: epochs [{}..{}], {} full maps, {} incremental maps",
@@ -1331,9 +1333,12 @@ impl OSDClient {
         let tid = msg.tid();
 
         // Decode the reply
-        let reply = MOSDOpReply::decode(&msg.front, &msg.data).map_err(|e| {
-            OSDClientError::Decoding(format!("Failed to decode MOSDOpReply: {}", e))
-        })?;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MOSDOpReply::msg_type(), MOSDOpReply::msg_version(0));
+        let reply =
+            MOSDOpReply::decode_payload(&header, &msg.front, &[], &msg.data).map_err(|e| {
+                OSDClientError::Decoding(format!("Failed to decode MOSDOpReply: {}", e))
+            })?;
 
         debug!("OSD {} sent OSDOpReply for tid={}", osd_id, tid);
 
@@ -1377,7 +1382,9 @@ impl OSDClient {
         };
 
         // Decode the backoff message
-        let backoff = MOSDBackoff::decode(&msg.front).map_err(|e| {
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MOSDBackoff::msg_type(), MOSDBackoff::msg_version(0));
+        let backoff = MOSDBackoff::decode_payload(&header, &msg.front, &[], &[]).map_err(|e| {
             OSDClientError::Decoding(format!("Failed to decode MOSDBackoff: {}", e))
         })?;
 
@@ -1433,7 +1440,8 @@ impl OSDClient {
                     backoff.end,
                 );
 
-                match ack.encode() {
+                use msgr2::ceph_message::CephMessagePayload;
+                match ack.encode_payload(0) {
                     Ok(payload) => {
                         let msg = msgr2::message::Message::new(
                             crate::messages::CEPH_MSG_OSD_BACKOFF,

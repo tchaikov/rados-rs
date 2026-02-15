@@ -1175,7 +1175,9 @@ impl MonClient {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
 
         // Decode MMonMap
-        let mmonmap = MMonMap::decode(&msg.front)?;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MMonMap::msg_type(), MMonMap::msg_version(0));
+        let mmonmap = MMonMap::decode_payload(&header, &msg.front, &[], &[])?;
         info!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
 
         // Decode the actual MonMap
@@ -1214,7 +1216,12 @@ impl MonClient {
         state: &Arc<RwLock<MonClientState>>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        let ack = MMonSubscribeAck::decode(&msg.front)?;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(
+            MMonSubscribeAck::msg_type(),
+            MMonSubscribeAck::msg_version(0),
+        );
+        let ack = MMonSubscribeAck::decode_payload(&header, &msg.front, &[], &[])?;
         info!("Subscription acknowledged: interval={}", ack.interval);
 
         let mut state_guard = state.write().await;
@@ -1229,7 +1236,9 @@ impl MonClient {
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        let mconfig = MConfig::decode(&msg.front)?;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MConfig::msg_type(), MConfig::msg_version(0));
+        let mconfig = MConfig::decode_payload(&header, &msg.front, &[], &[])?;
         let has_receivers = map_events.receiver_count() > 0;
         let mut state_guard = state.write().await;
         state_guard.runtime_config.update_from_map(&mconfig.config);
@@ -1247,7 +1256,12 @@ impl MonClient {
         msg: msgr2::message::Message,
     ) -> Result<()> {
         // Decode the version reply message from the front payload
-        let reply = MMonGetVersionReply::decode(&msg.front)?;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(
+            MMonGetVersionReply::msg_type(),
+            MMonGetVersionReply::msg_version(0),
+        );
+        let reply = MMonGetVersionReply::decode_payload(&header, &msg.front, &[], &[])?;
 
         // Get the transaction ID from the message payload (not header in this case)
         let tid = reply.tid;
