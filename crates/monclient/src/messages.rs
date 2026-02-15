@@ -34,6 +34,9 @@ pub struct MMonSubscribe {
 }
 
 impl MMonSubscribe {
+    /// Message version
+    const VERSION: u16 = 3;
+
     pub fn new() -> Self {
         Self {
             what: HashMap::new(),
@@ -120,6 +123,30 @@ impl Default for MMonSubscribe {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
+    fn msg_type() -> u16 {
+        CEPH_MSG_MON_SUBSCRIBE
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonSubscribe decode failed".into()))
+    }
+}
+
 /// MMonSubscribeAck - Acknowledgment of subscription
 #[derive(Debug, Clone)]
 pub struct MMonSubscribeAck {
@@ -128,6 +155,9 @@ pub struct MMonSubscribeAck {
 }
 
 impl MMonSubscribeAck {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(interval: u32, fsid: Uuid) -> Self {
         Self { interval, fsid }
     }
@@ -156,6 +186,30 @@ impl MMonSubscribeAck {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
+    fn msg_type() -> u16 {
+        CEPH_MSG_MON_SUBSCRIBE_ACK
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonSubscribeAck decode failed".into()))
+    }
+}
+
 /// MMonGetVersion - Query map version
 #[derive(Debug, Clone)]
 pub struct MMonGetVersion {
@@ -164,6 +218,9 @@ pub struct MMonGetVersion {
 }
 
 impl MMonGetVersion {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(tid: u64, what: &str) -> Self {
         Self {
             tid,
@@ -199,6 +256,30 @@ impl MMonGetVersion {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
+    fn msg_type() -> u16 {
+        CEPH_MSG_MON_GET_VERSION
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonGetVersion decode failed".into()))
+    }
+}
+
 /// MMonGetVersionReply - Version query response
 #[derive(Debug, Clone)]
 pub struct MMonGetVersionReply {
@@ -208,6 +289,9 @@ pub struct MMonGetVersionReply {
 }
 
 impl MMonGetVersionReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(tid: u64, version: u64, oldest_version: u64) -> Self {
         Self {
             tid,
@@ -240,6 +324,30 @@ impl MMonGetVersionReply {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
+    fn msg_type() -> u16 {
+        CEPH_MSG_MON_GET_VERSION_REPLY
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonGetVersionReply decode failed".into()))
+    }
+}
+
 /// MMonMap - Monitor map update
 #[derive(Debug, Clone)]
 pub struct MMonMap {
@@ -247,6 +355,9 @@ pub struct MMonMap {
 }
 
 impl MMonMap {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(monmap_bl: Bytes) -> Self {
         Self { monmap_bl }
     }
@@ -265,6 +376,30 @@ impl MMonMap {
         // Use Denc for Bytes which handles length prefix automatically
         let monmap_bl = Bytes::decode(&mut data, 0)?;
         Ok(Self { monmap_bl })
+    }
+}
+
+impl msgr2::ceph_message::CephMessagePayload for MMonMap {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_MON_MAP
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonMap decode failed".into()))
     }
 }
 
@@ -314,6 +449,9 @@ pub struct MOSDMap {
 }
 
 impl MOSDMap {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn decode(mut data: &[u8]) -> Result<Self> {
         use denc::Denc;
 
@@ -393,6 +531,31 @@ impl msgr2::MapMessage for MOSDMap {
     const NAME: &'static str = "MOSDMap";
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_OSD_MAP
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        // MOSDMap encoding not implemented - typically only needed on server side
+        Err(msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        Self::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MOSDMap decode failed".into()))
+    }
+}
+
 /// MMonCommand - Execute command on monitor
 #[derive(Debug, Clone)]
 pub struct MMonCommand {
@@ -406,6 +569,9 @@ pub struct MMonCommand {
 }
 
 impl MMonCommand {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(_tid: u64, cmd: Vec<String>, inbl: Bytes, fsid: UuidD) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -468,6 +634,36 @@ impl PaxosServiceMessage for MMonCommand {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonCommand {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_MON_COMMAND
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        Ok(self.inbl.clone())
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        let mut cmd: MMonCommand = PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonCommand decode failed".into()))?;
+        cmd.inbl = Bytes::copy_from_slice(data);
+        Ok(cmd)
+    }
+}
+
 /// MMonCommandAck - Command execution result
 #[derive(Debug, Clone)]
 pub struct MMonCommandAck {
@@ -481,6 +677,9 @@ pub struct MMonCommandAck {
 }
 
 impl MMonCommandAck {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(_tid: u64, retval: i32, outs: String, _outbl: Bytes) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -551,6 +750,30 @@ impl PaxosServiceMessage for MMonCommandAck {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MMonCommandAck {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_MON_COMMAND_ACK
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MMonCommandAck decode failed".into()))
+    }
+}
+
 /// MPoolOp - Pool operation message
 ///
 /// This message is used to create, delete, or modify pools.
@@ -571,6 +794,9 @@ pub struct MPoolOp {
 }
 
 impl MPoolOp {
+    /// Message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
+    const VERSION: u16 = 4;
+
     /// Create a new pool operation message
     pub fn new(fsid: [u8; 16], pool: u32, name: String, op: u32, version: u64) -> Self {
         Self {
@@ -711,6 +937,30 @@ impl PaxosServiceMessage for MPoolOp {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MPoolOp {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_POOLOP
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MPoolOp decode failed".into()))
+    }
+}
+
 /// MPoolOpReply - Pool operation reply message
 ///
 /// This message is sent in response to MPoolOp.
@@ -729,6 +979,9 @@ pub struct MPoolOpReply {
 }
 
 impl MPoolOpReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(fsid: [u8; 16], reply_code: u32, epoch: u32, version: u64) -> Self {
         Self {
             paxos: PaxosFields::with_version(version),
@@ -803,6 +1056,30 @@ impl PaxosServiceMessage for MPoolOpReply {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MPoolOpReply {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_POOLOP_REPLY
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MPoolOpReply decode failed".into()))
+    }
+}
+
 /// MAuth - Authentication request message
 ///
 /// This message is used for authentication with the monitor, including:
@@ -822,6 +1099,9 @@ pub struct MAuth {
 }
 
 impl MAuth {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(protocol: u32, auth_payload: Bytes) -> Self {
         Self {
             paxos: PaxosFields::new(),
@@ -871,6 +1151,30 @@ impl PaxosServiceMessage for MAuth {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MAuth {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_AUTH
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        PaxosServiceMessage::encode(self).map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        PaxosServiceMessage::decode(front)
+            .map_err(|_e| msgr2::Error::Deserialization("MAuth decode failed".into()))
+    }
+}
+
 /// MAuthReply - Authentication reply message
 ///
 /// This message is sent by the monitor in response to MAuth.
@@ -885,6 +1189,9 @@ pub struct MAuthReply {
 }
 
 impl MAuthReply {
+    /// Message version
+    const VERSION: u16 = 1;
+
     pub fn new(
         protocol: u32,
         result: i32,
@@ -944,6 +1251,31 @@ impl MAuthReply {
     }
 }
 
+impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
+    fn msg_type() -> u16 {
+        msgr2::message::CEPH_MSG_AUTH_REPLY
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+        self.encode().map_err(|_e| msgr2::Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &msgr2::ceph_message::CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        _data: &[u8],
+    ) -> std::result::Result<Self, msgr2::Error> {
+        let mut data = front;
+        Self::decode(&mut data)
+            .map_err(|_e| msgr2::Error::Deserialization("MAuthReply decode failed".into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -998,5 +1330,48 @@ mod tests {
             decoded.config.get("rados_mon_op_timeout"),
             Some(&"60".to_string())
         );
+    }
+
+    #[test]
+    fn test_mmon_subscribe_message_encoding() {
+        use msgr2::ceph_message::{CephMessage, CrcFlags};
+
+        let mut subscribe = MMonSubscribe::new();
+        subscribe.add("osdmap".to_string(), SubscribeItem { start: 0, flags: 0 });
+
+        // Create a complete message
+        let msg = CephMessage::from_payload(&subscribe, 0, CrcFlags::ALL).unwrap();
+
+        // Verify message structure
+        // Copy packed struct fields to local variables to avoid unaligned references
+        let msg_type = msg.header.msg_type;
+        let version = msg.header.version;
+        assert_eq!(msg_type, CEPH_MSG_MON_SUBSCRIBE);
+        assert_eq!(version, MMonSubscribe::VERSION);
+        assert!(!msg.front.is_empty());
+        assert_eq!(msg.middle.len(), 0);
+        assert_eq!(msg.data.len(), 0);
+
+        // Encode to bytes
+        let encoded = msg.encode().unwrap();
+        assert!(!encoded.is_empty());
+    }
+
+    #[test]
+    fn test_mmon_get_version_message_encoding() {
+        use msgr2::ceph_message::{CephMessage, CrcFlags};
+
+        let get_version = MMonGetVersion::new(1, "osdmap");
+
+        // Create a complete message
+        let msg = CephMessage::from_payload(&get_version, 0, CrcFlags::ALL).unwrap();
+
+        // Verify message structure
+        // Copy packed struct fields to local variables to avoid unaligned references
+        let msg_type = msg.header.msg_type;
+        let version = msg.header.version;
+        assert_eq!(msg_type, CEPH_MSG_MON_GET_VERSION);
+        assert_eq!(version, MMonGetVersion::VERSION);
+        assert!(!msg.front.is_empty());
     }
 }
