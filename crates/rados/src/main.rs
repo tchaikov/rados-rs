@@ -108,8 +108,8 @@ async fn main() -> Result<()> {
         None
     };
 
-    // Get monitor addresses (CLI arg > ceph.conf > DNS SRV)
-    let mon_addrs = if let Some(mon_host) = cli.mon_host {
+    // Get monitor addresses (CLI arg > ceph.conf)
+    let mon_addrs: Vec<String> = if let Some(mon_host) = cli.mon_host {
         mon_host.split(',').map(|s| s.trim().to_string()).collect()
     } else if let Some(ref config) = ceph_config {
         config.mon_addrs().unwrap_or_default()
@@ -117,33 +117,11 @@ async fn main() -> Result<()> {
         Vec::new()
     };
 
-    // If no addresses found from config/CLI, try DNS SRV discovery
-    let mon_addrs = if mon_addrs.is_empty() {
-        let srv_name = ceph_config
-            .as_ref()
-            .map(|c| c.mon_dns_srv_name())
-            .unwrap_or_else(|| "ceph-mon".to_string());
-        debug!(
-            "Attempting DNS SRV discovery with service name: {}",
-            srv_name
-        );
-        let monmap = monclient::resolve_mon_addrs_via_dns_srv(&srv_name)
-            .await
-            .context(
-                "Monitor address not specified and DNS SRV discovery failed. \
-                 Use --mon-host, set 'mon host' in ceph.conf, or configure DNS SRV records for _ceph-mon._tcp",
-            )?;
-        // Extract addresses from the discovered monmap
-        let mut addrs = Vec::new();
-        for mon in &monmap.monitors {
-            for addr in &mon.addrs.addrs {
-                addrs.push(addr.to_string());
-            }
-        }
-        addrs
-    } else {
-        mon_addrs
-    };
+    // Get DNS SRV service name from config (used as fallback when mon_addrs is empty)
+    let mon_dns_srv_name = ceph_config
+        .as_ref()
+        .map(|c| c.mon_dns_srv_name())
+        .unwrap_or_else(|| "ceph-mon".to_string());
 
     info!("Connecting to monitors: {:?}", mon_addrs);
 
@@ -165,10 +143,12 @@ async fn main() -> Result<()> {
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
     // Create MonClient with map channel
+    // When mon_addrs is empty, MonClient will automatically try DNS SRV discovery
     let mon_config = monclient::MonClientConfig {
         entity_name: cli.name.clone(),
         mon_addrs,
         keyring_path: keyring_path.clone(),
+        mon_dns_srv_name,
         ..Default::default()
     };
 

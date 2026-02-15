@@ -61,18 +61,18 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMap> {
         let target = record.target().to_string();
         let port = record.port();
         // Strip trailing dot from DNS name
-        let hostname = target.trim_end_matches('.');
+        let target_name = target.trim_end_matches('.');
 
         debug!(
             "SRV record: {} port={} priority={} weight={}",
-            hostname,
+            target_name,
             port,
             record.priority(),
             record.weight()
         );
 
         // Resolve the hostname to IP addresses
-        match resolver.lookup_ip(hostname).await {
+        match resolver.lookup_ip(target_name).await {
             Ok(ips) => {
                 for ip in ips.iter() {
                     let socket_addr = SocketAddr::new(ip, port);
@@ -91,7 +91,7 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMap> {
                 }
             }
             Err(e) => {
-                warn!("Failed to resolve hostname {}: {}", hostname, e);
+                warn!("Failed to resolve hostname {}: {}", target_name, e);
             }
         }
     }

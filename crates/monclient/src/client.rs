@@ -72,6 +72,14 @@ pub struct MonClientConfig {
     /// Maximum multiplier for hunt interval backoff
     /// Default: 10.0
     pub hunt_interval_max_multiple: f64,
+
+    /// DNS SRV service name for monitor discovery
+    /// When mon_addrs is empty, the client will attempt to discover monitors
+    /// via DNS SRV records using this service name.
+    /// Default: "ceph-mon" (queries `_ceph-mon._tcp`)
+    /// May include a domain suffix separated by `_`,
+    /// e.g., `"ceph-mon_example.com"` queries `_ceph-mon._tcp.example.com`.
+    pub mon_dns_srv_name: String,
 }
 
 impl Default for MonClientConfig {
@@ -90,6 +98,7 @@ impl Default for MonClientConfig {
             hunt_interval_backoff: 1.5,
             hunt_interval_min_multiple: 1.0,
             hunt_interval_max_multiple: 10.0,
+            mon_dns_srv_name: crate::dns_srv::DEFAULT_MON_DNS_SRV_NAME.to_string(),
         }
     }
 }
@@ -307,14 +316,16 @@ impl MonClient {
             .parse()
             .map_err(|e| MonClientError::Other(format!("Invalid entity name: {}", e)))?;
 
-        // Build initial monmap from config
+        // Build initial monmap from config or DNS SRV discovery
         let monmap = if !config.mon_addrs.is_empty() {
             info!("Building monmap from config");
             MonMap::build_initial(&config.mon_addrs)?
         } else {
-            return Err(MonClientError::InvalidMonMap(
-                "No monitor addresses provided in config (mon_addrs)".into(),
-            ));
+            info!(
+                "No monitor addresses configured, trying DNS SRV discovery with service name: {}",
+                config.mon_dns_srv_name
+            );
+            crate::dns_srv::resolve_mon_addrs_via_dns_srv(&config.mon_dns_srv_name).await?
         };
 
         info!("Initial monmap has {} monitors", monmap.size());
