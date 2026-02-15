@@ -1,4 +1,5 @@
 use bytes::BytesMut;
+use denc::features::*;
 use denc::Denc;
 use osdclient::PgPool;
 use std::fs;
@@ -26,6 +27,61 @@ fn get_corpus_dir() -> PathBuf {
 
 const CORPUS_VERSION: &str = "19.2.0-404-g78ddc7f9027";
 
+/// Determine the features needed to encode a pg_pool_t with the given version
+/// Based on the encoding_version logic in PgPool::encoding_version
+fn features_for_version(version: u8, _is_stretch_pool: bool) -> u64 {
+    // Start with all significant features
+    let mut features = SIGNIFICANT_FEATURES;
+
+    // Remove features based on version to match the encoding_version logic
+    match version {
+        ..=21 => {
+            // Version 21 or below: no NEW_OSDOP_ENCODING
+            features &= !CEPH_FEATUREMASK_NEW_OSDOP_ENCODING;
+            features &= !CEPH_FEATUREMASK_SERVER_LUMINOUS;
+            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
+            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        22..=24 => {
+            // Version 24: has NEW_OSDOP_ENCODING, no SERVER_LUMINOUS
+            features &= !CEPH_FEATUREMASK_SERVER_LUMINOUS;
+            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
+            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        25..=26 => {
+            // Version 26: has SERVER_LUMINOUS, no SERVER_MIMIC
+            features &= !CEPH_FEATUREMASK_SERVER_MIMIC;
+            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        27..=28 => {
+            // Version 27: has SERVER_MIMIC, no SERVER_NAUTILUS
+            features &= !CEPH_FEATUREMASK_SERVER_NAUTILUS;
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        29 => {
+            // Version 29: has SERVER_NAUTILUS, no SERVER_TENTACLE, not stretch pool
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        30 => {
+            // Version 30: has SERVER_NAUTILUS, no SERVER_TENTACLE, is stretch pool
+            features &= !CEPH_FEATUREMASK_SERVER_TENTACLE;
+        }
+        31 => {
+            // Version 31: has SERVER_TENTACLE
+            // All features enabled (note: version 31 uses optional encoding for stretch pool)
+        }
+        _ => {
+            // Version 32+: has SERVER_TENTACLE and all features
+            // All features enabled
+        }
+    }
+
+    features
+}
+
 #[test]
 #[ignore] // Requires external ceph-object-corpus
 fn test_pg_pool_t_decode_encode_roundtrip() {
@@ -45,6 +101,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
 
     let mut success_count = 0;
     let mut total_count = 0;
+    let mut mismatch_count = 0;
 
     for entry in fs::read_dir(test_dir).expect("Failed to read test directory") {
         let entry = entry.expect("Failed to read directory entry");
@@ -61,6 +118,17 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
 
         // Read original data
         let original_data = fs::read(&path).expect("Failed to read test file");
+        
+        // Extract version from the original data (first byte of versioned encoding)
+        if original_data.len() < 6 {
+            println!("  ✗ File too small for versioned encoding");
+            continue;
+        }
+        let original_version = original_data[0];
+        let original_compat = original_data[1];
+        
+        println!("  Original encoding: version={}, compat={}", original_version, original_compat);
+        
         let mut bytes = bytes::Bytes::from(original_data.clone());
 
         // Try to decode
@@ -71,9 +139,13 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                     pg_pool.pool_type, pg_pool.size, pg_pool.pg_num, pg_pool.pgp_num
                 );
 
-                // Try to encode back
+                // Determine features to use for encoding based on the original version
+                let encode_features = features_for_version(original_version, pg_pool.is_stretch_pool());
+                println!("  Using features: 0x{:x} for re-encoding", encode_features);
+
+                // Try to encode back with the same features
                 let mut encoded_buf = BytesMut::new();
-                match pg_pool.encode(&mut encoded_buf, 0) {
+                match pg_pool.encode(&mut encoded_buf, encode_features) {
                     Ok(()) => {
                         let encoded_bytes = encoded_buf.freeze();
 
@@ -81,7 +153,8 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                             println!("  ✓ Perfect roundtrip");
                             success_count += 1;
                         } else {
-                            println!("  ⚠ Roundtrip mismatch");
+                            println!("  ✗ Roundtrip mismatch");
+                            mismatch_count += 1;
                             println!(
                                 "    Original len: {}, Encoded len: {}",
                                 original_data.len(),
@@ -101,6 +174,7 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
                     }
                     Err(e) => {
                         println!("  ✗ Failed to encode: {}", e);
+                        mismatch_count += 1;
                     }
                 }
             }
@@ -121,10 +195,21 @@ fn test_pg_pool_t_decode_encode_roundtrip() {
         "pg_pool_t Results: {}/{} files processed successfully",
         success_count, total_count
     );
-
-    // We expect at least some files to work - this is a learning/debugging test
-    // so we don't fail if nothing works yet
-    if total_count > 0 {
-        println!("Processed {} test files", total_count);
+    
+    if mismatch_count > 0 {
+        println!("⚠ {} files had roundtrip mismatches", mismatch_count);
     }
+
+    // Assert that all files roundtrip correctly
+    assert_eq!(
+        mismatch_count, 0,
+        "Roundtrip test failed: {} files had mismatches",
+        mismatch_count
+    );
+    
+    // We should have processed at least some files
+    assert!(
+        total_count > 0,
+        "No test files were found in the corpus directory"
+    );
 }

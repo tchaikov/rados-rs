@@ -43,6 +43,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
 
     let mut success_count = 0;
     let mut total_count = 0;
+    let mut mismatch_count = 0;
 
     for entry in fs::read_dir(test_dir).expect("Failed to read test directory") {
         let entry = entry.expect("Failed to read directory entry");
@@ -73,7 +74,8 @@ fn test_entity_addr_decode_encode_roundtrip() {
 
                 // Try to encode back with different feature combinations
                 let features_to_test = [0u64, 1u64 << 59]; // without and with MSG_ADDR2
-
+                
+                let mut found_match = false;
                 for features in features_to_test {
                     let mut encoded_buf = bytes::BytesMut::new();
                     match entity_addr.encode(&mut encoded_buf, features) {
@@ -83,6 +85,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
                             if encoded_bytes == original_data {
                                 println!("  ✓ Perfect roundtrip with features=0x{:x}", features);
                                 success_count += 1;
+                                found_match = true;
                                 break;
                             } else {
                                 println!("  ⚠ Roundtrip mismatch with features=0x{:x}", features);
@@ -108,6 +111,10 @@ fn test_entity_addr_decode_encode_roundtrip() {
                         }
                     }
                 }
+                
+                if !found_match {
+                    mismatch_count += 1;
+                }
             }
             Err(e) => {
                 println!("  ✗ Failed to decode: {}", e);
@@ -120,6 +127,17 @@ fn test_entity_addr_decode_encode_roundtrip() {
     println!(
         "Results: {}/{} files processed successfully",
         success_count, total_count
+    );
+    
+    if mismatch_count > 0 {
+        println!("⚠ {} files had roundtrip mismatches", mismatch_count);
+    }
+
+    // Assert that all files roundtrip correctly
+    assert_eq!(
+        mismatch_count, 0,
+        "Roundtrip test failed: {} files had mismatches",
+        mismatch_count
     );
 
     // We expect at least some files to work
