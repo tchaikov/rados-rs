@@ -250,4 +250,78 @@ mod tests {
         // Higher version updates
         assert!(sub.inc_want("osdmap", 15, 0));
     }
+
+    #[test]
+    fn test_got_updates_start_epoch() {
+        let mut sub = MonSub::new();
+
+        // Subscribe to osdmap starting from epoch 0
+        sub.want("osdmap", 0, 0);
+        sub.renewed();
+
+        // Receive epoch 5
+        sub.got("osdmap", 5);
+
+        // After got(), the subscription should be updated to start from epoch 6
+        // This is verified by checking that reload brings it back with updated epoch
+        assert!(sub.reload());
+
+        // The subscription should now want epoch 6 onwards (5 + 1)
+        let subs = sub.get_subs();
+        assert_eq!(subs.get("osdmap").unwrap().start, 6);
+    }
+
+    #[test]
+    fn test_subscription_renewal_needed() {
+        let mut sub = MonSub::new();
+
+        // Initially, no renewal needed
+        assert!(!sub.need_renew());
+
+        // Subscribe and mark as sent
+        sub.want("osdmap", 0, 0);
+        sub.renewed();
+
+        // Still no renewal needed (no ack received yet)
+        assert!(!sub.need_renew());
+
+        // Receive ack with 60 second interval
+        sub.acked(60);
+
+        // Now we have a renew_after timestamp, but it's in the future
+        // So need_renew() should return false initially
+        assert!(!sub.need_renew());
+
+        // The renew_after is set to renew_sent + (interval / 2)
+        // Since we just acked, it should be ~30 seconds in the future
+        // We can't easily test the time-based renewal in a unit test
+        // without mocking time or sleeping
+    }
+
+    #[test]
+    fn test_got_increments_epoch() {
+        let mut sub = MonSub::new();
+
+        // Subscribe starting from epoch 10
+        sub.want("osdmap", 10, 0);
+        sub.renewed();
+
+        // Simulate receiving epochs 10, 11, 12
+        sub.got("osdmap", 10);
+        sub.reload();
+        let subs = sub.get_subs();
+        assert_eq!(subs.get("osdmap").unwrap().start, 11);
+
+        sub.renewed();
+        sub.got("osdmap", 11);
+        sub.reload();
+        let subs = sub.get_subs();
+        assert_eq!(subs.get("osdmap").unwrap().start, 12);
+
+        sub.renewed();
+        sub.got("osdmap", 12);
+        sub.reload();
+        let subs = sub.get_subs();
+        assert_eq!(subs.get("osdmap").unwrap().start, 13);
+    }
 }
