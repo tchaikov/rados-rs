@@ -16,7 +16,6 @@ pub const CEPH_MSG_MON_SUBSCRIBE_ACK: u16 = 0x0010;
 pub const CEPH_MSG_OSD_MAP: u16 = 0x0029;
 pub const CEPH_MSG_MON_GET_VERSION: u16 = 19;
 pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 20;
-pub const CEPH_MSG_CONFIG: u16 = 62;
 
 // Pool operation constants
 pub const POOL_OP_CREATE: u32 = 0x01;

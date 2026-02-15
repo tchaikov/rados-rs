@@ -735,7 +735,8 @@ impl MonClient {
         // Authentication was completed during MonConnection::connect() -> establish_session()
         state.authenticated = true;
         state.global_id = global_id; // Store global_id in MonClient
-        let has_subscriptions_to_reload = state.subscriptions.reload();
+                                     // Move previously-acked subscriptions back to pending so they are resent on reconnect.
+        let should_send_subscriptions = state.subscriptions.reload();
 
         // Clear any pending connections (from parallel hunt)
         state.pending_cons.clear();
@@ -761,7 +762,7 @@ impl MonClient {
         // Notify waiters that authentication is complete (after releasing lock)
         self.auth_notify.notify_waiters();
 
-        if has_subscriptions_to_reload {
+        if should_send_subscriptions {
             self.send_subscriptions().await?;
         }
 
@@ -863,11 +864,13 @@ impl MonClient {
 
     fn parse_duration_option(value: &str) -> Option<Duration> {
         let trimmed = value.trim();
-        let seconds = if let Some(stripped) = trimmed.strip_suffix('s') {
-            stripped.trim().parse::<f64>().ok()?
+        let numeric = if let Some(stripped) = trimmed.strip_suffix('s') {
+            stripped.trim()
         } else {
-            trimmed.parse::<f64>().ok()?
+            trimmed
         };
+        let seconds = numeric.parse::<f64>().ok()?;
+        // is_finite() rejects both NaN and +/-infinity values.
         if !seconds.is_finite() || seconds < 0.0 {
             return None;
         }
@@ -1253,11 +1256,14 @@ impl MonClient {
         msg: msgr2::message::Message,
     ) -> Result<()> {
         let mconfig = MConfig::decode(&msg.front)?;
-        let keys: Vec<String> = mconfig.config.keys().cloned().collect();
+        let has_receivers = map_events.receiver_count() > 0;
         let mut state_guard = state.write().await;
         Self::apply_runtime_config_updates(&mut state_guard.runtime_config, &mconfig.config);
         drop(state_guard);
-        let _ = map_events.send(MapEvent::ConfigUpdated { keys });
+        if has_receivers {
+            let keys: Vec<String> = mconfig.config.keys().cloned().collect();
+            let _ = map_events.send(MapEvent::ConfigUpdated { keys });
+        }
         Ok(())
     }
 
@@ -1808,5 +1814,21 @@ mod tests {
         assert_eq!(runtime_config.keepalive_interval, Duration::from_secs(11));
         assert_eq!(runtime_config.keepalive_timeout, Duration::from_secs(22));
         assert_eq!(runtime_config.command_timeout, Duration::from_secs(33));
+    }
+
+    #[test]
+    fn test_parse_duration_option() {
+        assert_eq!(
+            MonClient::parse_duration_option("1.5s"),
+            Some(Duration::from_secs_f64(1.5))
+        );
+        assert_eq!(
+            MonClient::parse_duration_option("2.25"),
+            Some(Duration::from_secs_f64(2.25))
+        );
+        assert_eq!(MonClient::parse_duration_option("-1"), None);
+        assert_eq!(MonClient::parse_duration_option("inf"), None);
+        assert_eq!(MonClient::parse_duration_option("NaN"), None);
+        assert_eq!(MonClient::parse_duration_option("not-a-duration"), None);
     }
 }
