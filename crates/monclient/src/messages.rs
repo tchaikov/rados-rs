@@ -16,6 +16,7 @@ pub const CEPH_MSG_MON_SUBSCRIBE_ACK: u16 = 0x0010;
 pub const CEPH_MSG_OSD_MAP: u16 = 0x0029;
 pub const CEPH_MSG_MON_GET_VERSION: u16 = 19;
 pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 20;
+pub const CEPH_MSG_CONFIG: u16 = 62;
 
 // Pool operation constants
 pub const POOL_OP_CREATE: u32 = 0x01;
@@ -265,6 +266,41 @@ impl MMonMap {
         // Use Denc for Bytes which handles length prefix automatically
         let monmap_bl = Bytes::decode(&mut data, 0)?;
         Ok(Self { monmap_bl })
+    }
+}
+
+/// MConfig - Runtime configuration update
+#[derive(Debug, Clone)]
+pub struct MConfig {
+    pub config: HashMap<String, String>,
+}
+
+impl MConfig {
+    pub fn new(config: HashMap<String, String>) -> Self {
+        Self { config }
+    }
+
+    pub fn encode(&self) -> Result<Bytes> {
+        use denc::Denc;
+        let mut buf = BytesMut::new();
+        (self.config.len() as u32).encode(&mut buf, 0)?;
+        for (key, value) in &self.config {
+            key.encode(&mut buf, 0)?;
+            value.encode(&mut buf, 0)?;
+        }
+        Ok(buf.freeze())
+    }
+
+    pub fn decode(mut data: &[u8]) -> Result<Self> {
+        use denc::Denc;
+        let count = u32::decode(&mut data, 0)? as usize;
+        let mut config = HashMap::with_capacity(count);
+        for _ in 0..count {
+            let key = String::decode(&mut data, 0)?;
+            let value = String::decode(&mut data, 0)?;
+            config.insert(key, value);
+        }
+        Ok(Self { config })
     }
 }
 
@@ -942,5 +978,26 @@ mod tests {
         assert_eq!(decoded.tid, 42);
         assert_eq!(decoded.version, 100);
         assert_eq!(decoded.oldest_version, 50);
+    }
+
+    #[test]
+    fn test_config_encode_decode() {
+        let mut config = HashMap::new();
+        config.insert("mon_client_hunt_interval".to_string(), "3".to_string());
+        config.insert("rados_mon_op_timeout".to_string(), "60".to_string());
+        let msg = MConfig::new(config);
+
+        let encoded = msg.encode().unwrap();
+        let decoded = MConfig::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.config.len(), 2);
+        assert_eq!(
+            decoded.config.get("mon_client_hunt_interval"),
+            Some(&"3".to_string())
+        );
+        assert_eq!(
+            decoded.config.get("rados_mon_op_timeout"),
+            Some(&"60".to_string())
+        );
     }
 }
