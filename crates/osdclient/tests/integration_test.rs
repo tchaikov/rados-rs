@@ -82,7 +82,7 @@ async fn parse_pool(
     // Otherwise, look up pool by name in OSDMap
     let osdmap = match osd_client.get_osdmap().await {
         Ok(map) => map,
-        Err(_) => return Err("OSDMap not available".into()),
+        Err(e) => return Err(format!("OSDMap not available: {}", e).into()),
     };
 
     // Search for pool by name
@@ -92,7 +92,7 @@ async fn parse_pool(
         }
     }
 
-    Err(format!("Pool '{}' not found", pool).into())
+    Err(format!("Pool '{}' not found in OSDMap", pool).into())
 }
 
 /// Setup test environment
@@ -154,8 +154,11 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
         .await
         .expect("Failed to subscribe to OSDMap");
 
-    // Wait for OSDMap to arrive (increased timeout for slower systems)
-    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    // Wait for OSDMap to arrive with proper timeout (increased for slower systems)
+    osd_client
+        .wait_for_osdmap(tokio::time::Duration::from_secs(10))
+        .await
+        .expect("Failed to receive OSDMap");
 
     // Parse pool (name or ID) to pool ID using OSDClient
     let pool_id = parse_pool(&config.pool, &osd_client)
