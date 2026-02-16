@@ -2,6 +2,7 @@
 // Reference: ~/dev/ceph/src/crush/CrushWrapper.cc (encode/decode functions)
 
 use bytes::{Buf, Bytes};
+use denc::Denc;
 use std::collections::HashMap;
 
 use crate::error::{CrushError, Result};
@@ -10,56 +11,112 @@ use crate::types::*;
 // CRUSH magic number
 const CRUSH_MAGIC: u32 = 0x00010000;
 
-// Helper functions for decoding primitives with error handling
-// These provide a cleaner interface than manual get_*_le() calls
+// ============= Helper Functions Using Denc =============
 
+/// Decode a value using Denc, converting RadosError to CrushError
 #[inline]
-fn decode_u8(buf: &mut impl Buf, context: &str) -> Result<u8> {
-    if buf.remaining() < 1 {
-        return Err(CrushError::DecodeError(format!(
-            "Insufficient bytes for u8 ({}): need 1, have {}",
-            context,
-            buf.remaining()
-        )));
-    }
-    Ok(buf.get_u8())
+fn decode<T: Denc>(buf: &mut impl Buf) -> Result<T> {
+    T::decode(buf, 0).map_err(|e| CrushError::DecodeError(e.to_string()))
 }
 
-#[inline]
-fn decode_u16(buf: &mut impl Buf, context: &str) -> Result<u16> {
-    if buf.remaining() < 2 {
-        return Err(CrushError::DecodeError(format!(
-            "Insufficient bytes for u16 ({}): need 2, have {}",
-            context,
-            buf.remaining()
-        )));
+/// Decode a vector of values using Denc
+fn decode_vec<T: Denc>(buf: &mut impl Buf, count: usize) -> Result<Vec<T>> {
+    let mut vec = Vec::with_capacity(count);
+    for _ in 0..count {
+        vec.push(decode(buf)?);
     }
-    Ok(buf.get_u16_le())
+    Ok(vec)
 }
 
-#[inline]
-fn decode_u32(buf: &mut impl Buf, context: &str) -> Result<u32> {
+/// Generic map decoder for HashMap<K, String> where K implements Denc
+/// Returns empty map if insufficient data (handles optional fields in versioned format)
+fn decode_map_to_string<K>(buf: &mut Bytes) -> Result<HashMap<K, String>>
+where
+    K: Denc + Eq + std::hash::Hash,
+{
+    // Optional field - return empty map if not present
     if buf.remaining() < 4 {
-        return Err(CrushError::DecodeError(format!(
-            "Insufficient bytes for u32 ({}): need 4, have {}",
-            context,
-            buf.remaining()
-        )));
+        return Ok(HashMap::new());
     }
-    Ok(buf.get_u32_le())
+    let len: u32 = decode(buf)?;
+    let mut map = HashMap::with_capacity(len as usize);
+
+    for _ in 0..len {
+        // Break on corrupted/truncated data rather than error
+        if buf.remaining() < 8 {
+            break;
+        }
+        let key: K = decode(buf)?;
+        let value: String = decode(buf)?;
+        map.insert(key, value);
+    }
+
+    Ok(map)
 }
 
-#[inline]
-fn decode_i32(buf: &mut impl Buf, context: &str) -> Result<i32> {
+/// Generic map decoder for HashMap<K, V> where both K and V implement Denc
+/// Returns empty map if insufficient data (handles optional fields in versioned format)
+fn decode_map<K, V>(buf: &mut Bytes) -> Result<HashMap<K, V>>
+where
+    K: Denc + Eq + std::hash::Hash,
+    V: Denc,
+{
+    // Optional field - return empty map if not present
     if buf.remaining() < 4 {
-        return Err(CrushError::DecodeError(format!(
-            "Insufficient bytes for i32 ({}): need 4, have {}",
-            context,
-            buf.remaining()
-        )));
+        return Ok(HashMap::new());
     }
-    Ok(buf.get_i32_le())
+    let len: u32 = decode(buf)?;
+    let mut map = HashMap::with_capacity(len as usize);
+
+    for _ in 0..len {
+        // Break on corrupted/truncated data rather than error
+        if buf.remaining() < 8 {
+            break;
+        }
+        let key: K = decode(buf)?;
+        let value: V = decode(buf)?;
+        map.insert(key, value);
+    }
+
+    Ok(map)
 }
+
+/// Decode nested map: HashMap<i32, HashMap<i32, i32>>
+/// Returns empty map if insufficient data (handles optional fields in versioned format)
+fn decode_nested_i32_map(buf: &mut Bytes) -> Result<HashMap<i32, HashMap<i32, i32>>> {
+    // Optional field - return empty map if not present
+    if buf.remaining() < 4 {
+        return Ok(HashMap::new());
+    }
+    let outer_len: u32 = decode(buf)?;
+    let mut outer_map = HashMap::with_capacity(outer_len as usize);
+
+    for _ in 0..outer_len {
+        // Break on corrupted/truncated data rather than error
+        if buf.remaining() < 8 {
+            break;
+        }
+        let outer_key: i32 = decode(buf)?;
+        let inner_len: u32 = decode(buf)?;
+        let mut inner_map = HashMap::with_capacity(inner_len as usize);
+
+        for _ in 0..inner_len {
+            // Break on corrupted/truncated data rather than error
+            if buf.remaining() < 8 {
+                break;
+            }
+            let inner_key: i32 = decode(buf)?;
+            let inner_value: i32 = decode(buf)?;
+            inner_map.insert(inner_key, inner_value);
+        }
+
+        outer_map.insert(outer_key, inner_map);
+    }
+
+    Ok(outer_map)
+}
+
+// ============= CrushMap Decoding =============
 
 impl CrushMap {
     /// Decode a CRUSH map from bytes
@@ -68,7 +125,7 @@ impl CrushMap {
     /// Reference: CrushWrapper::decode() in ~/dev/ceph/src/crush/CrushWrapper.cc
     pub fn decode(data: &mut Bytes) -> Result<Self> {
         // Read magic number
-        let magic = decode_u32(data, "magic number")?;
+        let magic: u32 = decode(data)?;
         if magic != CRUSH_MAGIC {
             return Err(CrushError::DecodeError(format!(
                 "Invalid CRUSH magic: 0x{:x}, expected 0x{:x}",
@@ -77,9 +134,9 @@ impl CrushMap {
         }
 
         // Read header
-        let max_buckets = decode_i32(data, "max_buckets")?;
-        let max_rules = decode_u32(data, "max_rules")?;
-        let max_devices = decode_i32(data, "max_devices")?;
+        let max_buckets: i32 = decode(data)?;
+        let max_rules: u32 = decode(data)?;
+        let max_devices: i32 = decode(data)?;
 
         let mut map = CrushMap::new();
         map.max_buckets = max_buckets;
@@ -88,8 +145,8 @@ impl CrushMap {
 
         // Decode buckets
         map.buckets = Vec::with_capacity(max_buckets as usize);
-        for i in 0..max_buckets {
-            let alg = decode_u32(data, &format!("bucket {} algorithm", i))?;
+        for _ in 0..max_buckets {
+            let alg: u32 = decode(data)?;
             if alg == 0 {
                 map.buckets.push(None);
                 continue;
@@ -101,8 +158,8 @@ impl CrushMap {
 
         // Decode rules
         map.rules = Vec::with_capacity(max_rules as usize);
-        for _i in 0..max_rules {
-            let exists = decode_u32(data, "rule existence flag")?;
+        for _ in 0..max_rules {
+            let exists: u32 = decode(data)?;
             if exists == 0 {
                 map.rules.push(None);
                 continue;
@@ -112,47 +169,44 @@ impl CrushMap {
             map.rules.push(Some(rule));
         }
 
-        // Decode name maps
-        map.type_names = decode_i32_string_map(data)?;
-        let name_map = decode_i32_string_map(data)?;
-        map.names = name_map;
-        let rule_name_map = decode_u32_string_map(data)?;
-        map.rule_names = rule_name_map;
+        // Decode name maps using generic decoders
+        map.type_names = decode_map_to_string(data)?;
+        map.names = decode_map_to_string(data)?;
+        map.rule_names = decode_map_to_string(data)?;
 
-        // Decode tunables
+        // Decode tunables (optional fields)
         if data.remaining() >= 4 {
-            map.choose_local_tries = decode_u32(data, "choose_local_tries")?;
+            map.choose_local_tries = decode(data)?;
         }
         if data.remaining() >= 4 {
-            map.choose_local_fallback_tries = decode_u32(data, "choose_local_fallback_tries")?;
+            map.choose_local_fallback_tries = decode(data)?;
         }
         if data.remaining() >= 4 {
-            map.choose_total_tries = decode_u32(data, "choose_total_tries")?;
+            map.choose_total_tries = decode(data)?;
         }
         if data.remaining() >= 4 {
-            map.chooseleaf_descend_once = decode_u32(data, "chooseleaf_descend_once")?;
+            map.chooseleaf_descend_once = decode(data)?;
         }
         if data.remaining() >= 1 {
-            map.chooseleaf_vary_r = decode_u8(data, "chooseleaf_vary_r")?;
+            map.chooseleaf_vary_r = decode(data)?;
         }
         if data.remaining() >= 1 {
             // straw_calc_version (skip)
-            let _ = decode_u8(data, "straw_calc_version")?;
+            let _: u8 = decode(data)?;
         }
         if data.remaining() >= 4 {
-            map.allowed_bucket_algs = decode_u32(data, "allowed_bucket_algs")?;
+            map.allowed_bucket_algs = decode(data)?;
         }
         if data.remaining() >= 1 {
-            map.chooseleaf_stable = decode_u8(data, "chooseleaf_stable")?;
+            map.chooseleaf_stable = decode(data)?;
         }
 
         // Decode device classes (Luminous+)
-        // Format: class_map, class_name, class_bucket
         if data.remaining() >= 4 {
-            map.class_map = decode_i32_i32_map(data)?;
+            map.class_map = decode_map(data)?;
         }
         if data.remaining() >= 4 {
-            map.class_name = decode_i32_string_map(data)?;
+            map.class_name = decode_map_to_string(data)?;
         }
         if data.remaining() >= 4 {
             map.class_bucket = decode_nested_i32_map(data)?;
@@ -166,12 +220,12 @@ impl CrushMap {
 }
 
 fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
-    let id = decode_i32(data, "bucket id")?;
-    let bucket_type = decode_u16(data, "bucket type")?;
-    let alg_byte = decode_u8(data, "bucket alg")?;
-    let hash = decode_u8(data, "bucket hash")?;
-    let weight = decode_u32(data, "bucket weight")?;
-    let size = decode_u32(data, "bucket size")?;
+    let id: i32 = decode(data)?;
+    let bucket_type: u16 = decode(data)?;
+    let alg_byte: u8 = decode(data)?;
+    let hash: u8 = decode(data)?;
+    let weight: u32 = decode(data)?;
+    let size: u32 = decode(data)?;
 
     // Verify alg matches
     if alg_byte as u32 != alg {
@@ -189,38 +243,23 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
         )));
     }
 
-    // Read items
-    let items_bytes = size
-        .checked_mul(4)
-        .ok_or_else(|| CrushError::DecodeError(format!("Bucket size overflow: {}", size)))?;
-
-    if data.remaining() < items_bytes as usize {
-        return Err(CrushError::DecodeError(format!(
-            "Not enough data for bucket items: need {}, have {}",
-            items_bytes,
-            data.remaining()
-        )));
-    }
-
-    let mut items = Vec::with_capacity(size as usize);
-    for i in 0..size {
-        items.push(decode_i32(data, &format!("bucket item {}", i))?);
-    }
+    // Read items using Denc
+    let items: Vec<i32> = decode_vec(data, size as usize)?;
 
     let algorithm = BucketAlgorithm::try_from(alg_byte)?;
 
     // Decode algorithm-specific data
     let bucket_data = match algorithm {
         BucketAlgorithm::Uniform => {
-            let item_weight = decode_u32(data, "uniform bucket item_weight")?;
+            let item_weight: u32 = decode(data)?;
             BucketData::Uniform { item_weight }
         }
         BucketAlgorithm::List => {
             let mut item_weights = Vec::with_capacity(size as usize);
             let mut sum_weights = Vec::with_capacity(size as usize);
-            for i in 0..size {
-                item_weights.push(decode_u32(data, &format!("list bucket item_weight {}", i))?);
-                sum_weights.push(decode_u32(data, &format!("list bucket sum_weight {}", i))?);
+            for _ in 0..size {
+                item_weights.push(decode(data)?);
+                sum_weights.push(decode(data)?);
             }
             BucketData::List {
                 item_weights,
@@ -228,11 +267,8 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             }
         }
         BucketAlgorithm::Tree => {
-            let num_nodes = decode_u32(data, "tree bucket num_nodes")?;
-            let mut node_weights = Vec::with_capacity(num_nodes as usize);
-            for i in 0..num_nodes {
-                node_weights.push(decode_u32(data, &format!("tree bucket node_weight {}", i))?);
-            }
+            let num_nodes: u32 = decode(data)?;
+            let node_weights: Vec<u32> = decode_vec(data, num_nodes as usize)?;
             BucketData::Tree {
                 num_nodes,
                 node_weights,
@@ -241,12 +277,9 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
         BucketAlgorithm::Straw => {
             let mut item_weights = Vec::with_capacity(size as usize);
             let mut straws = Vec::with_capacity(size as usize);
-            for i in 0..size {
-                item_weights.push(decode_u32(
-                    data,
-                    &format!("straw bucket item_weight {}", i),
-                )?);
-                straws.push(decode_u32(data, &format!("straw bucket straw {}", i))?);
+            for _ in 0..size {
+                item_weights.push(decode(data)?);
+                straws.push(decode(data)?);
             }
             BucketData::Straw {
                 item_weights,
@@ -254,13 +287,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             }
         }
         BucketAlgorithm::Straw2 => {
-            let mut item_weights = Vec::with_capacity(size as usize);
-            for i in 0..size {
-                item_weights.push(decode_u32(
-                    data,
-                    &format!("straw2 bucket item_weight {}", i),
-                )?);
-            }
+            let item_weights: Vec<u32> = decode_vec(data, size as usize)?;
             BucketData::Straw2 { item_weights }
         }
     };
@@ -278,19 +305,19 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
 }
 
 fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
-    let len = decode_u32(data, "rule length")?;
+    let len: u32 = decode(data)?;
 
     // Read legacy rule mask (4 bytes)
-    let rule_id = decode_u8(data, "rule_id")? as u32;
-    let rule_type = decode_u8(data, "rule_type")?;
-    let _min_size = decode_u8(data, "min_size")?;
-    let _max_size = decode_u8(data, "max_size")?;
+    let rule_id: u8 = decode(data)?;
+    let rule_type: u8 = decode(data)?;
+    let _min_size: u8 = decode(data)?;
+    let _max_size: u8 = decode(data)?;
 
     let mut steps = Vec::with_capacity(len as usize);
-    for i in 0..len {
-        let op = decode_u32(data, &format!("rule step {} op", i))?;
-        let arg1 = decode_i32(data, &format!("rule step {} arg1", i))?;
-        let arg2 = decode_i32(data, &format!("rule step {} arg2", i))?;
+    for _ in 0..len {
+        let op: u32 = decode(data)?;
+        let arg1: i32 = decode(data)?;
+        let arg2: i32 = decode(data)?;
 
         let rule_op = RuleOp::try_from(op)?;
         steps.push(CrushRuleStep {
@@ -301,121 +328,10 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
     }
 
     Ok(CrushRule {
-        rule_id,
+        rule_id: rule_id as u32,
         rule_type: RuleType::from(rule_type),
         steps,
     })
-}
-
-fn decode_i32_string_map(data: &mut Bytes) -> Result<HashMap<i32, String>> {
-    if data.remaining() < 4 {
-        return Ok(HashMap::new());
-    }
-    let len = decode_u32(data, "i32 map length")?;
-    let mut map = HashMap::with_capacity(len as usize);
-
-    for i in 0..len {
-        if data.remaining() < 8 {
-            break;
-        }
-        let key = decode_i32(data, &format!("i32 map key {}", i))?;
-        let str_len = decode_u32(data, &format!("i32 map string length {}", i))?;
-        if data.remaining() < str_len as usize {
-            return Err(CrushError::DecodeError(format!(
-                "Not enough data for string: need {}, have {}",
-                str_len,
-                data.remaining()
-            )));
-        }
-        let mut bytes = vec![0u8; str_len as usize];
-        data.copy_to_slice(&mut bytes);
-        let value = String::from_utf8(bytes)
-            .map_err(|e| CrushError::DecodeError(format!("Invalid UTF-8: {}", e)))?;
-        map.insert(key, value);
-    }
-
-    Ok(map)
-}
-
-fn decode_u32_string_map(data: &mut Bytes) -> Result<HashMap<u32, String>> {
-    if data.remaining() < 4 {
-        return Ok(HashMap::new());
-    }
-    let len = decode_u32(data, "u32 map length")?;
-    let mut map = HashMap::with_capacity(len as usize);
-
-    for i in 0..len {
-        if data.remaining() < 8 {
-            break;
-        }
-        let key = decode_u32(data, &format!("u32 map key {}", i))?;
-        let str_len = decode_u32(data, &format!("u32 map string length {}", i))?;
-        if data.remaining() < str_len as usize {
-            return Err(CrushError::DecodeError(format!(
-                "Not enough data for string: need {}, have {}",
-                str_len,
-                data.remaining()
-            )));
-        }
-        let mut bytes = vec![0u8; str_len as usize];
-        data.copy_to_slice(&mut bytes);
-        let value = String::from_utf8(bytes)
-            .map_err(|e| CrushError::DecodeError(format!("Invalid UTF-8: {}", e)))?;
-        map.insert(key, value);
-    }
-
-    Ok(map)
-}
-
-fn decode_i32_i32_map(data: &mut Bytes) -> Result<HashMap<i32, i32>> {
-    if data.remaining() < 4 {
-        return Ok(HashMap::new());
-    }
-    let len = decode_u32(data, "i32-i32 map length")?;
-    let mut map = HashMap::with_capacity(len as usize);
-
-    for i in 0..len {
-        if data.remaining() < 8 {
-            break;
-        }
-        let key = decode_i32(data, &format!("i32-i32 map key {}", i))?;
-        let value = decode_i32(data, &format!("i32-i32 map value {}", i))?;
-        map.insert(key, value);
-    }
-
-    Ok(map)
-}
-
-fn decode_nested_i32_map(data: &mut Bytes) -> Result<HashMap<i32, HashMap<i32, i32>>> {
-    if data.remaining() < 4 {
-        return Ok(HashMap::new());
-    }
-    let outer_len = decode_u32(data, "nested map outer length")?;
-    let mut outer_map = HashMap::with_capacity(outer_len as usize);
-
-    for i in 0..outer_len {
-        if data.remaining() < 8 {
-            break;
-        }
-        let outer_key = decode_i32(data, &format!("nested map outer key {}", i))?;
-
-        // Decode inner map
-        let inner_len = decode_u32(data, &format!("nested map inner length {}", i))?;
-        let mut inner_map = HashMap::with_capacity(inner_len as usize);
-
-        for j in 0..inner_len {
-            if data.remaining() < 8 {
-                break;
-            }
-            let inner_key = decode_i32(data, &format!("nested map[{}] inner key {}", i, j))?;
-            let inner_value = decode_i32(data, &format!("nested map[{}] inner value {}", i, j))?;
-            inner_map.insert(inner_key, inner_value);
-        }
-
-        outer_map.insert(outer_key, inner_map);
-    }
-
-    Ok(outer_map)
 }
 
 #[cfg(test)]

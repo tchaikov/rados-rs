@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 /// CRUSH bucket selection algorithms
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -169,11 +171,11 @@ pub struct CrushMap {
     /// Rules array
     pub rules: Vec<Option<CrushRule>>,
     /// Type names (type_id -> name)
-    pub type_names: std::collections::HashMap<i32, String>,
+    pub type_names: HashMap<i32, String>,
     /// Bucket/device names (id -> name)
-    pub names: std::collections::HashMap<i32, String>,
+    pub names: HashMap<i32, String>,
     /// Rule names (rule_id -> name)
-    pub rule_names: std::collections::HashMap<u32, String>,
+    pub rule_names: HashMap<u32, String>,
     /// Tunables
     pub choose_local_tries: u32,
     pub choose_local_fallback_tries: u32,
@@ -184,12 +186,12 @@ pub struct CrushMap {
     pub allowed_bucket_algs: u32,
     /// Device classes (Luminous+)
     /// Maps device/OSD ID to class ID
-    pub class_map: std::collections::HashMap<i32, i32>,
+    pub class_map: HashMap<i32, i32>,
     /// Maps class ID to class name (e.g., "ssd", "hdd", "nvme")
-    pub class_name: std::collections::HashMap<i32, String>,
+    pub class_name: HashMap<i32, String>,
     /// Shadow bucket mappings: `bucket[id][class_id] = shadow_bucket_id`
     /// Used for device class-specific CRUSH tree shadows
-    pub class_bucket: std::collections::HashMap<i32, std::collections::HashMap<i32, i32>>,
+    pub class_bucket: HashMap<i32, HashMap<i32, i32>>,
 }
 
 impl CrushMap {
@@ -201,9 +203,9 @@ impl CrushMap {
             max_rules: 0,
             buckets: Vec::new(),
             rules: Vec::new(),
-            type_names: std::collections::HashMap::new(),
-            names: std::collections::HashMap::new(),
-            rule_names: std::collections::HashMap::new(),
+            type_names: HashMap::new(),
+            names: HashMap::new(),
+            rule_names: HashMap::new(),
             choose_local_tries: 2,
             choose_local_fallback_tries: 5,
             choose_total_tries: 19,
@@ -211,9 +213,9 @@ impl CrushMap {
             chooseleaf_vary_r: 0,
             chooseleaf_stable: 0,
             allowed_bucket_algs: 0,
-            class_map: std::collections::HashMap::new(),
-            class_name: std::collections::HashMap::new(),
-            class_bucket: std::collections::HashMap::new(),
+            class_map: HashMap::new(),
+            class_name: HashMap::new(),
+            class_bucket: HashMap::new(),
         }
     }
 
@@ -259,11 +261,7 @@ impl CrushMap {
 
     /// Check if a device belongs to a specific class
     pub fn device_has_class(&self, device_id: i32, class_name: &str) -> bool {
-        if let Some(device_class) = self.get_device_class(device_id) {
-            device_class == class_name
-        } else {
-            false
-        }
+        self.get_device_class(device_id) == Some(class_name)
     }
 }
 

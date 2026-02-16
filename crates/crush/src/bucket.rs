@@ -231,21 +231,13 @@ fn bucket_straw_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         _ => return None,
     };
 
-    let mut high = 0usize;
-    let mut high_draw = 0u64;
-
-    for (i, &straw) in straws.iter().enumerate().take(bucket.size as usize) {
-        let mut draw = crush_hash32_3(x, bucket.items[i] as u32, r) as u64;
-        draw &= 0xffff;
-        draw = draw.wrapping_mul(straw as u64);
-
-        if i == 0 || draw > high_draw {
-            high = i;
-            high_draw = draw;
-        }
-    }
-
-    Some(bucket.items[high])
+    (0..bucket.size as usize)
+        .max_by_key(|&i| {
+            let mut draw = crush_hash32_3(x, bucket.items[i] as u32, r) as u64;
+            draw &= 0xffff;
+            draw.wrapping_mul(straws[i] as u64)
+        })
+        .map(|i| bucket.items[i])
 }
 
 #[cfg(test)]
