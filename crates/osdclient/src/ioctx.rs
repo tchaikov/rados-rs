@@ -4,26 +4,13 @@
 //! object operations (create, read, write, stat, delete) and object listing.
 
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::client::OSDClient;
 use crate::error::{OSDClientError, Result};
 use crate::types::{ReadResult, SparseReadResult, StatResult, WriteResult};
-
-/// Pending write operation
-#[derive(Debug)]
-#[allow(dead_code)]
-struct PendingWrite {
-    /// Request ID
-    req_id: u64,
-    /// Object ID
-    oid: String,
-    /// Completion channel
-    completion: tokio::sync::oneshot::Sender<Result<WriteResult>>,
-}
 
 /// I/O Context for a specific pool
 ///
@@ -62,13 +49,6 @@ pub struct IoCtx {
 
     /// Pool name (cached)
     pool_name: Arc<RwLock<Option<String>>>,
-
-    /// Pending write operations (request_id -> PendingWrite)
-    /// Used to track writes that haven't been acknowledged yet
-    pending_writes: Arc<Mutex<HashMap<u64, PendingWrite>>>,
-
-    /// Next request ID for tracking operations
-    next_req_id: Arc<Mutex<u64>>,
 }
 
 impl IoCtx {
@@ -89,8 +69,6 @@ impl IoCtx {
             client,
             pool_id,
             pool_name: Arc::new(RwLock::new(None)),
-            pending_writes: Arc::new(Mutex::new(HashMap::new())),
-            next_req_id: Arc::new(Mutex::new(1)),
         })
     }
 
@@ -120,14 +98,6 @@ impl IoCtx {
         }
 
         Err(OSDClientError::PoolNotFound(self.pool_id))
-    }
-
-    /// Allocate a new request ID for tracking operations
-    async fn next_request_id(&self) -> u64 {
-        let mut next_id = self.next_req_id.lock().await;
-        let id = *next_id;
-        *next_id += 1;
-        id
     }
 
     /// Create an object (optionally exclusive)
@@ -167,17 +137,7 @@ impl IoCtx {
         let data = data.into();
         debug!("Writing {} bytes to object {}", data.len(), oid);
 
-        let _req_id = self.next_request_id().await;
-
-        // Perform the write operation
-        let result = self.client.write_full(self.pool_id, oid, data).await;
-
-        // Track if this is a write (for flush operations)
-        if result.is_ok() {
-            // We could track this for aio_flush support
-        }
-
-        result
+        self.client.write_full(self.pool_id, oid, data).await
     }
 
     /// Read data from an object
@@ -358,30 +318,6 @@ impl IoCtx {
         );
         Ok(all_objects)
     }
-
-    /// Flush all pending writes
-    ///
-    /// Waits for all outstanding write operations to be acknowledged by OSDs.
-    pub async fn flush(&self) -> Result<()> {
-        debug!("Flushing pending writes for pool {}", self.pool_id);
-
-        // Wait for all pending writes to complete
-        let pending = self.pending_writes.lock().await;
-        if pending.is_empty() {
-            return Ok(());
-        }
-
-        // In a full implementation, we would wait for all pending writes
-        // For now, just clear the list
-        drop(pending);
-
-        Ok(())
-    }
-
-    /// Get the number of pending write operations
-    pub async fn pending_write_count(&self) -> usize {
-        self.pending_writes.lock().await.len()
-    }
 }
 
 impl Clone for IoCtx {
@@ -390,8 +326,6 @@ impl Clone for IoCtx {
             client: Arc::clone(&self.client),
             pool_id: self.pool_id,
             pool_name: Arc::clone(&self.pool_name),
-            pending_writes: Arc::clone(&self.pending_writes),
-            next_req_id: Arc::clone(&self.next_req_id),
         }
     }
 }

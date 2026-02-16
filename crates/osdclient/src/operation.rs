@@ -233,60 +233,6 @@ impl OpBuilder {
     }
 }
 
-// Keep the old builders for backward compatibility
-// These are simpler single-operation builders
-
-/// Builder for read operations (legacy)
-pub struct ReadOp {
-    offset: u64,
-    length: u64,
-}
-
-impl ReadOp {
-    pub fn new(offset: u64, length: u64) -> Self {
-        Self { offset, length }
-    }
-
-    pub fn build(self) -> OSDOp {
-        OSDOp::read(self.offset, self.length)
-    }
-}
-
-/// Builder for write operations (legacy)
-pub struct WriteOp {
-    offset: u64,
-    data: Bytes,
-}
-
-impl WriteOp {
-    pub fn new(offset: u64, data: Bytes) -> Self {
-        Self { offset, data }
-    }
-
-    pub fn build(self) -> OSDOp {
-        OSDOp::write(self.offset, self.data)
-    }
-}
-
-/// Builder for stat operations (legacy)
-pub struct StatOp;
-
-impl StatOp {
-    pub fn new() -> Self {
-        Self
-    }
-
-    pub fn build(self) -> OSDOp {
-        OSDOp::stat()
-    }
-}
-
-impl Default for StatOp {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,23 +362,5 @@ mod tests {
 
         assert_eq!(op.ops.len(), 1);
         assert!(op.is_read());
-    }
-
-    #[test]
-    fn test_legacy_read_op() {
-        let op = ReadOp::new(0, 4096).build();
-        assert_eq!(op.op, crate::types::OpCode::Read);
-    }
-
-    #[test]
-    fn test_legacy_write_op() {
-        let op = WriteOp::new(0, Bytes::from(vec![1, 2, 3])).build();
-        assert_eq!(op.op, crate::types::OpCode::Write);
-    }
-
-    #[test]
-    fn test_legacy_stat_op() {
-        let op = StatOp::new().build();
-        assert_eq!(op.op, crate::types::OpCode::Stat);
     }
 }

@@ -7,7 +7,6 @@ use msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{watch, RwLock};
-use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -57,8 +56,6 @@ pub struct OSDClient {
     osdmap_rx: watch::Receiver<Option<Arc<crate::osdmap::OSDMap>>>,
     /// Channel for routing MOSDMap messages to sessions
     map_tx: MapSender<MOSDMap>,
-    /// I/O task management
-    io_tasks: tokio::sync::Mutex<JoinSet<(i32, Result<()>)>>,
     /// Shutdown token for graceful termination
     shutdown_token: CancellationToken,
     /// Weak self-reference for session creation
@@ -138,7 +135,6 @@ impl OSDClient {
                 osdmap_tx: osdmap_tx_watch,
                 osdmap_rx: osdmap_rx_watch,
                 map_tx: osdmap_tx,
-                io_tasks: tokio::sync::Mutex::new(JoinSet::new()),
                 shutdown_token: CancellationToken::new(),
                 self_weak: weak.clone(),
             }
@@ -1302,12 +1298,7 @@ impl OSDClient {
 
         // Cancel all I/O tasks
         self.shutdown_token.cancel();
-        let mut tasks = self.io_tasks.lock().await;
-        while let Some(result) = tasks.join_next().await {
-            if let Ok((osd, Err(e))) = result {
-                warn!("Session {} error during shutdown: {}", osd, e);
-            }
-        }
+
         info!("OSDClient shutdown complete");
     }
 
