@@ -113,18 +113,83 @@ impl Message {
         // Decode header
         let header = MsgHeader::decode(src)?;
 
-        // Calculate payload lengths (simplified for now)
-        let front_len = src.remaining().min(1024); // TODO: proper length calculation
+        // Calculate front length from data_off field
+        // data_off = MsgHeader::LENGTH + front_len
+        let data_off = header.get_data_off() as usize;
+        if data_off < MsgHeader::LENGTH {
+            return Err(Error::protocol_error("Invalid data_off in message header"));
+        }
+
+        let front_len = data_off - MsgHeader::LENGTH;
+
+        // Decode front segment
+        if src.remaining() < front_len {
+            return Err(Error::protocol_error("Insufficient data for front segment"));
+        }
         let mut front = vec![0u8; front_len];
-        if front_len > 0 && src.remaining() >= front_len {
+        if front_len > 0 {
             src.copy_to_slice(&mut front);
+        }
+
+        // Read remaining bytes as data segment
+        // Note: Without explicit segment lengths, we cannot separate middle from data.
+        // All remaining payload goes into data segment, middle is left empty.
+        let remaining_len = src.remaining();
+        let mut data = vec![0u8; remaining_len];
+        if remaining_len > 0 {
+            src.copy_to_slice(&mut data);
         }
 
         Ok(Self {
             header,
             front: Bytes::from(front),
             middle: Bytes::new(),
-            data: Bytes::new(),
+            data: Bytes::from(data),
+            footer: None,
+        })
+    }
+
+    /// Decode message with explicit segment lengths (used by frame protocol)
+    pub fn decode_segments(
+        src: &mut impl Buf,
+        front_len: usize,
+        middle_len: usize,
+        data_len: usize,
+    ) -> Result<Self> {
+        // Decode header
+        let header = MsgHeader::decode(src)?;
+
+        // Verify we have enough data
+        let total_payload = front_len + middle_len + data_len;
+        if src.remaining() < total_payload {
+            return Err(Error::protocol_error(
+                "Insufficient data for message segments",
+            ));
+        }
+
+        // Decode front segment
+        let mut front = vec![0u8; front_len];
+        if front_len > 0 {
+            src.copy_to_slice(&mut front);
+        }
+
+        // Decode middle segment
+        let mut middle = vec![0u8; middle_len];
+        if middle_len > 0 {
+            src.copy_to_slice(&mut middle);
+        }
+
+        // Decode data segment
+        let mut data = vec![0u8; data_len];
+        if data_len > 0 {
+            src.copy_to_slice(&mut data);
+        }
+
+        Ok(Self {
+            header,
+            front: Bytes::from(front),
+            middle: Bytes::from(middle),
+            data: Bytes::from(data),
             footer: None,
         })
     }
@@ -233,5 +298,145 @@ impl MsgFooter {
 impl Default for MsgFooter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_message_roundtrip_front_only() {
+        let front = Bytes::from("Hello, Ceph!");
+        let msg = Message::new(CEPH_MSG_PING, front.clone());
+
+        // Encode
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf).unwrap();
+
+        // Decode
+        let mut read_buf = buf.freeze();
+        let decoded = Message::decode(&mut read_buf).unwrap();
+
+        assert_eq!(decoded.msg_type(), CEPH_MSG_PING);
+        assert_eq!(decoded.front, front);
+        assert_eq!(decoded.middle.len(), 0);
+        assert_eq!(decoded.data.len(), 0);
+    }
+
+    #[test]
+    fn test_message_roundtrip_with_middle_and_data() {
+        let front = Bytes::from("front");
+        let middle = Bytes::from("middle");
+        let data = Bytes::from("data");
+
+        let msg = Message {
+            header: MsgHeader::new_default(CEPH_MSG_AUTH, 10),
+            front: front.clone(),
+            middle: middle.clone(),
+            data: data.clone(),
+            footer: None,
+        };
+
+        // Encode
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf).unwrap();
+
+        // Decode using basic decode() - will combine middle+data
+        let mut read_buf = buf.freeze();
+        let decoded = Message::decode(&mut read_buf).unwrap();
+
+        assert_eq!(decoded.msg_type(), CEPH_MSG_AUTH);
+        assert_eq!(decoded.front, front);
+        // middle and data are combined in basic decode
+        assert_eq!(decoded.middle.len(), 0);
+        let mut expected_data = BytesMut::new();
+        expected_data.extend_from_slice(&middle);
+        expected_data.extend_from_slice(&data);
+        assert_eq!(decoded.data, expected_data.freeze());
+    }
+
+    #[test]
+    fn test_message_decode_segments() {
+        let front = Bytes::from("front payload");
+        let middle = Bytes::from("middle payload");
+        let data = Bytes::from("data payload");
+
+        let msg = Message {
+            header: MsgHeader::new_default(CEPH_MSG_OSD_MAP, 5),
+            front: front.clone(),
+            middle: middle.clone(),
+            data: data.clone(),
+            footer: None,
+        };
+
+        // Encode
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf).unwrap();
+
+        // Decode with explicit segment lengths
+        let mut read_buf = buf.freeze();
+        let decoded =
+            Message::decode_segments(&mut read_buf, front.len(), middle.len(), data.len()).unwrap();
+
+        assert_eq!(decoded.msg_type(), CEPH_MSG_OSD_MAP);
+        assert_eq!(decoded.front, front);
+        assert_eq!(decoded.middle, middle);
+        assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn test_message_decode_empty_payload() {
+        let msg = Message::ping();
+
+        // Encode
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf).unwrap();
+
+        // Decode
+        let mut read_buf = buf.freeze();
+        let decoded = Message::decode(&mut read_buf).unwrap();
+
+        assert_eq!(decoded.msg_type(), CEPH_MSG_PING);
+        assert_eq!(decoded.front.len(), 0);
+        assert_eq!(decoded.middle.len(), 0);
+        assert_eq!(decoded.data.len(), 0);
+    }
+
+    #[test]
+    fn test_message_decode_segments_empty() {
+        let msg = Message::ping_ack();
+
+        // Encode
+        let mut buf = BytesMut::new();
+        msg.encode(&mut buf).unwrap();
+
+        // Decode with explicit lengths (all zero)
+        let mut read_buf = buf.freeze();
+        let decoded = Message::decode_segments(&mut read_buf, 0, 0, 0).unwrap();
+
+        assert_eq!(decoded.msg_type(), CEPH_MSG_PING_ACK);
+        assert_eq!(decoded.front.len(), 0);
+        assert_eq!(decoded.middle.len(), 0);
+        assert_eq!(decoded.data.len(), 0);
+    }
+
+    #[test]
+    fn test_message_total_len() {
+        let front = Bytes::from("12345");
+        let middle = Bytes::from("67");
+        let data = Bytes::from("890");
+
+        let msg = Message {
+            header: MsgHeader::new_default(CEPH_MSG_AUTH, 0),
+            front,
+            middle,
+            data,
+            footer: None,
+        };
+
+        // total_len = header + front + middle + data
+        // = MsgHeader::LENGTH + 5 + 2 + 3
+        assert_eq!(msg.total_len(), MsgHeader::LENGTH + 10);
     }
 }
