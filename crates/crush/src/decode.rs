@@ -146,8 +146,20 @@ impl CrushMap {
             map.chooseleaf_stable = decode_u8(data, "chooseleaf_stable")?;
         }
 
-        // Skip remaining data (device classes, choose args, etc.)
-        // These are optional and not needed for basic functionality
+        // Decode device classes (Luminous+)
+        // Format: class_map, class_name, class_bucket
+        if data.remaining() >= 4 {
+            map.class_map = decode_i32_i32_map(data)?;
+        }
+        if data.remaining() >= 4 {
+            map.class_name = decode_i32_string_map(data)?;
+        }
+        if data.remaining() >= 4 {
+            map.class_bucket = decode_nested_i32_map(data)?;
+        }
+
+        // Skip remaining data (choose args, MSR tunables, etc.)
+        // These are optional and not yet implemented
 
         Ok(map)
     }
@@ -355,6 +367,57 @@ fn decode_u32_string_map(data: &mut Bytes) -> Result<HashMap<u32, String>> {
     Ok(map)
 }
 
+fn decode_i32_i32_map(data: &mut Bytes) -> Result<HashMap<i32, i32>> {
+    if data.remaining() < 4 {
+        return Ok(HashMap::new());
+    }
+    let len = decode_u32(data, "i32-i32 map length")?;
+    let mut map = HashMap::with_capacity(len as usize);
+
+    for i in 0..len {
+        if data.remaining() < 8 {
+            break;
+        }
+        let key = decode_i32(data, &format!("i32-i32 map key {}", i))?;
+        let value = decode_i32(data, &format!("i32-i32 map value {}", i))?;
+        map.insert(key, value);
+    }
+
+    Ok(map)
+}
+
+fn decode_nested_i32_map(data: &mut Bytes) -> Result<HashMap<i32, HashMap<i32, i32>>> {
+    if data.remaining() < 4 {
+        return Ok(HashMap::new());
+    }
+    let outer_len = decode_u32(data, "nested map outer length")?;
+    let mut outer_map = HashMap::with_capacity(outer_len as usize);
+
+    for i in 0..outer_len {
+        if data.remaining() < 8 {
+            break;
+        }
+        let outer_key = decode_i32(data, &format!("nested map outer key {}", i))?;
+
+        // Decode inner map
+        let inner_len = decode_u32(data, &format!("nested map inner length {}", i))?;
+        let mut inner_map = HashMap::with_capacity(inner_len as usize);
+
+        for j in 0..inner_len {
+            if data.remaining() < 8 {
+                break;
+            }
+            let inner_key = decode_i32(data, &format!("nested map[{}] inner key {}", i, j))?;
+            let inner_value = decode_i32(data, &format!("nested map[{}] inner value {}", i, j))?;
+            inner_map.insert(inner_key, inner_value);
+        }
+
+        outer_map.insert(outer_key, inner_map);
+    }
+
+    Ok(outer_map)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +465,40 @@ mod tests {
         // Verify we decoded something reasonable
         assert!(map.max_buckets > 0);
         assert!(map.max_rules > 0);
+    }
+
+    #[test]
+    fn test_device_class_methods() {
+        let mut map = CrushMap::new();
+
+        // Add some device classes
+        map.class_name.insert(1, "ssd".to_string());
+        map.class_name.insert(2, "hdd".to_string());
+        map.class_name.insert(3, "nvme".to_string());
+
+        // Assign devices to classes
+        map.class_map.insert(0, 1); // OSD 0 is SSD
+        map.class_map.insert(1, 2); // OSD 1 is HDD
+        map.class_map.insert(2, 1); // OSD 2 is SSD
+        map.class_map.insert(3, 3); // OSD 3 is NVMe
+
+        // Test get_device_class
+        assert_eq!(map.get_device_class(0), Some("ssd"));
+        assert_eq!(map.get_device_class(1), Some("hdd"));
+        assert_eq!(map.get_device_class(2), Some("ssd"));
+        assert_eq!(map.get_device_class(3), Some("nvme"));
+        assert_eq!(map.get_device_class(999), None);
+
+        // Test get_class_id
+        assert_eq!(map.get_class_id("ssd"), Some(1));
+        assert_eq!(map.get_class_id("hdd"), Some(2));
+        assert_eq!(map.get_class_id("nvme"), Some(3));
+        assert_eq!(map.get_class_id("unknown"), None);
+
+        // Test device_has_class
+        assert!(map.device_has_class(0, "ssd"));
+        assert!(map.device_has_class(1, "hdd"));
+        assert!(!map.device_has_class(0, "hdd"));
+        assert!(!map.device_has_class(999, "ssd"));
     }
 }
