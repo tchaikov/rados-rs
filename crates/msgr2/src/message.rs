@@ -131,8 +131,9 @@ impl Message {
             src.copy_to_slice(&mut front);
         }
 
-        // Read remaining bytes as data segment (middle+data combined)
-        // Note: Without explicit segment lengths, we cannot separate middle from data
+        // Read remaining bytes as data segment
+        // Note: Without explicit segment lengths, we cannot separate middle from data.
+        // All remaining payload goes into data segment, middle is left empty.
         let remaining_len = src.remaining();
         let mut data = vec![0u8; remaining_len];
         if remaining_len > 0 {
