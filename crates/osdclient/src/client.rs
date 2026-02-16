@@ -2,12 +2,13 @@
 //!
 //! Main entry point for performing object operations against a Ceph cluster.
 
-use monclient::wait_helper::wait_for_condition;
 use monclient::MOSDMap;
 use msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{watch, RwLock};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use denc::{Denc, VersionedEncode};
@@ -50,12 +51,15 @@ pub struct OSDClient {
     global_id: u64,
     /// Cluster FSID for OSDMap validation
     fsid: denc::UuidD,
-    /// Current OSDMap
-    osdmap: Arc<RwLock<Option<Arc<crate::osdmap::OSDMap>>>>,
+    /// Current OSDMap (watch channel for efficient distribution)
+    osdmap_tx: watch::Sender<Option<Arc<crate::osdmap::OSDMap>>>,
+    osdmap_rx: watch::Receiver<Option<Arc<crate::osdmap::OSDMap>>>,
     /// Channel for routing MOSDMap messages to sessions
-    osdmap_tx: MapSender<MOSDMap>,
-    /// Notification for OSDMap arrival
-    osdmap_notify: Arc<tokio::sync::Notify>,
+    map_tx: MapSender<MOSDMap>,
+    /// I/O task management
+    io_tasks: tokio::sync::Mutex<JoinSet<(i32, Result<()>)>>,
+    /// Shutdown token for graceful termination
+    shutdown_token: CancellationToken,
     /// Weak self-reference for session creation
     self_weak: std::sync::Weak<Self>,
 }
@@ -85,6 +89,9 @@ impl OSDClient {
             throttle.max_bytes()
         );
 
+        // Create watch channel for OSDMap distribution
+        let (osdmap_tx_watch, osdmap_rx_watch) = watch::channel(None);
+
         let client = Arc::new_cyclic(|weak| Self {
             config,
             mon_client: Arc::clone(&mon_client),
@@ -93,9 +100,11 @@ impl OSDClient {
             throttle,
             global_id,
             fsid,
-            osdmap: Arc::new(RwLock::new(None)),
-            osdmap_tx,
-            osdmap_notify: Arc::new(tokio::sync::Notify::new()),
+            osdmap_tx: osdmap_tx_watch,
+            osdmap_rx: osdmap_rx_watch,
+            map_tx: osdmap_tx,
+            io_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+            shutdown_token: CancellationToken::new(),
             self_weak: weak.clone(),
         });
 
@@ -147,9 +156,9 @@ impl OSDClient {
 
     /// Get the current OSDMap
     pub async fn get_osdmap(&self) -> Result<Arc<crate::osdmap::OSDMap>> {
-        let osdmap_guard = self.osdmap.read().await;
-        match osdmap_guard.as_ref() {
-            Some(map) => Ok(Arc::clone(map)),
+        let osdmap = self.osdmap_rx.borrow().clone();
+        match osdmap {
+            Some(map) => Ok(map),
             None => Err(OSDClientError::Connection(
                 "OSDMap not available".to_string(),
             )),
@@ -167,21 +176,43 @@ impl OSDClient {
         &self,
         timeout: std::time::Duration,
     ) -> Result<Arc<crate::osdmap::OSDMap>> {
-        wait_for_condition(
-            || async {
-                let osdmap_guard = self.osdmap.read().await;
-                if let Some(map) = osdmap_guard.as_ref() {
-                    info!("OSDMap received via event notification");
-                    Some(Arc::clone(map))
-                } else {
-                    None
+        let mut rx = self.osdmap_rx.clone();
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(map) = rx.borrow_and_update().as_ref() {
+                    info!("OSDMap received via watch channel");
+                    return Ok(Arc::clone(map));
                 }
-            },
-            &self.osdmap_notify,
-            timeout,
-            OSDClientError::Connection("Timeout waiting for OSDMap".to_string()),
-        )
+                rx.changed()
+                    .await
+                    .map_err(|_| OSDClientError::Connection("watch channel closed".into()))?;
+            }
+        })
         .await
+        .map_err(|_| OSDClientError::Timeout(timeout))?
+    }
+
+    /// Wait for a specific OSDMap epoch
+    pub async fn wait_for_epoch(
+        &self,
+        epoch: u32,
+        timeout: std::time::Duration,
+    ) -> Result<Arc<crate::osdmap::OSDMap>> {
+        let mut rx = self.osdmap_rx.clone();
+        tokio::time::timeout(timeout, async {
+            loop {
+                if let Some(map) = rx.borrow_and_update().as_ref() {
+                    if map.epoch.as_u32() >= epoch {
+                        return Ok(Arc::clone(map));
+                    }
+                }
+                rx.changed()
+                    .await
+                    .map_err(|_| OSDClientError::Connection("watch channel closed".into()))?;
+            }
+        })
+        .await
+        .map_err(|_| OSDClientError::Timeout(timeout))?
     }
 
     /// Get or create a session for an OSD
@@ -221,7 +252,7 @@ impl OSDClient {
             self.config.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
-            self.osdmap_tx.clone(),
+            self.map_tx.clone(),
             self.self_weak.clone(),
         );
 
@@ -1039,11 +1070,8 @@ impl OSDClient {
 
         // Get current OSDMap epoch
         let version = {
-            let osdmap_guard = self.osdmap.read().await;
-            osdmap_guard
-                .as_ref()
-                .map(|map| map.epoch.as_u32() as u64)
-                .unwrap_or(0)
+            let osdmap = self.osdmap_rx.borrow().clone();
+            osdmap.map(|map| map.epoch.as_u32() as u64).unwrap_or(0)
         };
 
         // Create MPoolOp message
@@ -1099,9 +1127,10 @@ impl OSDClient {
 
         // Look up pool ID and epoch from OSDMap
         let (pool_id, version) = {
-            let osdmap_guard = self.osdmap.read().await;
-            let osdmap = osdmap_guard
-                .as_ref()
+            let osdmap = self
+                .osdmap_rx
+                .borrow()
+                .clone()
                 .ok_or_else(|| OSDClientError::Other("OSD map not available yet".into()))?;
 
             let pool_id = osdmap
@@ -1146,6 +1175,66 @@ impl OSDClient {
         }
     }
 
+    /// Scan pending ops after OSDMap update, resend if target changed
+    ///
+    /// This implements Ceph's `_scan_requests` pattern from Objecter.
+    async fn scan_requests_on_map_change(&self, new_epoch: u32) -> Result<()> {
+        let osdmap = self.get_osdmap().await?;
+        let sessions = self.sessions.read().await;
+        let mut need_resend = Vec::new();
+
+        for (osd_id, session) in sessions.iter() {
+            let metadata = session.get_pending_ops_metadata().await;
+            for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+                // Check if pool deleted
+                if !osdmap.pools.contains_key(&pool_id) {
+                    if let Some(pending_op) = session.remove_pending_op(tid).await {
+                        let _ = pending_op
+                            .result_tx
+                            .send(Err(OSDClientError::PoolNotFound(pool_id)));
+                    }
+                    continue;
+                }
+
+                // Check if target changed
+                let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
+                let new_primary = new_osds.first().copied().unwrap_or(-1);
+
+                if new_primary != *osd_id {
+                    if let Some(mut op) = session.remove_pending_op(tid).await {
+                        op.target.osd = new_primary;
+                        op.target.epoch = new_epoch;
+                        op.state = crate::types::OpState::Queued;
+                        need_resend.push((new_primary, op));
+                    }
+                }
+            }
+        }
+        drop(sessions);
+
+        // Resend to new targets
+        for (new_osd, pending_op) in need_resend {
+            let session = self.get_or_create_session(new_osd).await?;
+            if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
+                warn!("Failed to migrate operation to OSD {}: {}", new_osd, e);
+            }
+        }
+        Ok(())
+    }
+
+    /// Graceful shutdown
+    pub async fn shutdown(&self) {
+        info!("Shutting down OSDClient");
+        self.shutdown_token.cancel();
+        let mut tasks = self.io_tasks.lock().await;
+        while let Some(result) = tasks.join_next().await {
+            if let Ok((osd, Err(e))) = result {
+                warn!("Session {} error during shutdown: {}", osd, e);
+            }
+        }
+        info!("OSDClient shutdown complete");
+    }
+
     /// Handle OSDMap message (moved from MonClient)
     async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
         use monclient::messages::MOSDMap;
@@ -1176,9 +1265,8 @@ impl OSDClient {
 
         // 2. Check if we've already processed these epochs
         let current_epoch = self
-            .osdmap
-            .read()
-            .await
+            .osdmap_rx
+            .borrow()
             .as_ref()
             .map(|m| m.epoch)
             .unwrap_or(denc::Epoch::new(0));
@@ -1202,13 +1290,15 @@ impl OSDClient {
 
         // 3. Process epochs sequentially
         let mut updated = false;
+        let mut new_map: Option<Arc<crate::osdmap::OSDMap>> = None;
         {
-            let mut osdmap_guard = self.osdmap.write().await;
+            let current_map = self.osdmap_rx.borrow().clone();
 
             if current_epoch.as_u32() > 0 {
                 // We have a current map, apply updates sequentially
+                let mut working_map = current_map;
                 for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
-                    let current_map_epoch = osdmap_guard
+                    let current_map_epoch = working_map
                         .as_ref()
                         .map(|m| m.epoch)
                         .unwrap_or(denc::Epoch::new(0));
@@ -1232,12 +1322,12 @@ impl OSDClient {
                                     inc_map.old_pools.len()
                                 );
 
-                                if let Some(current_map) = &*osdmap_guard {
+                                if let Some(current_map) = &working_map {
                                     let mut updated_map = (**current_map).clone();
                                     if let Err(err) = inc_map.apply_to(&mut updated_map) {
                                         warn!("Failed to apply incremental epoch {}: {}", e, err);
                                     } else {
-                                        *osdmap_guard = Some(Arc::new(updated_map));
+                                        working_map = Some(Arc::new(updated_map));
                                         updated = true;
                                     }
                                 }
@@ -1253,7 +1343,7 @@ impl OSDClient {
                         match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                             Ok(full_map) => {
                                 info!("✓ Decoded full OSDMap: epoch={}", full_map.epoch);
-                                *osdmap_guard = Some(Arc::new(full_map));
+                                working_map = Some(Arc::new(full_map));
                                 updated = true;
                             }
                             Err(err) => {
@@ -1264,6 +1354,7 @@ impl OSDClient {
                         warn!("Missing epoch {} (incremental and full)", e);
                     }
                 }
+                new_map = working_map;
             } else {
                 // No current map, use latest full map
                 if let Some((&latest_epoch, full_bl)) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)
@@ -1272,7 +1363,7 @@ impl OSDClient {
                     match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                         Ok(full_map) => {
                             info!("✓ Initial OSDMap loaded: epoch={}", full_map.epoch);
-                            *osdmap_guard = Some(Arc::new(full_map));
+                            new_map = Some(Arc::new(full_map));
                             updated = true;
                         }
                         Err(err) => {
@@ -1283,38 +1374,35 @@ impl OSDClient {
             }
         }
 
-        // 4. Rescan pending operations if map updated
+        // 4. Update watch channel and rescan pending operations if map updated
         if updated {
-            let final_epoch = self
-                .osdmap
-                .read()
-                .await
-                .as_ref()
-                .map(|m| m.epoch)
-                .unwrap_or(denc::Epoch::new(0));
-            info!(
-                "OSDMap updated to epoch {}, rescanning pending operations",
-                final_epoch
-            );
+            if let Some(map) = new_map {
+                let final_epoch = map.epoch;
+                self.osdmap_tx.send(Some(map)).ok();
 
-            // Notify waiters that OSDMap is available
-            self.osdmap_notify.notify_waiters();
-
-            // Notify MonClient that we received this osdmap epoch
-            // This allows MonClient to track subscription state and renew if needed
-            if let Err(e) = self
-                .mon_client
-                .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
-                .await
-            {
-                warn!(
-                    "Failed to notify MonClient of osdmap epoch {}: {}",
-                    final_epoch, e
+                info!(
+                    "OSDMap updated to epoch {}, rescanning pending operations",
+                    final_epoch
                 );
-            }
 
-            // TODO: Rescan all sessions for pending operations
-            // This will be implemented when we add rescan() method to OSDSession
+                // Notify MonClient that we received this osdmap epoch
+                // This allows MonClient to track subscription state and renew if needed
+                if let Err(e) = self
+                    .mon_client
+                    .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
+                    .await
+                {
+                    warn!(
+                        "Failed to notify MonClient of osdmap epoch {}: {}",
+                        final_epoch, e
+                    );
+                }
+
+                // Call scan_requests_on_map_change
+                if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
+                    warn!("Failed to rescan requests after OSDMap update: {}", e);
+                }
+            }
         }
 
         Ok(())

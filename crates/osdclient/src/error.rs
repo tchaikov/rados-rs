@@ -66,3 +66,41 @@ impl From<OSDClientError> for denc::RadosError {
         denc::RadosError::Protocol(format!("OSDClient error: {}", e))
     }
 }
+
+/// Error category for retry decision making
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorCategory {
+    /// Can retry immediately
+    Transient,
+    /// Should not retry
+    Permanent,
+    /// Wait for new OSDMap
+    NeedsMapUpdate,
+    /// Retry after delay
+    RetriableWithBackoff,
+}
+
+impl OSDClientError {
+    /// Categorize error for retry decisions
+    pub fn category(&self) -> ErrorCategory {
+        match self {
+            Self::Timeout(_) | Self::Connection(_) => ErrorCategory::Transient,
+            Self::ObjectNotFound(_) | Self::PoolNotFound(_) | Self::Auth(_) => {
+                ErrorCategory::Permanent
+            }
+            Self::Backoff(_) => ErrorCategory::RetriableWithBackoff,
+            Self::OSDError { code, .. } => match *code {
+                -2 => ErrorCategory::Permanent,             // ENOENT
+                -11 => ErrorCategory::NeedsMapUpdate,       // EAGAIN
+                -28 => ErrorCategory::RetriableWithBackoff, // ENOSPC
+                _ => ErrorCategory::Transient,
+            },
+            _ => ErrorCategory::Permanent,
+        }
+    }
+
+    /// Check if error is retriable
+    pub fn is_retriable(&self) -> bool {
+        !matches!(self.category(), ErrorCategory::Permanent)
+    }
+}

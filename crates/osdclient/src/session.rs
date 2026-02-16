@@ -84,6 +84,14 @@ pub struct PendingOp {
     pub osdmap_epoch: u32,
     /// Full operation for potential resubmission
     pub op: MOSDOp,
+    /// Operation state
+    pub state: crate::types::OpState,
+    /// Target information
+    pub target: crate::types::OpTarget,
+    /// Whether operation should be resent
+    pub should_resend: bool,
+    /// Maximum retry attempts
+    pub max_attempts: i32,
 }
 
 impl OSDSession {
@@ -458,6 +466,16 @@ impl OSDSession {
                     object_id: op.object.oid.clone(),
                     osdmap_epoch: op.osdmap_epoch,
                     op: op.clone(),
+                    state: crate::types::OpState::Queued,
+                    target: crate::types::OpTarget {
+                        epoch: op.osdmap_epoch,
+                        pgid: op.pgid,
+                        osd: self.osd_id,
+                        acting: vec![self.osd_id],
+                        used_replica: false,
+                    },
+                    should_resend: false,
+                    max_attempts: 10,
                 },
             );
         }

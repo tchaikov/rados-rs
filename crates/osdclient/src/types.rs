@@ -3,6 +3,42 @@
 use bytes::Bytes;
 use std::time::SystemTime;
 
+// ============= Operation State Machine =============
+
+/// Operation state machine matching Ceph Objecter's implicit states
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpState {
+    /// Operation created, not submitted
+    Created,
+    /// Submitted to session, awaiting send
+    Queued,
+    /// Sent to OSD, awaiting reply
+    Sent,
+    /// Needs resend due to OSDMap change
+    NeedsResend,
+    /// Blocked by backoff
+    Blocked,
+    /// Successfully completed
+    Completed,
+    /// Failed with error
+    Failed,
+}
+
+/// Target tracking (inspired by Ceph's op_target_t)
+#[derive(Debug, Clone)]
+pub struct OpTarget {
+    /// OSDMap epoch when calculated
+    pub epoch: u32,
+    /// Calculated PG
+    pub pgid: StripedPgId,
+    /// Target OSD
+    pub osd: i32,
+    /// Acting set
+    pub acting: Vec<i32>,
+    /// Whether replica was used
+    pub used_replica: bool,
+}
+
 // ============= Pool Flags =============
 
 bitflags::bitflags! {
@@ -24,7 +60,7 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// OSD operation flags (from ~/dev/ceph/src/include/rados.h)
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct OsdOpFlags: u32 {
         /// Request acknowledgement
         const ACK = 0x0001;
