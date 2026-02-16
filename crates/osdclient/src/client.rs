@@ -258,7 +258,27 @@ impl OSDClient {
             let sessions = self.sessions.read().await;
             if let Some(session) = sessions.get(&osd_id) {
                 if session.is_connected().await {
-                    return Ok(Arc::clone(session));
+                    // Validate that session's address matches current OSDMap
+                    // This prevents wasted reconnection attempts to stale addresses
+                    // Reference: Ceph Objecter checks OSDMap during reconnect
+                    if let Ok(current_addr) = self.get_osd_address(osd_id).await {
+                        let session_addr = session.get_peer_address().await;
+
+                        // Compare addresses (ignoring nonce which can change)
+                        if let Some(session_addr) = session_addr {
+                            if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
+                                return Ok(Arc::clone(session));
+                            } else {
+                                info!(
+                                    "OSD {} address changed in OSDMap (was {:?}, now {:?}), creating new session",
+                                    osd_id,
+                                    session_addr.to_socket_addr(),
+                                    current_addr.to_socket_addr()
+                                );
+                                // Address changed, fall through to create new session
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -269,7 +289,20 @@ impl OSDClient {
         // Double-check after acquiring write lock
         if let Some(session) = sessions.get(&osd_id) {
             if session.is_connected().await {
-                return Ok(Arc::clone(session));
+                // Re-validate address with write lock held
+                if let Ok(current_addr) = self.get_osd_address(osd_id).await {
+                    let session_addr = session.get_peer_address().await;
+
+                    if let Some(session_addr) = session_addr {
+                        if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
+                            return Ok(Arc::clone(session));
+                        }
+                    }
+                }
+
+                // Address changed, remove old session
+                info!("Removing old session for OSD {} with stale address", osd_id);
+                sessions.remove(&osd_id);
             }
         }
 

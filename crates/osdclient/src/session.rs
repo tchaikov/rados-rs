@@ -24,6 +24,24 @@ use monclient::MOSDMap;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::MapSender;
 
+/// Connection state for OSD session
+///
+/// Following Ceph pattern for explicit connection state tracking.
+/// Provides better observability and clearer semantics than implicit state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// Initial state - not yet connected
+    Disconnected,
+    /// Attempting to establish connection
+    Connecting,
+    /// Connection established and operational
+    Connected,
+    /// Attempting to reconnect after failure
+    Reconnecting,
+    /// Connection closed (terminal state)
+    Closed,
+}
+
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
@@ -37,6 +55,9 @@ struct IoTaskContext {
     /// Currently validated in handle_reply and timeout callback.
     #[allow(dead_code)]
     incarnation: Arc<AtomicU32>,
+    /// Connection state
+    /// Updated when io_task exits
+    conn_state: Arc<RwLock<ConnectionState>>,
 }
 
 // Re-export BackoffEntry for backward compatibility
@@ -67,6 +88,18 @@ pub struct OSDSession {
     /// Used to detect stale operations from previous connection incarnations.
     /// Reference: ~/dev/ceph/src/osdc/Objecter.h:2502, ~/dev/linux/net/ceph/osd_client.c:1413
     incarnation: Arc<AtomicU32>,
+    /// Peer address for this connection
+    /// Used to validate address against OSDMap during reconnection
+    peer_addr: Arc<RwLock<Option<denc::EntityAddr>>>,
+    /// Connection state
+    /// Following Ceph pattern for explicit state tracking.
+    /// Provides better observability than checking send_tx.is_closed()
+    conn_state: Arc<RwLock<ConnectionState>>,
+    /// Mutex to prevent concurrent connect() attempts
+    /// Following Ceph pattern: prevents race conditions when multiple
+    /// paths might trigger reconnection simultaneously.
+    /// Reference: Ceph Objecter uses locks during reconnection
+    connecting_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Tracking information for a pending operation
@@ -134,6 +167,12 @@ impl OSDSession {
             // Start at incarnation 0, will increment to 1 on first connect()
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
+            // No peer address until connected
+            peer_addr: Arc::new(RwLock::new(None)),
+            // Start in disconnected state
+            conn_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            // Mutex to prevent concurrent connection attempts
+            connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
@@ -156,6 +195,19 @@ impl OSDSession {
     /// This establishes a msgr2 connection to the OSD at the given address
     /// and spawns an I/O task that owns the connection.
     pub async fn connect(&mut self, entity_addr: denc::EntityAddr) -> Result<()> {
+        // Acquire connecting lock to prevent concurrent connection attempts
+        // Following Ceph pattern: prevents race conditions
+        let _lock = self.connecting_lock.lock().await;
+
+        // Check if already connected (double-check after acquiring lock)
+        if *self.conn_state.read().await == ConnectionState::Connected {
+            info!("OSD {} already connected, skipping", self.osd_id);
+            return Ok(());
+        }
+
+        // Transition to Connecting state
+        *self.conn_state.write().await = ConnectionState::Connecting;
+
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
             .to_socket_addr()
@@ -175,7 +227,7 @@ impl OSDSession {
 
         // Connect using msgr2
         let mut connection =
-            msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
+            msgr2::protocol::Connection::connect_with_target(addr, entity_addr.clone(), config)
                 .await
                 .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
 
@@ -190,6 +242,12 @@ impl OSDSession {
         })?;
 
         info!("✓ Session established with OSD {}", self.osd_id);
+
+        // Store peer address for validation
+        *self.peer_addr.write().await = Some(entity_addr.clone());
+
+        // Transition to Connected state
+        *self.conn_state.write().await = ConnectionState::Connected;
 
         // Increment connection incarnation following Ceph pattern
         // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
@@ -212,6 +270,7 @@ impl OSDSession {
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
             incarnation: Arc::clone(&self.incarnation),
+            conn_state: Arc::clone(&self.conn_state),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -336,6 +395,9 @@ impl OSDSession {
         }
 
         info!("I/O task exiting for OSD {}", ctx.osd_id);
+
+        // Update connection state to Disconnected
+        *ctx.conn_state.write().await = ConnectionState::Disconnected;
 
         // Do NOT cancel pending operations here - let them be migrated by scan_requests_on_map_change()
         // when OSDMap updates arrive. This handles scenarios where:
@@ -622,6 +684,50 @@ impl OSDSession {
                 );
             }
 
+            // Check for redirect reply first
+            // Following Ceph Objecter pattern: handle redirects before other logic
+            // Reference: ~/dev/ceph/src/osdc/Objecter.cc:3734
+            if let Some(redirect) = &reply.redirect {
+                info!(
+                    "Got redirect reply for tid {}: pool={}, key={}, namespace={}, object={}",
+                    tid,
+                    redirect.redirect_locator.pool_id,
+                    redirect.redirect_locator.key,
+                    redirect.redirect_locator.namespace,
+                    redirect.redirect_object
+                );
+
+                // Apply redirect to operation's target object locator
+                // The redirect combines with existing locator (Ceph's combine_with_locator)
+                let mut updated_op = pending_op;
+
+                // Update object locator with redirect information
+                if redirect.redirect_locator.pool_id != u64::MAX {
+                    updated_op.op.object.pool = redirect.redirect_locator.pool_id;
+                }
+                if !redirect.redirect_locator.key.is_empty() {
+                    updated_op.op.object.key = redirect.redirect_locator.key.clone();
+                }
+                if !redirect.redirect_locator.namespace.is_empty() {
+                    updated_op.op.object.namespace = redirect.redirect_locator.namespace.clone();
+                }
+                if !redirect.redirect_object.is_empty() {
+                    updated_op.op.object.oid = redirect.redirect_object.clone();
+                }
+
+                // Set redirect flags (following Ceph Objecter.cc:3747-3749)
+                use crate::types::OsdOpFlags;
+                updated_op.op.flags |= OsdOpFlags::REDIRECTED.bits();
+                updated_op.op.flags |= OsdOpFlags::IGNORE_CACHE.bits();
+                updated_op.op.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
+
+                let new_flags = updated_op.op.flags;
+
+                // Return operation for resubmission with updated flags
+                // The caller (OSDClient) will recalculate target OSD via CRUSH
+                return Some((updated_op, new_flags));
+            }
+
             // Check for EAGAIN on replica reads
             // See: ~/dev/ceph/src/osdc/Objecter.cc handle_reply()
             const EAGAIN: i32 = -11;
@@ -739,8 +845,25 @@ impl OSDSession {
 
     /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
-        // Connection is alive if the send channel is not closed
-        !self.send_tx.is_closed()
+        // Check explicit connection state
+        let state = self.conn_state.read().await;
+        *state == ConnectionState::Connected
+    }
+
+    /// Get the peer address for this session
+    ///
+    /// Returns the EntityAddr that was used to establish the current connection.
+    /// Used to validate that the session's address matches the current OSDMap.
+    pub async fn get_peer_address(&self) -> Option<denc::EntityAddr> {
+        self.peer_addr.read().await.clone()
+    }
+
+    /// Get the current connection state
+    ///
+    /// Provides explicit state information for observability and debugging.
+    /// Following Ceph pattern for explicit connection state tracking.
+    pub async fn connection_state(&self) -> ConnectionState {
+        *self.conn_state.read().await
     }
 
     /// Check if an operation is blocked by an active backoff
@@ -929,5 +1052,3 @@ mod tests {
         assert_ne!(sent_incarnation, current_incarnation);
     }
 }
-
-
