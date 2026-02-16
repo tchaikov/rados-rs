@@ -45,7 +45,7 @@ pub struct OSDClient {
     config: OSDClientConfig,
     mon_client: Arc<monclient::MonClient>,
     sessions: Arc<RwLock<HashMap<i32, Arc<OSDSession>>>>,
-    tracker: Arc<Tracker>,
+    pub(crate) tracker: Arc<Tracker>,
     /// Request throttle to prevent resource exhaustion
     throttle: Arc<Throttle>,
     /// Global ID from monitor authentication (used in entity_name for request IDs)
@@ -80,7 +80,8 @@ impl OSDClient {
         let global_id = mon_client.get_global_id().await;
         info!("OSDClient using global_id {} from monitor", global_id);
 
-        let tracker = Arc::new(Tracker::new(config.tracker_config.clone()));
+        // Create watch channel for OSDMap distribution
+        let (osdmap_tx_watch, osdmap_rx_watch) = watch::channel(None);
 
         // Create throttle with default limits (1024 ops, 100MB)
         let throttle = Arc::new(Throttle::default_limits());
@@ -90,23 +91,43 @@ impl OSDClient {
             throttle.max_bytes()
         );
 
-        // Create watch channel for OSDMap distribution
-        let (osdmap_tx_watch, osdmap_rx_watch) = watch::channel(None);
+        let client = Arc::new_cyclic(|weak: &std::sync::Weak<Self>| {
+            // Create timeout callback that cancels operations in sessions
+            let weak_for_callback = weak.clone();
+            let timeout_callback: crate::tracker::TimeoutCallback = Arc::new(move |osd_id, tid| {
+                if let Some(client) = weak_for_callback.upgrade() {
+                    let sessions = client.sessions.clone();
+                    tokio::spawn(async move {
+                        let sessions_guard = sessions.read().await;
+                        if let Some(session) = sessions_guard.get(&osd_id) {
+                            if let Some(pending_op) = session.remove_pending_op(tid).await {
+                                let _ = pending_op.result_tx.send(Err(
+                                    OSDClientError::Timeout(client.tracker.operation_timeout())
+                                ));
+                                warn!("Cancelled timed-out operation: OSD {} tid={}", osd_id, tid);
+                            }
+                        }
+                    });
+                }
+            });
 
-        let client = Arc::new_cyclic(|weak| Self {
-            config,
-            mon_client: Arc::clone(&mon_client),
-            sessions: Arc::new(RwLock::new(HashMap::new())),
-            tracker,
-            throttle,
-            global_id,
-            fsid,
-            osdmap_tx: osdmap_tx_watch,
-            osdmap_rx: osdmap_rx_watch,
-            map_tx: osdmap_tx,
-            io_tasks: tokio::sync::Mutex::new(JoinSet::new()),
-            shutdown_token: CancellationToken::new(),
-            self_weak: weak.clone(),
+            let tracker = Arc::new(Tracker::new(config.tracker_config.clone(), timeout_callback));
+
+            Self {
+                config,
+                mon_client: Arc::clone(&mon_client),
+                sessions: Arc::new(RwLock::new(HashMap::new())),
+                tracker,
+                throttle,
+                global_id,
+                fsid,
+                osdmap_tx: osdmap_tx_watch,
+                osdmap_rx: osdmap_rx_watch,
+                map_tx: osdmap_tx,
+                io_tasks: tokio::sync::Mutex::new(JoinSet::new()),
+                shutdown_token: CancellationToken::new(),
+                self_weak: weak.clone(),
+            }
         });
 
         // Spawn drain task for OSDMap messages
@@ -1228,6 +1249,11 @@ impl OSDClient {
     /// Graceful shutdown
     pub async fn shutdown(&self) {
         info!("Shutting down OSDClient");
+
+        // Shutdown tracker first to stop timeout callbacks
+        self.tracker.shutdown();
+
+        // Cancel all I/O tasks
         self.shutdown_token.cancel();
         let mut tasks = self.io_tasks.lock().await;
         while let Some(result) = tasks.join_next().await {

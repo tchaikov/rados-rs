@@ -16,3 +16,8 @@ hex = "0.4"
 glob = "0.3"
 crush = { path = "../crush" }
 osdclient = { path = "../osdclient" }
+criterion = "0.5"
+
+[[bench]]
+name = "encoding"
+harness = false

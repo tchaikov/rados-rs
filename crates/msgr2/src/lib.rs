@@ -15,6 +15,7 @@ pub mod map_channel;
 pub mod message;
 pub mod protocol;
 pub mod revocation;
+pub mod split;
 pub mod state_machine;
 pub mod throttle;
 
@@ -26,6 +27,7 @@ pub use header::*;
 pub use map_channel::*;
 pub use message::*;
 pub use revocation::*;
+pub use split::{RecvHalf, SendHalf, SharedState};
 pub use throttle::*;
 
 // Messenger configuration options from ceph.conf
@@ -204,20 +206,10 @@ pub struct ConnectionConfig {
 
 impl Default for ConnectionConfig {
     fn default() -> Self {
-        // Auto-detect keyring path from environment or use default
-        let keyring_exists = std::env::var("CEPH_KEYRING")
-            .ok()
-            .map(|p| std::path::Path::new(&p).exists())
-            .unwrap_or_else(|| {
-                std::path::Path::new("/etc/ceph/ceph.client.admin.keyring").exists()
-            });
-
-        // Default: try CephX first if keyring exists, otherwise fall back to None
-        let supported_auth_methods = if keyring_exists {
-            vec![AuthMethod::Cephx, AuthMethod::None]
-        } else {
-            vec![AuthMethod::None]
-        };
+        // Default: use AuthMethod::None
+        // Users should explicitly configure CephX authentication via
+        // with_auth_provider() or with_auth_provider_and_service() methods
+        let supported_auth_methods = vec![AuthMethod::None];
 
         Self {
             supported_features: FeatureSet::ALL.bits(),

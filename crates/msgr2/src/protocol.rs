@@ -1936,6 +1936,69 @@ impl Connection {
         self.state.current_state_kind()
     }
 
+    /// Split the connection into separate send and receive halves
+    ///
+    /// This allows concurrent sending and receiving of messages from different
+    /// tasks. The connection is consumed and cannot be used directly after splitting.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// # use msgr2::protocol::Connection;
+    /// # async fn example() -> msgr2::Result<()> {
+    /// # let addr = "127.0.0.1:6789".parse().unwrap();
+    /// # let config = msgr2::ConnectionConfig::default();
+    /// let mut conn = Connection::connect(addr, config).await?;
+    /// conn.establish_session().await?;
+    ///
+    /// // Split the connection
+    /// let (send_half, recv_half) = conn.split();
+    ///
+    /// // Spawn a task to receive messages
+    /// tokio::spawn(async move {
+    ///     loop {
+    ///         match recv_half.recv_message().await {
+    ///             Ok(msg) => println!("Received: {:?}", msg.msg_type()),
+    ///             Err(_) => break,
+    ///         }
+    ///     }
+    /// });
+    ///
+    /// // Send messages from the main task
+    /// // send_half.send_message(msg).await?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    ///
+    /// # Note
+    ///
+    /// The split halves do not support automatic reconnection. If the connection
+    /// fails, both halves will return errors and you'll need to establish a new
+    /// connection.
+    pub fn split(self) -> (crate::split::SendHalf, crate::split::RecvHalf) {
+        use crate::split::{SharedState, SplitBuilder};
+
+        let shared = SharedState {
+            out_seq: self.state.out_seq,
+            in_seq: self.state.in_seq,
+            client_cookie: self.state.session.client_cookie,
+            server_cookie: self.state.session.server_cookie,
+            global_seq: self.state.session.global_seq,
+            connect_seq: self.state.session.connect_seq,
+            sent_messages: self.state.session.sent_messages.clone(),
+            is_lossy: self.state.session.is_lossy,
+            global_id: self.state.state_machine.global_id(),
+        };
+
+        let builder = SplitBuilder {
+            connection_state: self.state,
+            shared,
+            throttle: self.throttle,
+        };
+
+        builder.build()
+    }
+
     /// Close the connection and discard all pending messages
     ///
     /// This matches Ceph's `discard_out_queue()` behavior:

@@ -55,6 +55,8 @@ pub struct OSDSession {
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
     client: std::sync::Weak<crate::client::OSDClient>,
+    /// Tracker for per-operation timeouts
+    tracker: Option<Arc<crate::tracker::Tracker>>,
 }
 
 /// Tracking information for a pending operation
@@ -98,6 +100,9 @@ impl OSDSession {
         // Buffer size of 100 messages should be plenty
         let (send_tx, _) = mpsc::channel(100);
 
+        // Get tracker from client if available
+        let tracker = client.upgrade().map(|c| Arc::clone(&c.tracker));
+
         Self {
             osd_id,
             send_tx,
@@ -109,6 +114,7 @@ impl OSDSession {
             backoff_tracker: Arc::new(RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
+            tracker,
         }
     }
 
@@ -201,6 +207,13 @@ impl OSDSession {
     /// - OSDMAP: Broadcast message → osdmap_tx channel (shared with OSDClient)
     /// - OPREPLY/BACKOFF: Session-specific → Direct dispatch with osd_id context
     ///
+    /// Connection recovery is handled at two levels:
+    /// - Short-term failures: msgr2 Connection automatically attempts SESSION_RECONNECT
+    ///   (up to 3 retries) on send/recv errors
+    /// - OSD map changes: OSDClient.scan_requests_on_map_change() migrates operations to new
+    ///   target OSDs when OSDMap updates arrive
+    /// - Prolonged failures: Operations eventually timeout via tracker, client can retry
+    ///
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2() and ~/dev/linux/net/ceph/osd_client.c
     async fn io_task(
         ctx: IoTaskContext,
@@ -209,8 +222,24 @@ impl OSDSession {
     ) {
         debug!("I/O task started for OSD {}", ctx.osd_id);
 
+        // Create keepalive interval (every 10 seconds, matching Ceph's default)
+        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        // Don't fire immediately - wait for first interval
+        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
+                // Periodic keepalive to detect dead connections proactively
+                _ = keepalive_interval.tick() => {
+                    if let Err(e) = connection.send_keepalive().await {
+                        warn!("Failed to send keepalive to OSD {}: {}", ctx.osd_id, e);
+                        // Don't break immediately - let send/recv errors handle reconnection
+                        // This just warns about potential connection issues
+                    } else {
+                        debug!("Sent keepalive to OSD {}", ctx.osd_id);
+                    }
+                }
+
                 // Handle outgoing messages (like try_write in Linux kernel)
                 msg_opt = send_rx.recv() => {
                     match msg_opt {
@@ -271,20 +300,18 @@ impl OSDSession {
 
         info!("I/O task exiting for OSD {}", ctx.osd_id);
 
-        // Clean up pending operations on disconnect
-        let mut pending = ctx.pending_ops.write().await;
-        for (tid, pending_op) in pending.drain() {
-            let _ = pending_op
-                .result_tx
-                .send(Err(OSDClientError::Connection(format!(
-                    "OSD {} disconnected",
-                    ctx.osd_id
-                ))));
-            debug!(
-                "Cancelled pending operation tid={} due to OSD {} disconnect",
-                tid, ctx.osd_id
-            );
-        }
+        // Do NOT cancel pending operations here - let them be migrated by scan_requests_on_map_change()
+        // when OSDMap updates arrive. This handles scenarios where:
+        // - OSD moved to a different IP address (reconnect to old address fails)
+        // - OSD is down for extended period (>30s, beyond reconnect retry window)
+        // - CRUSH map changes require operations to move to different OSDs
+        //
+        // Operations will eventually timeout via tracker if no OSDMap update arrives,
+        // giving the client application a chance to retry with backoff.
+        info!(
+            "Leaving {} pending operations for potential migration by OSDMap updates",
+            ctx.pending_ops.read().await.len()
+        );
     }
 
     // ===========================================================================
@@ -321,7 +348,16 @@ impl OSDSession {
         tid: u64,
         reply: MOSDOpReply,
     ) -> Option<(PendingOp, u32)> {
-        Self::handle_reply(tid, reply, &self.pending_ops).await
+        let result = Self::handle_reply(tid, reply, &self.pending_ops).await;
+
+        // If operation completed (not retrying), untrack it
+        if result.is_none() {
+            if let Some(tracker) = &self.tracker {
+                tracker.untrack(tid, self.osd_id);
+            }
+        }
+
+        result
     }
 
     /// Resubmit an operation for retry
@@ -465,6 +501,13 @@ impl OSDSession {
                     max_attempts: 10,
                 },
             );
+        }
+
+        // Track operation timeout
+        if let Some(tracker) = &self.tracker {
+            let timeout = tracker.operation_timeout();
+            let deadline = tokio::time::Instant::now() + timeout;
+            tracker.track(tid, self.osd_id, deadline);
         }
 
         // Encode the operation using shared helper

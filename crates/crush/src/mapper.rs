@@ -11,6 +11,33 @@ use denc::constants::crush::{FIXED_POINT_MASK, FIXED_POINT_ONE};
 /// Matches CRUSH_ITEM_NONE in Ceph (crush.h)
 const CRUSH_ITEM_NONE: i32 = 0x7fffffff;
 
+/// Calculate the number of replicas/items to select based on rule step argument
+///
+/// - arg == 0: use result_max
+/// - arg > 0: use arg directly
+/// - arg < 0: use result_max + arg (i.e., result_max - |arg|)
+#[inline]
+fn calculate_numrep(step_arg: i32, result_max: usize) -> usize {
+    if step_arg == 0 {
+        result_max
+    } else if step_arg > 0 {
+        step_arg as usize
+    } else {
+        (result_max as i32 + step_arg).max(0) as usize
+    }
+}
+
+/// Determine the type of an item (0 for device, bucket_type for buckets)
+/// Returns None if item is an invalid bucket
+#[inline]
+fn get_item_type(map: &CrushMap, item: i32) -> Option<i32> {
+    if item >= 0 {
+        Some(0) // Device
+    } else {
+        map.get_bucket(item).ok().map(|b| b.bucket_type)
+    }
+}
+
 /// Check if an OSD is "out" (failed, fully offloaded)
 fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
     if item < 0 || item as usize >= weight.len() {
@@ -80,15 +107,7 @@ pub fn crush_do_rule(
             RuleOp::ChooseFirstN => {
                 // Choose N items of a given type
                 scratch.clear();
-                let numrep = if step.arg1 == 0 {
-                    result_max as i32
-                } else if step.arg1 > 0 {
-                    step.arg1
-                } else {
-                    // Negative means result_max - |arg1|
-                    (result_max as i32) + step.arg1
-                };
-
+                let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
                 for &item in &work {
@@ -96,7 +115,7 @@ pub fn crush_do_rule(
                         map,
                         item,
                         x,
-                        numrep as usize,
+                        numrep,
                         item_type,
                         &mut scratch,
                         weights,
@@ -113,14 +132,7 @@ pub fn crush_do_rule(
             RuleOp::ChooseLeafFirstN => {
                 // Choose N items and descend to leaf devices
                 scratch.clear();
-                let numrep = if step.arg1 == 0 {
-                    result_max as i32
-                } else if step.arg1 > 0 {
-                    step.arg1
-                } else {
-                    (result_max as i32) + step.arg1
-                };
-
+                let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
                 for &item in &work {
@@ -128,7 +140,7 @@ pub fn crush_do_rule(
                         map,
                         item,
                         x,
-                        numrep as usize,
+                        numrep,
                         item_type,
                         &mut scratch,
                         weights,
@@ -173,24 +185,17 @@ pub fn crush_do_rule(
 
             RuleOp::ChooseIndep => {
                 // Choose N items using INDEP algorithm (for erasure coding)
-                let numrep = if step.arg1 == 0 {
-                    result_max as i32
-                } else if step.arg1 > 0 {
-                    step.arg1
-                } else {
-                    (result_max as i32) + step.arg1
-                };
-
+                let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
                 scratch.clear();
                 for &item in &work {
-                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep as usize];
+                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep];
                     crush_choose_indep(
                         map,
                         item,
                         x,
-                        numrep as usize,
+                        numrep,
                         item_type,
                         &mut indep_out,
                         weights,
@@ -207,24 +212,17 @@ pub fn crush_do_rule(
 
             RuleOp::ChooseLeafIndep => {
                 // Choose N items using INDEP algorithm and descend to leaf
-                let numrep = if step.arg1 == 0 {
-                    result_max as i32
-                } else if step.arg1 > 0 {
-                    step.arg1
-                } else {
-                    (result_max as i32) + step.arg1
-                };
-
+                let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
                 scratch.clear();
                 for &item in &work {
-                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep as usize];
+                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep];
                     crush_choose_indep(
                         map,
                         item,
                         x,
-                        numrep as usize,
+                        numrep,
                         item_type,
                         &mut indep_out,
                         weights,
@@ -341,15 +339,11 @@ fn crush_choose_firstn(
                 );
 
                 // Determine item type
-                let itemtype = if item >= 0 {
-                    0 // Device
-                } else {
-                    match map.get_bucket(item) {
-                        Ok(b) => b.bucket_type,
-                        Err(_) => {
-                            tracing::debug!("Invalid bucket {}", item);
-                            continue 'tries;
-                        }
+                let itemtype = match get_item_type(map, item) {
+                    Some(t) => t,
+                    None => {
+                        tracing::debug!("Invalid bucket {}", item);
+                        continue 'tries;
                     }
                 };
 
@@ -521,15 +515,11 @@ fn crush_choose_indep(
                 );
 
                 // Determine item type
-                let itemtype = if candidate >= 0 {
-                    0 // Device
-                } else {
-                    match map.get_bucket(candidate) {
-                        Ok(b) => b.bucket_type,
-                        Err(_) => {
-                            tracing::debug!("Invalid bucket {}", candidate);
-                            break;
-                        }
+                let itemtype = match get_item_type(map, candidate) {
+                    Some(t) => t,
+                    None => {
+                        tracing::debug!("Invalid bucket {}", candidate);
+                        break;
                     }
                 };
 

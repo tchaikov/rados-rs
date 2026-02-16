@@ -8,10 +8,12 @@
 /// Hash seed used by Ceph's CRUSH
 const CRUSH_HASH_SEED: u32 = 1315423911;
 
-/// Old Jenkins hash mix function
-/// This is the crush_hashmix macro from ~/dev/ceph/src/crush/hash.c
+/// Robert Jenkins' hash mix function
+/// Used by both CRUSH hash functions and string hashing.
+/// Reference: ~/dev/ceph/src/crush/hash.c (crush_hashmix macro)
+/// Reference: ~/dev/ceph/src/common/ceph_hash.cc (rjenkins hash)
 #[inline]
-fn crush_hashmix(a: &mut u32, b: &mut u32, c: &mut u32) {
+fn rjenkins_mix(a: &mut u32, b: &mut u32, c: &mut u32) {
     *a = a.wrapping_sub(*b);
     *a = a.wrapping_sub(*c);
     *a ^= *c >> 13;
@@ -56,8 +58,8 @@ pub fn crush_hash32(mut a: u32) -> u32 {
     let mut x = 231232;
     let mut y = 1232;
 
-    crush_hashmix(&mut b, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut a, &mut hash);
+    rjenkins_mix(&mut b, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut a, &mut hash);
 
     hash
 }
@@ -68,9 +70,9 @@ pub fn crush_hash32_2(mut a: u32, mut b: u32) -> u32 {
     let mut x = 231232;
     let mut y = 1232;
 
-    crush_hashmix(&mut a, &mut b, &mut hash);
-    crush_hashmix(&mut x, &mut a, &mut hash);
-    crush_hashmix(&mut b, &mut y, &mut hash);
+    rjenkins_mix(&mut a, &mut b, &mut hash);
+    rjenkins_mix(&mut x, &mut a, &mut hash);
+    rjenkins_mix(&mut b, &mut y, &mut hash);
 
     hash
 }
@@ -81,11 +83,11 @@ pub fn crush_hash32_3(mut a: u32, mut b: u32, mut c: u32) -> u32 {
     let mut x = 231232;
     let mut y = 1232;
 
-    crush_hashmix(&mut a, &mut b, &mut hash);
-    crush_hashmix(&mut c, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut a, &mut hash);
-    crush_hashmix(&mut b, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut c, &mut hash);
+    rjenkins_mix(&mut a, &mut b, &mut hash);
+    rjenkins_mix(&mut c, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut a, &mut hash);
+    rjenkins_mix(&mut b, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut c, &mut hash);
 
     hash
 }
@@ -96,12 +98,12 @@ pub fn crush_hash32_4(mut a: u32, mut b: u32, mut c: u32, mut d: u32) -> u32 {
     let mut x = 231232;
     let mut y = 1232;
 
-    crush_hashmix(&mut a, &mut b, &mut hash);
-    crush_hashmix(&mut c, &mut d, &mut hash);
-    crush_hashmix(&mut a, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut b, &mut hash);
-    crush_hashmix(&mut c, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut d, &mut hash);
+    rjenkins_mix(&mut a, &mut b, &mut hash);
+    rjenkins_mix(&mut c, &mut d, &mut hash);
+    rjenkins_mix(&mut a, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut b, &mut hash);
+    rjenkins_mix(&mut c, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut d, &mut hash);
 
     hash
 }
@@ -112,59 +114,16 @@ pub fn crush_hash32_5(mut a: u32, mut b: u32, mut c: u32, mut d: u32, mut e: u32
     let mut x = 231232;
     let mut y = 1232;
 
-    crush_hashmix(&mut a, &mut b, &mut hash);
-    crush_hashmix(&mut c, &mut d, &mut hash);
-    crush_hashmix(&mut e, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut a, &mut hash);
-    crush_hashmix(&mut b, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut c, &mut hash);
-    crush_hashmix(&mut d, &mut x, &mut hash);
-    crush_hashmix(&mut y, &mut e, &mut hash);
+    rjenkins_mix(&mut a, &mut b, &mut hash);
+    rjenkins_mix(&mut c, &mut d, &mut hash);
+    rjenkins_mix(&mut e, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut a, &mut hash);
+    rjenkins_mix(&mut b, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut c, &mut hash);
+    rjenkins_mix(&mut d, &mut x, &mut hash);
+    rjenkins_mix(&mut y, &mut e, &mut hash);
 
     hash
-}
-
-/// Robert Jenkins' hash function for strings
-/// This is the rjenkins hash used by Ceph for object name hashing
-/// Reference: http://burtleburtle.net/bob/hash/evahash.html
-/// C implementation: ~/dev/ceph/src/common/ceph_hash.cc
-#[inline]
-fn rjenkins_mix(a: &mut u32, b: &mut u32, c: &mut u32) {
-    *a = a.wrapping_sub(*b);
-    *a = a.wrapping_sub(*c);
-    *a ^= *c >> 13;
-
-    *b = b.wrapping_sub(*c);
-    *b = b.wrapping_sub(*a);
-    *b ^= *a << 8;
-
-    *c = c.wrapping_sub(*a);
-    *c = c.wrapping_sub(*b);
-    *c ^= *b >> 13;
-
-    *a = a.wrapping_sub(*b);
-    *a = a.wrapping_sub(*c);
-    *a ^= *c >> 12;
-
-    *b = b.wrapping_sub(*c);
-    *b = b.wrapping_sub(*a);
-    *b ^= *a << 16;
-
-    *c = c.wrapping_sub(*a);
-    *c = c.wrapping_sub(*b);
-    *c ^= *b >> 5;
-
-    *a = a.wrapping_sub(*b);
-    *a = a.wrapping_sub(*c);
-    *a ^= *c >> 3;
-
-    *b = b.wrapping_sub(*c);
-    *b = b.wrapping_sub(*a);
-    *b ^= *a << 10;
-
-    *c = c.wrapping_sub(*a);
-    *c = c.wrapping_sub(*b);
-    *c ^= *b >> 15;
 }
 
 /// Hash a byte string using rjenkins
