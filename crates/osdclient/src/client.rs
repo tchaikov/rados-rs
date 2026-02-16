@@ -1203,8 +1203,10 @@ impl OSDClient {
 
                 if new_primary != *osd_id {
                     if let Some(mut op) = session.remove_pending_op(tid).await {
-                        op.target.osd = new_primary;
-                        op.target.epoch = new_epoch;
+                        // Mark as needing resend, then update target
+                        op.state = crate::types::OpState::NeedsResend;
+                        op.target.update(new_epoch, new_primary, new_osds.clone());
+                        // Transition back to Queued for resubmission
                         op.state = crate::types::OpState::Queued;
                         need_resend.push((new_primary, op));
                     }

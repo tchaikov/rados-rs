@@ -6,9 +6,20 @@ use std::time::SystemTime;
 // ============= Operation State Machine =============
 
 /// Operation state machine matching Ceph Objecter's implicit states
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// State transitions:
+/// - `Created` → `Queued`: Operation submitted to session
+/// - `Queued` → `Sent`: Operation sent over the wire
+/// - `Sent` → `Completed`: Successful reply received
+/// - `Sent` → `Failed`: Error reply received
+/// - `Sent` → `NeedsResend`: OSDMap changed, target may have moved
+/// - `Sent` → `Blocked`: Backoff received from OSD
+/// - `NeedsResend` → `Queued`: Operation resubmitted to new target
+/// - `Blocked` → `Queued`: Backoff lifted, operation resubmitted
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum OpState {
     /// Operation created, not submitted
+    #[default]
     Created,
     /// Submitted to session, awaiting send
     Queued,
@@ -24,7 +35,31 @@ pub enum OpState {
     Failed,
 }
 
+impl OpState {
+    /// Check if the operation is in a terminal state
+    pub fn is_terminal(self) -> bool {
+        matches!(self, OpState::Completed | OpState::Failed)
+    }
+
+    /// Check if the operation is in-flight (sent but not completed)
+    pub fn is_in_flight(self) -> bool {
+        matches!(
+            self,
+            OpState::Sent | OpState::NeedsResend | OpState::Blocked
+        )
+    }
+
+    /// Check if the operation can be resent
+    pub fn can_resend(self) -> bool {
+        matches!(self, OpState::NeedsResend | OpState::Blocked)
+    }
+}
+
 /// Target tracking (inspired by Ceph's op_target_t)
+///
+/// Tracks where an operation is targeted and the OSDMap epoch
+/// used to calculate that target. When the OSDMap changes,
+/// we can compare epochs to determine if retargeting is needed.
 #[derive(Debug, Clone)]
 pub struct OpTarget {
     /// OSDMap epoch when calculated
@@ -37,6 +72,43 @@ pub struct OpTarget {
     pub acting: Vec<i32>,
     /// Whether replica was used
     pub used_replica: bool,
+}
+
+impl OpTarget {
+    /// Create a new OpTarget
+    pub fn new(epoch: u32, pgid: StripedPgId, osd: i32, acting: Vec<i32>) -> Self {
+        Self {
+            epoch,
+            pgid,
+            osd,
+            acting,
+            used_replica: false,
+        }
+    }
+
+    /// Check if the target needs updating based on a new OSDMap epoch
+    pub fn needs_update(&self, new_epoch: u32) -> bool {
+        new_epoch > self.epoch
+    }
+
+    /// Update the target with new placement information
+    pub fn update(&mut self, epoch: u32, osd: i32, acting: Vec<i32>) {
+        self.epoch = epoch;
+        self.osd = osd;
+        self.acting = acting;
+    }
+}
+
+impl Default for OpTarget {
+    fn default() -> Self {
+        Self {
+            epoch: 0,
+            pgid: StripedPgId::new(0, 0, -1),
+            osd: -1,
+            acting: Vec::new(),
+            used_replica: false,
+        }
+    }
 }
 
 // ============= Pool Flags =============
@@ -991,5 +1063,87 @@ mod tests {
         assert_eq!(entry.nspace, "namespace");
         assert_eq!(entry.oid, "object-name");
         assert_eq!(entry.locator, "locator");
+    }
+
+    #[test]
+    fn test_op_state_default() {
+        let state = OpState::default();
+        assert_eq!(state, OpState::Created);
+    }
+
+    #[test]
+    fn test_op_state_is_terminal() {
+        assert!(!OpState::Created.is_terminal());
+        assert!(!OpState::Queued.is_terminal());
+        assert!(!OpState::Sent.is_terminal());
+        assert!(!OpState::NeedsResend.is_terminal());
+        assert!(!OpState::Blocked.is_terminal());
+        assert!(OpState::Completed.is_terminal());
+        assert!(OpState::Failed.is_terminal());
+    }
+
+    #[test]
+    fn test_op_state_is_in_flight() {
+        assert!(!OpState::Created.is_in_flight());
+        assert!(!OpState::Queued.is_in_flight());
+        assert!(OpState::Sent.is_in_flight());
+        assert!(OpState::NeedsResend.is_in_flight());
+        assert!(OpState::Blocked.is_in_flight());
+        assert!(!OpState::Completed.is_in_flight());
+        assert!(!OpState::Failed.is_in_flight());
+    }
+
+    #[test]
+    fn test_op_state_can_resend() {
+        assert!(!OpState::Created.can_resend());
+        assert!(!OpState::Queued.can_resend());
+        assert!(!OpState::Sent.can_resend());
+        assert!(OpState::NeedsResend.can_resend());
+        assert!(OpState::Blocked.can_resend());
+        assert!(!OpState::Completed.can_resend());
+        assert!(!OpState::Failed.can_resend());
+    }
+
+    #[test]
+    fn test_op_target_new() {
+        let pgid = StripedPgId::new(1, 42, -1);
+        let target = OpTarget::new(100, pgid, 5, vec![5, 6, 7]);
+
+        assert_eq!(target.epoch, 100);
+        assert_eq!(target.pgid.pool, 1);
+        assert_eq!(target.pgid.seed, 42);
+        assert_eq!(target.osd, 5);
+        assert_eq!(target.acting, vec![5, 6, 7]);
+        assert!(!target.used_replica);
+    }
+
+    #[test]
+    fn test_op_target_default() {
+        let target = OpTarget::default();
+
+        assert_eq!(target.epoch, 0);
+        assert_eq!(target.osd, -1);
+        assert!(target.acting.is_empty());
+        assert!(!target.used_replica);
+    }
+
+    #[test]
+    fn test_op_target_needs_update() {
+        let target = OpTarget::new(100, StripedPgId::new(1, 0, -1), 5, vec![5]);
+
+        assert!(!target.needs_update(99));
+        assert!(!target.needs_update(100));
+        assert!(target.needs_update(101));
+    }
+
+    #[test]
+    fn test_op_target_update() {
+        let mut target = OpTarget::new(100, StripedPgId::new(1, 0, -1), 5, vec![5]);
+
+        target.update(200, 10, vec![10, 11]);
+
+        assert_eq!(target.epoch, 200);
+        assert_eq!(target.osd, 10);
+        assert_eq!(target.acting, vec![10, 11]);
     }
 }

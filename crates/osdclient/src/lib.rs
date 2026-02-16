@@ -31,8 +31,8 @@ pub use ioctx::IoCtx;
 pub use operation::{BuiltOp, OpBuilder};
 pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, UuidD};
 pub use types::{
-    OSDOp, ObjectId, OpCode, OsdOpFlags, PoolInfo, ReadResult, SparseExtent, SparseReadResult,
-    StatResult, StripedPgId, WriteResult,
+    OSDOp, ObjectId, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult, SparseExtent,
+    SparseReadResult, StatResult, StripedPgId, WriteResult,
 };
 
 pub type Result<T> = std::result::Result<T, OSDClientError>;
