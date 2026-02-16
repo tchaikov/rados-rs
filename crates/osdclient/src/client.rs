@@ -1313,8 +1313,151 @@ impl OSDClient {
                 );
             }
 
-            // TODO: Rescan all sessions for pending operations
-            // This will be implemented when we add rescan() method to OSDSession
+            // Rescan all sessions for pending operations that need remapping
+            if let Err(e) = self.rescan_pending_ops().await {
+                warn!("Failed to rescan pending operations: {}", e);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Rescan pending operations across all sessions when OSDMap updates
+    ///
+    /// This checks all pending operations to see if their target OSD has changed
+    /// due to OSDMap updates (e.g., OSD failures, CRUSH map changes). Operations
+    /// that need to be redirected are removed from their current session and
+    /// resubmitted to the correct OSD.
+    async fn rescan_pending_ops(&self) -> Result<()> {
+        let osdmap_guard = self.osdmap.read().await;
+        let osdmap = match osdmap_guard.as_ref() {
+            Some(map) => map,
+            None => {
+                debug!("No OSDMap available for rescanning");
+                return Ok(());
+            }
+        };
+
+        let current_epoch = u32::from(osdmap.epoch);
+        let sessions_guard = self.sessions.read().await;
+
+        // Collect operations that need to be migrated
+        // Map: (source_osd, tid) -> (target_osd, pending_op)
+        let mut migrations: Vec<(i32, u64, i32)> = Vec::new();
+
+        // Scan all sessions for stale operations
+        for (osd_id, session) in sessions_guard.iter() {
+            let ops_metadata = session.get_pending_ops_metadata().await;
+
+            for (tid, pool_id, object_id, op_epoch) in ops_metadata {
+                // Skip if operation is already at current epoch
+                if op_epoch >= current_epoch {
+                    continue;
+                }
+
+                // Calculate current target OSD for this object
+                match osdmap.object_to_osds(pool_id, &object_id) {
+                    Ok(osds) => {
+                        // Primary OSD is the first in the list
+                        if let Some(&primary_osd) = osds.first() {
+                            // If target OSD has changed, mark for migration
+                            if primary_osd != *osd_id {
+                                debug!(
+                                    "Operation tid={} for object {} needs migration from OSD {} to OSD {}",
+                                    tid, object_id, osd_id, primary_osd
+                                );
+                                migrations.push((*osd_id, tid, primary_osd));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to calculate target OSD for object {} in pool {}: {}",
+                            object_id, pool_id, e
+                        );
+                        // Operation will eventually timeout via tracker
+                        continue;
+                    }
+                }
+            }
+        }
+
+        drop(sessions_guard);
+        drop(osdmap_guard);
+
+        // Track number of migrations for logging
+        let migration_count = migrations.len();
+
+        // Perform migrations
+        for (source_osd, tid, target_osd) in migrations {
+            // Get source and target sessions
+            let sessions = self.sessions.read().await;
+            let source_session = match sessions.get(&source_osd) {
+                Some(s) => Arc::clone(s),
+                None => {
+                    warn!(
+                        "Source session OSD {} not found during migration",
+                        source_osd
+                    );
+                    continue;
+                }
+            };
+            drop(sessions);
+
+            // Remove operation from source session
+            let pending_op = match source_session.remove_pending_op(tid).await {
+                Some(op) => op,
+                None => {
+                    debug!(
+                        "Operation tid={} already completed, skipping migration",
+                        tid
+                    );
+                    continue;
+                }
+            };
+
+            info!(
+                "Migrating operation tid={} from OSD {} to OSD {}",
+                tid, source_osd, target_osd
+            );
+
+            // Get or create target session
+            let target_session = match self.get_or_create_session(target_osd).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(
+                        "Failed to get session for target OSD {}: {}, failing operation",
+                        target_osd, e
+                    );
+                    // Send error to operation's result channel
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::Connection(format!(
+                            "Failed to migrate to OSD {}: {}",
+                            target_osd, e
+                        ))));
+                    continue;
+                }
+            };
+
+            // Insert into target session with updated epoch
+            if let Err(e) = target_session
+                .insert_migrated_op(pending_op, current_epoch)
+                .await
+            {
+                warn!(
+                    "Failed to insert migrated operation tid={} into OSD {}: {}",
+                    tid, target_osd, e
+                );
+                // Operation's result channel was already notified by insert_migrated_op
+            }
+        }
+
+        if migration_count > 0 {
+            info!(
+                "Completed rescanning: migrated {} operations",
+                migration_count
+            );
         }
 
         Ok(())
