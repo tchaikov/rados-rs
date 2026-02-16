@@ -502,6 +502,41 @@ impl OSDClient {
         );
     }
 
+    /// Execute a built operation created with OpBuilder
+    ///
+    /// This bridges the OpBuilder API to the internal execute_op implementation.
+    /// Provides a convenient way to execute operations built with the fluent OpBuilder API.
+    ///
+    /// # Arguments
+    /// * `pool` - Pool ID
+    /// * `oid` - Object name
+    /// * `built_op` - Built operation from OpBuilder
+    ///
+    /// # Returns
+    /// Returns the OpResult after handling all redirects
+    ///
+    /// # Example
+    /// ```ignore
+    /// use osdclient::OpBuilder;
+    ///
+    /// let op = OpBuilder::new()
+    ///     .read(0, 4096)
+    ///     .balance_reads()
+    ///     .build();
+    ///
+    /// let result = client.execute_built_op(pool_id, "my-object", op).await?;
+    /// ```
+    pub async fn execute_built_op(
+        &self,
+        pool: u64,
+        oid: &str,
+        built_op: crate::operation::BuiltOp,
+    ) -> Result<crate::types::OpResult> {
+        // TODO: honor built_op.timeout override
+        // TODO: honor built_op.priority when MOSDOp supports it
+        self.execute_op(pool, oid, built_op.into_ops()).await
+    }
+
     /// Execute an OSD operation with automatic redirect handling
     ///
     /// This is the common pattern for all OSD operations:
