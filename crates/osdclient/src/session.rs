@@ -42,6 +42,13 @@ pub enum ConnectionState {
     Closed,
 }
 
+/// Session information combining connection state and peer address
+#[derive(Debug, Clone)]
+struct SessionInfo {
+    conn_state: ConnectionState,
+    peer_addr: Option<denc::EntityAddr>,
+}
+
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
@@ -55,9 +62,8 @@ struct IoTaskContext {
     /// Currently validated in handle_reply and timeout callback.
     #[allow(dead_code)]
     incarnation: Arc<AtomicU32>,
-    /// Connection state
-    /// Updated when io_task exits
-    conn_state: Arc<RwLock<ConnectionState>>,
+    /// Session information (connection state and peer address)
+    session_info: Arc<RwLock<SessionInfo>>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -90,13 +96,9 @@ pub struct OSDSession {
     /// Used to detect stale operations from previous connection incarnations.
     /// Reference: ~/dev/ceph/src/osdc/Objecter.h:2502, ~/dev/linux/net/ceph/osd_client.c:1413
     incarnation: Arc<AtomicU32>,
-    /// Peer address for this connection
-    /// Used to validate address against OSDMap during reconnection
-    peer_addr: Arc<RwLock<Option<denc::EntityAddr>>>,
-    /// Connection state
-    /// Following Ceph pattern for explicit state tracking.
-    /// Provides better observability than checking send_tx.is_closed()
-    conn_state: Arc<RwLock<ConnectionState>>,
+    /// Session information (connection state and peer address combined)
+    /// Using a single lock reduces lock acquisitions and simplifies the code.
+    session_info: Arc<RwLock<SessionInfo>>,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -173,10 +175,11 @@ impl OSDSession {
             // Start at incarnation 0, will increment to 1 on first connect()
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
-            // No peer address until connected
-            peer_addr: Arc::new(RwLock::new(None)),
-            // Start in disconnected state
-            conn_state: Arc::new(RwLock::new(ConnectionState::Disconnected)),
+            // Start with no peer address and disconnected state
+            session_info: Arc::new(RwLock::new(SessionInfo {
+                conn_state: ConnectionState::Disconnected,
+                peer_addr: None,
+            })),
             // Mutex to prevent concurrent connection attempts
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
         }
@@ -210,13 +213,13 @@ impl OSDSession {
         let _lock = self.connecting_lock.lock().await;
 
         // Check if already connected (double-check after acquiring lock)
-        if *self.conn_state.read().await == ConnectionState::Connected {
+        if self.session_info.read().await.conn_state == ConnectionState::Connected {
             info!("OSD {} already connected, skipping", self.osd_id);
             return Ok(());
         }
 
         // Transition to Connecting state
-        *self.conn_state.write().await = ConnectionState::Connecting;
+        self.session_info.write().await.conn_state = ConnectionState::Connecting;
 
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
@@ -253,11 +256,11 @@ impl OSDSession {
 
         info!("✓ Session established with OSD {}", self.osd_id);
 
-        // Store peer address for validation
-        *self.peer_addr.write().await = Some(entity_addr.clone());
-
-        // Transition to Connected state
-        *self.conn_state.write().await = ConnectionState::Connected;
+        // Store peer address and transition to Connected state
+        let mut info = self.session_info.write().await;
+        info.peer_addr = Some(entity_addr.clone());
+        info.conn_state = ConnectionState::Connected;
+        drop(info);
 
         // Increment connection incarnation following Ceph pattern
         // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
@@ -280,7 +283,7 @@ impl OSDSession {
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
             incarnation: Arc::clone(&self.incarnation),
-            conn_state: Arc::clone(&self.conn_state),
+            session_info: Arc::clone(&self.session_info),
             shutdown_token,
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
@@ -423,7 +426,7 @@ impl OSDSession {
         } else {
             ConnectionState::Disconnected
         };
-        *ctx.conn_state.write().await = final_state;
+        ctx.session_info.write().await.conn_state = final_state;
 
         // Do NOT cancel pending operations here - let them be migrated by scan_requests_on_map_change()
         // when OSDMap updates arrive. This handles scenarios where:
@@ -894,8 +897,7 @@ impl OSDSession {
     /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
         // Check explicit connection state
-        let state = self.conn_state.read().await;
-        *state == ConnectionState::Connected
+        self.session_info.read().await.conn_state == ConnectionState::Connected
     }
 
     /// Get the peer address for this session
@@ -903,7 +905,7 @@ impl OSDSession {
     /// Returns the EntityAddr that was used to establish the current connection.
     /// Used to validate that the session's address matches the current OSDMap.
     pub async fn get_peer_address(&self) -> Option<denc::EntityAddr> {
-        self.peer_addr.read().await.clone()
+        self.session_info.read().await.peer_addr.clone()
     }
 
     /// Get the current connection state
@@ -911,7 +913,7 @@ impl OSDSession {
     /// Provides explicit state information for observability and debugging.
     /// Following Ceph pattern for explicit connection state tracking.
     pub async fn connection_state(&self) -> ConnectionState {
-        *self.conn_state.read().await
+        self.session_info.read().await.conn_state
     }
 
     /// Check if an operation is blocked by an active backoff

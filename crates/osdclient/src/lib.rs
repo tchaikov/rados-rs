@@ -10,18 +10,18 @@
 //! - Message encoding/decoding for MOSDOp and MOSDOpReply
 //! - Integration with MonClient for OSDMap updates and CRUSH placement
 
-pub mod backoff;
+pub(crate) mod backoff;
 pub mod client;
-pub mod denc_types;
+pub(crate) mod denc_types;
 pub mod error;
 pub mod ioctx;
 pub mod messages;
 pub mod operation;
 pub mod osdmap;
-pub mod pgmap_types;
+pub(crate) mod pgmap_types;
 pub mod session;
-pub mod throttle;
-pub mod tracker;
+pub(crate) mod throttle;
+pub(crate) mod tracker;
 pub mod types;
 
 // Re-export commonly used types

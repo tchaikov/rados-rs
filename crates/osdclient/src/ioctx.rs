@@ -5,7 +5,6 @@
 
 use bytes::Bytes;
 use std::sync::Arc;
-use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use crate::client::OSDClient;
@@ -47,8 +46,8 @@ pub struct IoCtx {
     /// Pool ID this context is associated with
     pool_id: u64,
 
-    /// Pool name (cached)
-    pool_name: Arc<RwLock<Option<String>>>,
+    /// Pool name (cached, initialized on first access)
+    pool_name: tokio::sync::OnceCell<String>,
 }
 
 impl IoCtx {
@@ -68,7 +67,7 @@ impl IoCtx {
         Ok(Self {
             client,
             pool_id,
-            pool_name: Arc::new(RwLock::new(None)),
+            pool_name: tokio::sync::OnceCell::new(),
         })
     }
 
@@ -79,25 +78,18 @@ impl IoCtx {
 
     /// Get the pool name (cached)
     pub async fn pool_name(&self) -> Result<String> {
-        // Check cache first
-        {
-            let cached = self.pool_name.read().await;
-            if let Some(ref name) = *cached {
-                return Ok(name.clone());
-            }
-        }
-
-        // Fetch from monitor
-        let pools = self.client.list_pools().await?;
-        for pool in pools {
-            if pool.pool_id == self.pool_id {
-                let name = pool.pool_name.clone();
-                *self.pool_name.write().await = Some(name.clone());
-                return Ok(name);
-            }
-        }
-
-        Err(OSDClientError::PoolNotFound(self.pool_id))
+        self.pool_name
+            .get_or_try_init(|| async {
+                // Fetch from monitor
+                let pools = self.client.list_pools().await?;
+                pools
+                    .into_iter()
+                    .find(|p| p.pool_id == self.pool_id)
+                    .map(|p| p.pool_name)
+                    .ok_or(OSDClientError::PoolNotFound(self.pool_id))
+            })
+            .await
+            .cloned()
     }
 
     /// Create an object (optionally exclusive)
@@ -322,10 +314,11 @@ impl IoCtx {
 
 impl Clone for IoCtx {
     fn clone(&self) -> Self {
+        // Create new OnceCell - clones will independently cache pool name
         Self {
             client: Arc::clone(&self.client),
             pool_id: self.pool_id,
-            pool_name: Arc::clone(&self.pool_name),
+            pool_name: tokio::sync::OnceCell::new(),
         }
     }
 }
