@@ -432,7 +432,7 @@ fn crush_choose_firstn(
 /// rather than shifting subsequent items. This is critical for
 /// erasure-coded pools where each chunk has a fixed position.
 ///
-/// Reference: ~/dev/ceph/src/crush/mapper.c crush_choose_indep()
+/// Reference: Ceph src/crush/mapper.c crush_choose_indep()
 #[allow(clippy::too_many_arguments)]
 fn crush_choose_indep(
     map: &CrushMap,
