@@ -16,6 +16,7 @@ use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, RwLock};
 use tracing::{debug, error, info, warn};
 
+use crate::backoff::BackoffTracker;
 use crate::error::{OSDClientError, Result};
 use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId, StripedPgId};
@@ -28,22 +29,13 @@ struct IoTaskContext {
     osd_id: i32,
     pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
     #[allow(dead_code)]
-    backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+    backoff_tracker: Arc<RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::client::OSDClient>,
 }
 
-/// OSD backoff tracking
-///
-/// Represents an active backoff from the OSD requesting the client
-/// to pause operations on a specific object range.
-#[derive(Debug, Clone)]
-pub struct OSDBackoff {
-    pub pgid: StripedPgId,
-    pub id: u64,
-    pub begin: denc::HObject,
-    pub end: denc::HObject,
-}
+// Re-export BackoffEntry for backward compatibility
+pub use crate::backoff::BackoffEntry as OSDBackoff;
 
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
@@ -57,10 +49,8 @@ pub struct OSDSession {
     #[allow(dead_code)]
     client_inc: u32,
     auth_provider: Option<Box<dyn auth::AuthProvider>>,
-    /// Active backoffs from OSD
-    /// Outer map: pgid -> inner map
-    /// Inner map: begin hobject -> backoff info
-    backoffs: Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>>,
+    /// Per-PG backoff tracker using efficient data structures
+    backoff_tracker: Arc<RwLock<BackoffTracker>>,
     /// Channel for routing MOSDMap messages to OSDClient
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
@@ -116,7 +106,7 @@ impl OSDSession {
             entity_name,
             client_inc,
             auth_provider,
-            backoffs: Arc::new(RwLock::new(HashMap::new())),
+            backoff_tracker: Arc::new(RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
         }
@@ -176,7 +166,7 @@ impl OSDSession {
         let context = IoTaskContext {
             osd_id: self.osd_id,
             pending_ops: Arc::clone(&self.pending_ops),
-            backoffs: Arc::clone(&self.backoffs),
+            backoff_tracker: Arc::clone(&self.backoff_tracker),
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
         };
@@ -312,11 +302,9 @@ impl OSDSession {
         Arc::clone(&self.pending_ops)
     }
 
-    /// Get a clone of backoffs for management (used by OSDClient for backoff handling)
-    pub fn backoffs(
-        &self,
-    ) -> Arc<RwLock<HashMap<StripedPgId, HashMap<denc::HObject, OSDBackoff>>>> {
-        Arc::clone(&self.backoffs)
+    /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
+    pub fn backoff_tracker(&self) -> Arc<RwLock<BackoffTracker>> {
+        Arc::clone(&self.backoff_tracker)
     }
 
     /// Get the send channel for sending messages (used by OSDClient for ACKs)
@@ -652,27 +640,11 @@ impl OSDSession {
 
     /// Check if an operation is blocked by an active backoff
     ///
+    /// Uses efficient range lookup matching Ceph's _send_op() logic
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _send_op()
     async fn is_blocked_by_backoff(&self, pgid: &StripedPgId, hobj: &denc::HObject) -> bool {
-        let backoffs_map = self.backoffs.read().await;
-
-        // Check if this PG has any backoffs
-        if let Some(pg_backoffs) = backoffs_map.get(pgid) {
-            // Find the backoff range that might contain this object
-            // We need to check if hobj falls in [begin, end) for any backoff
-            for backoff in pg_backoffs.values() {
-                // Check if hobj is in [begin, end)
-                if hobj >= &backoff.begin && hobj < &backoff.end {
-                    debug!(
-                        "Operation blocked by backoff: pgid={:?}, hobj={:?}, backoff=[{:?}, {:?})",
-                        pgid, hobj, backoff.begin, backoff.end
-                    );
-                    return true;
-                }
-            }
-        }
-
-        false
+        let tracker = self.backoff_tracker.read().await;
+        tracker.is_blocked(pgid, hobj).is_some()
     }
 
     // === OSDMap Rescanning Support ===

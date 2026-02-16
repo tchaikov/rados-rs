@@ -13,6 +13,7 @@ use tracing::{debug, error, info, warn};
 
 use denc::{Denc, VersionedEncode};
 
+use crate::backoff::BackoffEntry;
 use crate::error::{OSDClientError, Result};
 use crate::messages::MOSDOp;
 use crate::session::OSDSession;
@@ -1502,20 +1503,15 @@ impl OSDClient {
 
                 // Register backoff in session
                 {
-                    let backoffs = session.backoffs();
-                    let mut backoffs_map = backoffs.write().await;
-                    let pg_backoffs = backoffs_map
-                        .entry(backoff.pgid)
-                        .or_insert_with(HashMap::new);
-
-                    let backoff_entry = crate::session::OSDBackoff {
+                    let tracker = session.backoff_tracker();
+                    let mut tracker = tracker.write().await;
+                    let entry = BackoffEntry {
                         pgid: backoff.pgid,
                         id: backoff.id,
                         begin: backoff.begin.clone(),
                         end: backoff.end.clone(),
                     };
-
-                    pg_backoffs.insert(backoff.begin.clone(), backoff_entry);
+                    tracker.register(entry);
                 }
 
                 // Send ACK_BLOCK reply through session's send channel
@@ -1564,16 +1560,9 @@ impl OSDClient {
 
                 // Remove backoff from session
                 {
-                    let backoffs = session.backoffs();
-                    let mut backoffs_map = backoffs.write().await;
-                    if let Some(pg_backoffs) = backoffs_map.get_mut(&backoff.pgid) {
-                        pg_backoffs.remove(&backoff.begin);
-
-                        // Remove PG entry if no more backoffs
-                        if pg_backoffs.is_empty() {
-                            backoffs_map.remove(&backoff.pgid);
-                        }
-                    }
+                    let tracker = session.backoff_tracker();
+                    let mut tracker = tracker.write().await;
+                    tracker.remove_by_id(backoff.id, &backoff.begin, &backoff.end);
                 }
 
                 // Resend operations that were in the backoff range
