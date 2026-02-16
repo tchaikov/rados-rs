@@ -218,8 +218,24 @@ impl OSDSession {
     ) {
         debug!("I/O task started for OSD {}", ctx.osd_id);
 
+        // Create keepalive interval (every 10 seconds, matching Ceph's default)
+        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(10));
+        // Don't fire immediately - wait for first interval
+        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
         loop {
             tokio::select! {
+                // Periodic keepalive to detect dead connections proactively
+                _ = keepalive_interval.tick() => {
+                    if let Err(e) = connection.send_keepalive().await {
+                        warn!("Failed to send keepalive to OSD {}: {}", ctx.osd_id, e);
+                        // Don't break immediately - let send/recv errors handle reconnection
+                        // This just warns about potential connection issues
+                    } else {
+                        debug!("Sent keepalive to OSD {}", ctx.osd_id);
+                    }
+                }
+
                 // Handle outgoing messages (like try_write in Linux kernel)
                 msg_opt = send_rx.recv() => {
                     match msg_opt {

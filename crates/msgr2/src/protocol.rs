@@ -1589,6 +1589,7 @@ impl Connection {
         R: Fn() -> ReconnectAction<T>,
     {
         const MAX_RECONNECT_ATTEMPTS: usize = 3;
+        const INITIAL_BACKOFF_MS: u64 = 100; // Start at 100ms
 
         for attempt in 0..MAX_RECONNECT_ATTEMPTS {
             match operation(self).await {
@@ -1602,6 +1603,19 @@ impl Connection {
                         e
                     );
 
+                    // Apply exponential backoff before reconnection attempt (except first attempt)
+                    // Backoff: 0ms, 100ms, 200ms, 400ms, 800ms, ...
+                    // Capped at 1000ms to match Ceph's behavior
+                    if attempt > 0 {
+                        let backoff_ms = (INITIAL_BACKOFF_MS * (1 << (attempt - 1))).min(1000);
+                        tracing::debug!(
+                            "Backing off {}ms before reconnection attempt {}",
+                            backoff_ms,
+                            attempt + 1
+                        );
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+                    }
+
                     // Attempt reconnection
                     if let Err(reconnect_err) = self.reconnect().await {
                         tracing::error!("Reconnection failed: {}", reconnect_err);
@@ -1609,7 +1623,7 @@ impl Connection {
                         if attempt + 1 == MAX_RECONNECT_ATTEMPTS {
                             return Err(reconnect_err);
                         }
-                        // Otherwise, continue to next attempt
+                        // Otherwise, continue to next attempt with backoff
                         continue;
                     }
 
