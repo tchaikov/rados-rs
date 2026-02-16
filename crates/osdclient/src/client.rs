@@ -101,9 +101,20 @@ impl OSDClient {
                         let sessions_guard = sessions.read().await;
                         if let Some(session) = sessions_guard.get(&osd_id) {
                             if let Some(pending_op) = session.remove_pending_op(tid).await {
-                                let _ = pending_op.result_tx.send(Err(
-                                    OSDClientError::Timeout(client.tracker.operation_timeout())
-                                ));
+                                // Check incarnation - operation might be from a previous connection
+                                // that has since reconnected. In that case, silently drop the timeout.
+                                let current_incarnation = session.current_incarnation();
+                                if pending_op.sent_incarnation != current_incarnation {
+                                    debug!(
+                                        "Ignoring timeout for stale operation: OSD {} tid={} (sent in incarnation {} but current is {})",
+                                        osd_id, tid, pending_op.sent_incarnation, current_incarnation
+                                    );
+                                    return;
+                                }
+
+                                let _ = pending_op.result_tx.send(Err(OSDClientError::Timeout(
+                                    client.tracker.operation_timeout(),
+                                )));
                                 warn!("Cancelled timed-out operation: OSD {} tid={}", osd_id, tid);
                             }
                         }
@@ -111,7 +122,10 @@ impl OSDClient {
                 }
             });
 
-            let tracker = Arc::new(Tracker::new(config.tracker_config.clone(), timeout_callback));
+            let tracker = Arc::new(Tracker::new(
+                config.tracker_config.clone(),
+                timeout_callback,
+            ));
 
             Self {
                 config,

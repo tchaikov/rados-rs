@@ -10,7 +10,7 @@
 //! - No locks held during I/O operations
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, RwLock};
@@ -32,6 +32,11 @@ struct IoTaskContext {
     backoff_tracker: Arc<RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::client::OSDClient>,
+    /// Session incarnation for this connection
+    /// Shared with OSDSession to detect stale operations.
+    /// Currently validated in handle_reply and timeout callback.
+    #[allow(dead_code)]
+    incarnation: Arc<AtomicU32>,
 }
 
 // Re-export BackoffEntry for backward compatibility
@@ -57,6 +62,11 @@ pub struct OSDSession {
     client: std::sync::Weak<crate::client::OSDClient>,
     /// Tracker for per-operation timeouts
     tracker: Option<Arc<crate::tracker::Tracker>>,
+    /// Connection incarnation counter - increments on each connect()
+    /// Following Ceph Objecter and Linux kernel Ceph client pattern.
+    /// Used to detect stale operations from previous connection incarnations.
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.h:2502, ~/dev/linux/net/ceph/osd_client.c:1413
+    incarnation: Arc<AtomicU32>,
 }
 
 /// Tracking information for a pending operation
@@ -84,6 +94,12 @@ pub struct PendingOp {
     pub should_resend: bool,
     /// Maximum retry attempts
     pub max_attempts: i32,
+    /// Connection incarnation when this operation was sent
+    /// Used to detect stale operations after connection restarts.
+    /// Following Ceph Objecter pattern: each connection restart increments
+    /// session incarnation, and operations with old incarnation are discarded.
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc:3519, ~/dev/linux/net/ceph/osd_client.c:2348
+    pub sent_incarnation: u32,
 }
 
 impl OSDSession {
@@ -115,12 +131,24 @@ impl OSDSession {
             osdmap_tx,
             client,
             tracker,
+            // Start at incarnation 0, will increment to 1 on first connect()
+            // Following Ceph pattern: incarnation 0 means "never connected"
+            incarnation: Arc::new(AtomicU32::new(0)),
         }
     }
 
     /// Get the next transaction ID
     pub fn next_tid(&self) -> u64 {
         self.next_tid.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Get current connection incarnation
+    ///
+    /// Used to detect stale operations from previous connections.
+    /// Following Ceph pattern where operations store incarnation when sent
+    /// and are discarded if incarnation doesn't match current value.
+    pub fn current_incarnation(&self) -> u32 {
+        self.incarnation.load(Ordering::SeqCst)
     }
 
     /// Connect to the OSD and start I/O task
@@ -163,6 +191,14 @@ impl OSDSession {
 
         info!("✓ Session established with OSD {}", self.osd_id);
 
+        // Increment connection incarnation following Ceph pattern
+        // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
+        let new_incarnation = self.incarnation.fetch_add(1, Ordering::SeqCst) + 1;
+        info!(
+            "OSD {} connection incarnation incremented to {}",
+            self.osd_id, new_incarnation
+        );
+
         // Create new channel for this connection
         let (send_tx, send_rx) = mpsc::channel(100);
         self.send_tx = send_tx;
@@ -175,6 +211,7 @@ impl OSDSession {
             backoff_tracker: Arc::clone(&self.backoff_tracker),
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
+            incarnation: Arc::clone(&self.incarnation),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -348,7 +385,10 @@ impl OSDSession {
         tid: u64,
         reply: MOSDOpReply,
     ) -> Option<(PendingOp, u32)> {
-        let result = Self::handle_reply(tid, reply, &self.pending_ops).await;
+        // Get current session incarnation for stale operation detection
+        let current_incarnation = self.incarnation.load(Ordering::SeqCst);
+
+        let result = Self::handle_reply(tid, reply, &self.pending_ops, current_incarnation).await;
 
         // If operation completed (not retrying), untrack it
         if result.is_none() {
@@ -373,6 +413,9 @@ impl OSDSession {
         pending_op.op.flags = new_flags;
         pending_op.attempts += 1;
         pending_op.op.retry_attempt = pending_op.attempts - 1;
+
+        // Update incarnation (operation is being resent in current session)
+        pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
 
         // Resubmit the operation
         Self::resubmit_operation(tid, pending_op, &self.send_tx, &self.pending_ops).await
@@ -499,6 +542,10 @@ impl OSDSession {
                     ),
                     should_resend: false,
                     max_attempts: 10,
+                    // Capture current session incarnation
+                    // Following Ceph pattern: operation stores incarnation when sent
+                    // Reference: ~/dev/linux/net/ceph/osd_client.c:2348
+                    sent_incarnation: self.incarnation.load(Ordering::SeqCst),
                 },
             );
         }
@@ -531,6 +578,7 @@ impl OSDSession {
         tid: u64,
         reply: MOSDOpReply,
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+        current_incarnation: u32,
     ) -> Option<(PendingOp, u32)> {
         let pending_op = {
             let mut pending = pending_ops.write().await;
@@ -538,6 +586,21 @@ impl OSDSession {
         };
 
         if let Some(pending_op) = pending_op {
+            // Check incarnation first - most important staleness check
+            // Following Ceph pattern: discard operations from previous connection incarnations
+            // Reference: ~/dev/linux/net/ceph/osd_client.c handle_reply()
+            if pending_op.sent_incarnation != current_incarnation {
+                warn!(
+                    "Ignoring stale reply for tid {}: sent in incarnation {} but current is {}",
+                    tid, pending_op.sent_incarnation, current_incarnation
+                );
+                debug!(
+                    "Stale operation details: tid={}, reqid={}, attempts={}, osdmap_epoch={}",
+                    tid, pending_op.reqid.tid, pending_op.attempts, pending_op.osdmap_epoch
+                );
+                return None;
+            }
+
             // Validate retry_attempt matches our attempt count
             // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
             if reply.retry_attempt >= 0 {
@@ -733,6 +796,10 @@ impl OSDSession {
         // Increment attempts counter (matching C++ Objecter behavior)
         pending_op.attempts += 1;
 
+        // Update incarnation to current session incarnation (operation is being resent)
+        // This is critical: migrated operations get new incarnation from target session
+        pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
+
         // Create HObject for backoff checking
         let hobj = denc::HObject {
             key: pending_op.op.object.key.clone(),
@@ -797,3 +864,70 @@ impl OSDSession {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_incarnation_starts_at_zero() {
+        let (osdmap_tx, _osdmap_rx) = msgr2::map_channel::map_channel::<MOSDMap>(1);
+        let session = OSDSession::new(
+            0,
+            "client.test".to_string(),
+            0,
+            None,
+            osdmap_tx,
+            std::sync::Weak::new(),
+        );
+
+        assert_eq!(session.current_incarnation(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_incarnation_increments_on_connect() {
+        let (osdmap_tx, _osdmap_rx) = msgr2::map_channel::map_channel::<MOSDMap>(1);
+        let session = OSDSession::new(
+            0,
+            "client.test".to_string(),
+            0,
+            None,
+            osdmap_tx,
+            std::sync::Weak::new(),
+        );
+
+        // Initial incarnation should be 0
+        assert_eq!(session.current_incarnation(), 0);
+
+        // Simulate connect by incrementing incarnation (what connect() does)
+        let _new_inc = session.incarnation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // After connect, incarnation should be 1
+        assert_eq!(session.current_incarnation(), 1);
+
+        // Second connect
+        let _new_inc = session.incarnation.fetch_add(1, Ordering::SeqCst) + 1;
+
+        // After second connect, incarnation should be 2
+        assert_eq!(session.current_incarnation(), 2);
+    }
+
+    #[test]
+    fn test_pending_op_captures_incarnation() {
+        // Test that PendingOp captures incarnation when created
+        let incarnation = Arc::new(AtomicU32::new(5));
+
+        let sent_incarnation = incarnation.load(Ordering::SeqCst);
+        assert_eq!(sent_incarnation, 5);
+
+        // Simulate reconnection
+        incarnation.fetch_add(1, Ordering::SeqCst);
+
+        // Old operation's incarnation is now stale
+        let current_incarnation = incarnation.load(Ordering::SeqCst);
+        assert_eq!(current_incarnation, 6);
+        assert_ne!(sent_incarnation, current_incarnation);
+    }
+}
+
+

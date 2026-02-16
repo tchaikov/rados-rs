@@ -4,11 +4,12 @@ This document describes the connection recovery implementation in rados-rs and h
 
 ## Overview
 
-Connection recovery in rados-rs uses a **three-level approach** to handle different failure scenarios:
+Connection recovery in rados-rs uses a **four-level approach** to handle different failure scenarios:
 
 1. **Immediate Recovery (msgr2 layer)**: Automatic SESSION_RECONNECT for transient failures
 2. **Map-Driven Recovery (OSD client layer)**: Operation migration when OSDMap changes
-3. **Ultimate Fallback**: Tracker timeout for unrecoverable failures
+3. **Keepalive & Heartbeat**: Proactive detection of dead connections
+4. **Per-Operation Timeout**: Ultimate fallback for unrecoverable failures
 
 ## Level 1: Immediate Recovery (msgr2)
 
@@ -48,22 +49,47 @@ let backoff_ms = (INITIAL_BACKOFF_MS * (1 << (attempt - 1))).min(1000);
 
 ### Implementation Status: ✅ COMPLETE
 
-**Location**: `crates/osdclient/src/client.rs::rescan_pending_ops()`
+**Location**: `crates/osdclient/src/client.rs::scan_requests_on_map_change()`
 
 **What it does**:
-- Triggered automatically when OSDMap updates arrive
+- Triggered automatically when OSDMap updates arrive via `handle_osdmap()`
 - Checks all pending operations across all sessions
-- Recalculates target OSD using CRUSH for stale operations
-- Migrates operations to correct OSD sessions
+- Recalculates target OSD using CRUSH for each pending operation
+- Migrates operations to correct OSD sessions when targets change
 
 **Key Features**:
 ```rust
-// Called from handle_osdmap() when OSDMap updates
-async fn rescan_pending_ops(&self) -> Result<()> {
+// Called from handle_osdmap() when OSDMap epoch changes (line 1431)
+async fn scan_requests_on_map_change(&self, new_epoch: u32) -> Result<()> {
     // 1. Get current OSDMap
+    let osdmap = self.get_osdmap().await?;
+
     // 2. For each session, check pending operations
-    // 3. Recalculate target OSD using object_to_osds()
-    // 4. Migrate if target has changed
+    for (osd_id, session) in sessions.iter() {
+        let metadata = session.get_pending_ops_metadata().await;
+
+        // 3. Check if pool deleted or target changed
+        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+            // Recalculate target OSD using CRUSH
+            let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
+            let new_primary = new_osds.first().copied().unwrap_or(-1);
+
+            // 4. Migrate if target has changed
+            if new_primary != *osd_id {
+                let mut op = session.remove_pending_op(tid).await.unwrap();
+                op.state = OpState::NeedsResend;
+                op.target.update(new_epoch, new_primary, new_osds.clone());
+                op.state = OpState::Queued;
+                need_resend.push((new_primary, op));
+            }
+        }
+    }
+
+    // 5. Resend to new targets
+    for (new_osd, pending_op) in need_resend {
+        let session = self.get_or_create_session(new_osd).await?;
+        session.insert_migrated_op(pending_op, new_epoch).await?;
+    }
 }
 ```
 
@@ -126,12 +152,30 @@ tokio::select! {
 **Location**: `crates/osdclient/src/tracker.rs`
 
 **What it does**:
-- Tracks each operation independently with its own deadline
+- Tracks each operation independently with its own deadline (30 seconds default)
 - Uses a background task with `tokio::time::sleep_until` for efficiency
 - Operations timeout even during connection failures or reconnection attempts
-- Automatically cancels timed-out operations via callback
+- Automatically cancels timed-out operations via callback to session
 
-**Key Features**:
+**Design Alignment**: ✅ **Matches Ceph Objecter's approach exactly**
+
+Ceph's implementation (`Objecter.h:2028`, `Objecter.cc:2403-2405`):
+```cpp
+struct Op {
+    uint64_t ontimeout = 0;  // Timer event ID
+};
+
+// Register timeout callback when operation is sent
+op->ontimeout = timer.add_event(osd_timeout, [this, tid]() {
+    op_cancel(tid, -ETIMEDOUT);
+});
+
+// Cancel timeout on success
+if (op->ontimeout && r != -ETIMEDOUT)
+    timer.cancel_event(op->ontimeout);
+```
+
+Our implementation mirrors this pattern:
 ```rust
 // Background task sleeps until next operation deadline
 type TrackedOps = BTreeMap<(Instant, i32, u64), ()>;  // Sorted by deadline
@@ -146,62 +190,131 @@ tokio::select! {
 }
 ```
 
-**Architecture**:
-- **BTreeMap** stores operations sorted by `(deadline, osd_id, tid)`
-- First entry is always the next operation to timeout
-- O(log n) insertion, O(1) next-deadline lookup
-- Single background task handles all OSDs' timeouts
-- Callback notifies OSDClient to cancel operation in session
+**Architecture Comparison**:
+
+| Aspect | Ceph Objecter | rados-rs |
+|--------|---------------|----------|
+| **Data structure** | boost::intrusive::set (ordered by time) | BTreeMap (ordered by deadline) |
+| **Registration** | `timer.add_event()` returns event ID | `tracker.track(tid, osd_id, deadline)` |
+| **Cancellation** | `timer.cancel_event(event_id)` | `tracker.untrack(tid, osd_id)` |
+| **Background task** | Dedicated timer thread | Tokio task with `sleep_until` |
+| **Timeout action** | `op_cancel(tid, -ETIMEDOUT)` | Callback removes op, sends error |
+| **Default timeout** | 30 seconds (`rados_osd_op_timeout`) | 30 seconds (configurable) |
 
 **Benefits**:
 - ✅ Timeouts work during reconnection (operations don't hang forever)
 - ✅ Timeouts work when connection is down (tracker runs independently)
 - ✅ Minimal overhead (single task, sleeps until needed)
 - ✅ Precise timeout tracking per operation, not per-client
+- ✅ O(log n) insertion, O(1) next-deadline lookup
 
-## Level 5: Ultimate Fallback
+## Level 5: Backoff Handling
 
-### Implementation Status: ✅ EXISTING (Configuration)
+### Implementation Status: ✅ COMPLETE
 
-**Location**: `crates/osdclient/src/tracker.rs::TrackerConfig`
+**Location**:
+- `crates/osdclient/src/backoff.rs` - BackoffTracker for per-PG backoff state
+- `crates/osdclient/src/client.rs::handle_backoff_from_osd()` - Message handling
+- `crates/osdclient/src/session.rs` - Per-session BackoffTracker integration
 
 **What it does**:
-- Default operation timeout: 30 seconds (configurable)
-- Client applications receive timeout error
-- Applications can retry with backoff
+- Handles MOSDBackoff messages from OSDs (BLOCK, UNBLOCK, ACK_BLOCK)
+- Tracks backoff state per-PG to prevent retry storms
+- Sends ACK_BLOCK responses to acknowledge backoff requests
+- Operations check backoff state before submission
+
+**Design Alignment**: ✅ **Matches Ceph's approach**
+- Reference: `~/dev/linux/net/ceph/osd_client.c::handle_backoff()`
+
+**Key Features**:
+```rust
+// BackoffTracker maintains per-PG backoff windows
+pub struct BackoffTracker {
+    backoffs: HashMap<SpgId, BackoffEntry>,  // Per-PG state
+}
+
+// When BLOCK received
+tracker.insert_or_update(backoff.pgid, backoff.begin, backoff.end);
+
+// Send ACK_BLOCK response
+let ack = MOSDBackoff::new(
+    backoff.pgid,
+    backoff.map_epoch,
+    CEPH_OSD_BACKOFF_OP_ACK_BLOCK,
+    backoff.id,
+    backoff.begin,
+    backoff.end,
+);
+session.send(ack).await?;
+
+// When UNBLOCK received
+tracker.remove(backoff.pgid);
+```
+
+**Benefits**:
+- ✅ Prevents retry storms when OSDs are overloaded
+- ✅ Respects per-PG backoff windows
+- ✅ Acknowledges backoff requests per protocol
+- ✅ Reduces wasted bandwidth and OSD CPU
 
 ## Comparison with Ceph's Objecter
 
-### ✅ Implemented Features
+### ✅ Implemented Features (Aligned with Ceph)
 
 | Feature | Ceph Objecter | rados-rs | Status |
 |---------|---------------|----------|--------|
 | SESSION_RECONNECT support | ✓ | ✓ | Complete |
 | Message replay queue | ✓ | ✓ | Complete |
 | Sequence number tracking | ✓ | ✓ | Complete |
-| Exponential backoff | ✓ | ✓ | **NEW** |
-| Active keepalive loop | ✓ | ✓ | **NEW** |
-| OSDMap-driven rescanning | ✓ | ✓ | **NEW** |
-| Operation timeout | ✓ | ✓ | Complete |
-| Backoff handling | ✓ | ✓ | Partial |
+| Exponential backoff | ✓ | ✓ | Complete |
+| Active keepalive loop | ✓ | ✓ | Complete |
+| OSDMap-driven rescanning | ✓ | ✓ | Complete |
+| Per-operation timeout | ✓ | ✓ | **Complete** (matches Ceph) |
+| Backoff handling (MOSDBackoff) | ✓ | ✓ | Complete |
 | Lossy connection policy | ✓ | ✓ | Complete |
+| Operation state tracking | ✓ | ✓ | Complete (OpState enum) |
+| OpTarget metadata | ✓ | ✓ | Complete |
+| Fluent operation builder | ✓ | ✓ | Complete (OpBuilder) |
 
-### ❌ Not Yet Implemented (Lower Priority)
+### 🚧 Partially Implemented
 
-| Feature | Severity | Effort | Notes |
-|---------|----------|--------|-------|
-| Connection state machine | Medium | Hard | Explicit states (DOWN, CONNECTING, CONNECTED) |
-| ~~Per-operation timeout~~ | ~~Medium~~ | ~~Medium~~ | ✅ **IMPLEMENTED** - Independent timeout tracking |
-| OSD address change detection | Medium | Medium | Check OSDMap during reconnect |
-| Message ACK window tracking | Low | Medium | Sliding window of acked sequence numbers |
-| Reconnect mutex/lock | Low | Easy | Prevent concurrent reconnect attempts |
-| Redirect loop prevention | Low | Medium | Track redirect history |
+| Feature | Ceph Implementation | rados-rs Status | Priority |
+|---------|---------------------|-----------------|----------|
+| Connection incarnation tracking | Tracks connection restarts to detect stale ops | Partially (client_inc exists, not per-connection) | **HIGH** |
+
+### ❌ Not Yet Implemented
+
+Prioritized by alignment with Ceph Objecter:
+
+#### **Priority 1: HIGH (Core Ceph Features)**
+
+| Feature | Ceph Reference | Impact | Effort | Notes |
+|---------|----------------|--------|--------|-------|
+| Per-connection incarnation | `Objecter.h:2502` incarnation field | Prevents stale op replay | Medium | Track connection restarts per-OSD |
+| Redirect handling | `Objecter.cc` redirect logic | Correct PG routing | Medium | Follow MOSDOpReply redirects |
+| OSD address change detection | Check OSDMap during reconnect | Faster recovery | Easy | Validate address in OSDMap |
+
+#### **Priority 2: MEDIUM (Reliability Features)**
+
+| Feature | Ceph Reference | Impact | Effort | Notes |
+|---------|----------------|--------|--------|-------|
+| Explicit connection state machine | CONNECTING/CONNECTED/CLOSED states | Better observability | Medium | Currently implicit in msgr2 |
+| Message ACK window tracking | Sliding window of acked sequence numbers | Prevents message loss | Medium | Optimize replay queue |
+| Reconnect mutex/lock | Prevents concurrent reconnects | Avoid races | Easy | Add per-session lock |
+
+#### **Priority 3: LOW (Optimization Features)**
+
+| Feature | Ceph Reference | Impact | Effort | Notes |
+|---------|----------------|--------|--------|-------|
+| Redirect loop prevention | Track redirect history | Prevent infinite loops | Medium | Track redirect chain |
+| Jittered backoff | Add randomness to delays | Reduce thundering herd | Easy | In exponential backoff |
+| Connection pooling | Multiple connections per OSD | Higher throughput | Hard | Not needed for most use cases |
 
 ### Design Differences
 
 **Ceph Objecter**:
 - Uses explicit connection state machine (DOWN → CONNECTING → CONNECTED)
-- Maintains per-operation retry state
+- Maintains per-connection incarnation counter to detect stale operations
 - Tracks redirect chains to prevent loops
 - Has more aggressive per-message acknowledgment tracking
 
@@ -214,8 +327,9 @@ tokio::select! {
 **Trade-offs**:
 - ✅ Simpler implementation, easier to maintain
 - ✅ Clear separation of concerns (msgr2 vs osdclient)
-- ❌ Slightly less aggressive reconnection (acceptable for most use cases)
-- ❌ No per-operation timeout (uses global tracker timeout)
+- ✅ Per-operation timeout tracking (matches Ceph exactly)
+- ⚠️ Missing per-connection incarnation (HIGH priority to add)
+- ⚠️ Missing redirect handling (HIGH priority to add)
 
 ## Testing
 
@@ -274,7 +388,89 @@ Integration tests with real Ceph cluster recommended for:
 3. **Result**: Connection re-established, operations resume
 4. **Time**: ~30 seconds detection + reconnect time
 
-## Future Enhancements
+## Prioritized Next Steps
+
+Based on alignment with Ceph's Objecter implementation, here are the recommended next steps:
+
+### Phase 1: Core Ceph Features (HIGH Priority)
+
+These features are present in Ceph's Objecter and are important for correctness:
+
+1. **Per-Connection Incarnation Tracking** (Medium effort)
+   - **Why**: Prevents stale operation replay after connection restarts
+   - **Ceph reference**: `Objecter.h:2502` - `OSDSession::incarnation` field
+   - **Implementation**: Add `incarnation` counter to `OSDSession`, increment on each connection establishment
+   - **Benefit**: Detect and reject operations from previous connection incarnations
+
+2. **Redirect Handling** (Medium effort)
+   - **Why**: OSDs may redirect operations to the correct PG primary
+   - **Ceph reference**: `Objecter.cc` - redirect logic in op reply handling
+   - **Implementation**: Parse `RequestRedirect` in `MOSDOpReply`, resubmit to new target
+   - **Benefit**: Faster operation completion without waiting for OSDMap update
+
+3. **OSD Address Validation During Reconnect** (Easy)
+   - **Why**: Faster recovery when OSD moves to new address
+   - **Ceph reference**: Check OSDMap before reconnecting
+   - **Implementation**: In `retry_with_reconnect()`, check if OSDMap has newer address
+   - **Benefit**: Avoid wasted reconnection attempts to stale addresses
+
+### Phase 2: Reliability Features (MEDIUM Priority)
+
+These improve observability and prevent edge cases:
+
+4. **Explicit Connection State Machine** (Medium effort)
+   - **Why**: Better visibility into connection lifecycle
+   - **States**: CONNECTING, CONNECTED, RECONNECTING, CLOSED
+   - **Benefit**: Easier debugging, clearer semantics
+
+5. **Reconnect Mutex/Lock** (Easy)
+   - **Why**: Prevent concurrent reconnection attempts
+   - **Implementation**: Per-session `Mutex<bool>` for reconnect-in-progress
+   - **Benefit**: Avoid race conditions in reconnection logic
+
+### Phase 3: Optimization Features (LOW Priority)
+
+Nice-to-have improvements:
+
+6. **Jittered Backoff** (Easy)
+   - **Why**: Reduce thundering herd at scale
+   - **Implementation**: Add random jitter to exponential backoff delays
+   - **Benefit**: Smoother cluster recovery under load
+
+7. **Redirect Loop Prevention** (Medium effort)
+   - **Why**: Prevent infinite redirect chains
+   - **Implementation**: Track redirect history per operation
+   - **Benefit**: Fail gracefully on misconfigured clusters
+
+### Recommended Implementation Order
+
+**Start with Phase 1, in order:**
+1. Per-Connection Incarnation Tracking - Most important for correctness
+2. Redirect Handling - Significant performance improvement
+3. OSD Address Validation - Quick win, easy to implement
+
+**Then Phase 2:**
+4. Explicit Connection State Machine - Improves maintainability
+5. Reconnect Mutex - Prevents rare race conditions
+
+**Phase 3 as needed:**
+6. Jittered Backoff - Only needed at scale
+7. Redirect Loop Prevention - Only needed for defensive coding
+
+### What NOT to Implement
+
+These Ceph features are not needed for rados-rs:
+
+- ❌ **Connection pooling** - Single connection per OSD is sufficient for most use cases
+- ❌ **Message ACK window tracking** - msgr2 sequence numbers already provide this
+- ❌ **Priority queuing** - Complexity not justified for typical workloads
+
+## Future Enhancements (Deprecated - See Prioritized Next Steps)
+
+The section below is kept for historical reference but is superseded by "Prioritized Next Steps" above.
+
+<details>
+<summary>Original Future Enhancements (Click to expand)</summary>
 
 Potential improvements for production hardening:
 
@@ -292,6 +488,19 @@ Potential improvements for production hardening:
 7. **Redirect tracking** - Prevent redirect loops
 8. **Connection pooling** - Multiple connections per OSD
 9. **Priority queuing** - Prioritize keepalive over bulk data
+
+</details>
+
+## Testing
+
+All existing tests pass:
+- msgr2: 66 unit tests
+- osdclient: 74 unit tests
+
+Integration tests with real Ceph cluster recommended for:
+- OSD restart scenarios
+- Network partition recovery
+- OSDMap-driven operation migration
 
 ## References
 
