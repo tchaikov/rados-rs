@@ -133,6 +133,10 @@ pub struct PendingOp {
     /// session incarnation, and operations with old incarnation are discarded.
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc:3519, ~/dev/linux/net/ceph/osd_client.c:2348
     pub sent_incarnation: u32,
+    /// Number of redirects this operation has followed
+    /// Used to detect and prevent infinite redirect loops.
+    /// Reference: Ceph has FIXME comment but no implementation (Objecter.cc:3741)
+    pub redirect_count: u32,
 }
 
 impl OSDSession {
@@ -608,6 +612,8 @@ impl OSDSession {
                     // Following Ceph pattern: operation stores incarnation when sent
                     // Reference: ~/dev/linux/net/ceph/osd_client.c:2348
                     sent_incarnation: self.incarnation.load(Ordering::SeqCst),
+                    // Start with no redirects
+                    redirect_count: 0,
                 },
             );
         }
@@ -688,9 +694,27 @@ impl OSDSession {
             // Following Ceph Objecter pattern: handle redirects before other logic
             // Reference: ~/dev/ceph/src/osdc/Objecter.cc:3734
             if let Some(redirect) = &reply.redirect {
+                // Check for redirect loop
+                const MAX_REDIRECTS: u32 = 10;
+                if pending_op.redirect_count >= MAX_REDIRECTS {
+                    error!(
+                        "Operation tid {} exceeded maximum redirects ({}), failing",
+                        tid, MAX_REDIRECTS
+                    );
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(crate::error::OSDClientError::Other(format!(
+                            "Exceeded maximum redirects ({})",
+                            MAX_REDIRECTS
+                        ))));
+                    return None;
+                }
+
                 info!(
-                    "Got redirect reply for tid {}: pool={}, key={}, namespace={}, object={}",
+                    "Got redirect reply for tid {} (redirect #{} of {}): pool={}, key={}, namespace={}, object={}",
                     tid,
+                    pending_op.redirect_count + 1,
+                    MAX_REDIRECTS,
                     redirect.redirect_locator.pool_id,
                     redirect.redirect_locator.key,
                     redirect.redirect_locator.namespace,
@@ -700,6 +724,9 @@ impl OSDSession {
                 // Apply redirect to operation's target object locator
                 // The redirect combines with existing locator (Ceph's combine_with_locator)
                 let mut updated_op = pending_op;
+
+                // Increment redirect counter
+                updated_op.redirect_count += 1;
 
                 // Update object locator with redirect information
                 if redirect.redirect_locator.pool_id != u64::MAX {

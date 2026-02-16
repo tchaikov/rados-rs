@@ -1589,6 +1589,9 @@ impl Connection {
         R: Fn() -> ReconnectAction<T>,
     {
         const MAX_RECONNECT_ATTEMPTS: usize = 3;
+        const INITIAL_BACKOFF_MS: u64 = 100;
+        const MAX_BACKOFF_MS: u64 = 1000;
+        const JITTER_PERCENT: f64 = 0.3; // ±30% jitter
 
         for attempt in 0..MAX_RECONNECT_ATTEMPTS {
             match operation(self).await {
@@ -1601,6 +1604,31 @@ impl Connection {
                         MAX_RECONNECT_ATTEMPTS,
                         e
                     );
+
+                    // Calculate exponential backoff with jitter before reconnection attempt
+                    // Skip backoff on first attempt (attempt == 0)
+                    if attempt > 0 {
+                        // Exponential backoff: 100ms, 200ms, 400ms, ...
+                        let base_backoff_ms =
+                            (INITIAL_BACKOFF_MS * (1_u64 << (attempt - 1))).min(MAX_BACKOFF_MS);
+
+                        // Add jitter: ±30% randomness to prevent thundering herd
+                        // Following best practices for distributed systems
+                        use rand::Rng;
+                        let jitter = rand::thread_rng().gen_range(-JITTER_PERCENT..=JITTER_PERCENT);
+                        let jittered_backoff_ms = (base_backoff_ms as f64 * (1.0 + jitter)) as u64;
+
+                        tracing::debug!(
+                            "Backing off for {}ms (base: {}ms, jitter: {:.1}%) before attempt {}",
+                            jittered_backoff_ms,
+                            base_backoff_ms,
+                            jitter * 100.0,
+                            attempt + 1
+                        );
+
+                        tokio::time::sleep(tokio::time::Duration::from_millis(jittered_backoff_ms))
+                            .await;
+                    }
 
                     // Attempt reconnection
                     if let Err(reconnect_err) = self.reconnect().await {
