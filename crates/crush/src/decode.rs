@@ -88,32 +88,9 @@ fn decode_nested_i32_map(buf: &mut Bytes) -> Result<HashMap<i32, HashMap<i32, i3
     if buf.remaining() < 4 {
         return Ok(HashMap::new());
     }
-    let outer_len: u32 = decode(buf)?;
-    let mut outer_map = HashMap::with_capacity(outer_len as usize);
 
-    for _ in 0..outer_len {
-        // Break on corrupted/truncated data rather than error
-        if buf.remaining() < 8 {
-            break;
-        }
-        let outer_key: i32 = decode(buf)?;
-        let inner_len: u32 = decode(buf)?;
-        let mut inner_map = HashMap::with_capacity(inner_len as usize);
-
-        for _ in 0..inner_len {
-            // Break on corrupted/truncated data rather than error
-            if buf.remaining() < 8 {
-                break;
-            }
-            let inner_key: i32 = decode(buf)?;
-            let inner_value: i32 = decode(buf)?;
-            inner_map.insert(inner_key, inner_value);
-        }
-
-        outer_map.insert(outer_key, inner_map);
-    }
-
-    Ok(outer_map)
+    // Now that HashMap<K, V> implements Denc, we can use the generic decode_map
+    decode_map(buf)
 }
 
 // ============= CrushMap Decoding =============

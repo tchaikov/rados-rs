@@ -643,50 +643,62 @@ impl Denc for String {
     }
 }
 
-// BTreeMap implementation - encodes length as u32 followed by key-value pairs
-use std::collections::BTreeMap;
+// Macro to implement Denc for map-like types
+// Encodes as: u32 length + key-value pairs
+macro_rules! impl_denc_map {
+    ($map_type:ident, $key_bound:tt, $($extra_bound:tt)*) => {
+        impl<K: Denc + $key_bound, V: Denc> Denc for std::collections::$map_type<K, V>
+        where
+            K: $($extra_bound)*
+        {
+            fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+                // Encode length as u32
+                let len = self.len() as u32;
+                Denc::encode(&len, buf, features)?;
 
-impl<K: Denc + Ord, V: Denc> Denc for BTreeMap<K, V> {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        // Encode length as u32
-        let len = self.len() as u32;
-        Denc::encode(&len, buf, features)?;
+                // Encode each key-value pair
+                for (key, value) in self {
+                    Denc::encode(key, buf, features)?;
+                    Denc::encode(value, buf, features)?;
+                }
 
-        // Encode each key-value pair
-        for (key, value) in self {
-            Denc::encode(key, buf, features)?;
-            Denc::encode(value, buf, features)?;
+                Ok(())
+            }
+
+            fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+                let len = <u32 as Denc>::decode(buf, features)? as usize;
+                let mut map = Self::new();
+
+                for _ in 0..len {
+                    let key = <K as Denc>::decode(buf, features)?;
+                    let value = <V as Denc>::decode(buf, features)?;
+                    map.insert(key, value);
+                }
+
+                Ok(map)
+            }
+
+            fn encoded_size(&self, features: u64) -> Option<usize> {
+                // Start with u32 length
+                let mut size = 4;
+
+                // Add size of each key-value pair
+                for (key, value) in self {
+                    size += Denc::encoded_size(key, features)?;
+                    size += Denc::encoded_size(value, features)?;
+                }
+
+                Some(size)
+            }
         }
-
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = <u32 as Denc>::decode(buf, features)? as usize;
-        let mut map = BTreeMap::new();
-
-        for _ in 0..len {
-            let key = <K as Denc>::decode(buf, features)?;
-            let value = <V as Denc>::decode(buf, features)?;
-            map.insert(key, value);
-        }
-
-        Ok(map)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Start with u32 length
-        let mut size = 4;
-
-        // Add size of each key-value pair
-        for (key, value) in self {
-            size += Denc::encoded_size(key, features)?;
-            size += Denc::encoded_size(value, features)?;
-        }
-
-        Some(size)
-    }
+    };
 }
+
+// BTreeMap implementation - encodes length as u32 followed by key-value pairs
+impl_denc_map!(BTreeMap, Ord,);
+
+// HashMap implementation - encodes length as u32 followed by key-value pairs
+impl_denc_map!(HashMap, Eq, Eq + std::hash::Hash);
 
 // BTreeSet implementation
 impl<T: Denc + Ord> Denc for std::collections::BTreeSet<T> {
