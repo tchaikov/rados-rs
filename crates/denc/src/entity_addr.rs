@@ -233,7 +233,7 @@ impl EntityAddr {
         buf.copy_to_slice(&mut sockaddr_data);
 
         Ok(Self {
-            addr_type: EntityAddrType::Legacy,
+            addr_type: EntityAddrType::Any, // Legacy format defaults to Any type
             nonce,
             sockaddr_data,
         })
