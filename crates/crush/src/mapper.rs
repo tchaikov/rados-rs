@@ -7,6 +7,10 @@ use crate::hash::crush_hash32_2;
 use crate::types::{CrushMap, RuleOp};
 use denc::constants::crush::{FIXED_POINT_MASK, FIXED_POINT_ONE};
 
+/// Sentinel value for "no item selected" in INDEP mode
+/// Matches CRUSH_ITEM_NONE in Ceph (crush.h)
+const CRUSH_ITEM_NONE: i32 = 0x7fffffff;
+
 /// Check if an OSD is "out" (failed, fully offloaded)
 fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
     if item < 0 || item as usize >= weight.len() {
@@ -167,8 +171,76 @@ pub fn crush_do_rule(
                 // Do nothing
             }
 
+            RuleOp::ChooseIndep => {
+                // Choose N items using INDEP algorithm (for erasure coding)
+                let numrep = if step.arg1 == 0 {
+                    result_max as i32
+                } else if step.arg1 > 0 {
+                    step.arg1
+                } else {
+                    (result_max as i32) + step.arg1
+                };
+
+                let item_type = step.arg2;
+
+                scratch.clear();
+                for &item in &work {
+                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep as usize];
+                    crush_choose_indep(
+                        map,
+                        item,
+                        x,
+                        numrep as usize,
+                        item_type,
+                        &mut indep_out,
+                        weights,
+                        choose_tries,
+                        false, // recurse_to_leaf
+                        chooseleaf_vary_r,
+                        chooseleaf_stable,
+                    )?;
+                    scratch.extend_from_slice(&indep_out);
+                }
+
+                work.clone_from(&scratch);
+            }
+
+            RuleOp::ChooseLeafIndep => {
+                // Choose N items using INDEP algorithm and descend to leaf
+                let numrep = if step.arg1 == 0 {
+                    result_max as i32
+                } else if step.arg1 > 0 {
+                    step.arg1
+                } else {
+                    (result_max as i32) + step.arg1
+                };
+
+                let item_type = step.arg2;
+
+                scratch.clear();
+                for &item in &work {
+                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep as usize];
+                    crush_choose_indep(
+                        map,
+                        item,
+                        x,
+                        numrep as usize,
+                        item_type,
+                        &mut indep_out,
+                        weights,
+                        choose_tries,
+                        true, // recurse_to_leaf
+                        chooseleaf_vary_r,
+                        chooseleaf_stable,
+                    )?;
+                    scratch.extend_from_slice(&indep_out);
+                }
+
+                work.clone_from(&scratch);
+            }
+
             _ => {
-                // Unsupported operations (INDEP, MSR, etc.)
+                // Unsupported operations (MSR, etc.)
                 tracing::warn!("Unsupported CRUSH rule operation: {:?}", step.op);
             }
         }
@@ -353,6 +425,222 @@ fn crush_choose_firstn(
     Ok(())
 }
 
+/// Choose N items using INDEP (independent) algorithm
+///
+/// Unlike FIRSTN, each position independently selects an item.
+/// If a position fails to find a valid item, it gets CRUSH_ITEM_NONE
+/// rather than shifting subsequent items. This is critical for
+/// erasure-coded pools where each chunk has a fixed position.
+///
+/// Reference: ~/dev/ceph/src/crush/mapper.c crush_choose_indep()
+#[allow(clippy::too_many_arguments)]
+fn crush_choose_indep(
+    map: &CrushMap,
+    bucket_id: i32,
+    x: u32,
+    numrep: usize,
+    item_type: i32,
+    out: &mut [i32],
+    weights: &[u32],
+    tries: u32,
+    recurse_to_leaf: bool,
+    _vary_r: u8,
+    _stable: u8,
+) -> Result<()> {
+    tracing::debug!(
+        "crush_choose_indep: bucket_id={}, numrep={}, item_type={}, recurse_to_leaf={}",
+        bucket_id,
+        numrep,
+        item_type,
+        recurse_to_leaf
+    );
+
+    // If bucket_id is a device (>= 0), just return it if it's the right type
+    if bucket_id >= 0 {
+        if item_type == 0 && !is_out(weights, bucket_id, x) && !out.is_empty() {
+            out[0] = bucket_id;
+        }
+        return Ok(());
+    }
+
+    // Get the bucket
+    let bucket = map.get_bucket(bucket_id)?;
+    tracing::debug!(
+        "Got bucket: id={}, type={}, size={}, items={:?}",
+        bucket.id,
+        bucket.bucket_type,
+        bucket.size,
+        bucket.items
+    );
+
+    // Initialize output with CRUSH_ITEM_NONE
+    for slot in out.iter_mut().take(numrep) {
+        *slot = CRUSH_ITEM_NONE;
+    }
+
+    // Try multiple times to fill all positions
+    for ftotal in 0..tries {
+        let mut all_done = true;
+
+        for rep in 0..numrep {
+            // Skip positions that already have a valid item
+            if out[rep] != CRUSH_ITEM_NONE {
+                continue;
+            }
+
+            all_done = false;
+
+            let mut current_bucket = bucket;
+
+            // In INDEP mode, r starts at numrep * ftotal + rep
+            // This ensures each position gets a different hash input
+            let r = (numrep as u32)
+                .wrapping_mul(ftotal)
+                .wrapping_add(rep as u32);
+
+            // Inner loop for descending through bucket hierarchy
+            let mut item = CRUSH_ITEM_NONE;
+            let mut item_found = false;
+
+            loop {
+                // Select an item from the current bucket
+                let candidate = match bucket_choose(current_bucket, x, r) {
+                    Some(candidate) => candidate,
+                    None => {
+                        tracing::debug!("bucket_choose returned None for r={}", r);
+                        break;
+                    }
+                };
+
+                tracing::debug!(
+                    "Selected item {} from bucket {} (rep={}, try={})",
+                    candidate,
+                    current_bucket.id,
+                    rep,
+                    ftotal
+                );
+
+                // Determine item type
+                let itemtype = if candidate >= 0 {
+                    0 // Device
+                } else {
+                    match map.get_bucket(candidate) {
+                        Ok(b) => b.bucket_type,
+                        Err(_) => {
+                            tracing::debug!("Invalid bucket {}", candidate);
+                            break;
+                        }
+                    }
+                };
+
+                tracing::debug!(
+                    "Item {} has type {}, looking for type {}",
+                    candidate,
+                    itemtype,
+                    item_type
+                );
+
+                // Check if this is the type we're looking for
+                if itemtype != item_type {
+                    if candidate >= 0 {
+                        // Item is a device but wrong type
+                        tracing::debug!("Device {} has wrong type", candidate);
+                        break;
+                    }
+                    // Item is a bucket, descend into it
+                    current_bucket = map.get_bucket(candidate)?;
+                    tracing::debug!("Descending into bucket {}", candidate);
+                    continue;
+                }
+
+                // Check for collision with any other output position
+                let collision = out
+                    .iter()
+                    .enumerate()
+                    .take(numrep)
+                    .any(|(j, &val)| j != rep && val == candidate);
+                if collision {
+                    tracing::debug!("Item {} collides with another position", candidate);
+                    break;
+                }
+
+                // Check if device is out
+                if candidate >= 0 && is_out(weights, candidate, x) {
+                    tracing::debug!("Device {} is out", candidate);
+                    break;
+                }
+
+                // If we need to recurse to leaf (for CHOOSELEAF)
+                if recurse_to_leaf && candidate < 0 {
+                    // Recursively select a device from this bucket using INDEP
+                    let mut leaf_out = [CRUSH_ITEM_NONE; 1];
+                    crush_choose_indep(
+                        map,
+                        candidate,
+                        x,
+                        1,
+                        0, // Type 0 = device
+                        &mut leaf_out,
+                        weights,
+                        tries,
+                        true,
+                        _vary_r,
+                        _stable,
+                    )?;
+
+                    if leaf_out[0] == CRUSH_ITEM_NONE {
+                        tracing::debug!("Failed to find leaf in bucket {}", candidate);
+                        break;
+                    }
+
+                    // Check leaf for collision with other positions
+                    let leaf_collision = out
+                        .iter()
+                        .enumerate()
+                        .take(numrep)
+                        .any(|(j, &val)| j != rep && val == leaf_out[0]);
+                    if leaf_collision {
+                        tracing::debug!("Leaf item {} collides with another position", leaf_out[0]);
+                        break;
+                    }
+
+                    item = leaf_out[0];
+                    item_found = true;
+                    break;
+                }
+
+                // Success - found a valid item
+                tracing::debug!("Found valid item {}", candidate);
+                item = candidate;
+                item_found = true;
+                break;
+            }
+
+            if item_found {
+                out[rep] = item;
+                tracing::trace!("crush_choose_indep: rep={}, item={} SELECTED", rep, item);
+            }
+        }
+
+        if all_done {
+            break;
+        }
+    }
+
+    // Log unfilled positions
+    for (rep, &item) in out.iter().enumerate().take(numrep) {
+        if item == CRUSH_ITEM_NONE {
+            tracing::debug!(
+                "Failed to find item for position {} after {} tries",
+                rep,
+                tries
+            );
+        }
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -464,5 +752,263 @@ mod tests {
         if out.len() == 2 {
             assert_ne!(out[0], out[1]);
         }
+    }
+
+    #[test]
+    fn test_crush_choose_indep() {
+        let mut map = CrushMap::new();
+        map.max_devices = 4;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x40000,
+            size: 4,
+            items: vec![0, 1, 2, 3],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        let mut out = vec![CRUSH_ITEM_NONE; 3];
+        let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
+
+        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0, 0);
+
+        assert!(res.is_ok());
+        // All positions should be filled (enough devices available)
+        for &item in &out {
+            assert_ne!(item, CRUSH_ITEM_NONE, "all positions should be filled");
+            assert!((0..4).contains(&item), "item should be a valid device");
+        }
+        // All items should be distinct
+        assert_ne!(out[0], out[1]);
+        assert_ne!(out[0], out[2]);
+        assert_ne!(out[1], out[2]);
+    }
+
+    #[test]
+    fn test_crush_choose_indep_stable_positions() {
+        // INDEP key property: removing a device only affects its position,
+        // not other positions. Verify determinism across multiple runs.
+        let mut map = CrushMap::new();
+        map.max_devices = 5;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x50000,
+            size: 5,
+            items: vec![0, 1, 2, 3, 4],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        let weights = vec![0x10000, 0x10000, 0x10000, 0x10000, 0x10000];
+
+        // Run the same input twice - should produce identical results
+        let mut out1 = vec![CRUSH_ITEM_NONE; 3];
+        let mut out2 = vec![CRUSH_ITEM_NONE; 3];
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0, 0).unwrap();
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0, 0).unwrap();
+        assert_eq!(out1, out2, "same input should produce same output");
+    }
+
+    #[test]
+    fn test_crush_choose_indep_with_out_device() {
+        // When a device is "out", INDEP should put CRUSH_ITEM_NONE in that
+        // position rather than shifting other items
+        let mut map = CrushMap::new();
+        map.max_devices = 3;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x30000,
+            size: 3,
+            items: vec![0, 1, 2],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        // All devices in
+        let weights_all_in = vec![0x10000, 0x10000, 0x10000];
+        let mut out_all = vec![CRUSH_ITEM_NONE; 3];
+        crush_choose_indep(
+            &map,
+            -1,
+            100,
+            3,
+            0,
+            &mut out_all,
+            &weights_all_in,
+            50,
+            false,
+            0,
+            0,
+        )
+        .unwrap();
+
+        // All positions should be filled when all devices are in
+        for &item in &out_all {
+            assert_ne!(item, CRUSH_ITEM_NONE);
+        }
+    }
+
+    #[test]
+    fn test_crush_do_rule_indep() {
+        // Test ChooseIndep via crush_do_rule
+        let mut map = CrushMap::new();
+        map.max_devices = 4;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x40000,
+            size: 4,
+            items: vec![0, 1, 2, 3],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        // Erasure rule: TAKE -1, CHOOSE_INDEP 3 type 0, EMIT
+        let rule = CrushRule {
+            rule_id: 0,
+            rule_type: crate::types::RuleType::Erasure,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseIndep,
+                    arg1: 3,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        };
+
+        map.rules = vec![Some(rule)];
+
+        let mut result = Vec::new();
+        let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
+
+        let res = crush_do_rule(&map, 0, 123, &mut result, 3, &weights);
+        assert!(res.is_ok());
+        assert_eq!(result.len(), 3);
+
+        // All results should be valid devices or CRUSH_ITEM_NONE
+        let valid_count = result
+            .iter()
+            .filter(|&&item| item != CRUSH_ITEM_NONE)
+            .count();
+        assert_eq!(
+            valid_count, 3,
+            "should find 3 valid devices with 4 available"
+        );
+
+        // Valid items should be distinct
+        let mut valid_items: Vec<i32> = result
+            .iter()
+            .copied()
+            .filter(|&item| item != CRUSH_ITEM_NONE)
+            .collect();
+        valid_items.sort();
+        valid_items.dedup();
+        assert_eq!(valid_items.len(), 3, "valid items should be distinct");
+    }
+
+    #[test]
+    fn test_crush_do_rule_chooseleaf_indep() {
+        // Test ChooseLeafIndep via crush_do_rule
+        let mut map = CrushMap::new();
+        map.max_devices = 4;
+        map.max_buckets = 1;
+
+        let bucket = CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x40000,
+            size: 4,
+            items: vec![0, 1, 2, 3],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000, 0x10000, 0x10000, 0x10000],
+            },
+        };
+
+        map.buckets = vec![Some(bucket)];
+
+        // Erasure rule: TAKE -1, CHOOSELEAF_INDEP 3 type 0, EMIT
+        let rule = CrushRule {
+            rule_id: 0,
+            rule_type: crate::types::RuleType::Erasure,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseLeafIndep,
+                    arg1: 3,
+                    arg2: 0, // Type 0 = device
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        };
+
+        map.rules = vec![Some(rule)];
+
+        let mut result = Vec::new();
+        let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
+
+        let res = crush_do_rule(&map, 0, 123, &mut result, 3, &weights);
+        assert!(res.is_ok());
+        assert_eq!(result.len(), 3);
+
+        // All results should be valid devices
+        let valid_count = result
+            .iter()
+            .filter(|&&item| item != CRUSH_ITEM_NONE)
+            .count();
+        assert_eq!(
+            valid_count, 3,
+            "should find 3 valid devices with 4 available"
+        );
     }
 }
