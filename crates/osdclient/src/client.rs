@@ -206,6 +206,9 @@ impl OSDClient {
             }
         }
 
+        // If there's a disconnected session, preserve its pending operations
+        let old_session = sessions.get(&osd_id).cloned();
+
         // Create new session
         info!("Creating new session for OSD {}", osd_id);
 
@@ -225,7 +228,7 @@ impl OSDClient {
             self.self_weak.clone(),
         );
 
-        // Get OSD address from OSDMap
+        // Get OSD address from OSDMap (may have changed)
         let osd_addr = self.get_osd_address(osd_id).await?;
 
         // Connect to OSD - this spawns the I/O task
@@ -234,6 +237,40 @@ impl OSDClient {
         // Wrap in Arc and store
         let session = Arc::new(session);
         sessions.insert(osd_id, Arc::clone(&session));
+
+        // Transfer pending operations from old session to new session
+        if let Some(old_session) = old_session {
+            let old_ops = old_session.get_pending_ops_metadata().await;
+            if !old_ops.is_empty() {
+                info!(
+                    "Transferring {} pending operations from old OSD {} session to new session",
+                    old_ops.len(),
+                    osd_id
+                );
+
+                // Get current OSDMap epoch for the transfer
+                let current_epoch = self
+                    .osdmap
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|m| u32::from(m.epoch))
+                    .unwrap_or(0);
+
+                // Transfer each operation
+                for (tid, _pool_id, _object_id, _op_epoch) in old_ops {
+                    if let Some(pending_op) = old_session.remove_pending_op(tid).await {
+                        if let Err(e) = session.insert_migrated_op(pending_op, current_epoch).await
+                        {
+                            warn!(
+                                "Failed to transfer operation tid={} to new session for OSD {}: {}",
+                                tid, osd_id, e
+                            );
+                        }
+                    }
+                }
+            }
+        }
 
         Ok(session)
     }

@@ -296,20 +296,18 @@ impl OSDSession {
 
         info!("I/O task exiting for OSD {}", ctx.osd_id);
 
-        // Clean up pending operations on disconnect
-        let mut pending = ctx.pending_ops.write().await;
-        for (tid, pending_op) in pending.drain() {
-            let _ = pending_op
-                .result_tx
-                .send(Err(OSDClientError::Connection(format!(
-                    "OSD {} disconnected",
-                    ctx.osd_id
-                ))));
-            debug!(
-                "Cancelled pending operation tid={} due to OSD {} disconnect",
-                tid, ctx.osd_id
-            );
-        }
+        // Do NOT cancel pending operations here - let them be migrated by rescan_pending_ops()
+        // when OSDMap updates arrive. This handles scenarios where:
+        // - OSD moved to a different IP address (reconnect to old address fails)
+        // - OSD is down for extended period (>30s, beyond reconnect retry window)
+        // - CRUSH map changes require operations to move to different OSDs
+        //
+        // Operations will eventually timeout via tracker if no OSDMap update arrives,
+        // giving the client application a chance to retry with backoff.
+        info!(
+            "Leaving {} pending operations for potential migration by OSDMap updates",
+            ctx.pending_ops.read().await.len()
+        );
     }
 
     // ===========================================================================

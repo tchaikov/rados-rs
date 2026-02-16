@@ -32,17 +32,17 @@ const INITIAL_BACKOFF_MS: u64 = 100;
 let backoff_ms = (INITIAL_BACKOFF_MS * (1 << (attempt - 1))).min(1000);
 ```
 
-**Handles**:
+**Handles** (via Level 1 immediate retry):
 - ✅ TCP connection failures
 - ✅ Network timeouts
 - ✅ OSD process restart (if within retry window)
 - ✅ Message replay after reconnection
 - ✅ Sequence number synchronization
 
-**Does NOT handle**:
-- ❌ OSD moved to different IP address
-- ❌ Prolonged OSD downtime (>30 seconds)
-- ❌ CRUSH map changes requiring different target OSD
+**Defers to Level 2** (for automatic migration):
+- ⏩ OSD moved to different IP address → Handled by Level 2 (pending ops preserved, migrated to new address)
+- ⏩ Prolonged OSD downtime (>30 seconds) → Handled by Level 2 (pending ops preserved for migration)
+- ⏩ CRUSH map changes requiring different target OSD → Handled by Level 2 (CRUSH recalculation)
 
 ## Level 2: Map-Driven Recovery (OSD Client)
 
@@ -80,6 +80,15 @@ async fn rescan_pending_ops(&self) -> Result<()> {
 3. `source_session.remove_pending_op()` - Remove from old session
 4. `target_session.insert_migrated_op()` - Insert into new session
 5. Operation automatically retried with incremented attempt counter
+
+**Critical Design Feature**:
+When Level 1 reconnection fails after all retries (e.g., OSD moved to new IP):
+- Pending operations are **preserved** in the disconnected session (not cancelled)
+- io_task exits but operations remain in `pending_ops` HashMap
+- When new session is created for same OSD (e.g., with new IP from OSDMap):
+  - Old pending operations are automatically transferred to new session
+  - Operations continue with updated target address
+- This ensures no operations are lost during address changes or prolonged downtime
 
 ## Level 3: Keepalive & Heartbeat
 
@@ -187,7 +196,7 @@ Integration tests with real Ceph cluster recommended for:
 3. **Result**: Operation completes successfully after reconnect
 4. **Time**: ~100-700ms
 
-### Scenario 2: OSD Process Restart
+### Scenario 2: OSD Process Restart (Same Address)
 1. **Detection**: Connection fails, OSDMap update arrives
 2. **Recovery**: 
    - Level 1 attempts reconnect (may fail if OSD still starting)
@@ -195,6 +204,17 @@ Integration tests with real Ceph cluster recommended for:
    - Operations migrated if OSD ID changed
 3. **Result**: Operations redirected to correct OSD
 4. **Time**: ~1-5 seconds
+
+### Scenario 2b: OSD Moved to New IP Address
+1. **Detection**: Connection fails, all reconnect attempts to old address fail
+2. **Recovery**:
+   - Level 1 tries old address 3 times (fails each time)
+   - io_task exits but **pending operations preserved**
+   - OSDMap update arrives with new address
+   - `get_or_create_session()` creates new session with new address
+   - Pending operations **automatically transferred** to new session
+3. **Result**: Operations resume on new address without data loss
+4. **Time**: ~2-10 seconds (depends on OSDMap propagation)
 
 ### Scenario 3: OSD Permanent Failure
 1. **Detection**: All reconnect attempts fail
