@@ -187,7 +187,7 @@ pub struct CrushMap {
     pub class_map: std::collections::HashMap<i32, i32>,
     /// Maps class ID to class name (e.g., "ssd", "hdd", "nvme")
     pub class_name: std::collections::HashMap<i32, String>,
-    /// Shadow bucket mappings: bucket[id][class] = shadow_bucket_id
+    /// Shadow bucket mappings: `bucket[id][class_id] = shadow_bucket_id`
     /// Used for device class-specific CRUSH tree shadows
     pub class_bucket: std::collections::HashMap<i32, std::collections::HashMap<i32, i32>>,
 }
