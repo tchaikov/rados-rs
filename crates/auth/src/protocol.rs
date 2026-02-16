@@ -907,3 +907,434 @@ impl Denc for CephXAuthorizeReply {
         Some(1 + 8) // struct_v + nonce_plus_one
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn test_service_ticket_request_encode_decode() {
+        let request = CephXServiceTicketRequest { keys: 0x12345678 };
+
+        let mut buf = BytesMut::new();
+        request.encode(&mut buf, 0).unwrap();
+
+        assert_eq!(buf.len(), 5); // 1 byte struct_v + 4 bytes keys
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXServiceTicketRequest::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.keys, 0x12345678);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_service_ticket_encode_decode() {
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+        let validity = Duration::from_secs(3600);
+        let ticket = CephXServiceTicket {
+            session_key: key.clone(),
+            validity,
+        };
+
+        let mut buf = BytesMut::new();
+        ticket.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXServiceTicket::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.session_key.len(), key.len());
+        assert_eq!(decoded.validity, validity);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_encrypted_service_ticket_encode_decode() {
+        let encrypted_data = Bytes::from(vec![1, 2, 3, 4, 5, 6, 7, 8]);
+        let ticket = EncryptedServiceTicket {
+            version: 1,
+            encrypted_data: encrypted_data.clone(),
+        };
+
+        let mut buf = BytesMut::new();
+        ticket.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = EncryptedServiceTicket::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.version, 1);
+        assert_eq!(decoded.encrypted_data, encrypted_data);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_service_ticket_info_encode_decode() {
+        let encrypted_data = Bytes::from(vec![1, 2, 3, 4]);
+        let ticket_blob_data = Bytes::from(vec![5, 6, 7, 8]);
+        let info = ServiceTicketInfo {
+            service_id: 4, // OSD
+            encrypted_service_ticket: EncryptedServiceTicket {
+                version: 1,
+                encrypted_data: encrypted_data.clone(),
+            },
+            ticket_enc: 1,
+            ticket_blob: CephXTicketBlob {
+                secret_id: 42,
+                blob: ticket_blob_data.clone(),
+            },
+        };
+
+        let mut buf = BytesMut::new();
+        info.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = ServiceTicketInfo::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.service_id, 4);
+        assert_eq!(decoded.encrypted_service_ticket.version, 1);
+        assert_eq!(
+            decoded.encrypted_service_ticket.encrypted_data,
+            encrypted_data
+        );
+        assert_eq!(decoded.ticket_enc, 1);
+        assert_eq!(decoded.ticket_blob.secret_id, 42);
+        assert_eq!(decoded.ticket_blob.blob, ticket_blob_data);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_service_ticket_reply_encode_decode() {
+        let encrypted_data = Bytes::from(vec![1, 2, 3, 4]);
+        let ticket_blob_data = Bytes::from(vec![5, 6, 7, 8]);
+        let info = ServiceTicketInfo {
+            service_id: 4,
+            encrypted_service_ticket: EncryptedServiceTicket {
+                version: 1,
+                encrypted_data: encrypted_data.clone(),
+            },
+            ticket_enc: 1,
+            ticket_blob: CephXTicketBlob {
+                secret_id: 42,
+                blob: ticket_blob_data.clone(),
+            },
+        };
+
+        let reply = ServiceTicketReply {
+            struct_v: 1,
+            tickets: vec![info],
+        };
+
+        let mut buf = BytesMut::new();
+        reply.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = ServiceTicketReply::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.struct_v, 1);
+        assert_eq!(decoded.tickets.len(), 1);
+        assert_eq!(decoded.tickets[0].service_id, 4);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_auth_mode_conversions() {
+        assert_eq!(AuthMode::Mon.as_u8(), 10);
+        assert_eq!(AuthMode::Authorizer.as_u8(), 1);
+        assert_eq!(AuthMode::None.as_u8(), 0);
+
+        assert_eq!(AuthMode::from_u8(10), Some(AuthMode::Mon));
+        assert_eq!(AuthMode::from_u8(1), Some(AuthMode::Authorizer));
+        assert_eq!(AuthMode::from_u8(0), Some(AuthMode::None));
+        assert_eq!(AuthMode::from_u8(99), None);
+    }
+
+    #[test]
+    fn test_cephx_encrypted_envelope_encode_decode() {
+        // Test with Bytes payload (more appropriate for encrypted data)
+        let payload = Bytes::from(vec![1, 2, 3, 4, 5]);
+        let envelope = CephXEncryptedEnvelope {
+            payload: payload.clone(),
+        };
+
+        let mut buf = BytesMut::new();
+        envelope.encode(&mut buf, 0).unwrap();
+
+        // The envelope includes: struct_v (1) + magic (8) + payload
+        // Bytes encodes as: length (4) + bytes
+        // So total: 1 + 8 + 4 + 5 = 18 bytes
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXEncryptedEnvelope::<Bytes>::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.payload, Bytes::from(vec![1, 2, 3, 4, 5]));
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_request_header_encode_decode() {
+        let header = CephXRequestHeader {
+            request_type: CEPHX_GET_AUTH_SESSION_KEY,
+        };
+
+        let mut buf = BytesMut::new();
+        header.encode(&mut buf, 0).unwrap();
+
+        assert_eq!(buf.len(), 2); // u16
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXRequestHeader::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.request_type, CEPHX_GET_AUTH_SESSION_KEY);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_response_header_encode_decode() {
+        let header = CephXResponseHeader {
+            request_type: CEPHX_GET_AUTH_SESSION_KEY,
+            status: 0,
+        };
+
+        let mut buf = BytesMut::new();
+        header.encode(&mut buf, 0).unwrap();
+
+        assert_eq!(buf.len(), 6); // u16 + i32
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXResponseHeader::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.request_type, CEPHX_GET_AUTH_SESSION_KEY);
+        assert_eq!(decoded.status, 0);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authenticate_encode_decode() {
+        let auth = CephXAuthenticate {
+            client_challenge: 0x1234567890abcdef,
+            key: 0xabcd,
+            old_ticket: CephXTicketBlob {
+                secret_id: 0,
+                blob: Bytes::new(),
+            },
+            other_keys: 0x0F, // Request all services
+        };
+
+        let mut buf = BytesMut::new();
+        auth.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthenticate::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.client_challenge, 0x1234567890abcdef);
+        assert_eq!(decoded.key, 0xabcd);
+        assert_eq!(decoded.other_keys, 0x0F);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_server_challenge_encode_decode() {
+        let challenge = CephXServerChallenge {
+            server_challenge: 0xfedcba9876543210,
+        };
+
+        let mut buf = BytesMut::new();
+        challenge.encode(&mut buf, 0).unwrap();
+
+        // The encode() doesn't add struct_v, but decode() expects it
+        // So manually add struct_v for the roundtrip test
+        let mut full_buf = BytesMut::new();
+        1u8.encode(&mut full_buf, 0).unwrap(); // struct_v
+        full_buf.extend_from_slice(&buf);
+
+        let mut read_buf = full_buf.freeze();
+        let decoded = CephXServerChallenge::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.server_challenge, 0xfedcba9876543210);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_challenge_blob_encode_decode() {
+        let blob = CephXChallengeBlob {
+            server_challenge: 0x1122334455667788,
+            client_challenge: 0x8877665544332211,
+        };
+
+        let mut buf = BytesMut::new();
+        blob.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXChallengeBlob::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.server_challenge, 0x1122334455667788);
+        assert_eq!(decoded.client_challenge, 0x8877665544332211);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_request_construction() {
+        let req = CephXRequest::get_auth_session_key();
+        assert_eq!(req.request_type, CEPHX_GET_AUTH_SESSION_KEY);
+
+        let req2 = CephXRequest::get_principal_session_key();
+        assert_eq!(req2.request_type, CEPHX_GET_PRINCIPAL_SESSION_KEY);
+
+        let req3 = CephXRequest::new(0x1234);
+        assert_eq!(req3.request_type, 0x1234);
+    }
+
+    #[test]
+    fn test_cephx_request_encode_decode() {
+        let request = CephXRequest {
+            request_type: CEPHX_GET_AUTH_SESSION_KEY,
+            keys: vec![1, 2, 3],
+            other_keys: true,
+        };
+
+        let mut buf = BytesMut::new();
+        request.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXRequest::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.request_type, CEPHX_GET_AUTH_SESSION_KEY);
+        assert_eq!(decoded.keys, vec![1, 2, 3]);
+        assert!(decoded.other_keys);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_reply_construction() {
+        let reply = CephXReply::success();
+        assert_eq!(reply.status, 0);
+
+        let reply2 = CephXReply::new(-5);
+        assert_eq!(reply2.status, -5);
+    }
+
+    #[test]
+    fn test_cephx_reply_with_session_key() {
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+        let reply = CephXReply::success().with_session_key(key.clone());
+
+        assert!(reply.session_key.is_some());
+        assert_eq!(reply.session_key.unwrap().len(), key.len());
+    }
+
+    #[test]
+    fn test_cephx_reply_with_ticket() {
+        let ticket_blob = CephXTicketBlob {
+            secret_id: 42,
+            blob: Bytes::from(vec![1, 2, 3, 4]),
+        };
+        let reply = CephXReply::success().with_ticket(ticket_blob.clone());
+
+        assert_eq!(reply.tickets.len(), 1);
+        assert_eq!(reply.tickets[0].secret_id, 42);
+    }
+
+    #[test]
+    fn test_cephx_reply_encode_decode() {
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+        let ticket_blob = CephXTicketBlob {
+            secret_id: 42,
+            blob: Bytes::from(vec![1, 2, 3, 4]),
+        };
+        let reply = CephXReply::success()
+            .with_session_key(key.clone())
+            .with_ticket(ticket_blob.clone());
+
+        let encoded = reply.encode().unwrap();
+        let decoded = CephXReply::decode(&encoded).unwrap();
+
+        assert_eq!(decoded.status, 0);
+        assert!(decoded.session_key.is_some());
+        assert_eq!(decoded.tickets.len(), 1);
+        assert_eq!(decoded.tickets[0].secret_id, 42);
+    }
+
+    #[test]
+    fn test_cephx_reply_is_success() {
+        let reply = CephXReply::success();
+        assert!(reply.is_success());
+
+        let reply2 = CephXReply::new(-5);
+        assert!(!reply2.is_success());
+    }
+
+    #[test]
+    fn test_cephx_authorize_a_encode_decode() {
+        let ticket_blob = CephXTicketBlob {
+            secret_id: 99,
+            blob: Bytes::from(vec![10, 20, 30]),
+        };
+        let auth_a = CephXAuthorizeA::new(12345, 4, ticket_blob.clone());
+
+        assert_eq!(auth_a.global_id, 12345);
+        assert_eq!(auth_a.service_id, 4);
+
+        let mut buf = BytesMut::new();
+        auth_a.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthorizeA::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.global_id, 12345);
+        assert_eq!(decoded.service_id, 4);
+        assert_eq!(decoded.ticket_blob.secret_id, 99);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authorize_b_no_challenge() {
+        let auth_b = CephXAuthorizeB::new(54321);
+
+        assert_eq!(auth_b.nonce, 54321);
+        assert!(!auth_b.have_challenge);
+        assert_eq!(auth_b.server_challenge_plus_one, 0);
+
+        let mut buf = BytesMut::new();
+        auth_b.encode(&mut buf, 0).unwrap();
+
+        // encode() always writes server_challenge_plus_one even when have_challenge is false
+        // So the size is struct_v (1) + nonce (8) + have_challenge (1) + server_challenge_plus_one (8) = 18
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.nonce, 54321);
+        assert!(!decoded.have_challenge);
+        // decode() only reads server_challenge_plus_one if have_challenge is true
+        assert_eq!(decoded.server_challenge_plus_one, 0);
+    }
+
+    #[test]
+    fn test_cephx_authorize_b_with_challenge() {
+        let auth_b = CephXAuthorizeB::with_challenge(11111, 99999);
+
+        assert_eq!(auth_b.nonce, 11111);
+        assert!(auth_b.have_challenge);
+        assert_eq!(auth_b.server_challenge_plus_one, 100000); // 99999 + 1
+
+        let mut buf = BytesMut::new();
+        auth_b.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.nonce, 11111);
+        assert!(decoded.have_challenge);
+        assert_eq!(decoded.server_challenge_plus_one, 100000);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authorize_reply_encode_decode() {
+        let reply = CephXAuthorizeReply {
+            nonce_plus_one: 98765,
+        };
+
+        let mut buf = BytesMut::new();
+        reply.encode(&mut buf, 0).unwrap();
+
+        assert_eq!(buf.len(), 9); // struct_v (1) + u64 (8)
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthorizeReply::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.nonce_plus_one, 98765);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+}

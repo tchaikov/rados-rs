@@ -1206,3 +1206,186 @@ impl CephXClientHandler {
         self.session = None;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::AuthMode;
+    use crate::types::{CephXSession, CryptoKey};
+
+    #[test]
+    fn test_client_handler_creation() {
+        let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        assert_eq!(handler.entity_name.to_string(), "client.admin");
+        assert!(handler.starting);
+        assert!(handler.session.is_none());
+        assert!(handler.secret_key.is_none());
+        assert!(handler.server_challenge.is_none());
+    }
+
+    #[test]
+    fn test_client_handler_creation_with_authorizer_mode() {
+        let handler = CephXClientHandler::new("client.test", AuthMode::Authorizer).unwrap();
+        assert_eq!(handler.entity_name.to_string(), "client.test");
+        assert!(handler.starting);
+    }
+
+    #[test]
+    fn test_set_secret_key() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
+        handler.set_secret_key(key.clone());
+        assert!(handler.secret_key.is_some());
+        assert_eq!(handler.secret_key.unwrap().len(), key.len());
+    }
+
+    #[test]
+    fn test_set_secret_key_from_base64() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        let base64_key = "AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==";
+
+        handler.set_secret_key_from_base64(base64_key).unwrap();
+        assert!(handler.secret_key.is_some());
+    }
+
+    #[test]
+    fn test_set_secret_key_from_base64_invalid() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        let result = handler.set_secret_key_from_base64("invalid-base64!");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_initial_request() {
+        let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        let global_id = 12345u64;
+
+        let request = handler.build_initial_request(global_id).unwrap();
+        assert!(!request.is_empty());
+
+        // Check that it starts with auth_mode byte (10 for Mon)
+        assert_eq!(request[0], 10);
+    }
+
+    #[test]
+    fn test_build_initial_request_authorizer_mode() {
+        let handler = CephXClientHandler::new("client.test", AuthMode::Authorizer).unwrap();
+        let global_id = 54321u64;
+
+        let request = handler.build_initial_request(global_id).unwrap();
+        assert!(!request.is_empty());
+
+        // Check that it starts with auth_mode byte (1 for Authorizer)
+        assert_eq!(request[0], 1);
+    }
+
+    #[test]
+    fn test_build_authenticate_request_without_server_challenge() {
+        let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+
+        // Should fail without server challenge
+        let result = handler.build_authenticate_request();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_authenticate_request_without_secret_key() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        handler.server_challenge = Some(0x1234567890abcdef);
+
+        // Should fail without secret key
+        let result = handler.build_authenticate_request();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_get_session_when_none() {
+        let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        assert!(handler.get_session().is_none());
+    }
+
+    #[test]
+    fn test_get_session_mut_when_none() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+        assert!(handler.get_session_mut().is_none());
+    }
+
+    #[test]
+    fn test_reset() {
+        let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+
+        // Set some state
+        handler.server_challenge = Some(12345);
+        handler.starting = false;
+        let entity_name = handler.entity_name.clone();
+        handler.session = Some(CephXSession::new(
+            entity_name,
+            12345,
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap(),
+        ));
+
+        // Reset
+        handler.reset();
+
+        // Check that state is cleared
+        assert!(handler.server_challenge.is_none());
+        assert!(handler.starting);
+        assert!(handler.session.is_none());
+    }
+
+    #[test]
+    fn test_decrypt_with_key_invalid_ciphertext() {
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
+        // Too short ciphertext (less than AES block size)
+        let result = CephXClientHandler::decrypt_with_key(&key, &[1, 2, 3, 4]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_auth_result_equality() {
+        assert_eq!(AuthResult::Success, AuthResult::Success);
+        assert_eq!(AuthResult::NeedMoreData, AuthResult::NeedMoreData);
+        assert_eq!(
+            AuthResult::Failed("error".to_string()),
+            AuthResult::Failed("error".to_string())
+        );
+        assert_ne!(
+            AuthResult::Failed("error1".to_string()),
+            AuthResult::Failed("error2".to_string())
+        );
+        assert_ne!(AuthResult::Success, AuthResult::NeedMoreData);
+    }
+
+    #[test]
+    fn test_entity_name_parsing() {
+        // Valid entity names
+        let handler1 = CephXClientHandler::new("client.admin", AuthMode::Mon);
+        assert!(handler1.is_ok());
+
+        let handler2 = CephXClientHandler::new("client.test", AuthMode::Mon);
+        assert!(handler2.is_ok());
+
+        let handler3 = CephXClientHandler::new("osd.0", AuthMode::Authorizer);
+        assert!(handler3.is_ok());
+
+        let handler4 = CephXClientHandler::new("mon.a", AuthMode::Mon);
+        assert!(handler4.is_ok());
+    }
+
+    #[test]
+    fn test_decrypt_with_key_empty_ciphertext() {
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
+        let result = CephXClientHandler::decrypt_with_key(&key, &[]);
+        assert!(result.is_err());
+    }
+}
