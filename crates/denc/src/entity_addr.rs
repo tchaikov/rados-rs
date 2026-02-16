@@ -281,6 +281,14 @@ impl EntityAddr {
 
         // Note: take() already consumed the bytes from buf, no need to advance
 
+        // Convert Legacy type to Any when decoding msgr2 format (matching Ceph behavior)
+        // Legacy is a format marker, not a semantic type in msgr2
+        let addr_type = if addr_type == EntityAddrType::Legacy {
+            EntityAddrType::Any
+        } else {
+            addr_type
+        };
+
         Ok(Self {
             addr_type,
             nonce,
