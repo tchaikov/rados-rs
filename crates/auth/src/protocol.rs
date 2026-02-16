@@ -930,8 +930,9 @@ mod tests {
 
     #[test]
     fn test_service_ticket_encode_decode() {
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
         let validity = Duration::from_secs(3600);
         let ticket = CephXServiceTicket {
             session_key: key.clone(),
@@ -990,7 +991,10 @@ mod tests {
         let decoded = ServiceTicketInfo::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.service_id, 4);
         assert_eq!(decoded.encrypted_service_ticket.version, 1);
-        assert_eq!(decoded.encrypted_service_ticket.encrypted_data, encrypted_data);
+        assert_eq!(
+            decoded.encrypted_service_ticket.encrypted_data,
+            encrypted_data
+        );
         assert_eq!(decoded.ticket_enc, 1);
         assert_eq!(decoded.ticket_blob.secret_id, 42);
         assert_eq!(decoded.ticket_blob.blob, ticket_blob_data);
@@ -1046,7 +1050,9 @@ mod tests {
     fn test_cephx_encrypted_envelope_encode_decode() {
         // Test with Bytes payload (more appropriate for encrypted data)
         let payload = Bytes::from(vec![1, 2, 3, 4, 5]);
-        let envelope = CephXEncryptedEnvelope { payload: payload.clone() };
+        let envelope = CephXEncryptedEnvelope {
+            payload: payload.clone(),
+        };
 
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf, 0).unwrap();
@@ -1063,7 +1069,9 @@ mod tests {
 
     #[test]
     fn test_cephx_request_header_encode_decode() {
-        let header = CephXRequestHeader { request_type: CEPHX_GET_AUTH_SESSION_KEY };
+        let header = CephXRequestHeader {
+            request_type: CEPHX_GET_AUTH_SESSION_KEY,
+        };
 
         let mut buf = BytesMut::new();
         header.encode(&mut buf, 0).unwrap();
@@ -1198,8 +1206,9 @@ mod tests {
 
     #[test]
     fn test_cephx_reply_with_session_key() {
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
         let reply = CephXReply::success().with_session_key(key.clone());
 
         assert!(reply.session_key.is_some());
@@ -1220,8 +1229,9 @@ mod tests {
 
     #[test]
     fn test_cephx_reply_encode_decode() {
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
         let ticket_blob = CephXTicketBlob {
             secret_id: 42,
             blob: Bytes::from(vec![1, 2, 3, 4]),
@@ -1313,7 +1323,9 @@ mod tests {
 
     #[test]
     fn test_cephx_authorize_reply_encode_decode() {
-        let reply = CephXAuthorizeReply { nonce_plus_one: 98765 };
+        let reply = CephXAuthorizeReply {
+            nonce_plus_one: 98765,
+        };
 
         let mut buf = BytesMut::new();
         reply.encode(&mut buf, 0).unwrap();

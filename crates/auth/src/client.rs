@@ -1233,9 +1233,10 @@ mod tests {
     #[test]
     fn test_set_secret_key() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
-        
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
         handler.set_secret_key(key.clone());
         assert!(handler.secret_key.is_some());
         assert_eq!(handler.secret_key.unwrap().len(), key.len());
@@ -1245,7 +1246,7 @@ mod tests {
     fn test_set_secret_key_from_base64() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
         let base64_key = "AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==";
-        
+
         handler.set_secret_key_from_base64(base64_key).unwrap();
         assert!(handler.secret_key.is_some());
     }
@@ -1261,10 +1262,10 @@ mod tests {
     fn test_build_initial_request() {
         let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
         let global_id = 12345u64;
-        
+
         let request = handler.build_initial_request(global_id).unwrap();
-        assert!(request.len() > 0);
-        
+        assert!(!request.is_empty());
+
         // Check that it starts with auth_mode byte (10 for Mon)
         assert_eq!(request[0], 10);
     }
@@ -1273,10 +1274,10 @@ mod tests {
     fn test_build_initial_request_authorizer_mode() {
         let handler = CephXClientHandler::new("client.test", AuthMode::Authorizer).unwrap();
         let global_id = 54321u64;
-        
+
         let request = handler.build_initial_request(global_id).unwrap();
-        assert!(request.len() > 0);
-        
+        assert!(!request.is_empty());
+
         // Check that it starts with auth_mode byte (1 for Authorizer)
         assert_eq!(request[0], 1);
     }
@@ -1284,7 +1285,7 @@ mod tests {
     #[test]
     fn test_build_authenticate_request_without_server_challenge() {
         let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
-        
+
         // Should fail without server challenge
         let result = handler.build_authenticate_request();
         assert!(result.is_err());
@@ -1294,7 +1295,7 @@ mod tests {
     fn test_build_authenticate_request_without_secret_key() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
         handler.server_challenge = Some(0x1234567890abcdef);
-        
+
         // Should fail without secret key
         let result = handler.build_authenticate_request();
         assert!(result.is_err());
@@ -1315,7 +1316,7 @@ mod tests {
     #[test]
     fn test_reset() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
-        
+
         // Set some state
         handler.server_challenge = Some(12345);
         handler.starting = false;
@@ -1323,12 +1324,13 @@ mod tests {
         handler.session = Some(CephXSession::new(
             entity_name,
             12345,
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==").unwrap(),
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap(),
         ));
-        
+
         // Reset
         handler.reset();
-        
+
         // Check that state is cleared
         assert!(handler.server_challenge.is_none());
         assert!(handler.starting);
@@ -1337,9 +1339,10 @@ mod tests {
 
     #[test]
     fn test_decrypt_with_key_invalid_ciphertext() {
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
-        
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
         // Too short ciphertext (less than AES block size)
         let result = CephXClientHandler::decrypt_with_key(&key, &[1, 2, 3, 4]);
         assert!(result.is_err());
@@ -1378,9 +1381,10 @@ mod tests {
 
     #[test]
     fn test_decrypt_with_key_empty_ciphertext() {
-        let key = CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-            .unwrap();
-        
+        let key =
+            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+                .unwrap();
+
         let result = CephXClientHandler::decrypt_with_key(&key, &[]);
         assert!(result.is_err());
     }
