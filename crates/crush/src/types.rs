@@ -182,6 +182,14 @@ pub struct CrushMap {
     pub chooseleaf_vary_r: u8,
     pub chooseleaf_stable: u8,
     pub allowed_bucket_algs: u32,
+    /// Device classes (Luminous+)
+    /// Maps device/OSD ID to class ID
+    pub class_map: std::collections::HashMap<i32, i32>,
+    /// Maps class ID to class name (e.g., "ssd", "hdd", "nvme")
+    pub class_name: std::collections::HashMap<i32, String>,
+    /// Shadow bucket mappings: `bucket[id][class_id] = shadow_bucket_id`
+    /// Used for device class-specific CRUSH tree shadows
+    pub class_bucket: std::collections::HashMap<i32, std::collections::HashMap<i32, i32>>,
 }
 
 impl CrushMap {
@@ -203,6 +211,9 @@ impl CrushMap {
             chooseleaf_vary_r: 0,
             chooseleaf_stable: 0,
             allowed_bucket_algs: 0,
+            class_map: std::collections::HashMap::new(),
+            class_name: std::collections::HashMap::new(),
+            class_bucket: std::collections::HashMap::new(),
         }
     }
 
@@ -224,6 +235,35 @@ impl CrushMap {
             .get(rule_id as usize)
             .and_then(|r| r.as_ref())
             .ok_or(crate::error::CrushError::RuleNotFound(rule_id))
+    }
+
+    /// Get the device class name for a given device/OSD ID
+    ///
+    /// Returns None if the device has no class assigned
+    pub fn get_device_class(&self, device_id: i32) -> Option<&str> {
+        self.class_map
+            .get(&device_id)
+            .and_then(|class_id| self.class_name.get(class_id))
+            .map(|s| s.as_str())
+    }
+
+    /// Get the class ID for a given class name
+    ///
+    /// Returns None if the class name doesn't exist
+    pub fn get_class_id(&self, class_name: &str) -> Option<i32> {
+        self.class_name
+            .iter()
+            .find(|(_, name)| name.as_str() == class_name)
+            .map(|(id, _)| *id)
+    }
+
+    /// Check if a device belongs to a specific class
+    pub fn device_has_class(&self, device_id: i32, class_name: &str) -> bool {
+        if let Some(device_class) = self.get_device_class(device_id) {
+            device_class == class_name
+        } else {
+            false
+        }
     }
 }
 
