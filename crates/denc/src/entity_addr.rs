@@ -542,7 +542,8 @@ mod tests {
 
         // Decode
         let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.addr_type, EntityAddrType::Legacy);
+        // Legacy format doesn't encode addr_type, so it defaults to Any (matching Ceph)
+        assert_eq!(decoded.addr_type, EntityAddrType::Any);
         assert_eq!(decoded.nonce, 0x12345678);
         assert_eq!(decoded.sockaddr_data.len(), STORAGE_SIZE);
         assert_eq!(&decoded.sockaddr_data[0..4], &[1, 2, 3, 4]);
