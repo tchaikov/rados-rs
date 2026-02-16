@@ -119,14 +119,54 @@ tokio::select! {
 - ✅ OSD process hang (not responding to messages)
 - ✅ Early detection of connection issues
 
-## Level 4: Ultimate Fallback
+## Level 4: Per-Operation Timeout Tracking
 
-### Implementation Status: ✅ EXISTING (Tracker)
+### Implementation Status: ✅ COMPLETE
 
 **Location**: `crates/osdclient/src/tracker.rs`
 
 **What it does**:
-- Operations timeout after 30 seconds by default
+- Tracks each operation independently with its own deadline
+- Uses a background task with `tokio::time::sleep_until` for efficiency
+- Operations timeout even during connection failures or reconnection attempts
+- Automatically cancels timed-out operations via callback
+
+**Key Features**:
+```rust
+// Background task sleeps until next operation deadline
+type TrackedOps = BTreeMap<(Instant, i32, u64), ()>;  // Sorted by deadline
+tokio::select! {
+    _ = tokio::time::sleep_until(next_deadline) => {
+        // Process all expired operations
+        timeout_callback(osd_id, tid);
+    }
+    cmd = cmd_rx.recv() => {
+        // Handle track/untrack commands
+    }
+}
+```
+
+**Architecture**:
+- **BTreeMap** stores operations sorted by `(deadline, osd_id, tid)`
+- First entry is always the next operation to timeout
+- O(log n) insertion, O(1) next-deadline lookup
+- Single background task handles all OSDs' timeouts
+- Callback notifies OSDClient to cancel operation in session
+
+**Benefits**:
+- ✅ Timeouts work during reconnection (operations don't hang forever)
+- ✅ Timeouts work when connection is down (tracker runs independently)
+- ✅ Minimal overhead (single task, sleeps until needed)
+- ✅ Precise timeout tracking per operation, not per-client
+
+## Level 5: Ultimate Fallback
+
+### Implementation Status: ✅ EXISTING (Configuration)
+
+**Location**: `crates/osdclient/src/tracker.rs::TrackerConfig`
+
+**What it does**:
+- Default operation timeout: 30 seconds (configurable)
 - Client applications receive timeout error
 - Applications can retry with backoff
 
@@ -151,7 +191,7 @@ tokio::select! {
 | Feature | Severity | Effort | Notes |
 |---------|----------|--------|-------|
 | Connection state machine | Medium | Hard | Explicit states (DOWN, CONNECTING, CONNECTED) |
-| Per-operation timeout | Medium | Medium | Independent of connection status |
+| ~~Per-operation timeout~~ | ~~Medium~~ | ~~Medium~~ | ✅ **IMPLEMENTED** - Independent timeout tracking |
 | OSD address change detection | Medium | Medium | Check OSDMap during reconnect |
 | Message ACK window tracking | Low | Medium | Sliding window of acked sequence numbers |
 | Reconnect mutex/lock | Low | Easy | Prevent concurrent reconnect attempts |

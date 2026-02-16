@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 use crate::error::{OSDClientError, Result};
@@ -65,6 +65,8 @@ pub struct OSDSession {
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
     client: std::sync::Weak<crate::client::OSDClient>,
+    /// Tracker for per-operation timeouts
+    tracker: Option<Arc<crate::tracker::Tracker>>,
 }
 
 /// Tracking information for a pending operation
@@ -100,6 +102,9 @@ impl OSDSession {
         // Buffer size of 100 messages should be plenty
         let (send_tx, _) = mpsc::channel(100);
 
+        // Get tracker from client if available
+        let tracker = client.upgrade().map(|c| Arc::clone(&c.tracker));
+
         Self {
             osd_id,
             send_tx,
@@ -111,6 +116,7 @@ impl OSDSession {
             backoffs: Arc::new(RwLock::new(HashMap::new())),
             osdmap_tx,
             client,
+            tracker,
         }
     }
 
@@ -346,7 +352,23 @@ impl OSDSession {
         tid: u64,
         reply: MOSDOpReply,
     ) -> Option<(PendingOp, u32)> {
-        Self::handle_reply(tid, reply, &self.pending_ops).await
+        let result = Self::handle_reply(
+            tid,
+            reply,
+            &self.pending_ops,
+            self.tracker.as_ref(),
+            self.osd_id,
+        )
+        .await;
+
+        // If operation completed (not being retried), untrack it
+        if result.is_none() {
+            if let Some(ref tracker) = self.tracker {
+                tracker.untrack(tid, self.osd_id);
+            }
+        }
+
+        result
     }
 
     /// Resubmit an operation for retry
@@ -464,6 +486,15 @@ impl OSDSession {
         // Create channel for result
         let (tx, rx) = oneshot::channel();
 
+        let submitted_at = Instant::now();
+
+        // Track the operation in the timeout tracker
+        if let Some(ref tracker) = self.tracker {
+            let timeout = tracker.operation_timeout();
+            let deadline = submitted_at + timeout;
+            tracker.track(tid, self.osd_id, deadline);
+        }
+
         // Track the operation
         {
             let mut pending = self.pending_ops.write().await;
@@ -473,7 +504,7 @@ impl OSDSession {
                     tid,
                     reqid: op.reqid.clone(),
                     result_tx: tx,
-                    submitted_at: Instant::now(),
+                    submitted_at,
                     attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
                     pool_id: op.object.pool,
                     object_id: op.object.oid.clone(),
@@ -504,6 +535,8 @@ impl OSDSession {
         tid: u64,
         reply: MOSDOpReply,
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+        _tracker: Option<&Arc<crate::tracker::Tracker>>,
+        _osd_id: i32,
     ) -> Option<(PendingOp, u32)> {
         let pending_op = {
             let mut pending = pending_ops.write().await;
@@ -698,7 +731,16 @@ impl OSDSession {
     /// migrated to a different OSD. Returns None if the operation doesn't exist.
     pub async fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
         let mut pending = self.pending_ops.write().await;
-        pending.remove(&tid)
+        let op = pending.remove(&tid);
+
+        // Untrack the operation if it was removed
+        if op.is_some() {
+            if let Some(ref tracker) = self.tracker {
+                tracker.untrack(tid, self.osd_id);
+            }
+        }
+
+        op
     }
 
     /// Insert a migrated operation from another session
@@ -752,6 +794,13 @@ impl OSDSession {
         {
             let mut pending = self.pending_ops.write().await;
             pending.insert(tid, pending_op);
+        }
+
+        // Track the migrated operation with a fresh deadline
+        if let Some(ref tracker) = self.tracker {
+            let timeout = tracker.operation_timeout();
+            let deadline = Instant::now() + timeout;
+            tracker.track(tid, self.osd_id, deadline);
         }
 
         // Get a reference to the op for sending
