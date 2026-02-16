@@ -58,6 +58,8 @@ struct IoTaskContext {
     /// Connection state
     /// Updated when io_task exits
     conn_state: Arc<RwLock<ConnectionState>>,
+    /// Shutdown token for graceful termination
+    shutdown_token: tokio_util::sync::CancellationToken,
 }
 
 // Re-export BackoffEntry for backward compatibility
@@ -198,7 +200,11 @@ impl OSDSession {
     ///
     /// This establishes a msgr2 connection to the OSD at the given address
     /// and spawns an I/O task that owns the connection.
-    pub async fn connect(&mut self, entity_addr: denc::EntityAddr) -> Result<()> {
+    pub async fn connect(
+        &mut self,
+        entity_addr: denc::EntityAddr,
+        shutdown_token: tokio_util::sync::CancellationToken,
+    ) -> Result<()> {
         // Acquire connecting lock to prevent concurrent connection attempts
         // Following Ceph pattern: prevents race conditions
         let _lock = self.connecting_lock.lock().await;
@@ -275,6 +281,7 @@ impl OSDSession {
             client: self.client.clone(),
             incarnation: Arc::clone(&self.incarnation),
             conn_state: Arc::clone(&self.conn_state),
+            shutdown_token,
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -323,12 +330,20 @@ impl OSDSession {
         debug!("I/O task started for OSD {}", ctx.osd_id);
 
         // Create keepalive interval (every 10 seconds, matching Ceph's default)
-        let mut keepalive_interval = tokio::time::interval(std::time::Duration::from_secs(10));
-        // Don't fire immediately - wait for first interval
-        keepalive_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Use interval_at to start first tick after 10 seconds, not immediately
+        let mut keepalive_interval = tokio::time::interval_at(
+            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(10),
+        );
 
         loop {
             tokio::select! {
+                // Shutdown signal
+                _ = ctx.shutdown_token.cancelled() => {
+                    info!("OSD {} I/O task received shutdown signal", ctx.osd_id);
+                    break;
+                }
+
                 // Periodic keepalive to detect dead connections proactively
                 _ = keepalive_interval.tick() => {
                     if let Err(e) = connection.send_keepalive().await {
@@ -400,8 +415,15 @@ impl OSDSession {
 
         info!("I/O task exiting for OSD {}", ctx.osd_id);
 
-        // Update connection state to Disconnected
-        *ctx.conn_state.write().await = ConnectionState::Disconnected;
+        // Update connection state based on exit reason
+        // If shutdown was triggered, set to Closed (terminal state)
+        // Otherwise set to Disconnected (can reconnect)
+        let final_state = if ctx.shutdown_token.is_cancelled() {
+            ConnectionState::Closed
+        } else {
+            ConnectionState::Disconnected
+        };
+        *ctx.conn_state.write().await = final_state;
 
         // Do NOT cancel pending operations here - let them be migrated by scan_requests_on_map_change()
         // when OSDMap updates arrive. This handles scenarios where:
@@ -757,8 +779,7 @@ impl OSDSession {
 
             // Check for EAGAIN on replica reads
             // See: ~/dev/ceph/src/osdc/Objecter.cc handle_reply()
-            const EAGAIN: i32 = -11;
-            if reply.result == EAGAIN {
+            if reply.result == crate::error::EAGAIN {
                 // Check if this was a replica read
                 use crate::types::OsdOpFlags;
                 let replica_flags = (OsdOpFlags::BALANCE_READS | OsdOpFlags::LOCALIZE_READS).bits();

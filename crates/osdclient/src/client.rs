@@ -324,8 +324,10 @@ impl OSDClient {
         // Get OSD address from OSDMap
         let osd_addr = self.get_osd_address(osd_id).await?;
 
-        // Connect to OSD - this spawns the I/O task
-        session.connect(osd_addr).await?;
+        // Connect to OSD - this spawns the I/O task with a child shutdown token
+        session
+            .connect(osd_addr, self.shutdown_token.child_token())
+            .await?;
 
         // Wrap in Arc and store
         let session = Arc::new(session);

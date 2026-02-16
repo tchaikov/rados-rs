@@ -5,7 +5,7 @@
 //! minimizing overhead while ensuring operations timeout even during
 //! connection failures or reconnection attempts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, RwLock};
@@ -98,16 +98,22 @@ impl Tracker {
 
     /// Background task that manages operation timeouts
     ///
-    /// Uses a BTreeMap to efficiently track operations ordered by deadline.
+    /// Uses a BTreeMap to efficiently track operations ordered by deadline,
+    /// with a HashMap as secondary index for O(1) deadline lookup during untrack.
     /// Sleeps until the next deadline, then processes all expired operations.
     async fn timeout_manager_task(
         mut cmd_rx: mpsc::UnboundedReceiver<TimeoutCommand>,
         timeout_callback: TimeoutCallback,
     ) {
-        // Map: (deadline, osd_id, tid) -> ()
+        // Primary index: Map (deadline, osd_id, tid) -> ()
         // BTreeMap keeps entries sorted by key, so first entry is next to timeout
         type TrackedOps = BTreeMap<(Instant, i32, u64), ()>;
         let tracked_ops: Arc<RwLock<TrackedOps>> = Arc::new(RwLock::new(BTreeMap::new()));
+
+        // Secondary index: Map (osd_id, tid) -> deadline
+        // Allows O(1) deadline lookup for untrack operations
+        type DeadlineIndex = HashMap<(i32, u64), Instant>;
+        let deadline_index: Arc<RwLock<DeadlineIndex>> = Arc::new(RwLock::new(HashMap::new()));
 
         loop {
             // Get the next deadline, if any
@@ -130,6 +136,7 @@ impl Tracker {
                     // Process expired operations
                     let now = Instant::now();
                     let mut ops = tracked_ops.write().await;
+                    let mut index = deadline_index.write().await;
 
                     // Collect all expired operations
                     let expired: Vec<(Instant, i32, u64)> = ops
@@ -140,6 +147,7 @@ impl Tracker {
                     // Remove and timeout each expired operation
                     for (deadline, osd_id, tid) in expired {
                         ops.remove(&(deadline, osd_id, tid));
+                        index.remove(&(osd_id, tid));
                         warn!(
                             "Operation timeout: OSD {} tid={} (deadline exceeded by {:?})",
                             osd_id,
@@ -155,22 +163,23 @@ impl Tracker {
                     match cmd {
                         Some(TimeoutCommand::Track { tid, osd_id, deadline }) => {
                             let mut ops = tracked_ops.write().await;
+                            let mut index = deadline_index.write().await;
                             ops.insert((deadline, osd_id, tid), ());
+                            index.insert((osd_id, tid), deadline);
                             debug!("Tracking operation: OSD {} tid={} deadline={:?}", osd_id, tid, deadline);
                         }
                         Some(TimeoutCommand::Untrack { tid, osd_id }) => {
                             let mut ops = tracked_ops.write().await;
-                            // We don't know the exact deadline, so we need to scan
-                            // This is O(n) but untrack is called on success path
-                            let to_remove: Vec<_> = ops
-                                .keys()
-                                .filter(|(_, oid, t)| *oid == osd_id && *t == tid)
-                                .copied()
-                                .collect();
-                            for key in to_remove {
-                                ops.remove(&key);
+                            let mut index = deadline_index.write().await;
+
+                            // O(1) deadline lookup from secondary index
+                            if let Some(deadline) = index.remove(&(osd_id, tid)) {
+                                // O(log n) removal from BTreeMap using full key
+                                ops.remove(&(deadline, osd_id, tid));
+                                debug!("Untracked operation: OSD {} tid={}", osd_id, tid);
+                            } else {
+                                debug!("Untrack called for non-existent operation: OSD {} tid={}", osd_id, tid);
                             }
-                            debug!("Untracked operation: OSD {} tid={}", osd_id, tid);
                         }
                         Some(TimeoutCommand::Shutdown) => {
                             debug!("Tracker shutting down");

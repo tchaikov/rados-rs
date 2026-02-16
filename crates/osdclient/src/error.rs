@@ -3,6 +3,11 @@
 use std::time::Duration;
 use thiserror::Error;
 
+// Standard errno constants (as negative values, matching Ceph conventions)
+pub const ENOENT: i32 = -2; // No such file or directory
+pub const EAGAIN: i32 = -11; // Try again
+pub const ENOSPC: i32 = -28; // No space left on device
+
 /// Errors that can occur during OSD client operations
 #[derive(Debug, Error)]
 pub enum OSDClientError {
@@ -90,9 +95,9 @@ impl OSDClientError {
             }
             Self::Backoff(_) => ErrorCategory::RetriableWithBackoff,
             Self::OSDError { code, .. } => match *code {
-                -2 => ErrorCategory::Permanent,             // ENOENT
-                -11 => ErrorCategory::NeedsMapUpdate,       // EAGAIN
-                -28 => ErrorCategory::RetriableWithBackoff, // ENOSPC
+                ENOENT => ErrorCategory::Permanent,
+                EAGAIN => ErrorCategory::NeedsMapUpdate,
+                ENOSPC => ErrorCategory::RetriableWithBackoff,
                 _ => ErrorCategory::Transient,
             },
             _ => ErrorCategory::Permanent,
