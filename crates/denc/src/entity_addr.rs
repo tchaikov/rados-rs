@@ -333,7 +333,14 @@ impl EntityAddr {
         buf.put_u32_le(content_size as u32); // struct length
 
         // Encode content
-        Denc::encode(&self.addr_type, buf, features)?;
+        // Convert Legacy type to Any when encoding in msgr2 format (matching Ceph behavior)
+        // Legacy is a format marker, not a semantic type in msgr2
+        let addr_type_to_encode = if self.addr_type == EntityAddrType::Legacy {
+            EntityAddrType::Any
+        } else {
+            self.addr_type
+        };
+        Denc::encode(&addr_type_to_encode, buf, features)?;
         Denc::encode(&self.nonce, buf, features)?;
         Denc::encode(&(self.sockaddr_data.len() as u32), buf, features)?;
 
