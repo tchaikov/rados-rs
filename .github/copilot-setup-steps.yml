@@ -1,0 +1,44 @@
+name: Pre-install dependencies for Copilot
+description: Install system dependencies needed for building, testing, and validating RADOS-RS changes
+
+steps:
+  - name: Install Rust toolchain
+    uses: dtolnay/rust-toolchain@stable
+    with:
+      components: rustfmt, clippy
+
+  - name: Cache cargo registry
+    uses: actions/cache@v4
+    with:
+      path: ~/.cargo/registry
+      key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+  - name: Cache cargo index
+    uses: actions/cache@v4
+    with:
+      path: ~/.cargo/git
+      key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+
+  - name: Cache cargo build
+    uses: actions/cache@v4
+    with:
+      path: target
+      key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+
+  - name: Install system dependencies
+    run: |
+      sudo apt-get update
+      sudo apt-get install -y \
+        build-essential \
+        pkg-config \
+        libssl-dev \
+        ceph-common
+
+  - name: Clone ceph-object-corpus for corpus tests
+    run: |
+      if [ ! -d "/tmp/ceph-object-corpus" ]; then
+        git clone --depth=1 https://github.com/ceph/ceph-object-corpus.git /tmp/ceph-object-corpus
+      fi
+
+  - name: Build workspace
+    run: cargo build --workspace
