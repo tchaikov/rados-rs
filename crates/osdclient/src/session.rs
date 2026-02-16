@@ -203,6 +203,13 @@ impl OSDSession {
     /// - OSDMAP: Broadcast message → osdmap_tx channel (shared with OSDClient)
     /// - OPREPLY/BACKOFF: Session-specific → Direct dispatch with osd_id context
     ///
+    /// Connection recovery is handled at two levels:
+    /// - Short-term failures: msgr2 Connection automatically attempts SESSION_RECONNECT
+    ///   (up to 3 retries) on send/recv errors
+    /// - OSD map changes: OSDClient.rescan_pending_ops() migrates operations to new
+    ///   target OSDs when OSDMap updates arrive
+    /// - Prolonged failures: Operations eventually timeout via tracker, client can retry
+    ///
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2() and ~/dev/linux/net/ceph/osd_client.c
     async fn io_task(
         ctx: IoTaskContext,
