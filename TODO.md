@@ -136,10 +136,14 @@
       zero unit tests. Protocol encode/decode (`protocol.rs`) also untested.
       Only keyring parsing and basic server setup are tested (3 tests total).
 
-- [ ] **OSD connection recovery** — Session reconnection after OSD restart or
-      network failure is not fully implemented. The `SESSION_RECONNECT` frame is
-      supported at the msgr2 layer but the OSD client doesn't use it.
-      See `crates/osdclient/src/client.rs:1316` TODO about rescanning sessions.
+- [x] **OSD connection recovery** — Session reconnection after OSD restart or
+      network failure is now implemented with a two-level approach:
+      - Short-term failures: msgr2 Connection automatically uses SESSION_RECONNECT
+        (up to 3 retries) when send/recv fails
+      - OSD map changes: OSDClient.rescan_pending_ops() migrates pending operations
+        to new target OSDs when OSDMap updates arrive (e.g., after OSD restart)
+      See `crates/osdclient/src/client.rs` rescan_pending_ops() and
+      `crates/osdclient/src/session.rs` io_task() documentation.
 
 - [ ] **Proper message length calculation** — `msgr2/src/message.rs:117` uses a
       hardcoded `min(remaining, 1024)` instead of proper front/middle/data
@@ -213,7 +217,7 @@
 1. Add unit tests for CephX client handler and protocol encode/decode
 2. Implement proper message length calculation in msgr2
 3. Fix IoCtx `flush()` to wait for actual OSD acknowledgments
-4. Add OSD session reconnection using `SESSION_RECONNECT`
+4. ~~Add OSD session reconnection using `SESSION_RECONNECT`~~ ✓ **Complete**
 5. Replace debug `eprintln!()` with `tracing` macros
 
 ### Phase 2: Erasure Coding & Device Classes (High Priority)
