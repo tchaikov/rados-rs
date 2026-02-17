@@ -1199,11 +1199,11 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
         self.result.encode(&mut buf, 0)?;
         self.global_id.encode(&mut buf, 0)?;
 
-        // Encode result_msg as length-prefixed string
-        let msg_bytes = Bytes::from(self.result_msg.as_bytes().to_vec());
-        msg_bytes.encode(&mut buf, 0)?;
-
+        // Encode auth_payload BEFORE result_msg (matches C++ MAuthReply.h:50-57)
         self.auth_payload.encode(&mut buf, 0)?;
+
+        // Encode result_msg as string
+        self.result_msg.encode(&mut buf, 0)?;
 
         Ok(buf.freeze())
     }
@@ -1217,27 +1217,15 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
         use denc::Denc;
 
         let mut data = front;
-        let protocol = u32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: protocol".into())
-        })?;
-        let result = i32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: result".into())
-        })?;
-        let global_id = u64::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: global_id".into())
-        })?;
+        let protocol = u32::decode(&mut data, 0)?;
+        let result = i32::decode(&mut data, 0)?;
+        let global_id = u64::decode(&mut data, 0)?;
+
+        // Decode auth_payload BEFORE result_msg (matches C++ MAuthReply.h:50-57)
+        let auth_payload = Bytes::decode(&mut data, 0)?;
 
         // Decode result_msg as string
-        let result_msg_bytes = Bytes::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: result_msg_bytes".into())
-        })?;
-        let result_msg = String::from_utf8(result_msg_bytes.to_vec()).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: result_msg UTF-8".into())
-        })?;
-
-        let auth_payload = Bytes::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MAuthReply decode failed: auth_payload".into())
-        })?;
+        let result_msg = String::decode(&mut data, 0)?;
 
         Ok(Self {
             protocol,

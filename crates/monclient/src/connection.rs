@@ -191,10 +191,8 @@ impl MonConnection {
 
             // Set up keepalive timer if enabled
             let mut keepalive_interval = keepalive_policy.interval.map(|interval| {
-                let mut ticker = tokio::time::interval(interval);
-                // Don't fire immediately on first tick
-                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-                ticker
+                // Start the interval in the future to avoid immediate first tick
+                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval)
             });
 
             // Track when we last sent a keepalive (for timeout checking when no ACK received yet)

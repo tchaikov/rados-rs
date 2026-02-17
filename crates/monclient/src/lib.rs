@@ -23,7 +23,7 @@
 //!         ..Default::default()
 //!     };
 //!
-//!     let client = MonClient::new(config).await?;
+//!     let client = MonClient::new(config, None).await?;
 //!     client.init().await?;
 //!
 //!     // Subscribe to osdmap

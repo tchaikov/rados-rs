@@ -61,17 +61,22 @@ where
         return Ok(value);
     }
 
-    // Wait for notification with timeout
-    tokio::select! {
-        _ = notify.notified() => {
-            // Double-check condition after notification
-            match check_fn().await {
-                Some(value) => Ok(value),
-                None => Err(timeout_error), // Spurious wakeup
-            }
+    // Wait for notification with timeout, looping on spurious wakeups
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        // Check condition before waiting
+        if let Some(value) = check_fn().await {
+            return Ok(value);
         }
-        _ = tokio::time::sleep(timeout) => {
-            Err(timeout_error)
+
+        tokio::select! {
+            _ = notify.notified() => {
+                // Loop to check condition again
+                continue;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                return Err(timeout_error);
+            }
         }
     }
 }
@@ -180,11 +185,21 @@ mod tests {
         let notify = Arc::new(tokio::sync::Notify::new());
         let state = Arc::new(RwLock::new(false));
 
+        let state_clone = Arc::clone(&state);
         let notify_clone = Arc::clone(&notify);
 
-        // Spawn task to notify without setting state (spurious wakeup)
+        // Spawn task that:
+        // 1. Sends spurious notification (state still false)
+        // 2. Waits a bit
+        // 3. Sets state to true and notifies again
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(50)).await;
+            // Spurious wakeup - state is still false
+            notify_clone.notify_waiters();
+
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            // Real wakeup - set state to true
+            *state_clone.write().await = true;
             notify_clone.notify_waiters();
         });
 
@@ -201,12 +216,12 @@ mod tests {
                 }
             },
             &notify,
-            Duration::from_millis(100),
+            Duration::from_millis(200),
             TestError::Timeout,
         )
         .await;
 
-        // Should return timeout error on spurious wakeup
-        assert_eq!(result, Err(TestError::Timeout));
+        // Should succeed after spurious wakeup when condition is eventually met
+        assert_eq!(result, Ok(42));
     }
 }
