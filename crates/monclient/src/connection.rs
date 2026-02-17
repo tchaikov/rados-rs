@@ -4,13 +4,13 @@
 
 use crate::error::{MonClientError, Result};
 use crate::messages::{MOSDMap, CEPH_MSG_OSD_MAP};
-use crate::types::EntityAddrVec;
 use msgr2::protocol::Connection as Msgr2Connection;
 use msgr2::{ConnectionConfig, MapSender};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// Parameters for creating a monitor connection
@@ -20,8 +20,6 @@ pub struct MonConnectionParams {
     pub addr: SocketAddr,
     /// Monitor rank
     pub rank: usize,
-    /// Monitor entity addresses
-    pub addrs: EntityAddrVec,
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
     /// Path to keyring file
@@ -68,16 +66,13 @@ impl KeepalivePolicy {
     }
 }
 
-/// Monitor connection state
+/// Monitor connection
 pub struct MonConnection {
     /// Monitor rank
     rank: usize,
 
-    /// Monitor addresses
-    addrs: EntityAddrVec,
-
-    /// Authentication state
-    state: Arc<Mutex<ConnectionState>>,
+    /// Global ID assigned during authentication (immutable after connect)
+    global_id: u64,
 
     /// Authentication provider (stored for creating service auth providers)
     /// Wrapped in Mutex to allow mutable access for ticket renewal
@@ -86,31 +81,11 @@ pub struct MonConnection {
     /// Channel for sending messages (to avoid deadlock with receive loop)
     send_tx: mpsc::UnboundedSender<msgr2::message::Message>,
 
-    /// Channel for receiving keepalive timeout notifications
-    /// The background task sends () when a keepalive timeout occurs
-    timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+    /// Background task handle for graceful shutdown and death detection
+    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     /// Token for signaling shutdown to background task
     shutdown_token: CancellationToken,
-}
-
-#[derive(Debug)]
-struct ConnectionState {
-    /// Authentication state
-    auth_state: AuthState,
-
-    /// Global ID assigned by monitor
-    global_id: u64,
-
-    /// Whether we have an active session
-    has_session: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AuthState {
-    None,
-    Authenticating,
-    Authenticated,
 }
 
 impl MonConnection {
@@ -161,10 +136,8 @@ impl MonConnection {
         tracing::debug!("Retrieved global_id {} from connection", global_id);
 
         // Get the authenticated auth provider from the connection
-        // This provider now contains the session and service tickets
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
             tracing::debug!("Retrieved auth provider from connection after authentication");
-            // Downcast to MonitorAuthProvider
             provider
                 .as_any()
                 .downcast_ref::<auth::MonitorAuthProvider>()
@@ -178,9 +151,8 @@ impl MonConnection {
             tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
         }
 
-        // Create channels for sending messages and timeouts
+        // Create channels for sending messages
         let (send_tx, mut send_rx) = mpsc::unbounded_channel::<msgr2::message::Message>();
-        let (timeout_tx, timeout_rx) = mpsc::unbounded_channel::<()>();
 
         let mut connection_for_task = connection;
 
@@ -194,7 +166,7 @@ impl MonConnection {
         let task_shutdown_token = shutdown_token.clone();
 
         // Spawn a unified task to handle sending, receiving, and keepalive
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             tracing::debug!("Send/Receive/Keepalive task started");
 
             // Set up keepalive timer if enabled
@@ -281,9 +253,7 @@ impl MonConnection {
                                             elapsed,
                                             timeout_duration
                                         );
-                                        // Notify upper layer of timeout
-                                        let _ = timeout_tx.send(());
-                                        // Break the loop to close the connection
+                                        // Break the loop - task exit signals timeout to upper layer
                                         break;
                                     }
                                 } else {
@@ -295,9 +265,7 @@ impl MonConnection {
                                             elapsed_since_send,
                                             timeout_duration
                                         );
-                                        // Notify upper layer of timeout
-                                        let _ = timeout_tx.send(());
-                                        // Break the loop to close the connection
+                                        // Break the loop - task exit signals timeout to upper layer
                                         break;
                                     }
                                 }
@@ -319,15 +287,10 @@ impl MonConnection {
 
         let mon_conn = Self {
             rank: params.rank,
-            addrs: params.addrs,
-            state: Arc::new(Mutex::new(ConnectionState {
-                auth_state: AuthState::Authenticated,
-                global_id, // Use the global_id from authentication
-                has_session: true,
-            })),
+            global_id,
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
-            timeout_rx: Arc::new(Mutex::new(timeout_rx)),
+            task_handle: Arc::new(Mutex::new(Some(handle))),
             shutdown_token,
         };
 
@@ -341,45 +304,18 @@ impl MonConnection {
         self.rank
     }
 
-    /// Get the monitor addresses
-    pub fn addrs(&self) -> &EntityAddrVec {
-        &self.addrs
+    /// Get the global ID assigned during authentication
+    pub fn global_id(&self) -> u64 {
+        self.global_id
     }
 
-    /// Check if authenticated
-    pub async fn is_authenticated(&self) -> bool {
-        let state = self.state.lock().await;
-        state.auth_state == AuthState::Authenticated
-    }
-
-    /// Check if we have a session
-    pub async fn has_session(&self) -> bool {
-        let state = self.state.lock().await;
-        state.has_session
-    }
-
-    /// Get the global ID
-    pub async fn global_id(&self) -> u64 {
-        let state = self.state.lock().await;
-        state.global_id
-    }
-
-    /// Set authentication state
-    pub async fn set_auth_state(&self, auth_state: AuthState) {
-        let mut state = self.state.lock().await;
-        state.auth_state = auth_state;
-    }
-
-    /// Set global ID
-    pub async fn set_global_id(&self, global_id: u64) {
-        let mut state = self.state.lock().await;
-        state.global_id = global_id;
-    }
-
-    /// Mark session as established
-    pub async fn set_session(&self, has_session: bool) {
-        let mut state = self.state.lock().await;
-        state.has_session = has_session;
+    /// Check if the background I/O task has finished
+    ///
+    /// Returns true if the task exited for any reason (including unexpected failure).
+    /// Used by the tick loop to detect dead connections.
+    pub async fn is_task_finished(&self) -> bool {
+        let guard = self.task_handle.lock().await;
+        guard.as_ref().is_none_or(|h| h.is_finished())
     }
 
     /// Send a message to the monitor
@@ -402,26 +338,19 @@ impl MonConnection {
 
     /// Close the connection
     ///
-    /// Signals the background task to terminate and clears the session state.
+    /// Signals the background task to terminate and waits for it to exit.
     pub async fn close(&self) -> Result<()> {
         tracing::debug!("Closing connection to mon.{}", self.rank);
 
         // Signal background task to shutdown
         self.shutdown_token.cancel();
 
-        // Mark session as closed
-        let mut state = self.state.lock().await;
-        state.has_session = false;
-        state.auth_state = AuthState::None;
+        // Await the background task to ensure it has stopped
+        let handle = self.task_handle.lock().await.take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
 
-        Ok(())
-    }
-
-    /// Send a keepalive ping message
-    pub async fn send_keepalive(&self) -> Result<()> {
-        let ping_msg = msgr2::message::Message::ping();
-        self.send_message(ping_msg).await?;
-        tracing::trace!("Sent keepalive ping to mon.{}", self.rank);
         Ok(())
     }
 
@@ -430,35 +359,6 @@ impl MonConnection {
     /// Returns None if no authentication was used (no-auth cluster).
     pub fn get_auth_provider(&self) -> Option<Arc<Mutex<auth::MonitorAuthProvider>>> {
         self.auth_provider.as_ref().map(Arc::clone)
-    }
-
-    /// Reopen the session after a timeout
-    ///
-    /// This marks the connection as closed and returns an error,
-    /// which will trigger the client to reconnect.
-    pub async fn reopen_session(&self) -> Result<()> {
-        tracing::warn!(
-            "Keepalive timeout on mon.{}, marking connection as closed",
-            self.rank
-        );
-
-        // Mark session as lost
-        let mut state = self.state.lock().await;
-        state.has_session = false;
-
-        // Return an error to trigger reconnection at the MonClient level
-        Err(MonClientError::Other(
-            "Connection timed out, need to reconnect".into(),
-        ))
-    }
-
-    /// Try to receive a keepalive timeout notification (non-blocking)
-    ///
-    /// Returns Some(()) if a keepalive timeout has occurred, None otherwise.
-    /// The upper layer should call reopen_session() when this returns Some(()).
-    pub async fn try_recv_timeout(&self) -> Option<()> {
-        let mut rx = self.timeout_rx.lock().await;
-        rx.try_recv().ok()
     }
 
     /// Create a ServiceAuthProvider for OSD/MDS/MGR connections
@@ -483,10 +383,6 @@ impl MonConnection {
 
 impl std::fmt::Display for MonConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "MonConnection(rank={}, addrs={:?})",
-            self.rank, self.addrs
-        )
+        write!(f, "MonConnection(rank={})", self.rank)
     }
 }

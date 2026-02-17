@@ -1333,8 +1333,14 @@ impl OSDClient {
         // Shutdown tracker first to stop timeout callbacks
         self.tracker.shutdown();
 
-        // Cancel all I/O tasks
+        // Cancel all I/O tasks (child tokens are cancelled automatically)
         self.shutdown_token.cancel();
+
+        // Await all I/O tasks to ensure they have stopped
+        let sessions = self.sessions.read().await;
+        for (_, session) in sessions.iter() {
+            session.close().await;
+        }
 
         info!("OSDClient shutdown complete");
     }

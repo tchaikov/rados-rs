@@ -13,7 +13,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
 use crate::backoff::BackoffTracker;
@@ -104,6 +105,8 @@ pub struct OSDSession {
     /// paths might trigger reconnection simultaneously.
     /// Reference: Ceph Objecter uses locks during reconnection
     connecting_lock: Arc<tokio::sync::Mutex<()>>,
+    /// I/O task handle for graceful shutdown
+    io_task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 /// Tracking information for a pending operation
@@ -182,6 +185,8 @@ impl OSDSession {
             })),
             // Mutex to prevent concurrent connection attempts
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
+            // No I/O task handle until connect() is called
+            io_task_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -291,12 +296,15 @@ impl OSDSession {
         // io_task's lifetime, we ensure the channel stays open even if there are timing issues with
         // session lifecycle management. This matches the previous implementation's behavior.
         let send_tx_keepalive = self.send_tx.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             // Capture the keepalive by value to ensure it lives for the io_task's lifetime
             let _keepalive = send_tx_keepalive;
             Self::io_task(context, connection, send_rx).await;
             drop(_keepalive); // Explicit drop for clarity
         });
+
+        // Store the handle for graceful shutdown
+        *self.io_task_handle.lock().await = Some(handle);
 
         info!("✓ I/O task started for OSD {}", self.osd_id);
 
@@ -898,6 +906,19 @@ impl OSDSession {
     pub async fn is_connected(&self) -> bool {
         // Check explicit connection state
         self.session_info.read().await.conn_state == ConnectionState::Connected
+    }
+
+    /// Await the I/O task to ensure it has stopped
+    ///
+    /// The caller must have already cancelled the shutdown token (via the OSDClient's
+    /// shutdown_token, whose child token is passed to each session's connect()).
+    pub async fn close(&self) {
+        info!("Waiting for OSD {} I/O task to stop", self.osd_id);
+        let handle = self.io_task_handle.lock().await.take();
+        if let Some(handle) = handle {
+            let _ = handle.await;
+        }
+        self.session_info.write().await.conn_state = ConnectionState::Closed;
     }
 
     /// Get the peer address for this session

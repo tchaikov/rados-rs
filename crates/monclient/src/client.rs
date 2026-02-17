@@ -122,6 +122,7 @@ impl MonClientConfig {
 }
 
 /// Monitor client
+#[derive(Clone)]
 pub struct MonClient {
     /// Configuration
     config: MonClientConfig,
@@ -150,22 +151,6 @@ pub struct MonClient {
 
     /// Notification for MonMap arrival
     monmap_notify: Arc<tokio::sync::Notify>,
-}
-
-impl Clone for MonClient {
-    fn clone(&self) -> Self {
-        Self {
-            config: self.config.clone(),
-            entity_name: self.entity_name.clone(),
-            state: Arc::clone(&self.state),
-            tick_task: Arc::clone(&self.tick_task),
-            map_events: self.map_events.clone(),
-            osdmap_tx: self.osdmap_tx.clone(),
-            mon_msg_tx: self.mon_msg_tx.clone(),
-            auth_notify: Arc::clone(&self.auth_notify),
-            monmap_notify: Arc::clone(&self.monmap_notify),
-        }
-    }
 }
 
 /// Events for map updates
@@ -436,6 +421,14 @@ impl MonClient {
             info!("Shutting down MonClient");
             state.stopping = true;
 
+            // Cancel all pending operations by dropping their senders.
+            // Callers blocked on rx.await will receive a RecvError ("Channel closed"),
+            // which they handle as an error. This matches C++ MonClient::shutdown()
+            // which cancels pending version_requests, commands, and pool_ops.
+            state.version_requests.clear();
+            state.commands.clear();
+            state.pool_ops.clear();
+
             // Take connections to close them after releasing the lock
             let active_con = state.active_con.take();
             let pending_cons: Vec<_> = state.pending_cons.drain().map(|(_, con)| con).collect();
@@ -443,7 +436,7 @@ impl MonClient {
             (active_con, pending_cons)
         };
 
-        // Close connections after releasing the lock
+        // Close connections after releasing the lock (close() now awaits task termination)
         if let Some(con) = active_con {
             con.close().await?;
         }
@@ -634,7 +627,6 @@ impl MonClient {
             .ok_or(MonClientError::InvalidMonMap("No msgr2 address".into()))?;
 
         let socket_addr = addr.addr;
-        let addrs = mon_info.addrs.clone();
         let runtime_config = state.runtime_config;
         drop(state);
 
@@ -662,7 +654,6 @@ impl MonClient {
             MonConnection::connect(MonConnectionParams {
                 addr: socket_addr,
                 rank,
-                addrs,
                 entity_name: self.config.entity_name.clone(),
                 keyring_path,
                 keepalive_policy,
@@ -676,7 +667,7 @@ impl MonClient {
         // The task was already spawned in MonConnection::connect()
 
         // Get global_id before taking lock (avoid holding lock during async call)
-        let global_id = mon_con.global_id().await;
+        let global_id = mon_con.global_id();
         tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // Store as active connection (but check if we won the race)
@@ -838,14 +829,30 @@ impl MonClient {
         let config = self.config.clone();
         let self_clone = self.clone(); // Clone Arc<Self> for use in spawned task
 
-        // Use tick_interval if specified, otherwise use hunt_interval
-        let tick_interval = config.tick_interval.unwrap_or(config.hunt_interval);
+        // Explicit tick_interval overrides adaptive scheduling when set
+        let explicit_tick_interval = config.tick_interval;
 
         let handle = tokio::spawn(async move {
-            info!("Tick loop started (interval: {:?})", tick_interval);
+            info!("Tick loop started");
 
             loop {
-                tokio::time::sleep(tick_interval).await;
+                // Adaptive tick interval: hunt faster when hunting, ping interval when connected.
+                // Matches C++ MonClient::schedule_tick() adaptive logic.
+                let interval = if let Some(explicit) = explicit_tick_interval {
+                    explicit
+                } else {
+                    let state_guard = state.read().await;
+                    if state_guard.hunting {
+                        state_guard
+                            .runtime_config
+                            .mon_client_hunt_interval
+                            .mul_f64(state_guard.reopen_interval_multiplier)
+                    } else {
+                        state_guard.runtime_config.mon_client_ping_interval
+                    }
+                };
+
+                tokio::time::sleep(interval).await;
 
                 // Check if stopping
                 {
@@ -878,41 +885,49 @@ impl MonClient {
 
     /// Periodic maintenance tick
     async fn tick(&self, state: &Arc<RwLock<MonClientState>>) -> Result<()> {
-        // Get active connection (using read lock, quickly released)
-        let active_con = {
+        // Phase 2.2: If we're in hunting state, continue hunting regardless of active_con
+        let (is_hunting, active_con_opt) = {
             let state_guard = state.read().await;
-            match &state_guard.active_con {
-                Some(con) => Arc::clone(con),
-                None => {
-                    debug!("No active connection in tick");
-                    return Ok(());
-                }
+            let is_hunting = state_guard.hunting;
+            let active_con = state_guard.active_con.as_ref().map(Arc::clone);
+            (is_hunting, active_con)
+        };
+
+        if is_hunting {
+            info!("Continuing hunt in tick");
+            return self.start_hunting().await;
+        }
+
+        let active_con = match active_con_opt {
+            Some(con) => con,
+            None => {
+                debug!("No active connection in tick (not hunting)");
+                return Ok(());
             }
         };
 
-        // Check for keepalive timeout
-        // The background task in MonConnection sends a timeout notification
-        // when keepalive ACK is not received within the configured timeout
-        if let Some(()) = active_con.try_recv_timeout().await {
+        // Phase 2.1: Detect unexpected I/O task death (connection died without explicit shutdown).
+        // The background task exits on keepalive timeout, send errors, or recv errors.
+        // This replaces the old try_recv_timeout() channel-based approach.
+        let stopping = state.read().await.stopping;
+        if !stopping && active_con.is_task_finished().await {
             warn!(
-                "Keepalive timeout detected on mon.{}, hunting for new monitor",
+                "Connection to mon.{} lost (I/O task exited), hunting for new monitor",
                 active_con.rank()
             );
 
-            // Clear the failed connection and trigger hunting
             {
                 let mut state_guard = state.write().await;
                 state_guard.active_con = None;
                 state_guard.hunting = true;
             }
 
-            // Trigger hunting to find a more responsive monitor
             if let Err(e) = self.start_hunting().await {
-                error!("Failed to start hunting after keepalive timeout: {}", e);
+                error!("Failed to start hunting after connection loss: {}", e);
                 return Err(e);
             }
 
-            info!("Successfully started hunting after keepalive timeout");
+            info!("Successfully started hunting after connection loss");
             return Ok(());
         }
 
