@@ -1420,7 +1420,7 @@ impl MonClient {
             cmd,
             fsid
         );
-        let msg = MMonCommand::new(tid, cmd, inbl, fsid);
+        let msg = MMonCommand::new(cmd, inbl, fsid);
 
         // Use unified CephMessage framework
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;

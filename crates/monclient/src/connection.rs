@@ -11,6 +11,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// Parameters for creating a monitor connection
 #[derive(Clone)]
@@ -88,6 +89,9 @@ pub struct MonConnection {
     /// Channel for receiving keepalive timeout notifications
     /// The background task sends () when a keepalive timeout occurs
     timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
+
+    /// Token for signaling shutdown to background task
+    shutdown_token: CancellationToken,
 }
 
 #[derive(Debug)]
@@ -185,6 +189,10 @@ impl MonConnection {
         let mon_msg_tx_for_task = params.mon_msg_tx.clone();
         let keepalive_policy = params.keepalive_policy;
 
+        // Create cancellation token for background task
+        let shutdown_token = CancellationToken::new();
+        let task_shutdown_token = shutdown_token.clone();
+
         // Spawn a unified task to handle sending, receiving, and keepalive
         tokio::spawn(async move {
             tracing::debug!("Send/Receive/Keepalive task started");
@@ -200,6 +208,12 @@ impl MonConnection {
 
             loop {
                 tokio::select! {
+                    // Handle shutdown signal
+                    _ = task_shutdown_token.cancelled() => {
+                        tracing::debug!("Shutdown signal received, terminating background task");
+                        break;
+                    }
+
                     // Handle outgoing messages
                     Some(msg) = send_rx.recv() => {
                         tracing::trace!("Send/Recv task: Sending message");
@@ -314,6 +328,7 @@ impl MonConnection {
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
+            shutdown_token,
         };
 
         tracing::debug!("MonConnection created for rank {}", params.rank);
@@ -387,10 +402,12 @@ impl MonConnection {
 
     /// Close the connection
     ///
-    /// Clears the session state. The background task will terminate when the
-    /// MonConnection is dropped and channels are closed.
+    /// Signals the background task to terminate and clears the session state.
     pub async fn close(&self) -> Result<()> {
         tracing::debug!("Closing connection to mon.{}", self.rank);
+
+        // Signal background task to shutdown
+        self.shutdown_token.cancel();
 
         // Mark session as closed
         let mut state = self.state.lock().await;

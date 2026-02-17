@@ -38,16 +38,16 @@
 //! ```
 
 pub mod client;
-pub mod connection;
-pub mod defaults;
+pub(crate) mod connection;
+pub(crate) mod defaults;
 pub mod dns_srv;
 pub mod error;
 pub mod messages;
 pub mod monmap;
-pub mod paxos_service_message;
-pub mod subscription;
+pub(crate) mod paxos_service_message;
+pub(crate) mod subscription;
 pub mod types;
-pub mod wait_helper;
+pub(crate) mod wait_helper;
 
 pub use client::{MonClient, MonClientConfig, PoolOpResult};
 pub use dns_srv::{resolve_mon_addrs_via_dns_srv, DEFAULT_MON_DNS_SRV_NAME};

@@ -176,14 +176,10 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
         use denc::Denc;
 
         let mut data = front;
-        let interval = u32::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonSubscribeAck decode failed: interval".into())
-        })?;
+        let interval = u32::decode(&mut data, 0)?;
 
         // Decode UUID using Denc
-        let uuid_denc = UuidD::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonSubscribeAck decode failed: fsid".into())
-        })?;
+        let uuid_denc = UuidD::decode(&mut data, 0)?;
         let fsid = Uuid::from_bytes(uuid_denc.bytes);
 
         Ok(Self { interval, fsid })
@@ -235,12 +231,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
         use denc::Denc;
 
         let mut data = front;
-        let tid = u64::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonGetVersion decode failed: tid".into())
-        })?;
-        let what = String::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonGetVersion decode failed: what".into())
-        })?;
+        let tid = u64::decode(&mut data, 0)?;
+        let what = String::decode(&mut data, 0)?;
 
         Ok(Self { tid, what })
     }
@@ -294,17 +286,9 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
         use denc::Denc;
 
         let mut data = front;
-        let tid = u64::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonGetVersionReply decode failed: tid".into())
-        })?;
-        let version = u64::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization("MMonGetVersionReply decode failed: version".into())
-        })?;
-        let oldest_version = u64::decode(&mut data, 0).map_err(|_e| {
-            msgr2::Error::Deserialization(
-                "MMonGetVersionReply decode failed: oldest_version".into(),
-            )
-        })?;
+        let tid = u64::decode(&mut data, 0)?;
+        let version = u64::decode(&mut data, 0)?;
+        let oldest_version = u64::decode(&mut data, 0)?;
 
         Ok(Self {
             tid,
@@ -431,22 +415,12 @@ impl MOSDMap {
 
     /// Get the first (oldest) epoch in this message
     pub fn get_first(&self) -> u32 {
-        let mut first = u32::MAX;
-        for &epoch in self.incremental_maps.keys() {
-            if epoch < first {
-                first = epoch;
-            }
-        }
-        for &epoch in self.maps.keys() {
-            if epoch < first {
-                first = epoch;
-            }
-        }
-        if first == u32::MAX {
-            0
-        } else {
-            first
-        }
+        self.incremental_maps
+            .keys()
+            .chain(self.maps.keys())
+            .copied()
+            .min()
+            .unwrap_or(0)
     }
 
     /// Get the last (newest) epoch in this message
@@ -545,7 +519,7 @@ impl MMonCommand {
     /// Message version
     const VERSION: u16 = 1;
 
-    pub fn new(_tid: u64, cmd: Vec<String>, inbl: Bytes, fsid: UuidD) -> Self {
+    pub fn new(cmd: Vec<String>, inbl: Bytes, fsid: UuidD) -> Self {
         Self {
             paxos: PaxosFields::new(),
             fsid,
@@ -653,7 +627,7 @@ impl MMonCommandAck {
     /// Message version
     const VERSION: u16 = 1;
 
-    pub fn new(_tid: u64, retval: i32, outs: String, _outbl: Bytes) -> Self {
+    pub fn new(retval: i32, outs: String) -> Self {
         Self {
             paxos: PaxosFields::new(),
             r: retval,
