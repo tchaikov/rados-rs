@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
+use tokio::sync::{broadcast, mpsc, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
@@ -132,15 +132,8 @@ pub struct MonClient {
     /// Client state
     state: Arc<RwLock<MonClientState>>,
 
-    /// Tokio runtime handle
-    #[allow(dead_code)]
-    runtime: tokio::runtime::Handle,
-
     /// Tick task handle (for periodic keepalive and auth renewal)
     tick_task: Arc<RwLock<Option<JoinHandle<()>>>>,
-
-    /// Keepalive state (separate lock to avoid contention)
-    keepalive_state: Arc<Mutex<KeepaliveState>>,
 
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
@@ -165,9 +158,7 @@ impl Clone for MonClient {
             config: self.config.clone(),
             entity_name: self.entity_name.clone(),
             state: Arc::clone(&self.state),
-            runtime: self.runtime.clone(),
             tick_task: Arc::clone(&self.tick_task),
-            keepalive_state: Arc::clone(&self.keepalive_state),
             map_events: self.map_events.clone(),
             osdmap_tx: self.osdmap_tx.clone(),
             mon_msg_tx: self.mon_msg_tx.clone(),
@@ -208,25 +199,6 @@ impl RuntimeMonClientConfig {
     }
 }
 
-/// Keepalive state tracking
-///
-/// Keepalive is implemented at the msgr2 protocol layer via MonConnection.
-/// The MonConnection background task:
-/// - Sends Keepalive2 frames at the configured interval
-/// - Monitors for keepalive ACKs with timeout checking
-/// - Notifies the tick loop via timeout_rx channel when keepalive timeout occurs
-///
-/// The tick loop (lines 919-943) handles keepalive timeouts by:
-/// - Checking try_recv_timeout() on the active connection
-/// - Triggering hunting for a new monitor if timeout detected
-#[derive(Default)]
-#[allow(dead_code)]
-struct KeepaliveState {
-    /// Last time we sent a keepalive (Keepalive2 frame)
-    /// Note: Actual keepalive sending is handled by msgr2 protocol layer
-    last_sent: Option<std::time::Instant>,
-}
-
 struct MonClientState {
     /// Monitor map
     monmap: MonMap,
@@ -236,10 +208,6 @@ struct MonClientState {
 
     /// Pending connections (during hunting)
     pending_cons: HashMap<usize, Arc<MonConnection>>,
-
-    /// Monitors we've tried (to avoid retry storms)
-    #[allow(dead_code)]
-    tried: std::collections::HashSet<usize>,
 
     /// Subscription manager
     subscriptions: MonSub,
@@ -281,20 +249,11 @@ struct MonClientState {
 }
 
 struct MapWaiter {
-    #[allow(dead_code)]
-    what: String,
-    #[allow(dead_code)]
-    version: u64,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Consumed when sent through channel
     tx: oneshot::Sender<()>,
 }
 
 struct CommandTracker {
-    #[allow(dead_code)]
-    tid: u64,
-    #[allow(dead_code)]
-    cmd: Vec<String>,
-    #[allow(dead_code)]
     result_tx: oneshot::Sender<CommandResult>,
 }
 
@@ -324,20 +283,10 @@ impl PoolOpResult {
 }
 
 struct PoolOpTracker {
-    #[allow(dead_code)]
-    tid: u64,
-    #[allow(dead_code)]
-    pool_name: String,
-    #[allow(dead_code)]
     result_tx: oneshot::Sender<PoolOpResult>,
 }
 
 struct VersionTracker {
-    #[allow(dead_code)]
-    req_id: u64,
-    #[allow(dead_code)]
-    what: String,
-    #[allow(dead_code)]
     result_tx: oneshot::Sender<(u64, u64)>,
 }
 
@@ -383,7 +332,6 @@ impl MonClient {
             monmap,
             active_con: None,
             pending_cons: HashMap::new(),
-            tried: std::collections::HashSet::new(),
             subscriptions: MonSub::new(),
             commands: HashMap::new(),
             last_command_tid: 0,
@@ -408,9 +356,7 @@ impl MonClient {
             config,
             entity_name,
             state: Arc::new(RwLock::new(state)),
-            runtime: tokio::runtime::Handle::current(),
             tick_task: Arc::new(RwLock::new(None)),
-            keepalive_state: Arc::new(Mutex::new(KeepaliveState::default())),
             map_events,
             osdmap_tx,
             mon_msg_tx,
@@ -425,7 +371,6 @@ impl MonClient {
                 if let Some(client_arc) = client_weak.upgrade() {
                     if let Err(e) = Self::dispatch_message(
                         &client_arc.state,
-                        &client_arc.keepalive_state,
                         &client_arc.map_events,
                         &client_arc.monmap_notify,
                         msg,
@@ -890,7 +835,6 @@ impl MonClient {
     /// Start background tick loop for periodic maintenance
     fn start_tick_loop(&self) {
         let state = Arc::clone(&self.state);
-        let keepalive_state = Arc::clone(&self.keepalive_state);
         let config = self.config.clone();
         let self_clone = self.clone(); // Clone Arc<Self> for use in spawned task
 
@@ -913,7 +857,7 @@ impl MonClient {
                 }
 
                 // Perform tick operations
-                if let Err(e) = self_clone.tick(&state, &keepalive_state).await {
+                if let Err(e) = self_clone.tick(&state).await {
                     tracing::error!("Error in tick: {}", e);
                 }
             }
@@ -933,11 +877,7 @@ impl MonClient {
     }
 
     /// Periodic maintenance tick
-    async fn tick(
-        &self,
-        state: &Arc<RwLock<MonClientState>>,
-        _keepalive_state: &Arc<Mutex<KeepaliveState>>,
-    ) -> Result<()> {
+    async fn tick(&self, state: &Arc<RwLock<MonClientState>>) -> Result<()> {
         // Get active connection (using read lock, quickly released)
         let active_con = {
             let state_guard = state.read().await;
@@ -1087,7 +1027,6 @@ impl MonClient {
     /// Dispatch received message to appropriate handler
     async fn dispatch_message(
         state: &Arc<RwLock<MonClientState>>,
-        _keepalive_state: &Arc<Mutex<KeepaliveState>>,
         map_events: &broadcast::Sender<MapEvent>,
         monmap_notify: &Arc<tokio::sync::Notify>,
         msg: msgr2::message::Message,
@@ -1207,7 +1146,7 @@ impl MonClient {
         // Notify waiters that MonMap has arrived
         monmap_notify.notify_waiters();
 
-        info!("✓ MonMap updated successfully");
+        info!("MonMap updated successfully");
         Ok(())
     }
 
@@ -1387,14 +1326,9 @@ impl MonClient {
         let req_id = state.last_version_req_id;
 
         // Track request
-        state.version_requests.insert(
-            req_id,
-            VersionTracker {
-                req_id,
-                what: what.to_string(),
-                result_tx: tx,
-            },
-        );
+        state
+            .version_requests
+            .insert(req_id, VersionTracker { result_tx: tx });
 
         drop(state);
 
@@ -1474,14 +1408,7 @@ impl MonClient {
         let tid = state.last_command_tid;
 
         // Track command
-        state.commands.insert(
-            tid,
-            CommandTracker {
-                tid,
-                cmd: cmd.clone(),
-                result_tx: tx,
-            },
-        );
+        state.commands.insert(tid, CommandTracker { result_tx: tx });
 
         drop(state);
 
@@ -1522,7 +1449,7 @@ impl MonClient {
     ///
     /// This is a low-level helper for sending MPoolOp messages.
     /// Most users should use OSDClient's create_pool() and delete_pool() methods instead.
-    pub async fn send_poolop(&self, pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
+    pub async fn send_poolop(&self, _pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
         let (tx, rx) = oneshot::channel();
 
         let mut state = self.state.write().await;
@@ -1542,14 +1469,7 @@ impl MonClient {
         let tid = state.last_poolop_tid;
 
         // Track pool operation
-        state.pool_ops.insert(
-            tid,
-            PoolOpTracker {
-                tid,
-                pool_name: pool_name.clone(),
-                result_tx: tx,
-            },
-        );
+        state.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
 
         drop(state);
 
@@ -1726,11 +1646,7 @@ impl MonClient {
                 .map_waiters
                 .entry(what.to_string())
                 .or_insert_with(Vec::new)
-                .push(MapWaiter {
-                    what: what.to_string(),
-                    version,
-                    tx,
-                });
+                .push(MapWaiter { tx });
         }
 
         // Wait for notification

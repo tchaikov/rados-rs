@@ -69,10 +69,6 @@ impl KeepalivePolicy {
 
 /// Monitor connection state
 pub struct MonConnection {
-    /// Underlying msgr2 connection (not used, kept for API compatibility)
-    #[allow(dead_code)]
-    connection: Arc<Mutex<Option<Msgr2Connection>>>,
-
     /// Monitor rank
     rank: usize,
 
@@ -92,16 +88,6 @@ pub struct MonConnection {
     /// Channel for receiving keepalive timeout notifications
     /// The background task sends () when a keepalive timeout occurs
     timeout_rx: Arc<Mutex<mpsc::UnboundedReceiver<()>>>,
-
-    /// Channel for routing MOSDMap messages to OSDClient
-    /// Note: Used by the background task closure, so #[allow(dead_code)] is needed
-    #[allow(dead_code)]
-    osdmap_tx: Option<MapSender<MOSDMap>>,
-
-    /// Channel for routing all other monitor messages to MonClient
-    /// Note: Used by the background task closure, so #[allow(dead_code)] is needed
-    #[allow(dead_code)]
-    mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
 }
 
 #[derive(Debug)]
@@ -164,7 +150,7 @@ impl MonConnection {
             .await
             .map_err(MonClientError::MessageError)?;
 
-        tracing::info!("✓ Session established with monitor rank {}", params.rank);
+        tracing::info!("Session established with monitor rank {}", params.rank);
 
         // Get the global_id from the connection
         let global_id = connection.global_id();
@@ -173,24 +159,19 @@ impl MonConnection {
         // Get the authenticated auth provider from the connection
         // This provider now contains the session and service tickets
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
-            eprintln!("DEBUG: Retrieved auth provider from connection after authentication");
             tracing::debug!("Retrieved auth provider from connection after authentication");
             // Downcast to MonitorAuthProvider
             provider
                 .as_any()
                 .downcast_ref::<auth::MonitorAuthProvider>()
                 .map(|mon_auth| {
-                    eprintln!("DEBUG: Successfully downcast to MonitorAuthProvider");
                     tracing::debug!("Successfully downcast to MonitorAuthProvider");
                     mon_auth.clone()
                 })
         });
 
         if auth_provider.is_none() {
-            eprintln!("DEBUG: Auth provider is None after authentication!");
             tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
-        } else {
-            eprintln!("DEBUG: Auth provider is Some after authentication!");
         }
 
         // Create channels for sending messages and timeouts
@@ -325,7 +306,6 @@ impl MonConnection {
         });
 
         let mon_conn = Self {
-            connection: Arc::new(Mutex::new(None)), // Not used anymore
             rank: params.rank,
             addrs: params.addrs,
             state: Arc::new(Mutex::new(ConnectionState {
@@ -336,11 +316,9 @@ impl MonConnection {
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             timeout_rx: Arc::new(Mutex::new(timeout_rx)),
-            osdmap_tx: params.osdmap_tx,
-            mon_msg_tx: params.mon_msg_tx,
         };
 
-        tracing::debug!("✓ MonConnection created, connection is wrapped in Arc<Mutex>");
+        tracing::debug!("MonConnection created for rank {}", params.rank);
 
         Ok(mon_conn)
     }
@@ -353,12 +331,6 @@ impl MonConnection {
     /// Get the monitor addresses
     pub fn addrs(&self) -> &EntityAddrVec {
         &self.addrs
-    }
-
-    /// Get a reference to the underlying msgr2 connection
-    /// Note: This returns None now since the connection is managed by a background task
-    pub fn connection(&self) -> Arc<Mutex<Option<Msgr2Connection>>> {
-        Arc::clone(&self.connection)
     }
 
     /// Check if authenticated
@@ -417,8 +389,8 @@ impl MonConnection {
 
     /// Close the connection
     ///
-    /// Properly closes the underlying msgr2 connection and clears the session state.
-    /// This is a graceful shutdown that allows pending messages to be sent.
+    /// Clears the session state. The background task will terminate when the
+    /// MonConnection is dropped and channels are closed.
     pub async fn close(&self) -> Result<()> {
         tracing::debug!("Closing connection to mon.{}", self.rank);
 
@@ -426,15 +398,6 @@ impl MonConnection {
         let mut state = self.state.lock().await;
         state.has_session = false;
         state.auth_state = AuthState::None;
-        drop(state);
-
-        // Close the underlying msgr2 connection
-        let mut connection = self.connection.lock().await;
-        if let Some(conn) = connection.take() {
-            // The msgr2 Connection will be dropped here, which closes the TCP connection
-            tracing::debug!("Closed msgr2 connection to mon.{}", self.rank);
-            drop(conn);
-        }
 
         Ok(())
     }
@@ -467,10 +430,6 @@ impl MonConnection {
         // Mark session as lost
         let mut state = self.state.lock().await;
         state.has_session = false;
-
-        // Close the underlying connection
-        let mut connection = self.connection.lock().await;
-        *connection = None;
 
         // Return an error to trigger reconnection at the MonClient level
         Err(MonClientError::Other(

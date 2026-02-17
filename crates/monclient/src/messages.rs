@@ -79,7 +79,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
             // Encode name using Denc
             name.encode(&mut buf, 0)?;
             tracing::debug!(
-                "  📝 Subscription: '{}' start={} flags={}",
+                "Subscription: '{}' start={} flags={}",
                 name,
                 item.start,
                 item.flags
@@ -92,7 +92,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
 
         // Encode hostname (version 3) using Denc
         self.hostname.encode(&mut buf, 0)?;
-        tracing::debug!("  🖥️  Hostname: '{}'", self.hostname);
+        tracing::debug!("Hostname: '{}'", self.hostname);
 
         Ok(buf.freeze())
     }
@@ -223,15 +223,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
         let mut buf = BytesMut::new();
         self.tid.encode(&mut buf, 0)?;
         self.what.encode(&mut buf, 0)?;
-        let result = buf.freeze();
-        eprintln!(
-            "DEBUG: MMonGetVersion::encode() tid={}, what='{}', payload={} bytes: {:02x?}",
-            self.tid,
-            self.what,
-            result.len(),
-            &result[..]
-        );
-        Ok(result)
+        Ok(buf.freeze())
     }
 
     fn decode_payload(
