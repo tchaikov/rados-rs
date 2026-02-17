@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, trace, warn};
 
@@ -135,6 +135,9 @@ pub struct MonClient {
 
     /// Tick task handle (for periodic keepalive and auth renewal)
     tick_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+
+    /// Drain task handle (processes incoming monitor messages)
+    drain_task: Arc<Mutex<Option<JoinHandle<()>>>>,
 
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
@@ -342,6 +345,7 @@ impl MonClient {
             entity_name,
             state: Arc::new(RwLock::new(state)),
             tick_task: Arc::new(RwLock::new(None)),
+            drain_task: Arc::new(Mutex::new(None)),
             map_events,
             osdmap_tx,
             mon_msg_tx,
@@ -351,7 +355,7 @@ impl MonClient {
 
         // Spawn drain task for monitor messages
         let client_weak = Arc::downgrade(&client);
-        tokio::spawn(async move {
+        let drain_handle = tokio::spawn(async move {
             while let Some(msg) = mon_msg_rx.recv().await {
                 if let Some(client_arc) = client_weak.upgrade() {
                     if let Err(e) = Self::dispatch_message(
@@ -371,6 +375,7 @@ impl MonClient {
             }
             info!("MonClient message drain task terminated");
         });
+        *client.drain_task.lock().await = Some(drain_handle);
 
         Ok(client)
     }
@@ -450,6 +455,15 @@ impl MonClient {
         if let Some(handle) = tick_task.take() {
             handle.abort();
             info!("Aborted tick task");
+        }
+
+        // Stop drain task. Closing all connections above dropped the per-connection
+        // mon_msg_tx senders, but MonClient still holds its own mon_msg_tx, so the
+        // channel won't close on its own. Abort ensures the task stops promptly.
+        let mut drain_task = self.drain_task.lock().await;
+        if let Some(handle) = drain_task.take() {
+            handle.abort();
+            info!("Aborted drain task");
         }
 
         Ok(())
