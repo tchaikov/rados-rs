@@ -144,7 +144,7 @@ impl CephMsgHeader {
                 .encode(&mut buf, 0)
                 .unwrap();
         }
-        denc::ceph_crc32c(&buf, 0)
+        denc::ceph_crc32c(0, &buf)
     }
 }
 
@@ -219,9 +219,9 @@ impl CephMessage {
         };
 
         if _crc_flags.contains(CrcFlags::DATA) {
-            footer.front_crc = denc::ceph_crc32c(&front, 0);
-            footer.middle_crc = denc::ceph_crc32c(&middle, 0);
-            footer.data_crc = denc::ceph_crc32c(&data, 0);
+            footer.front_crc = denc::ceph_crc32c(0, &front);
+            footer.middle_crc = denc::ceph_crc32c(0, &middle);
+            footer.data_crc = denc::ceph_crc32c(0, &data);
         } else {
             footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
@@ -305,7 +305,7 @@ impl CephMessage {
                 unsafe { std::ptr::addr_of!(footer.middle_crc).read_unaligned() };
             let data_crc_expected = unsafe { std::ptr::addr_of!(footer.data_crc).read_unaligned() };
 
-            let front_crc = denc::ceph_crc32c(&front, 0);
+            let front_crc = denc::ceph_crc32c(0, &front);
             if front_crc != front_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Front CRC mismatch: got {}, expected {}",
@@ -313,7 +313,7 @@ impl CephMessage {
                 )));
             }
 
-            let middle_crc = denc::ceph_crc32c(&middle, 0);
+            let middle_crc = denc::ceph_crc32c(0, &middle);
             if middle_crc != middle_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Middle CRC mismatch: got {}, expected {}",
@@ -321,7 +321,7 @@ impl CephMessage {
                 )));
             }
 
-            let data_crc = denc::ceph_crc32c(&data, 0);
+            let data_crc = denc::ceph_crc32c(0, &data);
             if data_crc != data_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Data CRC mismatch: got {}, expected {}",

@@ -345,7 +345,7 @@ impl Preamble {
         // Calculate CRC using Ceph's SCTP CRC32C algorithm
         // For preamble CRC, Ceph uses ceph_crc32c(0, data, len) with initial value 0
         // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 295
-        let crc = denc::ceph_crc32c(&buf[..28], 0);
+        let crc = denc::ceph_crc32c(0, &buf[..28]);
 
         crc.encode(&mut buf, 0).unwrap();
 
@@ -361,7 +361,7 @@ impl Preamble {
         // Verify CRC BEFORE decoding (need original buffer)
         // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
         // Use Ceph's SCTP CRC32C with initial value 0 (matching frames_v2.cc line 295)
-        let calculated_crc = denc::ceph_crc32c(&buf[..28], 0);
+        let calculated_crc = denc::ceph_crc32c(0, &buf[..28]);
 
         // Now decode the fields
         let mut cursor = buf;
@@ -572,7 +572,7 @@ impl FrameAssembler {
             epilogue.crc_values[i] = if self.with_data_crc {
                 // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
                 // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 573
-                denc::ceph_crc32c(segment, 0xFFFFFFFF)
+                denc::ceph_crc32c(0xFFFFFFFF, segment)
             } else {
                 0
             };
@@ -601,7 +601,7 @@ impl FrameAssembler {
             let first_crc = if self.with_data_crc {
                 // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
                 // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 157
-                denc::ceph_crc32c(&segments[0], 0xFFFFFFFF)
+                denc::ceph_crc32c(0xFFFFFFFF, &segments[0])
             } else {
                 0u32
             };
@@ -629,7 +629,7 @@ impl FrameAssembler {
             epilogue.crc_values[i - 1] = if self.with_data_crc {
                 // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
                 // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 168
-                denc::ceph_crc32c(segment, 0xFFFFFFFF)
+                denc::ceph_crc32c(0xFFFFFFFF, segment)
             } else {
                 0
             };
