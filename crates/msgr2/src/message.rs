@@ -65,10 +65,12 @@ impl Message {
 
     pub fn ping() -> Self {
         Self::new(CEPH_MSG_PING, Bytes::new())
+            .with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn ping_ack() -> Self {
         Self::new(CEPH_MSG_PING_ACK, Bytes::new())
+            .with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn with_seq(mut self, seq: u64) -> Self {
@@ -470,5 +472,46 @@ mod tests {
         // total_len = header + front + middle + data
         // = MsgHeader::LENGTH + 5 + 2 + 3
         assert_eq!(msg.total_len(), MsgHeader::LENGTH + 10);
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_has_high_priority() {
+        let ping = Message::ping();
+        assert_eq!(ping.priority(), MessagePriority::High);
+        assert_eq!(ping.header.get_priority(), MessagePriority::High.to_u16());
+    }
+
+    #[test]
+    fn test_ping_ack_has_high_priority() {
+        let ping_ack = Message::ping_ack();
+        assert_eq!(ping_ack.priority(), MessagePriority::High);
+        assert_eq!(ping_ack.header.get_priority(), MessagePriority::High.to_u16());
+    }
+
+    #[test]
+    fn test_message_priority_from_u16() {
+        assert_eq!(MessagePriority::from_u16(0), MessagePriority::Low);
+        assert_eq!(MessagePriority::from_u16(1), MessagePriority::Normal);
+        assert_eq!(MessagePriority::from_u16(2), MessagePriority::High);
+        assert_eq!(MessagePriority::from_u16(5), MessagePriority::High); // Values >= 2 map to High
+    }
+
+    #[test]
+    fn test_message_priority_to_u16() {
+        assert_eq!(MessagePriority::Low.to_u16(), 0);
+        assert_eq!(MessagePriority::Normal.to_u16(), 1);
+        assert_eq!(MessagePriority::High.to_u16(), 2);
+    }
+
+    #[test]
+    fn test_message_with_priority() {
+        let msg = Message::new(CEPH_MSG_MON_MAP, Bytes::from("test"))
+            .with_priority(MessagePriority::High.to_u16());
+        assert_eq!(msg.priority(), MessagePriority::High);
     }
 }
