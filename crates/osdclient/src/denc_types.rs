@@ -15,18 +15,6 @@ use crate::types::{
 #[cfg(test)]
 use crate::types::BlkinTraceInfo;
 
-// Re-export types for convenience
-pub use crate::types::{
-    BlkinTraceInfo as BlkinTraceInfoType, EntityName as EntityNameType,
-    JaegerSpanContext as JaegerSpanContextType, PgId as PgIdType, StripedPgId as StripedPgIdType,
-};
-
-// Re-export entity type constants for convenience
-pub use crate::types::{
-    CEPH_ENTITY_TYPE_AUTH, CEPH_ENTITY_TYPE_CLIENT, CEPH_ENTITY_TYPE_MDS, CEPH_ENTITY_TYPE_MGR,
-    CEPH_ENTITY_TYPE_MON, CEPH_ENTITY_TYPE_OSD,
-};
-
 // PgId Denc implementation is now in the denc crate (osdmap.rs)
 // We just re-export and use it here
 
