@@ -1094,13 +1094,12 @@ impl OSDClient {
             );
 
             // Convert entries to ListObjectEntry
-            for entry in response.entries {
-                all_entries.push(ListObjectEntry::new(
-                    &entry.nspace,
-                    &entry.oid,
-                    &entry.locator,
-                ));
-            }
+            all_entries.extend(
+                response
+                    .entries
+                    .iter()
+                    .map(|entry| ListObjectEntry::new(&entry.nspace, &entry.oid, &entry.locator)),
+            );
 
             // Check if we have enough entries
             if all_entries.len() >= max_entries as usize {
@@ -1175,15 +1174,19 @@ impl OSDClient {
             .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
 
         // Extract pool information from OSDMap
-        let mut pools = Vec::new();
-        for pool_id in osdmap.pools.keys() {
-            if let Some(pool_name) = osdmap.pool_name.get(pool_id) {
-                pools.push(crate::types::PoolInfo {
-                    pool_id: *pool_id,
-                    pool_name: pool_name.clone(),
-                });
-            }
-        }
+        let pools: Vec<_> = osdmap
+            .pools
+            .keys()
+            .filter_map(|pool_id| {
+                osdmap
+                    .pool_name
+                    .get(pool_id)
+                    .map(|pool_name| crate::types::PoolInfo {
+                        pool_id: *pool_id,
+                        pool_name: pool_name.clone(),
+                    })
+            })
+            .collect();
 
         Ok(pools)
     }

@@ -158,11 +158,8 @@ pub fn crush_do_rule(
 
             RuleOp::Emit => {
                 // Output current working set
-                for &item in &work {
-                    if result.len() < result_max {
-                        result.push(item);
-                    }
-                }
+                let remaining = result_max.saturating_sub(result.len());
+                result.extend(work.iter().copied().take(remaining));
             }
 
             RuleOp::SetChooseTries => {
