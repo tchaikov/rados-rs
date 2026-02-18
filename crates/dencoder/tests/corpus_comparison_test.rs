@@ -621,7 +621,7 @@ fn test_type(
             ceph_dencoder,
             type_name,
             &corpus_file,
-            features,  // Rust needs features for encoding
+            features, // Rust needs features for encoding
             &rust_json,
             is_exception,
         )
@@ -632,7 +632,7 @@ fn test_type(
             rust_dencoder,
             type_name,
             &corpus_file,
-            None,  // Don't pass features to Ceph - it loses version info
+            None, // Don't pass features to Ceph - it loses version info
             &ceph_json,
             is_exception,
         )

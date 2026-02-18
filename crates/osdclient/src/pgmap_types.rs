@@ -1,4 +1,5 @@
 // PGMap and related types from Ceph's mon/PGMap.h
+#![allow(dead_code)]
 
 use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};

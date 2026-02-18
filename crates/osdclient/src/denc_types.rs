@@ -468,18 +468,23 @@ pub use denc::UTime;
 // ============= Size Constants =============
 
 /// Size of spg_t encoding (with version header)
+#[allow(dead_code)]
 pub const SPG_T_ENCODED_SIZE: usize = 24; // 6 (header) + 17 (pgid) + 1 (shard)
 
 /// Size of osd_reqid_t encoding (with version header)
+#[allow(dead_code)]
 pub const OSD_REQID_T_ENCODED_SIZE: usize = 27; // 6 (header) + 9 (name) + 8 (tid) + 4 (inc)
 
 /// Size of blkin_trace_info encoding
+#[allow(dead_code)]
 pub const BLKIN_TRACE_INFO_SIZE: usize = 24; // 3 x u64
 
 /// Size of jspan_context encoding (with version header, when invalid)
+#[allow(dead_code)]
 pub const JSPAN_CONTEXT_ENCODED_SIZE: usize = 7; // 6 (header) + 1 (is_valid)
 
 /// Size of ceph_osd_op structure
+#[allow(dead_code)]
 pub const OSD_OP_ENCODED_SIZE: usize = 38; // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len)
 
 #[cfg(test)]
