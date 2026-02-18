@@ -2,7 +2,7 @@
 //!
 //! Implements distributed object locking using Ceph's cls_lock object class.
 
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use std::time::Duration;
 
