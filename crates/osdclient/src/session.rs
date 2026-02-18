@@ -23,6 +23,7 @@ use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId, StripedPgId};
 use monclient::MOSDMap;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
+use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
 use msgr2::MapSender;
 
 /// Connection state for OSD session
@@ -313,122 +314,81 @@ impl OSDSession {
 
     /// I/O task that owns the Connection
     ///
-    /// This task multiplexes:
-    /// - Receiving messages from send_rx channel and sending to OSD
-    /// - Receiving messages from OSD and routing based on message type
+    /// Routes messages based on their semantic scope:
+    /// - OSDMAP: Broadcast → osdmap_tx channel (shared with OSDClient)
+    /// - OPREPLY/BACKOFF: Session-specific → dispatch_from_osd (Linux kernel pattern)
     ///
-    /// Message routing follows a hybrid pattern inspired by both implementations:
-    /// - Ceph C++ (Objecter): Central dispatcher with connection context preservation
-    /// - Linux Kernel: Explicit OSD context passing to handlers
+    /// The mechanical select! loop (send/recv/keepalive/shutdown) is shared with
+    /// MonConnection via [`msgr2::io_loop::run_io_loop`]; only the routing differs.
     ///
-    /// We route messages based on their semantic scope:
-    /// - OSDMAP: Broadcast message → osdmap_tx channel (shared with OSDClient)
-    /// - OPREPLY/BACKOFF: Session-specific → Direct dispatch with osd_id context
-    ///
-    /// Connection recovery is handled at two levels:
-    /// - Short-term failures: msgr2 Connection automatically attempts SESSION_RECONNECT
-    ///   (up to 3 retries) on send/recv errors
-    /// - OSD map changes: OSDClient.scan_requests_on_map_change() migrates operations to new
-    ///   target OSDs when OSDMap updates arrive
-    /// - Prolonged failures: Operations eventually timeout via tracker, client can retry
-    ///
-    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2() and ~/dev/linux/net/ceph/osd_client.c
+    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc ms_dispatch2()
+    ///            ~/dev/linux/net/ceph/osd_client.c
     async fn io_task(
         ctx: IoTaskContext,
-        mut connection: msgr2::protocol::Connection,
-        mut send_rx: mpsc::Receiver<msgr2::message::Message>,
+        connection: msgr2::protocol::Connection,
+        send_rx: mpsc::Receiver<msgr2::message::Message>,
     ) {
         debug!("I/O task started for OSD {}", ctx.osd_id);
 
-        // Create keepalive interval (every 10 seconds, matching Ceph's default)
-        // Use interval_at to start first tick after 10 seconds, not immediately
-        let mut keepalive_interval = tokio::time::interval_at(
-            tokio::time::Instant::now() + std::time::Duration::from_secs(10),
-            std::time::Duration::from_secs(10),
-        );
+        let osd_id = ctx.osd_id;
+        let osdmap_tx = ctx.osdmap_tx.clone();
+        let client = ctx.client.clone();
 
-        loop {
-            tokio::select! {
-                // Shutdown signal
-                _ = ctx.shutdown_token.cancelled() => {
-                    info!("OSD {} I/O task received shutdown signal", ctx.osd_id);
-                    break;
-                }
+        // Keepalive every 10 seconds, matching Ceph's default (no timeout check for OSDs)
+        let keepalive = Some(KeepaliveConfig {
+            interval: std::time::Duration::from_secs(10),
+            timeout: None,
+        });
 
-                // Periodic keepalive to detect dead connections proactively
-                _ = keepalive_interval.tick() => {
-                    if let Err(e) = connection.send_keepalive().await {
-                        warn!("Failed to send keepalive to OSD {}: {}", ctx.osd_id, e);
-                        // Don't break immediately - let send/recv errors handle reconnection
-                        // This just warns about potential connection issues
-                    } else {
-                        debug!("Sent keepalive to OSD {}", ctx.osd_id);
-                    }
-                }
+        run_io_loop(
+            connection,
+            send_rx,
+            ctx.shutdown_token.clone(),
+            keepalive,
+            move |msg| {
+                let osdmap_tx = osdmap_tx.clone();
+                let client = client.clone();
+                async move {
+                    let msg_type = msg.msg_type();
+                    debug!("OSD {} received message type 0x{:04x}", osd_id, msg_type);
 
-                // Handle outgoing messages (like try_write in Linux kernel)
-                msg_opt = send_rx.recv() => {
-                    match msg_opt {
-                        Some(msg) => {
-                            debug!("OSD {} sending message type 0x{:04x}, tid={}", ctx.osd_id, msg.msg_type(), msg.tid());
-                            if let Err(e) = connection.send_message(msg).await {
-                                error!("Failed to send message to OSD {}: {}", ctx.osd_id, e);
-                                break;
+                    match msg_type {
+                        msgr2::message::CEPH_MSG_OSD_MAP => {
+                            if let Err(e) = osdmap_tx.send(msg).await {
+                                error!("Failed to send OSDMap to OSDClient: {:?}", e);
                             }
                         }
-                        None => {
-                            debug!("OSD {} send_rx channel closed", ctx.osd_id);
-                            break;
-                        }
-                    }
-                }
-
-                // Handle incoming messages - route based on message semantics
-                result = connection.recv_message() => {
-                    match result {
-                        Ok(msg) => {
-                            let msg_type = msg.msg_type();
-                            debug!("OSD {} received message type 0x{:04x}", ctx.osd_id, msg_type);
-
-                            // Route messages based on their scope (broadcast vs session-specific)
-                            match msg_type {
-                                msgr2::message::CEPH_MSG_OSD_MAP => {
-                                    // Route MOSDMap to OSDClient via typed channel
-                                    if let Err(e) = ctx.osdmap_tx.send(msg).await {
-                                        error!("Failed to send OSDMap to OSDClient: {:?}", e);
-                                    }
+                        crate::messages::CEPH_MSG_OSD_OPREPLY
+                        | crate::messages::CEPH_MSG_OSD_BACKOFF => {
+                            if let Some(client_arc) = client.upgrade() {
+                                if let Err(e) = client_arc.dispatch_from_osd(osd_id, msg).await {
+                                    error!(
+                                        "Failed to dispatch message 0x{:04x} from OSD {}: {}",
+                                        msg_type, osd_id, e
+                                    );
                                 }
-                                crate::messages::CEPH_MSG_OSD_OPREPLY | crate::messages::CEPH_MSG_OSD_BACKOFF => {
-                                    // Session-specific message: Dispatch directly with OSD context
-                                    // Like Linux kernel's explicit osd parameter
-                                    if let Some(client_arc) = ctx.client.upgrade() {
-                                        if let Err(e) = client_arc.dispatch_from_osd(ctx.osd_id, msg).await {
-                                            error!("Failed to dispatch message 0x{:04x} from OSD {}: {}", msg_type, ctx.osd_id, e);
-                                        }
-                                    } else {
-                                        debug!("OSDClient dropped, ignoring message from OSD {}", ctx.osd_id);
-                                        break;
-                                    }
-                                }
-                                _ => {
-                                    warn!("OSD {} sent unexpected message type: 0x{:04x}", ctx.osd_id, msg_type);
-                                }
+                            } else {
+                                debug!("OSDClient dropped, ignoring message from OSD {}", osd_id);
+                                return false;
                             }
                         }
-                        Err(e) => {
-                            error!("Failed to receive message from OSD {}: {}", ctx.osd_id, e);
-                            break;
+                        _ => {
+                            warn!(
+                                "OSD {} sent unexpected message type: 0x{:04x}",
+                                osd_id, msg_type
+                            );
                         }
                     }
+                    true
                 }
-            }
-        }
+            },
+        )
+        .await;
 
         info!("I/O task exiting for OSD {}", ctx.osd_id);
 
-        // Update connection state based on exit reason
-        // If shutdown was triggered, set to Closed (terminal state)
-        // Otherwise set to Disconnected (can reconnect)
+        // Update connection state based on exit reason:
+        // cancelled → Closed (terminal), otherwise → Disconnected (can reconnect)
         let final_state = if ctx.shutdown_token.is_cancelled() {
             ConnectionState::Closed
         } else {
@@ -438,7 +398,7 @@ impl OSDSession {
 
         // Leave pending ops in the session.
         // They are migrated eagerly by get_or_create_session() the next time any operation
-        // targets this OSD (see kick_requests() there), or by scan_requests_on_map_change()
+        // targets this OSD (see kick_into_session() there), or by scan_requests_on_map_change()
         // when an OSDMap update arrives. This avoids a type cycle that would arise from
         // spawning kick_requests() here (io_task → kick → get_or_create_session → connect →
         // io_task forms an opaque-async-return cycle the compiler cannot resolve).

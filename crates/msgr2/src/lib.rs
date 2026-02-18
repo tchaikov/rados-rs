@@ -11,6 +11,7 @@ pub mod crypto;
 pub mod error;
 pub mod frames;
 pub mod header;
+pub mod io_loop;
 pub mod map_channel;
 pub mod message;
 pub mod protocol;

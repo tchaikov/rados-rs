@@ -9,6 +9,7 @@ auth = { path = "../auth" }
 cephconfig = { path = "../cephconfig" }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros"] }
+tokio-util = "0.7"
 bytes = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

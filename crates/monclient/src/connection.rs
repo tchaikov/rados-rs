@@ -4,6 +4,7 @@
 
 use crate::error::{MonClientError, Result};
 use crate::messages::{MOSDMap, CEPH_MSG_OSD_MAP};
+use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
 use msgr2::protocol::Connection as Msgr2Connection;
 use msgr2::{ConnectionConfig, MapSender};
 use std::net::SocketAddr;
@@ -79,7 +80,7 @@ pub struct MonConnection {
     auth_provider: Option<Arc<Mutex<auth::MonitorAuthProvider>>>,
 
     /// Channel for sending messages (to avoid deadlock with receive loop)
-    send_tx: mpsc::UnboundedSender<msgr2::message::Message>,
+    send_tx: mpsc::Sender<msgr2::message::Message>,
 
     /// Background task handle for graceful shutdown and death detection
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
@@ -151,138 +152,70 @@ impl MonConnection {
             tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
         }
 
-        // Create channels for sending messages
-        let (send_tx, mut send_rx) = mpsc::unbounded_channel::<msgr2::message::Message>();
+        // Create bounded send channel (256 slots — monitors are low-rate senders)
+        let (send_tx, send_rx) = mpsc::channel::<msgr2::message::Message>(256);
 
-        let mut connection_for_task = connection;
-
-        // Clone channels for the background task
         let osdmap_tx_for_task = params.osdmap_tx.clone();
         let mon_msg_tx_for_task = params.mon_msg_tx.clone();
         let keepalive_policy = params.keepalive_policy;
+
+        // Convert KeepalivePolicy → KeepaliveConfig for run_io_loop
+        let keepalive = keepalive_policy.interval.map(|interval| KeepaliveConfig {
+            interval,
+            timeout: keepalive_policy.timeout,
+        });
 
         // Create cancellation token for background task
         let shutdown_token = CancellationToken::new();
         let task_shutdown_token = shutdown_token.clone();
 
-        // Spawn a unified task to handle sending, receiving, and keepalive
+        // Spawn unified I/O task using the shared loop
         let handle = tokio::spawn(async move {
-            tracing::debug!("Send/Receive/Keepalive task started");
+            tracing::debug!("MonConnection I/O task started for rank {}", params.rank);
 
-            // Set up keepalive timer if enabled
-            let mut keepalive_interval = keepalive_policy.interval.map(|interval| {
-                // Start the interval in the future to avoid immediate first tick
-                tokio::time::interval_at(tokio::time::Instant::now() + interval, interval)
-            });
-
-            // Track when we last sent a keepalive (for timeout checking when no ACK received yet)
-            let mut last_keepalive_sent: Option<std::time::Instant> = None;
-
-            loop {
-                tokio::select! {
-                    // Handle shutdown signal
-                    _ = task_shutdown_token.cancelled() => {
-                        tracing::debug!("Shutdown signal received, terminating background task");
-                        break;
-                    }
-
-                    // Handle outgoing messages
-                    Some(msg) = send_rx.recv() => {
-                        tracing::trace!("Send/Recv task: Sending message");
-                        if let Err(e) = connection_for_task.send_message(msg).await {
-                            tracing::error!("Failed to send message: {}", e);
-                            break;
-                        }
-                        tracing::trace!("Send/Recv task: Message sent successfully");
-                    }
-
-                    // Handle incoming messages - route based on type
-                    result = connection_for_task.recv_message() => {
-                        match result {
-                            Ok(msg) => {
-                                let msg_type = msg.header.msg_type;
-                                tracing::trace!("Received message type 0x{:04x}, routing to appropriate channel", msg_type);
-
-                                // Route based on message type
-                                match msg_type {
-                                    CEPH_MSG_OSD_MAP => {
-                                        // Route MOSDMap to OSDClient if configured
-                                        if let Some(ref tx) = osdmap_tx_for_task {
-                                            if let Err(e) = tx.send(msg).await {
-                                                tracing::error!("Failed to send MOSDMap to OSDClient: {:?}", e);
-                                            }
-                                        } else {
-                                            tracing::debug!("Received MOSDMap but no osdmap_tx configured, dropping");
-                                        }
-                                    }
-                                    _ => {
-                                        // Route all other messages to MonClient
-                                        if let Err(e) = mon_msg_tx_for_task.send(msg) {
-                                            tracing::error!("Failed to send message 0x{:04x} to MonClient: {}", msg_type, e);
-                                            break;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to receive message: {}", e);
-                                break;
-                            }
-                        }
-                    }
-
-                    // Handle keepalive timing
-                    _ = async {
-                        if let Some(ref mut interval) = keepalive_interval {
-                            interval.tick().await;
-                        } else {
-                            // If keepalive is disabled, wait forever
-                            std::future::pending::<()>().await;
-                        }
-                    } => {
-                        // First check for keepalive timeout (before sending new one)
-                        if let Some(timeout_duration) = keepalive_policy.timeout {
-                            // Only check timeout if we've sent at least one keepalive
-                            if let Some(sent_time) = last_keepalive_sent {
-                                if let Some(last_ack) = connection_for_task.last_keepalive_ack() {
-                                    // We have received at least one ACK - check if it's stale
-                                    let elapsed = last_ack.elapsed();
-                                    if elapsed > timeout_duration {
-                                        tracing::warn!(
-                                            "Keepalive timeout: no ACK for {:?} (threshold: {:?})",
-                                            elapsed,
-                                            timeout_duration
+            run_io_loop(
+                connection,
+                send_rx,
+                task_shutdown_token,
+                keepalive,
+                move |msg| {
+                    let osdmap_tx = osdmap_tx_for_task.clone();
+                    let mon_msg_tx = mon_msg_tx_for_task.clone();
+                    async move {
+                        let msg_type = msg.header.msg_type;
+                        match msg_type {
+                            CEPH_MSG_OSD_MAP => {
+                                if let Some(ref tx) = osdmap_tx {
+                                    if let Err(e) = tx.send(msg).await {
+                                        tracing::error!(
+                                            "Failed to send MOSDMap to OSDClient: {:?}",
+                                            e
                                         );
-                                        // Break the loop - task exit signals timeout to upper layer
-                                        break;
                                     }
                                 } else {
-                                    // No ACK received yet - check if we've been waiting too long
-                                    let elapsed_since_send = sent_time.elapsed();
-                                    if elapsed_since_send > timeout_duration {
-                                        tracing::warn!(
-                                            "Keepalive timeout: no initial ACK for {:?} (threshold: {:?})",
-                                            elapsed_since_send,
-                                            timeout_duration
-                                        );
-                                        // Break the loop - task exit signals timeout to upper layer
-                                        break;
-                                    }
+                                    tracing::debug!(
+                                        "Received MOSDMap but no osdmap_tx configured, dropping"
+                                    );
+                                }
+                            }
+                            _ => {
+                                if let Err(e) = mon_msg_tx.send(msg) {
+                                    tracing::error!(
+                                        "Failed to send message 0x{:04x} to MonClient: {}",
+                                        msg_type,
+                                        e
+                                    );
+                                    return false;
                                 }
                             }
                         }
-
-                        // Now send keepalive
-                        tracing::trace!("Keepalive interval elapsed, sending keepalive");
-                        if let Err(e) = connection_for_task.send_keepalive().await {
-                            tracing::error!("Failed to send keepalive: {}", e);
-                            break;
-                        }
-                        last_keepalive_sent = Some(std::time::Instant::now());
+                        true
                     }
-                }
-            }
-            tracing::debug!("Send/Receive/Keepalive task terminated");
+                },
+            )
+            .await;
+
+            tracing::debug!("MonConnection I/O task terminated for rank {}", params.rank);
         });
 
         let mon_conn = Self {
@@ -331,6 +264,7 @@ impl MonConnection {
         );
         self.send_tx
             .send(msg)
+            .await
             .map_err(|_| MonClientError::Other("Send channel closed".into()))?;
         tracing::trace!("MonConnection::send_message: Message queued for sending");
         Ok(())
