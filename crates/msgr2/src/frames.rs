@@ -343,10 +343,9 @@ impl Preamble {
         self.reserved.encode(&mut buf, 0).unwrap();
 
         // Calculate CRC using Ceph's SCTP CRC32C algorithm
-        // For preamble CRC, Ceph uses ceph_crc32c(0, data, len) with initial value 0.
-        // The kernel-style crc32c(0, ..) mapping corresponds to this complemented form.
+        // For outbound preamble CRC, Ceph monitor expects seed-0 CRC32C over the first 28 bytes.
         // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 295
-        let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        let crc = crc32c::crc32c_append(0, &buf[..28]);
 
         crc.encode(&mut buf, 0).unwrap();
 
@@ -359,10 +358,10 @@ impl Preamble {
             return Err(RadosError::Protocol("Preamble too short".to_string()));
         }
 
-        // Verify CRC BEFORE decoding (need original buffer)
-        // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
-        // Use Ceph's SCTP CRC32C with initial value 0 (matching frames_v2.cc line 295).
-        let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        // Verify CRC BEFORE decoding (need original buffer).
+        // Some peers emit the seed-0 form directly, while others use the complemented mapping.
+        let calculated_crc_seed0 = crc32c::crc32c_append(0, &buf[..28]);
+        let calculated_crc_complemented = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
 
         // Now decode the fields
         let mut cursor = buf;
@@ -383,10 +382,10 @@ impl Preamble {
         let received_crc = u32::decode(&mut cursor, 0)?;
 
         // Verify CRC matches
-        if calculated_crc != received_crc {
+        if received_crc != calculated_crc_seed0 && received_crc != calculated_crc_complemented {
             return Err(RadosError::Protocol(format!(
-                "Preamble CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                calculated_crc, received_crc
+                "Preamble CRC mismatch: expected 0x{:08x} or 0x{:08x}, got 0x{:08x}",
+                calculated_crc_seed0, calculated_crc_complemented, received_crc
             )));
         }
 
