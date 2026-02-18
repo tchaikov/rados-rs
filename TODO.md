@@ -1,6 +1,6 @@
 # RADOS-RS Development TODO
 
-> **Last Updated**: 2026-02-18
+> **Last Updated**: 2026-02-19
 >
 > This document reflects the current implementation status based on a thorough
 > code review. The project has 10 crates totaling ~41,000 lines of Rust code,
@@ -218,6 +218,417 @@
       requires architectural refactoring.
 - [ ] `crush/src/decode.rs:365` ignored test for binary format alignment issues.
 - [ ] `denc/src/denc.rs:925` TODO about derive macro not working inside denc crate.
+
+---
+
+## 🔍 Comprehensive Design Review Findings (2026-02-19)
+
+> **Scope**: Full review of 11 crates (~41,000 lines) cross-referenced with
+> `~/dev/ceph/src/msg/async/ProtocolV2.{cc,h}` (3,114 lines) and related C++ sources.
+
+### TIER 1: CRITICAL — Session Recovery & Correctness
+
+**Status**: Current implementation may lose messages or send duplicates during reconnection.
+
+---
+
+#### Missing Sent Message Queue & ACK Tracking
+
+**C++ Implementation** (`ProtocolV2.h` lines 93–105):
+- Maintains `std::list<Message *> sent` — messages awaiting ACK
+- Tracks `out_seq`, `in_seq`, `ack_left` for message ordering
+- On reconnection: `requeue_sent()` re-adds unACKed messages to outgoing queue
+- Server ACKs allow `discard_requeued_up_to()` to remove confirmed messages
+
+**Rust Status**:
+- ❌ No sent message queue
+- ❌ No ACK tracking
+- ❌ Assumes messages are lost on reconnection
+
+**Impact**:
+- Messages may be duplicated (sent twice) or silently dropped
+- Message ordering not guaranteed across reconnections
+- Bandwidth wasted retransmitting already-received messages
+
+**Recommendation**:
+```rust
+// Add to osdclient/src/session.rs
+pub struct OSDSession {
+    // ... existing fields ...
+    sent_messages: VecDeque<(u64, Message)>,  // (seq, msg) pairs awaiting ACK
+    out_seq: AtomicU64,
+    in_seq: AtomicU64,
+    ack_left: AtomicU64,
+}
+
+impl OSDSession {
+    async fn handle_message_ack(&self, seq: u64) {
+        self.sent_messages.retain(|(msg_seq, _)| *msg_seq > seq);
+        self.ack_left.fetch_sub(1, Ordering::SeqCst);
+    }
+
+    async fn requeue_sent_on_reconnect(&mut self) {
+        for (_, msg) in self.sent_messages.drain(..) {
+            self.send_tx.send(msg).await.ok();
+        }
+    }
+}
+```
+
+**Files to modify**:
+- `crates/osdclient/src/session.rs` — Add sent queue + ACK handling
+- `crates/msgr2/src/frames.rs` — Ensure ACK frame is decoded
+- `crates/msgr2/src/protocol.rs` — Piggyback ACKs on data messages
+
+**Effort**: HIGH COMPLEXITY
+
+---
+
+#### Incomplete Session Identity Tracking
+
+**C++ Implementation** (`ProtocolV2.h` lines 84–91):
+```cpp
+uint64_t client_cookie;      // Client's session identifier
+uint64_t server_cookie;      // Server's session identifier
+uint64_t global_seq;         // Snapshot of global sequence
+uint64_t connect_seq;        // Connection attempt counter
+uint64_t peer_global_seq;    // Peer's global sequence
+uint64_t message_seq;        // Application message counter
+bool reconnecting;           // True during reconnection
+bool replacing;              // True if replacing existing connection
+```
+
+**Rust Status**:
+- ✅ Has incarnation counter (analogous to connect_seq)
+- ❌ Missing `client_cookie`, `server_cookie`
+- ❌ Missing `global_seq` tracking
+- ❌ Missing `reconnecting` / `replacing` flags
+
+**Impact**:
+- Server cannot distinguish reconnections from new connections
+- Cannot detect if client is replacing a previous connection
+- Message ordering not validated across reconnections
+
+**Recommendation**:
+```rust
+// Enhance SessionInfo in osdclient/src/session.rs
+pub struct SessionInfo {
+    conn_state: ConnectionState,
+    peer_addr: Option<denc::EntityAddr>,
+
+    // NEW: Session identity
+    client_cookie: u64,
+    server_cookie: u64,
+    peer_supported_features: u64,
+
+    // NEW: Sequence tracking
+    global_seq: u64,
+    connect_seq: u64,
+    message_seq: u64,
+
+    // NEW: Connection state flags
+    reconnecting: bool,
+    replacing: bool,
+}
+```
+
+**Files to modify**:
+- `crates/osdclient/src/session.rs` — Enhanced SessionInfo
+- `crates/msgr2/src/state_machine.rs` — Cookie exchange in session negotiation
+- `crates/msgr2/src/frames.rs` — Encode cookies in ClientIdent/ServerIdent frames
+
+**Effort**: MEDIUM COMPLEXITY
+
+---
+
+### TIER 2: HIGH PRIORITY — Robustness & Error Handling
+
+#### State Cleanup on Fault Recovery
+
+**C++ Implementation** (`ProtocolV2.h` line 154):
+- `_fault()` method with comprehensive cleanup:
+  - `reset_recv_state()` — Clear incoming buffers
+  - `reset_security()` — Reset encryption state
+  - `reset_throttle()` — Clear throttle counters
+  - `reset_session()` — Full session reset
+  - `discard_out_queue()` — Clear pending sends
+
+**Rust Status**:
+- ✅ Fault handling exists (`StateResult::Fault`)
+- ⚠️ Incomplete cleanup: no explicit crypto/throttle/buffer reset
+
+**Recommendation**:
+```rust
+// Add to msgr2/src/state_machine.rs
+impl StateMachine {
+    pub fn fault_reset(&mut self) {
+        self.session_stream_handlers = None;      // Clear crypto
+        self.session_compression_handlers = None; // Clear compression
+        self.throttle.reset();                    // Clear throttle state
+        self.recv_buffer.clear();                 // Clear buffers
+    }
+}
+```
+
+**Files to modify**:
+- `crates/msgr2/src/state_machine.rs` — Add `fault_reset()`
+- `crates/msgr2/src/protocol.rs` — Call `fault_reset()` on errors
+- `crates/msgr2/src/crypto.rs` — Add `reset()` method
+
+**Effort**: LOW COMPLEXITY
+
+---
+
+#### Type Duplication — EntityName (4 Definitions)
+
+| Crate | Fields | Use Case |
+|-------|--------|----------|
+| `denc::types` | `entity_type: EntityType, num: u64` | General encoding |
+| `auth::types` | `entity_type: u32, id: String` | CephX authentication |
+| `osdclient::types` | `entity_type: u8, num: u64` | Zero-copy wire protocol |
+| `monclient::types` | `entity_type: String, entity_id: String` | Human-readable |
+
+**Risk**: Conversion errors, maintenance burden, confusion when types diverge.
+
+**Recommendation**:
+1. Keep `denc::types::EntityName` as canonical (with `EntityType` enum + `u64`)
+2. Zero-copy wire variant in `osdclient` stays if needed for performance
+3. Add `From` trait implementations for conversions
+4. Replace `auth` and `monclient` duplicates with re-exports or newtypes
+
+**Files to modify**:
+- `crates/denc/src/types.rs` — Canonical definition
+- `crates/auth/src/types.rs` — Replace with newtype or re-export
+- `crates/osdclient/src/types.rs` — Add `From<denc::EntityName>` if keeping own variant
+- `crates/monclient/src/types.rs` — Replace with newtype or re-export
+
+**Effort**: MEDIUM COMPLEXITY
+
+---
+
+#### Missing Compression Statistics
+
+**C++ Implementation** (`compression_onwire.h`):
+- Tracks ratio: `get_ratio()`, `get_initial_size()`, `get_final_size()`
+- Useful for monitoring compression effectiveness and debugging performance
+
+**Rust Status**:
+- ✅ Compression algorithms implemented (Snappy, Zstd, LZ4, Zlib)
+- ❌ No statistics tracking
+
+**Recommendation**:
+```rust
+// Add to msgr2/src/compression.rs
+pub struct CompressionStats {
+    pub algorithm: CompressionAlgorithm,
+    pub initial_size: u64,
+    pub compressed_size: u64,
+    pub compression_count: u64,
+    pub decompression_count: u64,
+}
+
+impl CompressionStats {
+    pub fn ratio(&self) -> f64 {
+        self.compressed_size as f64 / self.initial_size as f64
+    }
+}
+```
+
+**Files to modify**:
+- `crates/msgr2/src/compression.rs` — Add `CompressionStats`
+- `crates/msgr2/src/protocol.rs` — Update stats during compress/decompress
+- `crates/msgr2/src/connection.rs` — Expose stats via API
+
+**Effort**: LOW COMPLEXITY
+
+---
+
+### TIER 3: MEDIUM PRIORITY — Idiomatic Rust Improvements
+
+#### Async Pattern: Reduce Arc<Mutex> Contention
+
+**Current Pattern** (some locations):
+```rust
+let state = client.state.lock().await;
+// Lock held across await points or long computations
+```
+
+**Better Pattern**: Clone minimal data, release lock immediately:
+```rust
+let needed_data = {
+    let state = client.state.lock().await;
+    state.some_field.clone()
+};
+// Use cloned data without holding lock
+```
+
+**Or use `RwLock` for read-heavy access** (already done in `monmap`/`osdmap` — good pattern):
+```rust
+self.state.read().await   // Multiple readers
+self.state.write().await  // Exclusive writer
+```
+
+**Files to audit**:
+- `crates/monclient/src/client.rs` — Already uses `RwLock` (GOOD)
+- `crates/osdclient/src/client.rs` — Check session map access patterns
+- `crates/msgr2/src/protocol.rs` — Check state machine lock duration
+
+**Effort**: LOW–MEDIUM COMPLEXITY
+
+---
+
+#### Error Handling: Manual Buffer Length Checks
+
+**Pattern found throughout codebase**:
+```rust
+if buf.remaining() < 8 {
+    return Err(RadosError::Protocol(format!(
+        "Insufficient bytes: need 8, have {}", buf.remaining()
+    )));
+}
+let value = buf.get_u64_le();
+```
+
+**Issue**: Verbose boilerplate; inconsistent error messages.
+
+**Better Pattern**: Let nested `decode()` handle bounds checking:
+```rust
+let value = u64::decode(&mut buf, 0)?;  // Already checks bounds internally
+```
+
+**Recommendation**: Remove manual checks where nested `Denc::decode()` calls exist.
+
+**Files to audit**: All files with manual `buf.remaining()` checks, particularly
+`crates/denc/src/*.rs` and `crates/osdclient/src/denc_types.rs`.
+
+**Effort**: LOW COMPLEXITY
+
+---
+
+#### Iterator Patterns: Prefer Functional Style
+
+**Recommendation**: Where appropriate, replace manual accumulation loops:
+```rust
+// Before
+let mut result = Vec::new();
+for item in items {
+    if let Some(v) = process(item) { result.push(v); }
+}
+
+// After
+let result: Vec<_> = items.iter().filter_map(process).collect();
+```
+
+**Files to audit**:
+- `crates/crush/src/mapper.rs` — CRUSH selection loops
+- `crates/osdclient/src/client.rs` — Session iteration
+- `crates/monclient/src/client.rs` — Monitor selection
+
+**Effort**: LOW COMPLEXITY
+
+---
+
+### TIER 4: LOW PRIORITY — Observability & Performance
+
+#### Missing Connection Diagnostics
+
+**C++ Feature**: `dump(Formatter *f)` method for live state inspection.
+
+**Rust Status**: ❌ No diagnostic dump capability.
+
+**Recommendation**:
+```rust
+// Add to msgr2/src/protocol.rs
+pub struct ConnectionDiagnostics {
+    pub state: StateKind,
+    pub remote_addr: SocketAddr,
+    pub remote_features: u64,
+    pub messages_sent: u64,
+    pub messages_received: u64,
+    pub bytes_sent: u64,
+    pub bytes_received: u64,
+    pub last_keepalive: Option<Instant>,
+    pub reconnection_count: u32,
+    pub current_incarnation: u32,
+}
+
+impl Connection {
+    pub fn diagnostics(&self) -> ConnectionDiagnostics { /* ... */ }
+}
+```
+
+**Files to modify**:
+- `crates/msgr2/src/protocol.rs` — Add `ConnectionDiagnostics`
+- `crates/osdclient/src/session.rs` — Expose session diagnostics
+- `crates/rados/src/main.rs` — Add `--debug-session` flag
+
+**Effort**: MEDIUM COMPLEXITY
+
+---
+
+#### Missing Priority-Based Message Queueing
+
+**C++ Feature** (`ProtocolV2.h` lines 93–105):
+- `std::map<int, std::list<out_queue_entry_t>, std::greater<int>> out_queue`
+- Higher-priority messages sent first (e.g., heartbeats before bulk data)
+
+**Rust Status**: FIFO queue via `mpsc` channel — heartbeats can be delayed.
+
+**Recommendation**:
+```rust
+// Add to msgr2/src/protocol.rs
+pub enum MessagePriority { High = 2, Normal = 1, Low = 0 }
+
+struct PriorityQueue {
+    high: VecDeque<Message>,
+    normal: VecDeque<Message>,
+    low: VecDeque<Message>,
+}
+
+impl PriorityQueue {
+    fn pop(&mut self) -> Option<Message> {
+        self.high.pop_front()
+            .or_else(|| self.normal.pop_front())
+            .or_else(|| self.low.pop_front())
+    }
+}
+```
+
+**Files to modify**:
+- `crates/msgr2/src/protocol.rs` — Replace `mpsc` with `PriorityQueue`
+- `crates/osdclient/src/session.rs` — Set message priorities
+- `crates/monclient/src/client.rs` — Mark heartbeats as `High`
+
+**Effort**: MEDIUM COMPLEXITY
+
+---
+
+### Implementation Phases
+
+| Phase | Goal | Items |
+|-------|------|-------|
+| **Phase 1** (Critical) | Fix session recovery to match C++ | Sent message queue, session identity |
+| **Phase 2** (Robustness) | Improve error safety | Fault reset, type consolidation, compression stats |
+| **Phase 3** (Idiomatic) | Cleaner Rust patterns | Async/lock audit, iterator style, error handling |
+| **Phase 4** (Observability) | Visibility into runtime state | Diagnostics, priority queue |
+
+### Risk Assessment
+
+| Risk | Area | Mitigation |
+|------|------|-----------|
+| **HIGH** | Session recovery changes | Feature flag, extensive fault injection tests |
+| **MEDIUM** | EntityName consolidation | Deprecation warnings, migration guide, test all conversions |
+| **LOW** | Async/error refactoring | Mostly refactoring; no protocol changes |
+
+### C++ Reference Locations
+
+| Topic | File |
+|-------|------|
+| Session identity & sequence tracking | `src/msg/async/ProtocolV2.h` lines 84–105 |
+| Sent message queue & ACK | `src/msg/async/ProtocolV2.h` lines 93–105 |
+| Fault recovery | `src/msg/async/ProtocolV2.h` line 154 |
+| Compression stats | `src/msg/async/compression_onwire.h` |
+| OSD session management | `src/osdc/Objecter.h` lines 650–750 |
 
 ---
 
