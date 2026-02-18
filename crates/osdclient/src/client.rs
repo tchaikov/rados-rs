@@ -299,6 +299,15 @@ impl OSDClient {
                 // Address changed, remove old session
                 info!("Removing old session for OSD {} with stale address", osd_id);
                 sessions.remove(&osd_id);
+            } else {
+                // Session exists but is disconnected — kick its pending ops now.
+                // This is the earliest moment we know a new connection will be created,
+                // matching C++ Objecter::kick_requests() called from ms_handle_reset().
+                // We drain here (under write lock) before replacing the session so no
+                // ops are lost between drain and the new session being installed.
+                drop(sessions);
+                self.kick_requests(osd_id).await;
+                sessions = self.sessions.write().await;
             }
         }
 
@@ -1324,6 +1333,129 @@ impl OSDClient {
             }
         }
         Ok(())
+    }
+
+    /// Resend all pending operations from a session whose I/O task died unexpectedly.
+    ///
+    /// When an OSD's background I/O task exits due to a connection error or keepalive
+    /// timeout, in-flight operations would otherwise hang until their timeout fires.
+    /// This method drains those operations and resubmits them to the current CRUSH
+    /// target — which may be the same OSD (triggering a fresh connection) or a
+    /// different one if the OSDMap changed since the operation was submitted.
+    ///
+    /// Matches C++ `Objecter::kick_requests()` called from `ms_handle_reset()`.
+    ///
+    /// Returns a boxed future to break the mutual recursion with `get_or_create_session`
+    /// (kick calls get_or_create_session for the remapped target, which calls kick for
+    /// any disconnected sessions it finds — Rust requires boxing for such cycles).
+    pub(crate) fn kick_requests(
+        &self,
+        osd_id: i32,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        Box::pin(async move {
+        // Skip kick during shutdown — the tracker and shutdown path handle cleanup.
+        if self.shutdown_token.is_cancelled() {
+            return;
+        }
+
+        let osdmap = match self.get_osdmap().await {
+            Ok(m) => m,
+            Err(e) => {
+                warn!(
+                    "kick_requests: OSD {} has pending ops but no OSDMap available: {}",
+                    osd_id, e
+                );
+                return;
+            }
+        };
+
+        // Drain pending ops from the disconnected session under a short-lived read lock.
+        // The old session's send_tx is already dead (io_task exited), so no new ops
+        // can arrive between releasing the read lock and the write lock in get_or_create_session.
+        let ops_to_resend = {
+            let sessions = self.sessions.read().await;
+            let Some(session) = sessions.get(&osd_id) else {
+                return;
+            };
+            let metadata = session.get_pending_ops_metadata().await;
+            let mut ops = Vec::with_capacity(metadata.len());
+            for (tid, pool_id, object_id, _epoch) in metadata {
+                // Pool deleted — fail immediately rather than resend.
+                if !osdmap.pools.contains_key(&pool_id) {
+                    if let Some(op) = session.remove_pending_op(tid).await {
+                        let _ = op.result_tx.send(Err(OSDClientError::PoolNotFound(pool_id)));
+                    }
+                    continue;
+                }
+                if let Some(op) = session.remove_pending_op(tid).await {
+                    ops.push((pool_id, object_id, op));
+                }
+            }
+            ops
+        };
+
+        if ops_to_resend.is_empty() {
+            return;
+        }
+
+        info!(
+            "kick_requests: resending {} ops from disconnected OSD {}",
+            ops_to_resend.len(),
+            osd_id
+        );
+
+        let new_epoch = osdmap.epoch.as_u32();
+
+        for (pool_id, object_id, mut pending_op) in ops_to_resend {
+            // CRUSH-remap to current target (same OSD unless map changed).
+            let (_, new_osds) = match self.object_to_osds(pool_id, &object_id).await {
+                Ok(r) => r,
+                Err(e) => {
+                    warn!(
+                        "kick_requests: failed to remap tid {}: {}",
+                        pending_op.tid, e
+                    );
+                    let _ = pending_op.result_tx.send(Err(e));
+                    continue;
+                }
+            };
+            let new_primary = match new_osds.first().copied() {
+                Some(osd) => osd,
+                None => {
+                    let _ = pending_op.result_tx.send(Err(OSDClientError::NoOSDs));
+                    continue;
+                }
+            };
+
+            pending_op.target.update(new_epoch, new_primary, new_osds);
+            pending_op.state = crate::types::OpState::Queued;
+
+            // Get or create a (re)connected session for the target OSD, then insert.
+            match self.get_or_create_session(new_primary).await {
+                Ok(session) => {
+                    if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
+                        // insert_migrated_op already sent error via result_tx; just log.
+                        warn!(
+                            "kick_requests: insert_migrated_op to OSD {} failed: {}",
+                            new_primary, e
+                        );
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "kick_requests: cannot connect to OSD {} for kicked op: {}",
+                        new_primary, e
+                    );
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::Connection(format!(
+                            "Failed to connect to OSD {} after disconnect: {}",
+                            new_primary, e
+                        ))));
+                }
+            }
+        }
+    })
     }
 
     /// Graceful shutdown
