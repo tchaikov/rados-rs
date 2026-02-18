@@ -42,6 +42,25 @@ impl CompressionAlgorithm {
 ///
 /// Tracks compression effectiveness and operation counts.
 /// Thread-safe using atomic operations.
+///
+/// # Example
+///
+/// ```rust
+/// use msgr2::compression::{CompressionContext, CompressionAlgorithm};
+///
+/// let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+/// let data = b"Hello, World!";
+///
+/// // Perform operations
+/// let compressed = ctx.compress(data).unwrap();
+/// let _decompressed = ctx.decompress(&compressed, data.len()).unwrap();
+///
+/// // Check statistics
+/// let stats = ctx.stats();
+/// assert_eq!(stats.compression_count(), 1);
+/// assert_eq!(stats.decompression_count(), 1);
+/// assert!(stats.ratio() < 1.0); // Effective compression
+/// ```
 #[derive(Debug, Clone)]
 pub struct CompressionStats {
     /// Algorithm used for compression

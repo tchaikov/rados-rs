@@ -2,6 +2,35 @@
 
 This crate implements the Ceph messenger v2 protocol in Rust.
 
+## Features
+
+### Compression Statistics
+
+The msgr2 implementation provides detailed statistics for compression operations. This is useful for monitoring compression effectiveness and debugging performance issues.
+
+```rust
+use msgr2::compression::{CompressionContext, CompressionAlgorithm};
+
+// Create a compression context
+let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+
+// Perform compression/decompression operations
+let data = b"Hello, World!";
+let compressed = ctx.compress(data)?;
+let decompressed = ctx.decompress(&compressed, data.len())?;
+
+// Get statistics
+let stats = ctx.stats();
+println!("Algorithm: {:?}", stats.algorithm());
+println!("Initial size: {} bytes", stats.initial_size());
+println!("Compressed size: {} bytes", stats.compressed_size());
+println!("Compression ratio: {:.2}%", stats.ratio() * 100.0);
+println!("Compression count: {}", stats.compression_count());
+println!("Decompression count: {}", stats.decompression_count());
+```
+
+Statistics are tracked using atomic operations and are thread-safe. The `ratio()` method returns the compression ratio (compressed size / initial size), where values less than 1.0 indicate effective compression.
+
 ## Testing
 
 ### Unit Tests
