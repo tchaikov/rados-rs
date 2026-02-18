@@ -235,15 +235,15 @@
 3. ~~Complete PgPool encoding (v24+ fields) for full roundtrip fidelity~~ ✅ DONE
 
 ### Phase 3: Extended API Surface (Medium Priority)
-1. Expose xattr operations via IoCtx
+1. ~~Expose xattr operations via IoCtx~~ ✅ DONE (get_xattr, set_xattr, remove_xattr, list_xattrs)
 2. Implement Watch/Notify for cache coherency
 3. ~~Add `ObjectOperation` builder for compound operations~~ ✅ DONE (OpBuilder)
-4. Add advisory object locking
+4. ~~Add advisory object locking~~ ✅ DONE (lock_exclusive, lock_shared, unlock)
 
 ### Phase 4: Advanced Features (Lower Priority)
 1. Snapshot operations
-2. RADOS class method calls
-3. Connection pooling with load balancing
+2. ~~RADOS class method calls~~ ✅ DONE (OpCode::Call with call() builder)
+3. ~~Connection pooling with load balancing~~ ✅ NOT NEEDED (1:1 OSD-to-session architecture)
 4. Metrics collection and distributed tracing (tracing logs exist, but no prometheus/opentelemetry)
 5. ~~Rotating key renewal integration~~ ✅ DONE
 
