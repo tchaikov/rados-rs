@@ -10,6 +10,7 @@ paste = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 denc-derive = { path = "../denc-derive" }
+crc32c = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"

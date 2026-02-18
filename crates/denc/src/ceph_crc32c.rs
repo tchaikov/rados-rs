@@ -1,24 +1,4 @@
-/// FFI bindings to Ceph's SCTP CRC32C implementation
-///
-/// Ceph uses the SCTP variant of CRC32C (RFC 3720) which differs from standard CRC32C
-/// in its polynomial table. We use FFI to call Ceph's implementation directly.
-use std::os::raw::{c_uchar, c_uint};
-
-extern "C" {
-    /// Ceph's SCTP CRC32C implementation
-    ///
-    /// This is the actual CRC32C function used throughout Ceph for data integrity.
-    /// The SCTP variant uses polynomial 0x1EDC6F41 (CRC-32C Castagnoli).
-    ///
-    /// # Arguments
-    /// * `crc` - Initial CRC value (use 0xFFFFFFFF for Ceph's standard init)
-    /// * `data` - Data buffer to compute CRC over
-    /// * `length` - Length of data buffer
-    ///
-    /// # Returns
-    /// Computed CRC32C value
-    pub fn ceph_crc32c_sctp(crc: u32, data: *const c_uchar, length: c_uint) -> u32;
-}
+//! CRC32C helpers compatible with Ceph's SCTP CRC32C usage.
 
 /// Compute CRC32C using Ceph's SCTP implementation
 ///
@@ -31,7 +11,7 @@ extern "C" {
 /// # Returns
 /// Computed CRC32C value
 pub fn ceph_crc32c(data: &[u8], initial: u32) -> u32 {
-    unsafe { ceph_crc32c_sctp(initial, data.as_ptr(), data.len() as c_uint) }
+    crc32c::crc32c_append(initial, data)
 }
 
 /// Compute streaming CRC32C using Ceph's SCTP implementation
@@ -45,7 +25,7 @@ pub fn ceph_crc32c(data: &[u8], initial: u32) -> u32 {
 /// # Returns
 /// Updated CRC32C value
 pub fn ceph_crc32c_append(crc: u32, data: &[u8]) -> u32 {
-    unsafe { ceph_crc32c_sctp(crc, data.as_ptr(), data.len() as c_uint) }
+    crc32c::crc32c_append(crc, data)
 }
 
 #[cfg(test)]
