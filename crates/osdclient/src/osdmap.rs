@@ -2377,23 +2377,31 @@ impl VersionedEncode for OSDMapIncremental {
             //
             // The CRC covers: [header][client_section][osd_section][full_crc],
             // excluding only the 4-byte inc_crc field.
+            //
+            // Use streaming CRC to avoid large buffer allocation
+            //
+            // Note: The crc32c crate returns the inverted CRC (XOR with 0xFFFFFFFF),
+            // but Ceph stores the non-inverted value, so we need to invert it.
 
             let crc_field_size = 4; // Size of inc_crc field
             let crc_tail_offset = crc_offset + crc_field_size;
 
-            // Build the buffer to CRC (excluding the inc_crc field)
-            let mut crc_buffer = Vec::with_capacity(
-                header_bytes.len() + crc_offset + (outer_bytes.len() - crc_tail_offset),
-            );
-            crc_buffer.extend_from_slice(&header_bytes);
+            // Calculate CRC using streaming approach
+            // Start with 0 (crc32c crate's initial value)
+            let mut actual_crc = crc32c::crc32c(&header_bytes);
+
+            // CRC the client and OSD sections (everything before inc_crc)
             if crc_offset > 0 {
-                crc_buffer.extend_from_slice(&outer_bytes[..crc_offset]);
-            }
-            if crc_tail_offset < outer_bytes.len() {
-                crc_buffer.extend_from_slice(&outer_bytes[crc_tail_offset..]);
+                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
             }
 
-            let actual_crc = crc32c::crc32c(&crc_buffer);
+            // CRC the tail (full_crc field after inc_crc)
+            if crc_tail_offset < outer_bytes.len() {
+                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[crc_tail_offset..]);
+            }
+
+            // Invert the CRC to match Ceph's convention
+            actual_crc = !actual_crc;
 
             // Verify CRC matches
             if actual_crc != inc.inc_crc {
