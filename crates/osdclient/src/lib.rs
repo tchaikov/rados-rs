@@ -11,7 +11,6 @@
 //! - Integration with MonClient for OSDMap updates and CRUSH placement
 
 pub(crate) mod backoff;
-pub(crate) mod ceph_crc32c;
 pub mod client;
 pub(crate) mod denc_types;
 pub mod error;

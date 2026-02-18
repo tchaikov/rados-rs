@@ -2373,34 +2373,27 @@ impl VersionedEncode for OSDMapIncremental {
             //
             // So CRC covers: [header][client][osd][full_crc], excluding [inc_crc]
             //
-            // Calculate CRC32C using Ceph's SCTP implementation
+            // Calculate CRC32C using the SCTP/iSCSI variant (RFC 3720)
             //
-            // Ceph uses ceph_crc32c_sctp (RFC 3720 SCTP/iSCSI variant) which differs from
-            // standard CRC32C. The CRC covers: [header][client_section][osd_section][full_crc],
+            // The CRC covers: [header][client_section][osd_section][full_crc],
             // excluding only the 4-byte inc_crc field.
 
             let crc_field_size = 4; // Size of inc_crc field
             let crc_tail_offset = crc_offset + crc_field_size;
 
-            // Calculate CRC using streaming approach (avoids large buffer allocation)
-            let mut actual_crc = 0xFFFFFFFF_u32; // Ceph's standard CRC initial value
-
-            // CRC the outer header (6 bytes: struct_v, compat, len)
-            actual_crc = crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &header_bytes);
-
-            // CRC the client and OSD sections (everything before inc_crc)
+            // Build the buffer to CRC (excluding the inc_crc field)
+            let mut crc_buffer = Vec::with_capacity(
+                header_bytes.len() + crc_offset + (outer_bytes.len() - crc_tail_offset),
+            );
+            crc_buffer.extend_from_slice(&header_bytes);
             if crc_offset > 0 {
-                actual_crc =
-                    crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
+                crc_buffer.extend_from_slice(&outer_bytes[..crc_offset]);
+            }
+            if crc_tail_offset < outer_bytes.len() {
+                crc_buffer.extend_from_slice(&outer_bytes[crc_tail_offset..]);
             }
 
-            // CRC the tail (full_crc field after inc_crc)
-            if crc_tail_offset < outer_bytes.len() {
-                actual_crc = crate::ceph_crc32c::ceph_crc32c_append(
-                    actual_crc,
-                    &outer_bytes[crc_tail_offset..],
-                );
-            }
+            let actual_crc = crc32c::crc32c(&crc_buffer);
 
             // Verify CRC matches
             if actual_crc != inc.inc_crc {
