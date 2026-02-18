@@ -7,6 +7,8 @@
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Compression algorithm identifiers (from Ceph's Compressor.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,6 +35,96 @@ impl CompressionAlgorithm {
 
     pub fn as_u32(self) -> u32 {
         self as u32
+    }
+}
+
+/// Statistics for compression operations
+///
+/// Tracks compression effectiveness and operation counts.
+/// Thread-safe using atomic operations.
+#[derive(Debug, Clone)]
+pub struct CompressionStats {
+    /// Algorithm used for compression
+    algorithm: CompressionAlgorithm,
+    /// Total bytes before compression
+    initial_size: Arc<AtomicU64>,
+    /// Total bytes after compression
+    compressed_size: Arc<AtomicU64>,
+    /// Number of compression operations
+    compression_count: Arc<AtomicU64>,
+    /// Number of decompression operations
+    decompression_count: Arc<AtomicU64>,
+}
+
+impl CompressionStats {
+    /// Create new statistics tracker
+    pub fn new(algorithm: CompressionAlgorithm) -> Self {
+        Self {
+            algorithm,
+            initial_size: Arc::new(AtomicU64::new(0)),
+            compressed_size: Arc::new(AtomicU64::new(0)),
+            compression_count: Arc::new(AtomicU64::new(0)),
+            decompression_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Get the algorithm
+    pub fn algorithm(&self) -> CompressionAlgorithm {
+        self.algorithm
+    }
+
+    /// Get total initial (uncompressed) size
+    pub fn initial_size(&self) -> u64 {
+        self.initial_size.load(Ordering::Relaxed)
+    }
+
+    /// Get total compressed size
+    pub fn compressed_size(&self) -> u64 {
+        self.compressed_size.load(Ordering::Relaxed)
+    }
+
+    /// Get number of compression operations
+    pub fn compression_count(&self) -> u64 {
+        self.compression_count.load(Ordering::Relaxed)
+    }
+
+    /// Get number of decompression operations
+    pub fn decompression_count(&self) -> u64 {
+        self.decompression_count.load(Ordering::Relaxed)
+    }
+
+    /// Calculate compression ratio (compressed / initial)
+    /// Returns 0.0 if no data has been compressed
+    pub fn ratio(&self) -> f64 {
+        let initial = self.initial_size();
+        let compressed = self.compressed_size();
+        if initial == 0 {
+            0.0
+        } else {
+            compressed as f64 / initial as f64
+        }
+    }
+
+    /// Record a compression operation
+    fn record_compression(&self, initial_size: usize, compressed_size: usize) {
+        self.initial_size
+            .fetch_add(initial_size as u64, Ordering::Relaxed);
+        self.compressed_size
+            .fetch_add(compressed_size as u64, Ordering::Relaxed);
+        self.compression_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Record a decompression operation
+    fn record_decompression(&self) {
+        self.decompression_count.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Reset all statistics
+    pub fn reset(&self) {
+        self.initial_size.store(0, Ordering::Relaxed);
+        self.compressed_size.store(0, Ordering::Relaxed);
+        self.compression_count.store(0, Ordering::Relaxed);
+        self.decompression_count.store(0, Ordering::Relaxed);
     }
 }
 
@@ -236,6 +328,8 @@ pub struct CompressionContext {
     threshold: usize,
     /// Algorithm for debugging
     algorithm: CompressionAlgorithm,
+    /// Statistics tracking
+    stats: CompressionStats,
 }
 
 impl std::fmt::Debug for CompressionContext {
@@ -243,6 +337,7 @@ impl std::fmt::Debug for CompressionContext {
         f.debug_struct("CompressionContext")
             .field("algorithm", &self.algorithm)
             .field("threshold", &self.threshold)
+            .field("stats", &self.stats)
             .finish()
     }
 }
@@ -262,6 +357,7 @@ impl CompressionContext {
             compressor,
             threshold: 512, // Default: compress frames >= 512 bytes
             algorithm,
+            stats: CompressionStats::new(algorithm),
         }
     }
 
@@ -279,6 +375,7 @@ impl CompressionContext {
             compressor,
             threshold,
             algorithm,
+            stats: CompressionStats::new(algorithm),
         }
     }
 
@@ -289,13 +386,23 @@ impl CompressionContext {
 
     /// Compress data
     pub fn compress(&self, data: &[u8]) -> Result<Bytes> {
+        let initial_size = data.len();
         let compressed = self.compressor.compress(data)?;
+        let compressed_size = compressed.len();
+
+        // Record statistics
+        self.stats.record_compression(initial_size, compressed_size);
+
         Ok(Bytes::from(compressed))
     }
 
     /// Decompress data
     pub fn decompress(&self, data: &[u8], original_size: usize) -> Result<Bytes> {
         let decompressed = self.compressor.decompress(data, original_size)?;
+
+        // Record statistics
+        self.stats.record_decompression();
+
         Ok(Bytes::from(decompressed))
     }
 
@@ -307,6 +414,11 @@ impl CompressionContext {
     /// Get the compression threshold
     pub fn threshold(&self) -> usize {
         self.threshold
+    }
+
+    /// Get compression statistics
+    pub fn stats(&self) -> &CompressionStats {
+        &self.stats
     }
 }
 
@@ -428,6 +540,134 @@ mod tests {
             let compressed = ctx.compress(&data).unwrap();
             let decompressed = ctx.decompress(&compressed, data.len()).unwrap();
             assert_eq!(&decompressed[..], &data[..], "Algorithm {:?} failed", algo);
+        }
+    }
+
+    #[test]
+    fn test_compression_stats_basic() {
+        let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+        let data = b"Hello, World! This is a test of compression statistics.";
+
+        // Initially, stats should be zero
+        let stats = ctx.stats();
+        assert_eq!(stats.initial_size(), 0);
+        assert_eq!(stats.compressed_size(), 0);
+        assert_eq!(stats.compression_count(), 0);
+        assert_eq!(stats.decompression_count(), 0);
+        assert_eq!(stats.ratio(), 0.0);
+
+        // Compress data
+        let compressed = ctx.compress(data).unwrap();
+
+        // Check stats after compression
+        let stats = ctx.stats();
+        assert_eq!(stats.initial_size(), data.len() as u64);
+        assert_eq!(stats.compressed_size(), compressed.len() as u64);
+        assert_eq!(stats.compression_count(), 1);
+        assert_eq!(stats.decompression_count(), 0);
+        assert!(stats.ratio() > 0.0);
+
+        // Decompress data
+        let _decompressed = ctx.decompress(&compressed, data.len()).unwrap();
+
+        // Check stats after decompression
+        let stats = ctx.stats();
+        assert_eq!(stats.decompression_count(), 1);
+    }
+
+    #[test]
+    fn test_compression_stats_multiple_operations() {
+        let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+        let data1 = b"First data block for compression.";
+        let data2 = b"Second data block for compression.";
+
+        // Compress multiple times
+        let compressed1 = ctx.compress(data1).unwrap();
+        let compressed2 = ctx.compress(data2).unwrap();
+
+        // Check accumulated stats
+        let stats = ctx.stats();
+        assert_eq!(stats.initial_size(), (data1.len() + data2.len()) as u64);
+        assert_eq!(
+            stats.compressed_size(),
+            (compressed1.len() + compressed2.len()) as u64
+        );
+        assert_eq!(stats.compression_count(), 2);
+
+        // Decompress multiple times
+        let _decompressed1 = ctx.decompress(&compressed1, data1.len()).unwrap();
+        let _decompressed2 = ctx.decompress(&compressed2, data2.len()).unwrap();
+
+        // Check decompression count
+        let stats = ctx.stats();
+        assert_eq!(stats.decompression_count(), 2);
+    }
+
+    #[test]
+    fn test_compression_stats_ratio() {
+        let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+        // Use highly compressible data
+        let data = vec![b'A'; 10000]; // 10KB of 'A's
+
+        let compressed = ctx.compress(&data).unwrap();
+
+        let stats = ctx.stats();
+        let ratio = stats.ratio();
+
+        // For highly compressible data, ratio should be much less than 1.0
+        assert!(ratio < 1.0, "Expected ratio < 1.0, got {}", ratio);
+        assert!(ratio > 0.0, "Expected ratio > 0.0, got {}", ratio);
+
+        // Verify the ratio calculation
+        let expected_ratio = compressed.len() as f64 / data.len() as f64;
+        assert!(
+            (ratio - expected_ratio).abs() < 0.0001,
+            "Expected ratio {}, got {}",
+            expected_ratio,
+            ratio
+        );
+    }
+
+    #[test]
+    fn test_compression_stats_reset() {
+        let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+        let data = b"Test data for reset";
+
+        // Perform some operations
+        let compressed = ctx.compress(data).unwrap();
+        let _decompressed = ctx.decompress(&compressed, data.len()).unwrap();
+
+        // Verify stats are non-zero
+        let stats = ctx.stats();
+        assert!(stats.initial_size() > 0);
+        assert!(stats.compression_count() > 0);
+        assert!(stats.decompression_count() > 0);
+
+        // Reset stats
+        stats.reset();
+
+        // Verify stats are zero
+        assert_eq!(stats.initial_size(), 0);
+        assert_eq!(stats.compressed_size(), 0);
+        assert_eq!(stats.compression_count(), 0);
+        assert_eq!(stats.decompression_count(), 0);
+        assert_eq!(stats.ratio(), 0.0);
+    }
+
+    #[test]
+    fn test_compression_stats_algorithm() {
+        let algorithms = vec![
+            CompressionAlgorithm::None,
+            CompressionAlgorithm::Snappy,
+            CompressionAlgorithm::Zstd,
+            CompressionAlgorithm::Lz4,
+            CompressionAlgorithm::Zlib,
+        ];
+
+        for algo in algorithms {
+            let ctx = CompressionContext::new(algo);
+            let stats = ctx.stats();
+            assert_eq!(stats.algorithm(), algo);
         }
     }
 }
