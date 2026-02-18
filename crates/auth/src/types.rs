@@ -147,12 +147,6 @@ impl Denc for EntityName {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for EntityName".to_string(),
-            ));
-        }
-
         let entity_type = u32::decode(buf, 0)?;
 
         let id_len = u32::decode(buf, 0)? as usize;
@@ -493,12 +487,6 @@ impl Denc for CephXTicketBlob {
 
         let _struct_v = buf.get_u8();
 
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for secret_id".to_string(),
-            ));
-        }
-
         let secret_id = u64::decode(buf, 0)?;
         let blob = Bytes::decode(buf, features)?;
 
@@ -710,12 +698,6 @@ impl Denc for AuthCapsInfo {
         }
 
         let _struct_v = buf.get_u8();
-
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for caps count".to_string(),
-            ));
-        }
 
         let count = u32::decode(buf, 0)?;
         let mut caps = HashMap::new();

@@ -608,10 +608,6 @@ impl Denc for CephXRequest {
         let request_type = u16::decode(buf, features)?;
         let keys_len = u32::decode(buf, features)? as usize;
 
-        if buf.remaining() < keys_len * 4 + 1 {
-            return Err(RadosError::InvalidData("Insufficient key data".into()));
-        }
-
         let mut keys = Vec::with_capacity(keys_len);
         for _ in 0..keys_len {
             let key = u32::decode(buf, features)?;
@@ -1336,5 +1332,28 @@ mod tests {
         let decoded = CephXAuthorizeReply::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.nonce_plus_one, 98765);
         assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_request_decode_insufficient_data() {
+        // Test that CephXRequest::decode properly handles insufficient data
+        // by relying on nested decode() calls for bounds checking
+
+        // Create a buffer with only partial data (just request_type, no keys_len)
+        let mut buf = BytesMut::new();
+        buf.put_u16_le(CEPHX_GET_AUTH_SESSION_KEY);
+        
+        let mut read_buf = buf.freeze();
+        let result = CephXRequest::decode(&mut read_buf, 0);
+        assert!(result.is_err(), "Should fail on insufficient data for keys_len");
+
+        // Create a buffer with request_type and keys_len but insufficient key data
+        let mut buf = BytesMut::new();
+        buf.put_u16_le(CEPHX_GET_AUTH_SESSION_KEY);
+        buf.put_u32_le(2); // keys_len = 2, but no actual keys
+        
+        let mut read_buf = buf.freeze();
+        let result = CephXRequest::decode(&mut read_buf, 0);
+        assert!(result.is_err(), "Should fail on insufficient data for keys");
     }
 }
