@@ -83,7 +83,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nResetting statistics...");
     ctx.stats().reset();
     let stats = ctx.stats();
-    println!("After reset: operations={}, ratio={:.2}%",
+    println!(
+        "After reset: operations={}, ratio={:.2}%",
         stats.compression_count(),
         stats.ratio() * 100.0
     );
