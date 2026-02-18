@@ -577,8 +577,11 @@ fn test_type(
 
         // Test 2: Roundtrip consistency (following Ceph's readable.sh)
         // Check if decode == decode→encode→decode for each implementation
+        // NOTE: We DON'T pass features to ceph roundtrip because set_features causes
+        // ceph-dencoder to lose version-specific data. Ceph auto-detects from the file.
+        // We DO pass features to Rust because our implementation needs them for encoding.
         let (ceph_roundtrip_consistent, rust_roundtrip_consistent) = match (
-            run_ceph_dencoder_with_ops(ceph_dencoder, type_name, &corpus_file, features, true),
+            run_ceph_dencoder_with_ops(ceph_dencoder, type_name, &corpus_file, None, true),
             run_rust_dencoder_with_ops(rust_dencoder, type_name, &corpus_file, features, true),
         ) {
             (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => {
@@ -612,12 +615,13 @@ fn test_type(
 
         // Test 3: Cross-implementation decode (interoperability)
         // Check if Rust-encoded can be decoded by Ceph, and vice versa
+        // NOTE: Pass features to Rust encode (needed), but NOT to Ceph encode (causes bugs)
         let rust_to_ceph_works = test_rust_encode_ceph_decode(
             rust_dencoder,
             ceph_dencoder,
             type_name,
             &corpus_file,
-            features,
+            features,  // Rust needs features for encoding
             &rust_json,
             is_exception,
         )
@@ -628,7 +632,7 @@ fn test_type(
             rust_dencoder,
             type_name,
             &corpus_file,
-            features,
+            None,  // Don't pass features to Ceph - it loses version info
             &ceph_json,
             is_exception,
         )
