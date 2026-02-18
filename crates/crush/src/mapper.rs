@@ -95,6 +95,8 @@ pub fn crush_do_rule(
     let mut _chooseleaf_descend_once = map.chooseleaf_descend_once;
     let mut chooseleaf_vary_r = map.chooseleaf_vary_r;
     let mut chooseleaf_stable = map.chooseleaf_stable;
+    let mut msr_descents = 1u32; // Default MSR descents
+    let mut msr_collision_tries = 0u32; // Default MSR collision tries
 
     for step in &rule.steps {
         match step.op {
@@ -237,8 +239,43 @@ pub fn crush_do_rule(
                 work.clone_from(&scratch);
             }
 
+            RuleOp::SetMsrDescents => {
+                msr_descents = step.arg1 as u32;
+            }
+
+            RuleOp::SetMsrCollisionTries => {
+                msr_collision_tries = step.arg1 as u32;
+            }
+
+            RuleOp::ChooseMsr => {
+                // Choose N items using MSR (Main Search Rule) algorithm
+                let numrep = calculate_numrep(step.arg1, result_max);
+                let item_type = step.arg2;
+
+                scratch.clear();
+                for &item in &work {
+                    let mut msr_out = vec![CRUSH_ITEM_NONE; numrep];
+                    crush_choose_msr(
+                        map,
+                        item,
+                        x,
+                        numrep,
+                        item_type,
+                        &mut msr_out,
+                        weights,
+                        msr_descents,
+                        msr_collision_tries,
+                        false, // recurse_to_leaf
+                    )?;
+                    // Filter out CRUSH_ITEM_NONE entries
+                    scratch.extend(msr_out.into_iter().filter(|&x| x != CRUSH_ITEM_NONE));
+                }
+
+                work.clone_from(&scratch);
+            }
+
             _ => {
-                // Unsupported operations (MSR, etc.)
+                // Unsupported operations
                 tracing::warn!("Unsupported CRUSH rule operation: {:?}", step.op);
             }
         }
@@ -625,6 +662,129 @@ fn crush_choose_indep(
                 rep,
                 tries
             );
+        }
+    }
+
+    Ok(())
+}
+
+/// Choose N items using MSR (Main Search Rule) algorithm
+///
+/// MSR is an alternative selection algorithm for multi-way replication.
+/// It uses a different hash function and collision handling strategy.
+///
+/// Reference: ~/dev/ceph/src/crush/mapper.c (crush_choose_msr)
+#[allow(clippy::too_many_arguments)]
+fn crush_choose_msr(
+    map: &CrushMap,
+    bucket_id: i32,
+    x: u32,
+    numrep: usize,
+    item_type: i32,
+    out: &mut [i32],
+    weights: &[u32],
+    descents: u32,
+    collision_tries: u32,
+    recurse_to_leaf: bool,
+) -> Result<()> {
+    tracing::debug!(
+        "crush_choose_msr: bucket_id={}, numrep={}, item_type={}, descents={}, collision_tries={}",
+        bucket_id,
+        numrep,
+        item_type,
+        descents,
+        collision_tries
+    );
+
+    // If bucket_id is a device (>= 0), just return it if it's the right type
+    if bucket_id >= 0 {
+        if item_type == 0 && !is_out(weights, bucket_id, x) {
+            out[0] = bucket_id;
+        }
+        return Ok(());
+    }
+
+    let bucket = map.get_bucket(bucket_id)?;
+
+    // Track which items have been chosen to avoid duplicates (by item ID)
+    let mut chosen_items: Vec<i32> = Vec::new();
+    let mut collisions = vec![0u32; numrep];
+
+    for rep in 0..numrep {
+        let mut descent = 0;
+
+        'retry: loop {
+            if descent >= descents {
+                // Exceeded descent limit, leave as CRUSH_ITEM_NONE
+                break 'retry;
+            }
+            descent += 1;
+
+            // MSR hash function: combines rep, descent, and collision count
+            let r = rep as u32 + descent * numrep as u32 + collisions[rep];
+            let hash = crush_hash32_2(x + r, bucket_id as u32);
+
+            // Select item from bucket using hash
+            let item = match bucket_choose(bucket, hash, r) {
+                Some(item) => item,
+                None => {
+                    tracing::debug!("bucket_choose returned None for hash={}", hash);
+                    continue 'retry;
+                }
+            };
+
+            // Check if already chosen (collision)
+            if chosen_items.contains(&item) {
+                collisions[rep] += 1;
+                if collisions[rep] < collision_tries {
+                    continue 'retry;
+                }
+                // Exceeded collision tries, leave as CRUSH_ITEM_NONE
+                break 'retry;
+            }
+
+            // Check if item is out
+            if is_out(weights, item, x) {
+                continue 'retry;
+            }
+
+            // Check if we need to recurse or if this is terminal
+            let item_type_match = match get_item_type(map, item) {
+                Some(t) => t == item_type || item_type == 0,
+                None => false,
+            };
+
+            if item < 0 && (recurse_to_leaf || !item_type_match) {
+                // Recurse into child bucket
+                let mut sub_out = vec![CRUSH_ITEM_NONE; 1];
+                crush_choose_msr(
+                    map,
+                    item,
+                    x,
+                    1,
+                    item_type,
+                    &mut sub_out,
+                    weights,
+                    descents,
+                    collision_tries,
+                    recurse_to_leaf,
+                )?;
+
+                if sub_out[0] != CRUSH_ITEM_NONE {
+                    out[rep] = sub_out[0];
+                    chosen_items.push(item);
+                    break 'retry;
+                }
+                // Recursion failed, try again
+                continue 'retry;
+            } else if item_type_match {
+                // Found a matching item
+                out[rep] = item;
+                chosen_items.push(item);
+                break 'retry;
+            }
+
+            // Item doesn't match type, try again
         }
     }
 

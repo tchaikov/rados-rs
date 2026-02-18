@@ -15,6 +15,7 @@ pub mod client;
 pub(crate) mod denc_types;
 pub mod error;
 pub mod ioctx;
+pub mod lock;
 pub mod messages;
 pub mod operation;
 pub mod osdmap;
@@ -28,6 +29,7 @@ pub mod types;
 pub use client::{OSDClient, OSDClientConfig};
 pub use error::OSDClientError;
 pub use ioctx::IoCtx;
+pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use operation::{BuiltOp, OpBuilder};
 pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, UuidD};
 pub use types::{

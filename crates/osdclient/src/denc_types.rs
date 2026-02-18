@@ -312,6 +312,18 @@ impl Denc for OSDOp {
                 buf.put_u64_le(0);
                 buf.put_u16_le(0);
             }
+            OpData::Call {
+                class_len,
+                method_len,
+                ..
+            } => {
+                buf.put_u32_le(*class_len);
+                buf.put_u32_le(*method_len);
+                // Pad to 28 bytes: 4 + 4 = 8, need 20 more
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+                buf.put_u32_le(0);
+            }
             OpData::None => {
                 // Empty union - 28 bytes of zeros
                 buf.put_u64_le(0);

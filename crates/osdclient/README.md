@@ -128,6 +128,30 @@ Create practical examples:
        [Ceph OSD]
 ```
 
+## Connection Management
+
+OSDClient uses a **1:1 session-to-OSD architecture** matching Ceph C++ Objecter design:
+
+- Each OSD gets exactly one `OSDSession` with one persistent connection
+- Operations are "pooled" via mpsc channels (100-message buffer per session)
+- Concurrent operations multiplex over the single connection
+- This design provides simplicity, correct ordering, and efficient resource usage
+
+This is the same architecture used by Ceph C++ since 2010 (commit 065cdf523ee9).
+
+### Why Not Traditional Connection Pooling?
+
+Traditional connection pooling (maintaining multiple connections per OSD) is **not used** because:
+
+1. **Ordering guarantees**: A single connection ensures operations to the same OSD maintain order
+2. **Simplicity**: One connection per OSD is easier to reason about and manage
+3. **Efficiency**: The msgr2 protocol is designed for multiplexing many operations over one connection
+4. **Resource usage**: Ceph OSDs can handle thousands of concurrent operations per connection
+
+The mpsc channel with a 100-message buffer provides the "pooling" effect by allowing
+many operations to queue concurrently, while the single connection handles wire protocol
+serialization.
+
 ## Usage Example (Once Complete)
 
 ```rust

@@ -185,17 +185,19 @@ impl MonConnection {
                         let msg_type = msg.header.msg_type;
                         match msg_type {
                             CEPH_MSG_OSD_MAP => {
+                                // Send to OSDClient if configured
                                 if let Some(ref tx) = osdmap_tx {
-                                    if let Err(e) = tx.send(msg).await {
+                                    if let Err(e) = tx.send(msg.clone()).await {
                                         tracing::error!(
                                             "Failed to send MOSDMap to OSDClient: {:?}",
                                             e
                                         );
                                     }
-                                } else {
-                                    tracing::debug!(
-                                        "Received MOSDMap but no osdmap_tx configured, dropping"
-                                    );
+                                }
+                                // Also send to MonClient for caching
+                                if let Err(e) = mon_msg_tx.send(msg).await {
+                                    tracing::error!("Failed to send MOSDMap to MonClient: {}", e);
+                                    return false;
                                 }
                             }
                             _ => {

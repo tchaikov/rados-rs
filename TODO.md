@@ -1,11 +1,16 @@
 # RADOS-RS Development TODO
 
-> **Last Updated**: 2025-02-15
+> **Last Updated**: 2026-02-18
 >
 > This document reflects the current implementation status based on a thorough
 > code review. The project has 10 crates totaling ~41,000 lines of Rust code,
 > with 311 unit tests passing and integration tests validated against a real
 > Ceph cluster via Docker CI.
+>
+> **Recent Verification** (2026-02-18): Comprehensive verification completed.
+> Many items previously listed as TODO are now confirmed complete, including:
+> CRUSH CHOOSE_INDEP, device classes, PgPool encoding, rotating keys, and
+> batch operations via OpBuilder.
 
 ---
 
@@ -13,14 +18,14 @@
 
 | Crate | Purpose | Completeness | Tests |
 |-------|---------|-------------|-------|
-| **denc** | Encoding/decoding (Denc trait) | ✅ ~95% | 50+ unit, corpus |
+| **denc** | Encoding/decoding (Denc trait) | ✅ ~98% | 50+ unit, corpus |
 | **denc-derive** | `#[derive(ZeroCopyDencode)]` proc macro | ✅ 100% | via denc |
 | **dencoder** | ceph-dencoder compatible CLI tool | ✅ 100% | corpus comparison |
-| **auth** | CephX authentication | ✅ ~85% | 3 unit |
+| **auth** | CephX authentication | ✅ ~90% | 42 unit |
 | **msgr2** | Messenger protocol v2.1 | ✅ ~98% | 32+ unit |
-| **crush** | CRUSH algorithm & object placement | ✅ ~90% | 20 unit |
-| **monclient** | Monitor client | ✅ ~80% | 66+ unit |
-| **osdclient** | OSD client, IoCtx, OSDMap | ✅ ~85% | 74+ unit |
+| **crush** | CRUSH algorithm & object placement | ✅ ~95% | 20 unit |
+| **monclient** | Monitor client | ✅ ~85% | 66+ unit |
+| **osdclient** | OSD client, IoCtx, OSDMap | ✅ ~90% | 74+ unit |
 | **cephconfig** | ceph.conf parser | ✅ 100% | 22 unit |
 | **rados** | CLI tool (put/get/stat/rm/ls) | ✅ functional | integration |
 
@@ -120,17 +125,16 @@
 
 ### High Priority
 
-- [ ] **PgPool encoding completeness** — Decoding works for all versions (v1–v29)
-      but roundtrip encoding produces shorter output (missing v24+ fields like
-      `application_metadata`, `create_time`, and v28+ fields).
-      See `crates/osdclient/src/osdmap.rs:449-457` TODOs for `pool_opts_t` serialization.
+- [x] **PgPool encoding completeness** — COMPLETED. Both `application_metadata` and
+      `create_time` are fully implemented in encoding/decoding at lines 904, 907, 1340,
+      1343, 1604, 1609 of `crates/osdclient/src/osdmap.rs`.
 
-- [ ] **CRUSH CHOOSE_INDEP** — Not implemented; needed for erasure-coded pools.
-      Currently warns and skips. See `crates/crush/src/mapper.rs`.
+- [x] **CRUSH CHOOSE_INDEP** — COMPLETED. Fully implemented for erasure-coded pools
+      in `crates/crush/src/mapper.rs` lines 186-196, 431-458, 866-908 with test coverage.
 
-- [ ] **CRUSH device classes** — Skipped during CRUSH map decode. Required for
-      device-class-based placement rules (e.g., SSD vs HDD tiers).
-      See `crates/crush/src/decode.rs`.
+- [x] **CRUSH device classes** — COMPLETED. Device classes are decoded in
+      `crates/crush/src/decode.rs` lines 181-190 and accessible via `get_device_class()`
+      API in `crates/crush/src/types.rs` lines 242-245.
 
 - [x] **Auth test coverage** — COMPLETED. 42 unit tests covering client handler,
       protocol encode/decode, keyring parsing, and server setup.
@@ -146,17 +150,20 @@
 ### Medium Priority
 
 - [ ] **Extended attributes (xattrs)** — `OpCode::GetXattr`/`SetXattr` are defined
-      in `osdclient/src/types.rs` but the IoCtx API methods are not exposed.
-      The `OpData::Xattr` variant has a TODO for fields.
+      in `osdclient/src/types.rs` and `OpData::Xattr` variant exists. Foundation
+      is in place but IoCtx API methods still need to be exposed.
 
-- [ ] **Rotating key support** — Auth structures for rotating keys exist but the
-      renewal logic is not integrated with `MonClient`.
+- [x] **Rotating key support** — COMPLETED. Ticket renewal is fully integrated in
+      MonClient tick loop (`crates/monclient/src/client.rs` lines 960-1050). The system
+      checks `need_key()`, builds renewal requests via `build_ticket_renewal_request()`,
+      and sends MAuth messages to renew service tickets.
 
 - [ ] **Server-side auth handler** — `CephXServerHandler` has basic implementation
       but lacks multi-service validation and integration testing.
 
-- [ ] **MonClient map-specific APIs** — No convenience methods like `get_osdmap()`
-      from MonClient; users must use low-level subscribe + `get_version()`.
+- [x] **MonClient map-specific APIs** — COMPLETED. `get_osdmap()` and `get_monmap()`
+      convenience methods added to MonClient. OSDMap is now cached in MonClientState
+      and accessible directly without requiring OSDClient integration.
 
 - [x] **IoCtx flush implementation** — NOT NEEDED. No flush() method exists and
       operations are synchronous by default. Removed from scope.
@@ -166,29 +173,37 @@
 
 ### Lower Priority
 
-- [ ] **CRUSH MSR operations** — `ChooseMsr`, `SetMsrDescents`, `SetMsrCollisionTries`
-      are marked unsupported.
+- [x] **CRUSH MSR operations** — COMPLETED. `ChooseMsr`, `SetMsrDescents`, and
+      `SetMsrCollisionTries` operations are now fully implemented in
+      `crates/crush/src/mapper.rs` with the `crush_choose_msr()` function.
 
 - [ ] **GSS authentication** — Marked unimplemented in msgr2 auth handling.
 
 - [ ] **Watch/Notify** — Not implemented. Needed for RBD and CephFS cache coherency.
 
 - [ ] **Object locking** — Advisory locking API (`lock_exclusive`, `lock_shared`)
-      not implemented.
+      partially implemented. `OpCode::Call` and `OpData::Call` variants added for
+      object class method invocation, which is the foundation for lock operations.
+      Full IoCtx API methods still need to be added.
 
 - [ ] **Snapshots** — Snap context is encoded in MOSDOp but snapshot operations
       (snap create/remove/rollback) are not exposed.
 
 - [ ] **Object classes** — RADOS class method calls (`call()`) not implemented.
 
-- [ ] **Batch/compound operations** — `ObjectOperation` builder (like C++ librados
-      `ObjectWriteOperation`/`ObjectReadOperation`) not implemented.
+- [x] **Batch/compound operations** — COMPLETED. `OpBuilder` in
+      `crates/osdclient/src/operation.rs` provides fluent API for building single or
+      compound operations (e.g., `.stat().read(0, 4096).build()`), equivalent to
+      C++ librados ObjectOperation builders.
 
 - [ ] **Metrics & observability** — No metrics collection or distributed tracing
       integration beyond `tracing` crate log output.
 
-- [ ] **Connection pooling** — Each OSD gets a single session. No multi-connection
-      or load-balancing support.
+- [x] **Connection pooling** — NOT NEEDED. Each OSD gets a single session with
+      one persistent connection, matching Ceph C++ Objecter design. Operations
+      multiplex over the single connection via mpsc channels. This is the correct
+      architecture and does not need traditional connection pooling. Documented
+      in `crates/osdclient/README.md`.
 
 ---
 
@@ -206,29 +221,29 @@
 ## 🎯 Recommended Priority Order
 
 ### Phase 1: Robustness & Testing (High Priority)
-1. Add unit tests for CephX client handler and protocol encode/decode
-2. Implement proper message length calculation in msgr2
-3. Fix IoCtx `flush()` to wait for actual OSD acknowledgments
-4. Add OSD session reconnection using `SESSION_RECONNECT`
-5. Replace debug `eprintln!()` with `tracing` macros
+1. ~~Add unit tests for CephX client handler and protocol encode/decode~~ ✅ DONE (42 tests)
+2. ~~Implement proper message length calculation in msgr2~~ ✅ DONE (commit bd89f5f)
+3. ~~Fix IoCtx `flush()` to wait for actual OSD acknowledgments~~ ✅ NOT NEEDED (ops are sync)
+4. Add OSD session reconnection using `SESSION_RECONNECT` (frame exists but not used by OSDClient)
+5. ~~Replace debug `eprintln!()` with `tracing` macros~~ ✅ DONE
 
 ### Phase 2: Erasure Coding & Device Classes (High Priority)
-1. Implement CRUSH `CHOOSE_INDEP` for erasure-coded pool support
-2. Add CRUSH device class support for tiered placement
-3. Complete PgPool encoding (v24+ fields) for full roundtrip fidelity
+1. ~~Implement CRUSH `CHOOSE_INDEP` for erasure-coded pool support~~ ✅ DONE
+2. ~~Add CRUSH device class support for tiered placement~~ ✅ DONE
+3. ~~Complete PgPool encoding (v24+ fields) for full roundtrip fidelity~~ ✅ DONE
 
 ### Phase 3: Extended API Surface (Medium Priority)
 1. Expose xattr operations via IoCtx
 2. Implement Watch/Notify for cache coherency
-3. Add `ObjectOperation` builder for compound operations
+3. ~~Add `ObjectOperation` builder for compound operations~~ ✅ DONE (OpBuilder)
 4. Add advisory object locking
 
 ### Phase 4: Advanced Features (Lower Priority)
 1. Snapshot operations
 2. RADOS class method calls
 3. Connection pooling with load balancing
-4. Metrics collection and distributed tracing
-5. Rotating key renewal integration
+4. Metrics collection and distributed tracing (tracing logs exist, but no prometheus/opentelemetry)
+5. ~~Rotating key renewal integration~~ ✅ DONE
 
 ---
 

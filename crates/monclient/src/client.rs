@@ -234,6 +234,9 @@ struct MonClientState {
 
     /// Runtime configuration values updated via MConfig
     runtime_config: RuntimeMonClientConfig,
+
+    /// Latest OSDMap received from monitors
+    latest_osdmap: Option<crate::MOSDMap>,
 }
 
 struct MapWaiter {
@@ -337,6 +340,7 @@ impl MonClient {
             last_hunt_attempt: None,
             had_a_connection: false,
             runtime_config: RuntimeMonClientConfig::from_config(&config),
+            latest_osdmap: None,
         };
 
         let shutdown_token = CancellationToken::new();
@@ -1132,6 +1136,10 @@ impl MonClient {
                 debug!("Received CEPH_MSG_CONFIG");
                 Self::handle_config(state, map_events, msg).await?;
             }
+            msgr2::message::CEPH_MSG_OSD_MAP => {
+                debug!("Received CEPH_MSG_OSD_MAP");
+                Self::handle_osdmap(state, map_events, msg).await?;
+            }
             _ => {
                 return Err(MonClientError::Other(format!(
                     "Received unknown message type 0x{:04x} - this is a bug! MonClient should only receive messages it subscribed for",
@@ -1224,6 +1232,36 @@ impl MonClient {
             let keys: Vec<String> = mconfig.config.keys().cloned().collect();
             let _ = map_events.send(MapEvent::ConfigUpdated { keys });
         }
+        Ok(())
+    }
+
+    /// Handle OSDMap message
+    async fn handle_osdmap(
+        state: &Arc<RwLock<MonClientState>>,
+        map_events: &broadcast::Sender<MapEvent>,
+        msg: msgr2::message::Message,
+    ) -> Result<()> {
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+        let header = CephMsgHeader::new(MOSDMap::msg_type(), MOSDMap::msg_version(0));
+        let osdmap = MOSDMap::decode_payload(&header, &msg.front, &[], &[])?;
+
+        let epoch = osdmap.get_last();
+        debug!("Received OSDMap: epoch={}", epoch);
+
+        // Cache the latest OSDMap in state
+        let mut state_guard = state.write().await;
+        state_guard.latest_osdmap = Some(osdmap.clone());
+
+        // Mark subscription as received
+        state_guard.subscriptions.got("osdmap", epoch as u64);
+        drop(state_guard);
+
+        // Broadcast OSDMap update event
+        let _ = map_events.send(MapEvent::OsdMapUpdated {
+            epoch: epoch as u64,
+        });
+
+        debug!("OSDMap cached successfully");
         Ok(())
     }
 
@@ -1697,6 +1735,65 @@ impl MonClient {
     /// Subscribe to map events
     pub fn subscribe_events(&self) -> broadcast::Receiver<MapEvent> {
         self.map_events.subscribe()
+    }
+
+    /// Get the current OSDMap from the monitor
+    ///
+    /// This is a convenience wrapper that subscribes to osdmap and waits for the latest version.
+    /// For more control, use the low-level subscribe/get_version APIs directly.
+    ///
+    /// # Returns
+    /// The latest OSDMap received from the monitor
+    ///
+    /// # Errors
+    /// Returns an error if not connected, subscription fails, or timeout occurs
+    pub async fn get_osdmap(&self) -> Result<crate::MOSDMap> {
+        // Subscribe to osdmap if not already subscribed
+        self.subscribe("osdmap", 0, 0).await?;
+
+        // Get current version
+        let (epoch, _) = self.get_version("osdmap").await?;
+
+        // Wait for that version via event channel
+        let mut events = self.subscribe_events();
+        let timeout_duration = Duration::from_secs(30);
+
+        loop {
+            tokio::select! {
+                event = events.recv() => {
+                    match event {
+                        Ok(MapEvent::OsdMapUpdated { epoch: recv_epoch }) => {
+                            if recv_epoch >= epoch {
+                                // Map received, extract from state
+                                let state = self.state.read().await;
+                                if let Some(osdmap) = state.latest_osdmap.clone() {
+                                    return Ok(osdmap);
+                                } else {
+                                    return Err(MonClientError::Other(
+                                        "OSDMap event received but map not cached".into()
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            return Err(MonClientError::Other(format!("Event channel error: {}", e)));
+                        }
+                        _ => {}
+                    }
+                }
+                _ = tokio::time::sleep(timeout_duration) => {
+                    return Err(MonClientError::Timeout);
+                }
+            }
+        }
+    }
+
+    /// Get the current MonMap
+    ///
+    /// Returns a cloned copy of the cached MonMap.
+    pub async fn get_monmap(&self) -> MonMap {
+        let state = self.state.read().await;
+        state.monmap.clone()
     }
 }
 

@@ -449,6 +449,7 @@ const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
 const CEPH_OSD_OP_TYPE_ATTR: u16 = 0x0300; // Attribute operations
+const CEPH_OSD_OP_TYPE_EXEC: u16 = 0x0400; // Exec/CLS operations (object class methods)
 const CEPH_OSD_OP_TYPE_PG: u16 = 0x0500; // PG operations
 
 /// Helper macro to construct operation codes using Ceph's encoding scheme
@@ -468,6 +469,9 @@ macro_rules! osd_op {
     };
     (WR, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_ATTR | $nr
+    };
+    (RMW, CLS, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_EXEC | $nr
     };
     (RD, PG, $nr:expr) => {
         CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_PG | $nr
@@ -505,6 +509,12 @@ pub enum OpCode {
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
+    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 2)
+    RemoveXattr = osd_op!(WR, ATTR, 2),
+    /// List extended attributes: __CEPH_OSD_OP(RD, ATTR, 3)
+    ListXattrs = osd_op!(RD, ATTR, 3),
+    /// Call object class method: __CEPH_OSD_OP(RMW, CLS, 1)
+    Call = osd_op!(RMW, CLS, 1),
     /// PG list operation: __CEPH_OSD_OP(RD, PG, 1) = PGLS
     Pgls = osd_op!(RD, PG, 1),
 }
@@ -517,17 +527,20 @@ impl OpCode {
     /// Try to convert a u16 to an OpCode
     pub fn from_u16(value: u16) -> Option<Self> {
         match value {
-            0x1201 => Some(OpCode::Read),       // RD | DATA | 1
-            0x1202 => Some(OpCode::Stat),       // RD | DATA | 2
-            0x1205 => Some(OpCode::SparseRead), // RD | DATA | 5
-            0x2201 => Some(OpCode::Write),      // WR | DATA | 1
-            0x2202 => Some(OpCode::WriteFull),  // WR | DATA | 2
-            0x2203 => Some(OpCode::Truncate),   // WR | DATA | 3
-            0x2205 => Some(OpCode::Delete),     // WR | DATA | 5
-            0x220D => Some(OpCode::Create),     // WR | DATA | 13
-            0x1301 => Some(OpCode::GetXattr),   // RD | ATTR | 1
-            0x2301 => Some(OpCode::SetXattr),   // WR | ATTR | 1
-            0x1501 => Some(OpCode::Pgls),       // RD | PG | 1
+            0x1201 => Some(OpCode::Read),        // RD | DATA | 1
+            0x1202 => Some(OpCode::Stat),        // RD | DATA | 2
+            0x1205 => Some(OpCode::SparseRead),  // RD | DATA | 5
+            0x2201 => Some(OpCode::Write),       // WR | DATA | 1
+            0x2202 => Some(OpCode::WriteFull),   // WR | DATA | 2
+            0x2203 => Some(OpCode::Truncate),    // WR | DATA | 3
+            0x2205 => Some(OpCode::Delete),      // WR | DATA | 5
+            0x220D => Some(OpCode::Create),      // WR | DATA | 13
+            0x1301 => Some(OpCode::GetXattr),    // RD | ATTR | 1
+            0x2301 => Some(OpCode::SetXattr),    // WR | ATTR | 1
+            0x2302 => Some(OpCode::RemoveXattr), // WR | ATTR | 2
+            0x1303 => Some(OpCode::ListXattrs),  // RD | ATTR | 3
+            0x3501 => Some(OpCode::Call),        // RMW | CLS | 1
+            0x1501 => Some(OpCode::Pgls),        // RD | PG | 1
             _ => None,
         }
     }
@@ -570,6 +583,12 @@ pub enum OpData {
         value_len: u32,
         cmp_op: u8,
         cmp_mode: u8,
+    },
+    /// Object class method call
+    Call {
+        class_len: u32,
+        method_len: u32,
+        indata_len: u32,
     },
     /// Operations with no specific data
     None,
