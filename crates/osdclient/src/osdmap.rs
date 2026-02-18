@@ -2333,9 +2333,37 @@ impl VersionedEncode for OSDMapIncremental {
         // CRC validation (version 8+)
         if struct_v >= 8 && outer_cursor.remaining() >= 8 {
             inc.have_crc = true;
+
+            // Calculate CRC position (how many bytes consumed from outer_bytes)
+            let crc_offset = outer_bytes.len() - outer_cursor.remaining();
+
+            // Read CRC fields
             inc.inc_crc = u32::decode(&mut outer_cursor, features)?;
             inc.full_crc = u32::decode(&mut outer_cursor, features)?;
-            // TODO: Validate CRC if needed
+
+            // Validate CRC using two-part streaming calculation
+            // Following C++ pattern from OSDMap.cc:1029-1057
+            // CRC covers: [0..crc_offset) + [(crc_offset+8)..end]
+            let mut actual_crc = 0xFFFFFFFF_u32;
+
+            // Part 1: CRC of bytes before CRC field position
+            if crc_offset > 0 {
+                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
+            }
+
+            // Part 2: CRC of bytes after CRC fields (if any)
+            let crc_tail_offset = crc_offset + 8;
+            if crc_tail_offset < outer_bytes.len() {
+                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[crc_tail_offset..]);
+            }
+
+            // Compare calculated CRC with stored CRC
+            if actual_crc != inc.inc_crc {
+                return Err(RadosError::Protocol(format!(
+                    "OSDMapIncremental CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                    inc.inc_crc, actual_crc
+                )));
+            }
         }
 
         // DECODE_FINISH: Forward compatibility - remaining bytes are ignored

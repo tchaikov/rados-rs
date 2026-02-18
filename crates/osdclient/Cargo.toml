@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 anyhow = { workspace = true }
 bitflags = "2.4"
 serde = { workspace = true }
+crc32c = { workspace = true }
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }
