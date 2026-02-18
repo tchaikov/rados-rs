@@ -40,12 +40,11 @@ fn test_priority_queue_mixed_priorities() {
     let mut queue = msgr2::protocol::PriorityQueue::new();
 
     // Create messages with all three priority levels
-    let low_msg = Message::new(1, Bytes::from("low"))
-        .with_priority(MessagePriority::Low.to_u16());
-    let normal_msg = Message::new(2, Bytes::from("normal"))
-        .with_priority(MessagePriority::Normal.to_u16());
-    let high_msg = Message::new(3, Bytes::from("high"))
-        .with_priority(MessagePriority::High.to_u16());
+    let low_msg = Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+    let normal_msg =
+        Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
+    let high_msg =
+        Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
 
     // Add in reverse priority order
     queue.push_back(low_msg);
@@ -70,8 +69,8 @@ fn test_priority_queue_maintains_fifo_within_priority() {
     }
 
     // Add a high priority message in the middle
-    let high_msg = Message::new(100, Bytes::from("urgent"))
-        .with_priority(MessagePriority::High.to_u16());
+    let high_msg =
+        Message::new(100, Bytes::from("urgent")).with_priority(MessagePriority::High.to_u16());
     queue.push_back(high_msg);
 
     // Add more normal priority messages
