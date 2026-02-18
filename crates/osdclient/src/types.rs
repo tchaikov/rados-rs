@@ -286,9 +286,13 @@ impl StripedPgId {
 /// in performance-critical paths where zero-copy operations are important.
 ///
 /// **Related types:**
-/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
-/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
-/// - `denc::types::EntityName` - General encoding version (typed)
+/// - `auth::types::EntityName` - Canonical entity name (numeric type + string ID),
+///   also re-exported as `monclient::types::EntityName`
+/// - `denc::types::EntityName` - General encoding version (typed with `EntityType` enum)
+///
+/// **Conversions:**
+/// - `From<denc::types::EntityName>` to convert from the typed encoding version
+/// - `TryFrom<osdclient::EntityName>` for `denc::types::EntityName` to convert back
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
 #[derive(Debug, Clone, PartialEq, Eq, denc::ZeroCopyDencode)]
@@ -311,6 +315,23 @@ pub const CEPH_ENTITY_TYPE_AUTH: u8 = 0x20;
 impl EntityName {
     pub fn new(entity_type: u8, num: u64) -> Self {
         Self { entity_type, num }
+    }
+}
+
+impl From<denc::types::EntityName> for EntityName {
+    fn from(e: denc::types::EntityName) -> Self {
+        Self::new(e.entity_type.value() as u8, e.num)
+    }
+}
+
+impl TryFrom<EntityName> for denc::types::EntityName {
+    type Error = denc::error::RadosError;
+
+    fn try_from(e: EntityName) -> Result<Self, Self::Error> {
+        let entity_type = { e.entity_type };
+        let num = { e.num };
+        let et = denc::types::EntityType::try_from(entity_type)?;
+        Ok(denc::types::EntityName::new(et, num))
     }
 }
 
@@ -1385,5 +1406,31 @@ mod tests {
         assert_eq!(target.epoch, 200);
         assert_eq!(target.osd, 10);
         assert_eq!(target.acting, vec![10, 11]);
+    }
+
+    #[test]
+    fn test_from_denc_entity_name() {
+        let denc_name = denc::types::EntityName::client(42);
+        let osd_name = EntityName::from(denc_name);
+        // Copy values to avoid references to packed struct fields
+        let entity_type = osd_name.entity_type;
+        let num = osd_name.num;
+        assert_eq!(entity_type, CEPH_ENTITY_TYPE_CLIENT);
+        assert_eq!(num, 42);
+    }
+
+    #[test]
+    fn test_try_from_osd_to_denc_entity_name() {
+        let osd_name = EntityName::new(CEPH_ENTITY_TYPE_OSD, 5);
+        let denc_name = denc::types::EntityName::try_from(osd_name).unwrap();
+        assert_eq!(denc_name, denc::types::EntityName::osd(5));
+    }
+
+    #[test]
+    fn test_roundtrip_denc_to_osd_to_denc() {
+        let original = denc::types::EntityName::client(0);
+        let osd_name = EntityName::from(original);
+        let roundtrip = denc::types::EntityName::try_from(osd_name).unwrap();
+        assert_eq!(original, roundtrip);
     }
 }

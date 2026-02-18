@@ -253,9 +253,15 @@ impl fmt::Display for EntityType {
 /// important and you're not in a performance-critical path requiring zero-copy.
 ///
 /// **Related types:**
-/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
+/// - `auth::types::EntityName` - Canonical entity name (numeric type + string ID),
+///   also re-exported as `monclient::types::EntityName`
 /// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
-/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
+///
+/// **Conversions:**
+/// - `From<denc::EntityName>` for `auth::EntityName` — infallible
+/// - `TryFrom<&auth::EntityName>` for `denc::EntityName` — may fail if ID isn't numeric
+/// - `From<denc::EntityName>` for `osdclient::EntityName` — infallible
+/// - `TryFrom<osdclient::EntityName>` for `denc::EntityName` — may fail for unknown types
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct EntityName {
     pub entity_type: EntityType,

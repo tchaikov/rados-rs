@@ -39,17 +39,21 @@ pub type GlobalId = u64;
 
 /// Entity name for authentication protocol (hybrid format: numeric type + string ID)
 ///
-/// This is a hybrid representation used specifically in the CephX authentication protocol.
+/// This is the canonical entity name type used across crates for identifying Ceph entities.
 /// It combines a numeric entity type with a string ID, matching the C++ `EntityName` struct
 /// in `/src/common/entity_name.h`.
 ///
-/// **When to use:** For authentication-related operations, especially when encoding/decoding
-/// CephX protocol messages.
+/// **When to use:** For authentication-related operations and general entity identification.
+/// This type is re-exported by `monclient::types::EntityName`.
 ///
 /// **Related types:**
-/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
 /// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
-/// - `denc::types::EntityName` - General encoding version (typed)
+/// - `denc::types::EntityName` - General encoding version (typed with `EntityType` enum)
+///
+/// **Conversions:**
+/// - `From<denc::types::EntityName>` to convert from the typed encoding version
+/// - `TryFrom<&auth::EntityName>` for `denc::types::EntityName` to convert back (may fail
+///   if the string ID is not a valid `u64`)
 ///
 /// C++ encoding format:
 /// - `__u32 type` - Entity type (CEPH_ENTITY_TYPE_CLIENT=1, etc.)
@@ -172,6 +176,26 @@ impl Denc for EntityName {
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
         Some(4 + 4 + self.id.len())
+    }
+}
+
+impl From<denc::types::EntityName> for EntityName {
+    fn from(e: denc::types::EntityName) -> Self {
+        Self::new(e.entity_type.value(), &e.num.to_string())
+    }
+}
+
+impl TryFrom<&EntityName> for denc::types::EntityName {
+    type Error = CephXError;
+
+    fn try_from(e: &EntityName) -> std::result::Result<Self, Self::Error> {
+        let entity_type = denc::types::EntityType::try_from(e.entity_type as u8).map_err(|_| {
+            CephXError::ProtocolError(format!("Unknown entity type: {}", e.entity_type))
+        })?;
+        let num: u64 = e.id.parse().map_err(|_| {
+            CephXError::ProtocolError(format!("Entity ID '{}' is not a valid u64", e.id))
+        })?;
+        Ok(denc::types::EntityName::new(entity_type, num))
     }
 }
 
@@ -944,5 +968,49 @@ impl CephXSession {
             CephXError::EncodingError(format!("Failed to encode authenticator: {}", e))
         })?;
         self.session_key.sign(&buf.freeze())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_from_denc_entity_name() {
+        let denc_name = denc::types::EntityName::client(42);
+        let auth_name = EntityName::from(denc_name);
+        assert_eq!(auth_name.entity_type, CEPH_ENTITY_TYPE_CLIENT);
+        assert_eq!(auth_name.id, "42");
+        assert_eq!(auth_name.to_string(), "client.42");
+    }
+
+    #[test]
+    fn test_from_denc_entity_name_osd() {
+        let denc_name = denc::types::EntityName::osd(5);
+        let auth_name = EntityName::from(denc_name);
+        assert_eq!(auth_name.entity_type, CEPH_ENTITY_TYPE_OSD);
+        assert_eq!(auth_name.id, "5");
+    }
+
+    #[test]
+    fn test_try_from_auth_to_denc() {
+        let auth_name = EntityName::new(CEPH_ENTITY_TYPE_CLIENT, "42");
+        let denc_name = denc::types::EntityName::try_from(&auth_name).unwrap();
+        assert_eq!(denc_name, denc::types::EntityName::client(42));
+    }
+
+    #[test]
+    fn test_try_from_auth_to_denc_non_numeric_id() {
+        let auth_name = EntityName::new(CEPH_ENTITY_TYPE_CLIENT, "admin");
+        let result = denc::types::EntityName::try_from(&auth_name);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_roundtrip_denc_to_auth_to_denc() {
+        let original = denc::types::EntityName::mon(0);
+        let auth_name = EntityName::from(original);
+        let roundtrip = denc::types::EntityName::try_from(&auth_name).unwrap();
+        assert_eq!(original, roundtrip);
     }
 }

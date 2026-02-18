@@ -3,71 +3,16 @@
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
-/// Entity name for human-readable display and parsing (e.g., "client.admin", "osd.0")
+/// Re-export `auth::types::EntityName` as the canonical entity name type.
 ///
-/// This is the runtime representation used for display purposes and parsing user input.
-/// It uses String-based fields for both entity type and ID, making it suitable for
-/// human-readable formats and configuration files.
+/// This replaces the previous `monclient`-specific `EntityName` (which used
+/// `String`-based fields) with the canonical `auth::types::EntityName`
+/// (which uses a numeric `u32` entity type and a `String` ID).
 ///
-/// **When to use:** For displaying entity names to users, parsing configuration,
-/// or when you need the human-readable string representation.
-///
-/// **Related types:**
-/// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
-/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
-/// - `denc::types::EntityName` - General encoding version (typed)
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct EntityName {
-    pub entity_type: String,
-    pub entity_id: String,
-}
-
-impl EntityName {
-    pub fn new(entity_type: impl Into<String>, entity_id: impl Into<String>) -> Self {
-        Self {
-            entity_type: entity_type.into(),
-            entity_id: entity_id.into(),
-        }
-    }
-
-    pub fn client(id: impl Into<String>) -> Self {
-        Self::new("client", id)
-    }
-
-    pub fn osd(id: u32) -> Self {
-        Self::new("osd", id.to_string())
-    }
-
-    pub fn mon(id: impl Into<String>) -> Self {
-        Self::new("mon", id)
-    }
-
-    pub fn mds(id: impl Into<String>) -> Self {
-        Self::new("mds", id)
-    }
-
-    pub fn mgr(id: impl Into<String>) -> Self {
-        Self::new("mgr", id)
-    }
-}
-
-impl std::fmt::Display for EntityName {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.entity_type, self.entity_id)
-    }
-}
-
-impl std::str::FromStr for EntityName {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 2 {
-            return Err(format!("Invalid entity name: {}", s));
-        }
-        Ok(Self::new(parts[0], parts[1]))
-    }
-}
+/// The `auth::EntityName` already provides all the functionality needed by
+/// `monclient`: `FromStr` parsing (e.g., "client.admin"), `Display`, `Debug`,
+/// and `Clone`.
+pub use auth::types::EntityName;
 
 /// Result of a monitor command
 #[derive(Debug, Clone)]
