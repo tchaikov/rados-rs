@@ -20,7 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::sync::{broadcast, mpsc, Mutex, RwLock};
-use tokio::task::JoinHandle;
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 /// Monitor client configuration
@@ -133,11 +134,11 @@ pub struct MonClient {
     /// Client state
     state: Arc<RwLock<MonClientState>>,
 
-    /// Tick task handle (for periodic keepalive and auth renewal)
-    tick_task: Arc<RwLock<Option<JoinHandle<()>>>>,
+    /// Background tasks (tick loop + drain loop)
+    tasks: Arc<Mutex<JoinSet<()>>>,
 
-    /// Drain task handle (processes incoming monitor messages)
-    drain_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Shutdown token — cancel to stop all background tasks
+    shutdown_token: CancellationToken,
 
     /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
@@ -222,7 +223,6 @@ struct MonClientState {
     hunting: bool,
     want_monmap: bool,
     initialized: bool,
-    stopping: bool,
 
     /// Hunting backoff state
     /// Current backoff multiplier for hunt interval
@@ -333,19 +333,20 @@ impl MonClient {
             hunting: false,
             want_monmap: true,
             initialized: false,
-            stopping: false,
             reopen_interval_multiplier: config.hunt_interval_min_multiple,
             last_hunt_attempt: None,
             had_a_connection: false,
             runtime_config: RuntimeMonClientConfig::from_config(&config),
         };
 
+        let shutdown_token = CancellationToken::new();
+
         let client = Arc::new(Self {
             config,
             entity_name,
             state: Arc::new(RwLock::new(state)),
-            tick_task: Arc::new(RwLock::new(None)),
-            drain_task: Arc::new(Mutex::new(None)),
+            tasks: Arc::new(Mutex::new(JoinSet::new())),
+            shutdown_token: shutdown_token.clone(),
             map_events,
             osdmap_tx,
             mon_msg_tx,
@@ -355,27 +356,43 @@ impl MonClient {
 
         // Spawn drain task for monitor messages
         let client_weak = Arc::downgrade(&client);
-        let drain_handle = tokio::spawn(async move {
-            while let Some(msg) = mon_msg_rx.recv().await {
-                if let Some(client_arc) = client_weak.upgrade() {
-                    if let Err(e) = Self::dispatch_message(
-                        &client_arc.state,
-                        &client_arc.map_events,
-                        &client_arc.monmap_notify,
-                        msg,
-                    )
-                    .await
-                    {
-                        error!("Failed to dispatch monitor message: {}", e);
+        let drain_token = shutdown_token.clone();
+        client.tasks.lock().await.spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = drain_token.cancelled() => {
+                        info!("MonClient drain task received shutdown signal");
+                        break;
                     }
-                } else {
-                    info!("MonClient dropped, terminating message drain task");
-                    break;
+                    msg = mon_msg_rx.recv() => {
+                        match msg {
+                            Some(msg) => {
+                                if let Some(client_arc) = client_weak.upgrade() {
+                                    if let Err(e) = Self::dispatch_message(
+                                        &client_arc.state,
+                                        &client_arc.map_events,
+                                        &client_arc.monmap_notify,
+                                        msg,
+                                    )
+                                    .await
+                                    {
+                                        error!("Failed to dispatch monitor message: {}", e);
+                                    }
+                                } else {
+                                    info!("MonClient dropped, terminating drain task");
+                                    break;
+                                }
+                            }
+                            None => {
+                                info!("MonClient message channel closed, drain task exiting");
+                                break;
+                            }
+                        }
+                    }
                 }
             }
-            info!("MonClient message drain task terminated");
+            info!("MonClient drain task terminated");
         });
-        *client.drain_task.lock().await = Some(drain_handle);
 
         Ok(client)
     }
@@ -416,15 +433,14 @@ impl MonClient {
 
     /// Shutdown the client
     pub async fn shutdown(&self) -> Result<()> {
+        if self.shutdown_token.is_cancelled() {
+            return Ok(());
+        }
+
+        info!("Shutting down MonClient");
+
         let (active_con, pending_cons) = {
             let mut state = self.state.write().await;
-
-            if state.stopping {
-                return Ok(());
-            }
-
-            info!("Shutting down MonClient");
-            state.stopping = true;
 
             // Cancel all pending operations by dropping their senders.
             // Callers blocked on rx.await will receive a RecvError ("Channel closed"),
@@ -445,27 +461,24 @@ impl MonClient {
         if let Some(con) = active_con {
             con.close().await?;
         }
-
         for con in pending_cons {
             con.close().await?;
         }
 
-        // Stop tick task
-        let mut tick_task = self.tick_task.write().await;
-        if let Some(handle) = tick_task.take() {
-            handle.abort();
-            info!("Aborted tick task");
+        // Cancel all background tasks and await them.
+        // The drain task won't stop on its own because MonClient still holds mon_msg_tx;
+        // the cancellation token signals it to exit.
+        self.shutdown_token.cancel();
+        let mut tasks = self.tasks.lock().await;
+        while let Some(result) = tasks.join_next().await {
+            if let Err(e) = result {
+                if !e.is_cancelled() {
+                    warn!("Background task panicked during shutdown: {:?}", e);
+                }
+            }
         }
 
-        // Stop drain task. Closing all connections above dropped the per-connection
-        // mon_msg_tx senders, but MonClient still holds its own mon_msg_tx, so the
-        // channel won't close on its own. Abort ensures the task stops promptly.
-        let mut drain_task = self.drain_task.lock().await;
-        if let Some(handle) = drain_task.take() {
-            handle.abort();
-            info!("Aborted drain task");
-        }
-
+        info!("MonClient shutdown complete");
         Ok(())
     }
 
@@ -840,59 +853,56 @@ impl MonClient {
     /// Start background tick loop for periodic maintenance
     fn start_tick_loop(&self) {
         let state = Arc::clone(&self.state);
-        let config = self.config.clone();
-        let self_clone = self.clone(); // Clone Arc<Self> for use in spawned task
+        let self_clone = self.clone();
+        let tick_token = self.shutdown_token.clone();
 
         // Explicit tick_interval overrides adaptive scheduling when set
-        let explicit_tick_interval = config.tick_interval;
+        let explicit_tick_interval = self.config.tick_interval;
 
-        let handle = tokio::spawn(async move {
-            info!("Tick loop started");
+        // Spawn into the shared JoinSet so shutdown() can await all tasks together.
+        self.tasks
+            .try_lock()
+            .expect("tasks lock should not be contended during init")
+            .spawn(async move {
+                info!("Tick loop started");
 
-            loop {
-                // Adaptive tick interval: hunt faster when hunting, ping interval when connected.
-                // Matches C++ MonClient::schedule_tick() adaptive logic.
-                let interval = if let Some(explicit) = explicit_tick_interval {
-                    explicit
-                } else {
-                    let state_guard = state.read().await;
-                    if state_guard.hunting {
-                        state_guard
-                            .runtime_config
-                            .mon_client_hunt_interval
-                            .mul_f64(state_guard.reopen_interval_multiplier)
+                loop {
+                    // Adaptive tick interval: hunt faster when hunting, ping when connected.
+                    // Matches C++ MonClient::schedule_tick() adaptive logic.
+                    let interval = if let Some(explicit) = explicit_tick_interval {
+                        explicit
                     } else {
-                        state_guard.runtime_config.mon_client_ping_interval
+                        let state_guard = state.read().await;
+                        if state_guard.hunting {
+                            state_guard
+                                .runtime_config
+                                .mon_client_hunt_interval
+                                .mul_f64(state_guard.reopen_interval_multiplier)
+                        } else {
+                            state_guard.runtime_config.mon_client_ping_interval
+                        }
+                    };
+
+                    tokio::select! {
+                        _ = tick_token.cancelled() => {
+                            info!("Tick loop received shutdown signal");
+                            break;
+                        }
+                        _ = tokio::time::sleep(interval) => {}
                     }
-                };
 
-                tokio::time::sleep(interval).await;
-
-                // Check if stopping
-                {
-                    let state_guard = state.read().await;
-                    if state_guard.stopping {
-                        info!("Stopping flag set, exiting tick loop");
+                    if tick_token.is_cancelled() {
                         break;
                     }
+
+                    // Perform tick operations
+                    if let Err(e) = self_clone.tick(&state).await {
+                        error!("Error in tick: {}", e);
+                    }
                 }
 
-                // Perform tick operations
-                if let Err(e) = self_clone.tick(&state).await {
-                    tracing::error!("Error in tick: {}", e);
-                }
-            }
-
-            info!("Tick loop terminated");
-        });
-
-        // Store task handle directly (no need to spawn a task just to store a value)
-        // Use try_write since we're called from async context (init())
-        let tick_task = Arc::clone(&self.tick_task);
-        let mut task_guard = tick_task
-            .try_write()
-            .expect("tick_task lock should not be held during initialization");
-        *task_guard = Some(handle);
+                info!("Tick loop terminated");
+            });
 
         info!("Started tick loop");
     }
@@ -923,8 +933,7 @@ impl MonClient {
         // Phase 2.1: Detect unexpected I/O task death (connection died without explicit shutdown).
         // The background task exits on keepalive timeout, send errors, or recv errors.
         // This replaces the old try_recv_timeout() channel-based approach.
-        let stopping = state.read().await.stopping;
-        if !stopping && active_con.is_task_finished().await {
+        if !self.shutdown_token.is_cancelled() && active_con.is_task_finished().await {
             warn!(
                 "Connection to mon.{} lost (I/O task exited), hunting for new monitor",
                 active_con.rank()
