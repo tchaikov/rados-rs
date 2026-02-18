@@ -29,7 +29,7 @@ enum ReconnectAction<T> {
 
 /// Priority-based message queue
 /// Higher-priority messages are sent first, matching Ceph's ProtocolV2 behavior
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PriorityQueue {
     high: VecDeque<Message>,
     normal: VecDeque<Message>,
@@ -2156,12 +2156,12 @@ mod tests {
         let mut queue = PriorityQueue::new();
 
         // Create messages with different priorities
-        let low_msg = Message::new(1, Bytes::from("low"))
-            .with_priority(MessagePriority::Low.to_u16());
-        let normal_msg = Message::new(2, Bytes::from("normal"))
-            .with_priority(MessagePriority::Normal.to_u16());
-        let high_msg = Message::new(3, Bytes::from("high"))
-            .with_priority(MessagePriority::High.to_u16());
+        let low_msg =
+            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+        let normal_msg =
+            Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
+        let high_msg =
+            Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
 
         // Add messages in random order
         queue.push_back(normal_msg.clone());
@@ -2170,16 +2170,16 @@ mod tests {
 
         // Verify they come out in priority order
         assert_eq!(queue.len(), 3);
-        
+
         let msg1 = queue.pop_front().unwrap();
         assert_eq!(msg1.msg_type(), 3); // High priority first
-        
+
         let msg2 = queue.pop_front().unwrap();
         assert_eq!(msg2.msg_type(), 2); // Normal priority second
-        
+
         let msg3 = queue.pop_front().unwrap();
         assert_eq!(msg3.msg_type(), 1); // Low priority last
-        
+
         assert!(queue.is_empty());
     }
 
@@ -2188,12 +2188,12 @@ mod tests {
         let mut queue = PriorityQueue::new();
 
         // Create multiple messages with the same priority
-        let msg1 = Message::new(1, Bytes::from("first"))
-            .with_priority(MessagePriority::Normal.to_u16());
-        let msg2 = Message::new(2, Bytes::from("second"))
-            .with_priority(MessagePriority::Normal.to_u16());
-        let msg3 = Message::new(3, Bytes::from("third"))
-            .with_priority(MessagePriority::Normal.to_u16());
+        let msg1 =
+            Message::new(1, Bytes::from("first")).with_priority(MessagePriority::Normal.to_u16());
+        let msg2 =
+            Message::new(2, Bytes::from("second")).with_priority(MessagePriority::Normal.to_u16());
+        let msg3 =
+            Message::new(3, Bytes::from("third")).with_priority(MessagePriority::Normal.to_u16());
 
         queue.push_back(msg1.clone());
         queue.push_back(msg2.clone());
@@ -2209,12 +2209,12 @@ mod tests {
     fn test_priority_queue_iter() {
         let mut queue = PriorityQueue::new();
 
-        let low_msg = Message::new(1, Bytes::from("low"))
-            .with_priority(MessagePriority::Low.to_u16());
-        let high_msg = Message::new(3, Bytes::from("high"))
-            .with_priority(MessagePriority::High.to_u16());
-        let normal_msg = Message::new(2, Bytes::from("normal"))
-            .with_priority(MessagePriority::Normal.to_u16());
+        let low_msg =
+            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+        let high_msg =
+            Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
+        let normal_msg =
+            Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
 
         queue.push_back(low_msg);
         queue.push_back(high_msg);
@@ -2234,9 +2234,9 @@ mod tests {
         queue.push_back(Message::new(3, Bytes::from("msg3")).with_priority(1));
 
         assert_eq!(queue.len(), 3);
-        
+
         queue.clear();
-        
+
         assert_eq!(queue.len(), 0);
         assert!(queue.is_empty());
         assert!(queue.pop_front().is_none());
@@ -2246,10 +2246,10 @@ mod tests {
     fn test_priority_queue_front() {
         let mut queue = PriorityQueue::new();
 
-        let low_msg = Message::new(1, Bytes::from("low"))
-            .with_priority(MessagePriority::Low.to_u16());
-        let high_msg = Message::new(2, Bytes::from("high"))
-            .with_priority(MessagePriority::High.to_u16());
+        let low_msg =
+            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+        let high_msg =
+            Message::new(2, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
 
         queue.push_back(low_msg);
         queue.push_back(high_msg);

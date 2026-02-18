@@ -64,13 +64,11 @@ impl Message {
     }
 
     pub fn ping() -> Self {
-        Self::new(CEPH_MSG_PING, Bytes::new())
-            .with_priority(MessagePriority::High.to_u16())
+        Self::new(CEPH_MSG_PING, Bytes::new()).with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn ping_ack() -> Self {
-        Self::new(CEPH_MSG_PING_ACK, Bytes::new())
-            .with_priority(MessagePriority::High.to_u16())
+        Self::new(CEPH_MSG_PING_ACK, Bytes::new()).with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn with_seq(mut self, seq: u64) -> Self {
@@ -490,7 +488,10 @@ mod priority_tests {
     fn test_ping_ack_has_high_priority() {
         let ping_ack = Message::ping_ack();
         assert_eq!(ping_ack.priority(), MessagePriority::High);
-        assert_eq!(ping_ack.header.get_priority(), MessagePriority::High.to_u16());
+        assert_eq!(
+            ping_ack.header.get_priority(),
+            MessagePriority::High.to_u16()
+        );
     }
 
     #[test]
