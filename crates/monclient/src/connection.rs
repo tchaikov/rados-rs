@@ -30,7 +30,7 @@ pub struct MonConnectionParams {
     /// Channel for routing MOSDMap messages to OSDClient
     pub osdmap_tx: Option<MapSender<MOSDMap>>,
     /// Channel for routing monitor messages
-    pub mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
+    pub mon_msg_tx: mpsc::Sender<msgr2::message::Message>,
 }
 
 /// Keepalive policy for the connection
@@ -199,7 +199,7 @@ impl MonConnection {
                                 }
                             }
                             _ => {
-                                if let Err(e) = mon_msg_tx.send(msg) {
+                                if let Err(e) = mon_msg_tx.send(msg).await {
                                     tracing::error!(
                                         "Failed to send message 0x{:04x} to MonClient: {}",
                                         msg_type,

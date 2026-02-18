@@ -148,7 +148,7 @@ pub struct MonClient {
     osdmap_tx: Option<MapSender<MOSDMap>>,
 
     /// Channel for routing monitor messages to drain task
-    mon_msg_tx: mpsc::UnboundedSender<msgr2::message::Message>,
+    mon_msg_tx: mpsc::Sender<msgr2::message::Message>,
 
     /// Notification for authentication completion
     auth_notify: Arc<tokio::sync::Notify>,
@@ -313,8 +313,8 @@ impl MonClient {
         // Create event broadcaster
         let (map_events, _) = broadcast::channel(100);
 
-        // Create channel for monitor messages
-        let (mon_msg_tx, mut mon_msg_rx) = mpsc::unbounded_channel();
+        // Create channel for monitor messages (256 slots — monitors are low-rate senders)
+        let (mon_msg_tx, mut mon_msg_rx) = mpsc::channel(256);
 
         let state = MonClientState {
             monmap,
