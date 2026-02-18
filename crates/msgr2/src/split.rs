@@ -17,7 +17,7 @@
 //! conn.establish_session().await?;
 //!
 //! // Split the connection
-//! let (send_half, recv_half) = conn.split();
+//! let (send_half, mut recv_half) = conn.split();
 //!
 //! // Spawn a task to receive messages
 //! let recv_handle = tokio::spawn(async move {
