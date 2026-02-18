@@ -1,4 +1,3 @@
-pub mod ceph_crc32c;
 pub mod constants;
 pub mod denc;
 pub mod encoding_metadata;
@@ -14,7 +13,11 @@ pub mod pg_nls_response;
 pub mod types;
 pub mod zerocopy;
 
-pub use ceph_crc32c::*;
+/// Ceph-compatible CRC32C with explicit initial seed.
+///
+/// Cross-checked against Ceph (`src/include/crc32c.h`: `ceph_crc32c(crc, data, len)`)
+/// and Linux Ceph client (`net/ceph/messenger_v2.c`: `crc32c(seed, buf, len)`).
+pub use crc32c::crc32c_append as ceph_crc32c_append;
 pub use denc::*;
 pub use encoding_metadata::*;
 pub use entity_addr::*;
