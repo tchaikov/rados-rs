@@ -144,7 +144,7 @@ impl CephMsgHeader {
                 .encode(&mut buf, 0)
                 .unwrap();
         }
-        !crc32c::crc32c_append(0xFFFFFFFF, &buf)
+        crc32c::crc32c_append(0, &buf)
     }
 }
 
@@ -219,9 +219,9 @@ impl CephMessage {
         };
 
         if _crc_flags.contains(CrcFlags::DATA) {
-            footer.front_crc = !crc32c::crc32c_append(0xFFFFFFFF, &front);
-            footer.middle_crc = !crc32c::crc32c_append(0xFFFFFFFF, &middle);
-            footer.data_crc = !crc32c::crc32c_append(0xFFFFFFFF, &data);
+            footer.front_crc = crc32c::crc32c_append(0, &front);
+            footer.middle_crc = crc32c::crc32c_append(0, &middle);
+            footer.data_crc = crc32c::crc32c_append(0, &data);
         } else {
             footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
@@ -305,7 +305,7 @@ impl CephMessage {
                 unsafe { std::ptr::addr_of!(footer.middle_crc).read_unaligned() };
             let data_crc_expected = unsafe { std::ptr::addr_of!(footer.data_crc).read_unaligned() };
 
-            let front_crc = !crc32c::crc32c_append(0xFFFFFFFF, &front);
+            let front_crc = crc32c::crc32c_append(0, &front);
             if front_crc != front_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Front CRC mismatch: got {}, expected {}",
@@ -313,7 +313,7 @@ impl CephMessage {
                 )));
             }
 
-            let middle_crc = !crc32c::crc32c_append(0xFFFFFFFF, &middle);
+            let middle_crc = crc32c::crc32c_append(0, &middle);
             if middle_crc != middle_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Middle CRC mismatch: got {}, expected {}",
@@ -321,7 +321,7 @@ impl CephMessage {
                 )));
             }
 
-            let data_crc = !crc32c::crc32c_append(0xFFFFFFFF, &data);
+            let data_crc = crc32c::crc32c_append(0, &data);
             if data_crc != data_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Data CRC mismatch: got {}, expected {}",

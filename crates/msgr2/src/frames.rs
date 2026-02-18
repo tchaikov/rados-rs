@@ -343,10 +343,9 @@ impl Preamble {
         self.reserved.encode(&mut buf, 0).unwrap();
 
         // Calculate CRC using Ceph's SCTP CRC32C algorithm
-        // For preamble CRC, Ceph uses ceph_crc32c(0, data, len) with initial value 0.
-        // With crc32c crate this is represented as !crc32c_append(0xFFFFFFFF, data).
+        // For preamble CRC, Ceph uses ceph_crc32c(0, data, len) with initial value 0
         // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 295
-        let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        let crc = crc32c::crc32c_append(0, &buf[..28]);
 
         crc.encode(&mut buf, 0).unwrap();
 
@@ -361,9 +360,8 @@ impl Preamble {
 
         // Verify CRC BEFORE decoding (need original buffer)
         // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
-        // Use Ceph's SCTP CRC32C with initial value 0 (matching frames_v2.cc line 295),
-        // represented as !crc32c_append(0xFFFFFFFF, data) with crc32c crate.
-        let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        // Use Ceph's SCTP CRC32C with initial value 0 (matching frames_v2.cc line 295)
+        let calculated_crc = crc32c::crc32c_append(0, &buf[..28]);
 
         // Now decode the fields
         let mut cursor = buf;
