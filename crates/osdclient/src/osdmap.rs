@@ -2354,41 +2354,60 @@ impl VersionedEncode for OSDMapIncremental {
             inc.full_crc = u32::decode(&mut outer_cursor, features)?;
 
             // Validate CRC following C++ pattern from OSDMap.cc:1029-1057
-            // Key insight: In C++, start_offset is saved BEFORE ENCODE_START(8, 7, bl),
-            // so the CRC includes the 6-byte outer wrapper header (struct_v + struct_compat + struct_len).
-            // We saved the original header bytes before consuming them.
+            //
+            // C++ encoding (OSDMap.cc:745-762):
+            //   start_offset = bl.length();              // Before outer ENCODE_START
+            //   ENCODE_START(8, 7, bl);                  // Adds 6-byte header
+            //   <encode client section>
+            //   <encode osd section>
+            //   crc_offset = bl.length();
+            //   crc_filler = bl.append_hole(4);          // Reserve for inc_crc
+            //   tail_offset = bl.length();
+            //   encode(full_crc, bl);                    // Write 4 bytes
+            //   ENCODE_FINISH(bl);
+            //
+            //   front.substr_of(bl, start_offset, crc_offset - start_offset);
+            //   inc_crc = front.crc32c(-1);              // CRC header + client + osd
+            //   tail.substr_of(bl, tail_offset, bl.length() - tail_offset);
+            //   inc_crc = tail.crc32c(inc_crc);          // Append CRC of full_crc
+            //
+            // So CRC covers: [header][client][osd][full_crc], excluding [inc_crc]
+            //
+            // Calculate CRC32C using Ceph's SCTP implementation
+            //
+            // Ceph uses ceph_crc32c_sctp (RFC 3720 SCTP/iSCSI variant) which differs from
+            // standard CRC32C. The CRC covers: [header][client_section][osd_section][full_crc],
+            // excluding only the 4-byte inc_crc field.
 
             let crc_field_size = 4; // Size of inc_crc field
             let crc_tail_offset = crc_offset + crc_field_size;
 
-            // Calculate CRC using streaming approach with initial value -1 (0xFFFFFFFF)
-            let mut actual_crc = 0xFFFFFFFF_u32;
+            // Calculate CRC using streaming approach (avoids large buffer allocation)
+            let mut actual_crc = 0xFFFFFFFF_u32; // Ceph's standard CRC initial value
 
-            // CRC the front part: original header bytes + content up to inc_crc field
-            actual_crc = crc32c::crc32c_append(actual_crc, &header_bytes);
+            // CRC the outer header (6 bytes: struct_v, compat, len)
+            actual_crc = crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &header_bytes);
+
+            // CRC the client and OSD sections (everything before inc_crc)
             if crc_offset > 0 {
-                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
+                actual_crc =
+                    crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
             }
 
-            // CRC the tail part: content after inc_crc field (includes full_crc)
+            // CRC the tail (full_crc field after inc_crc)
             if crc_tail_offset < outer_bytes.len() {
-                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[crc_tail_offset..]);
+                actual_crc = crate::ceph_crc32c::ceph_crc32c_append(
+                    actual_crc,
+                    &outer_bytes[crc_tail_offset..],
+                );
             }
 
-            // Compare calculated CRC with stored CRC
+            // Verify CRC matches
             if actual_crc != inc.inc_crc {
-                // TODO(CRC): Fix CRC validation - currently incorrect
-                // The byte layout or CRC calculation doesn't match Ceph's implementation
-                // Tracked in: https://github.com/anthropics/rados-rs/issues/TBD
-                tracing::warn!(
-                    "OSDMapIncremental CRC mismatch (validation disabled): expected 0x{:08x}, got 0x{:08x}",
+                return Err(RadosError::Protocol(format!(
+                    "OSDMapIncremental CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
                     inc.inc_crc, actual_crc
-                );
-                // Temporarily disable CRC validation to unblock pool operation tests
-                // return Err(RadosError::Protocol(format!(
-                //     "OSDMapIncremental CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                //     inc.inc_crc, actual_crc
-                // )));
+                )));
             }
         }
 
