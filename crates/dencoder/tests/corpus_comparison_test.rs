@@ -769,7 +769,7 @@ fn test_corpus_comparison() {
         ("uuid_d", None, false),
         ("osd_info_t", None, false),
         // Level 2: Types depending on Level 1
-        ("entity_addr_t", Some(0x40000000000000), false), // MSG_ADDR2 feature
+        ("entity_addr_t", Some(0x0800000000000000), false), // MSG_ADDR2 feature (1<<59)
         ("pool_snap_info_t", None, false),
         ("osd_xinfo_t", Some(0x8000000000000000), false), // SERVER_OCTOPUS feature for version 4
         // Level 3: Complex types
