@@ -26,6 +26,7 @@ snap = "1.1"           # Snappy compression (most common in Ceph)
 zstd = "0.13"          # Zstandard compression
 lz4 = "1.24"           # LZ4 compression
 flate2 = "1.0"         # Zlib/gzip compression
+crc32c = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
