@@ -4,6 +4,7 @@
 //! handling frame I/O, encryption, and state machine coordination.
 
 use bytes::{Bytes, BytesMut};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -24,6 +25,77 @@ enum ReconnectAction<T> {
     ReturnSuccess(T),
     /// Continue retrying the operation
     Retry,
+}
+
+/// Priority-based message queue
+/// Higher-priority messages are sent first, matching Ceph's ProtocolV2 behavior
+#[derive(Debug, Clone)]
+pub struct PriorityQueue {
+    high: VecDeque<Message>,
+    normal: VecDeque<Message>,
+    low: VecDeque<Message>,
+}
+
+impl PriorityQueue {
+    pub fn new() -> Self {
+        Self {
+            high: VecDeque::new(),
+            normal: VecDeque::new(),
+            low: VecDeque::new(),
+        }
+    }
+
+    /// Push a message into the appropriate priority queue
+    pub fn push_back(&mut self, msg: Message) {
+        let priority = msg.priority();
+        match priority {
+            crate::message::MessagePriority::High => self.high.push_back(msg),
+            crate::message::MessagePriority::Normal => self.normal.push_back(msg),
+            crate::message::MessagePriority::Low => self.low.push_back(msg),
+        }
+    }
+
+    /// Pop the highest-priority message available
+    pub fn pop_front(&mut self) -> Option<Message> {
+        self.high
+            .pop_front()
+            .or_else(|| self.normal.pop_front())
+            .or_else(|| self.low.pop_front())
+    }
+
+    /// Peek at the front message of the highest non-empty queue
+    pub fn front(&self) -> Option<&Message> {
+        self.high
+            .front()
+            .or_else(|| self.normal.front())
+            .or_else(|| self.low.front())
+    }
+
+    /// Get an iterator over all messages in priority order
+    pub fn iter(&self) -> impl Iterator<Item = &Message> {
+        self.high
+            .iter()
+            .chain(self.normal.iter())
+            .chain(self.low.iter())
+    }
+
+    /// Clear all queues
+    pub fn clear(&mut self) {
+        self.high.clear();
+        self.normal.clear();
+        self.low.clear();
+    }
+
+    /// Get the total count of messages across all priority queues
+    pub fn len(&self) -> usize {
+        self.high.len() + self.normal.len() + self.low.len()
+    }
+
+    /// Check if all queues are empty
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.high.is_empty() && self.normal.is_empty() && self.low.is_empty()
+    }
 }
 
 /// Frame I/O layer - handles encryption-aware frame send/recv
@@ -569,8 +641,8 @@ struct SessionState {
     global_seq: u64,
     /// Connection sequence number - incremented on each reconnection attempt
     connect_seq: u64,
-    /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
-    sent_messages: std::collections::VecDeque<Message>,
+    /// Priority queue of sent messages awaiting acknowledgment (for replay on reconnect)
+    sent_messages: PriorityQueue,
     /// Connection policy - if true, connection is lossy (no reconnection support)
     is_lossy: bool,
 }
@@ -593,7 +665,7 @@ impl ConnectionState {
                 server_cookie: 0, // Will be assigned by server
                 global_seq: 0,
                 connect_seq: 0,
-                sent_messages: std::collections::VecDeque::new(),
+                sent_messages: PriorityQueue::new(),
                 is_lossy: false, // Default to lossless (reconnectable)
             },
         }
@@ -692,6 +764,8 @@ impl ConnectionState {
 
     /// Discard acknowledged messages up to the given sequence number
     pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
+        // Pop messages from the front of the priority queue until we find one
+        // that hasn't been acknowledged yet
         while let Some(msg) = self.session.sent_messages.front() {
             if msg.header.seq <= ack_seq {
                 self.session.sent_messages.pop_front();
@@ -701,9 +775,9 @@ impl ConnectionState {
         }
     }
 
-    /// Get all unacknowledged messages for replay
-    pub fn get_unacknowledged_messages(&self) -> &std::collections::VecDeque<Message> {
-        &self.session.sent_messages
+    /// Get the count of unacknowledged messages
+    pub fn get_unacknowledged_message_count(&self) -> usize {
+        self.session.sent_messages.len()
     }
 
     /// Clear the sent message queue
@@ -2061,7 +2135,7 @@ impl Connection {
         tracing::info!(
             "Marking connection down to {} (keeping {} sent messages for replay)",
             self.server_addr,
-            self.state.get_unacknowledged_messages().len()
+            self.state.get_unacknowledged_message_count()
         );
 
         // Keep sent messages for potential replay
@@ -2069,5 +2143,120 @@ impl Connection {
 
         // TCP stream will be dropped when ConnectionState is dropped
         tracing::debug!("Connection marked down, sent messages preserved for reconnection");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::MessagePriority;
+
+    #[test]
+    fn test_priority_queue_ordering() {
+        let mut queue = PriorityQueue::new();
+
+        // Create messages with different priorities
+        let low_msg = Message::new(1, Bytes::from("low"))
+            .with_priority(MessagePriority::Low.to_u16());
+        let normal_msg = Message::new(2, Bytes::from("normal"))
+            .with_priority(MessagePriority::Normal.to_u16());
+        let high_msg = Message::new(3, Bytes::from("high"))
+            .with_priority(MessagePriority::High.to_u16());
+
+        // Add messages in random order
+        queue.push_back(normal_msg.clone());
+        queue.push_back(low_msg.clone());
+        queue.push_back(high_msg.clone());
+
+        // Verify they come out in priority order
+        assert_eq!(queue.len(), 3);
+        
+        let msg1 = queue.pop_front().unwrap();
+        assert_eq!(msg1.msg_type(), 3); // High priority first
+        
+        let msg2 = queue.pop_front().unwrap();
+        assert_eq!(msg2.msg_type(), 2); // Normal priority second
+        
+        let msg3 = queue.pop_front().unwrap();
+        assert_eq!(msg3.msg_type(), 1); // Low priority last
+        
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_priority_queue_fifo_within_priority() {
+        let mut queue = PriorityQueue::new();
+
+        // Create multiple messages with the same priority
+        let msg1 = Message::new(1, Bytes::from("first"))
+            .with_priority(MessagePriority::Normal.to_u16());
+        let msg2 = Message::new(2, Bytes::from("second"))
+            .with_priority(MessagePriority::Normal.to_u16());
+        let msg3 = Message::new(3, Bytes::from("third"))
+            .with_priority(MessagePriority::Normal.to_u16());
+
+        queue.push_back(msg1.clone());
+        queue.push_back(msg2.clone());
+        queue.push_back(msg3.clone());
+
+        // Verify FIFO order within the same priority
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 1);
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 2);
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 3);
+    }
+
+    #[test]
+    fn test_priority_queue_iter() {
+        let mut queue = PriorityQueue::new();
+
+        let low_msg = Message::new(1, Bytes::from("low"))
+            .with_priority(MessagePriority::Low.to_u16());
+        let high_msg = Message::new(3, Bytes::from("high"))
+            .with_priority(MessagePriority::High.to_u16());
+        let normal_msg = Message::new(2, Bytes::from("normal"))
+            .with_priority(MessagePriority::Normal.to_u16());
+
+        queue.push_back(low_msg);
+        queue.push_back(high_msg);
+        queue.push_back(normal_msg);
+
+        // Verify iterator returns messages in priority order
+        let types: Vec<u16> = queue.iter().map(|m| m.msg_type()).collect();
+        assert_eq!(types, vec![3, 2, 1]); // High, Normal, Low
+    }
+
+    #[test]
+    fn test_priority_queue_clear() {
+        let mut queue = PriorityQueue::new();
+
+        queue.push_back(Message::new(1, Bytes::from("msg1")));
+        queue.push_back(Message::new(2, Bytes::from("msg2")).with_priority(2));
+        queue.push_back(Message::new(3, Bytes::from("msg3")).with_priority(1));
+
+        assert_eq!(queue.len(), 3);
+        
+        queue.clear();
+        
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+        assert!(queue.pop_front().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_front() {
+        let mut queue = PriorityQueue::new();
+
+        let low_msg = Message::new(1, Bytes::from("low"))
+            .with_priority(MessagePriority::Low.to_u16());
+        let high_msg = Message::new(2, Bytes::from("high"))
+            .with_priority(MessagePriority::High.to_u16());
+
+        queue.push_back(low_msg);
+        queue.push_back(high_msg);
+
+        // front() should return the high priority message without removing it
+        let front = queue.front().unwrap();
+        assert_eq!(front.msg_type(), 2);
+        assert_eq!(queue.len(), 2); // Still has both messages
     }
 }

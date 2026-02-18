@@ -3,6 +3,33 @@ use crate::header::MsgHeader;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt;
 
+/// Message priority levels for priority-based queueing
+/// Matches Ceph's priority scheme where higher values are sent first
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u16)]
+pub enum MessagePriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+}
+
+impl MessagePriority {
+    /// Convert a u16 priority value to MessagePriority
+    /// Values >= 2 map to High, 1 maps to Normal, 0 maps to Low
+    pub fn from_u16(priority: u16) -> Self {
+        match priority {
+            0 => MessagePriority::Low,
+            1 => MessagePriority::Normal,
+            _ => MessagePriority::High, // 2 and above -> High
+        }
+    }
+
+    /// Convert MessagePriority to u16 for message header
+    pub fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
 pub const CEPH_MSG_PING: u16 = 0x0001;
 pub const CEPH_MSG_PING_ACK: u16 = 0x0002;
 pub const CEPH_MSG_MON_MAP: u16 = 0x0004;
@@ -204,6 +231,11 @@ impl Message {
 
     pub fn tid(&self) -> u64 {
         self.header.tid
+    }
+
+    /// Get the message priority as MessagePriority enum
+    pub fn priority(&self) -> MessagePriority {
+        MessagePriority::from_u16(self.header.get_priority())
     }
 
     pub fn total_len(&self) -> usize {

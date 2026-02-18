@@ -39,10 +39,10 @@ use crate::error::{Error, Result};
 use crate::frames::{Frame, MessageFrame, Tag};
 use crate::header::MsgHeader;
 use crate::message::Message;
+use crate::protocol::PriorityQueue;
 use crate::state_machine::create_frame_from_trait;
 use crate::throttle::MessageThrottle;
 use bytes::Bytes;
-use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify};
 
@@ -61,8 +61,8 @@ pub struct SharedState {
     pub server_cookie: u64,
     pub global_seq: u64,
     pub connect_seq: u64,
-    /// Queue of sent messages awaiting acknowledgment
-    pub sent_messages: VecDeque<Message>,
+    /// Priority queue of sent messages awaiting acknowledgment
+    pub sent_messages: PriorityQueue,
     /// Whether the connection is lossy
     pub is_lossy: bool,
     /// Global ID from authentication
@@ -447,7 +447,7 @@ mod tests {
             server_cookie: 456,
             global_seq: 1,
             connect_seq: 0,
-            sent_messages: VecDeque::new(),
+            sent_messages: PriorityQueue::new(),
             is_lossy: false,
             global_id: 100,
         };
