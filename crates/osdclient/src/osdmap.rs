@@ -2511,9 +2511,69 @@ pub struct OSDMap {
     pub allow_crimson: bool,
 }
 
+/// OSD state flag: OSD exists in the cluster.
+///
+/// Reference: Ceph `include/ceph_fs.h` `CEPH_OSD_EXISTS`
+const CEPH_OSD_EXISTS: u32 = 1 << 0;
+
+/// OSD state flag: OSD is currently up (running and reachable).
+///
+/// Reference: Ceph `include/ceph_fs.h` `CEPH_OSD_UP`
+const CEPH_OSD_UP: u32 = 1 << 1;
+
 impl OSDMap {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Check if an OSD is marked UP in the OSDMap.
+    ///
+    /// Returns `false` if the OSD ID is out of range or the OSD is not UP.
+    ///
+    /// Reference: Ceph `OSDMap::is_up(int osd)` in `src/osd/OSDMap.h`
+    pub fn is_up(&self, osd_id: i32) -> bool {
+        if osd_id < 0 {
+            return false;
+        }
+        let idx = osd_id as usize;
+        if idx >= self.osd_state.len() {
+            return false;
+        }
+        self.osd_state[idx] & CEPH_OSD_UP != 0
+    }
+
+    /// Check if an OSD is marked DOWN in the OSDMap.
+    ///
+    /// An OSD is down if it exists but is not marked UP, or if it does not
+    /// exist in the map at all.
+    ///
+    /// Reference: Ceph `OSDMap::is_down(int osd)` in `src/osd/OSDMap.h`
+    pub fn is_down(&self, osd_id: i32) -> bool {
+        !self.is_up(osd_id)
+    }
+
+    /// Check if an OSD exists in the cluster.
+    ///
+    /// Reference: Ceph `OSDMap::exists(int osd)` in `src/osd/OSDMap.h`
+    pub fn exists(&self, osd_id: i32) -> bool {
+        if osd_id < 0 {
+            return false;
+        }
+        let idx = osd_id as usize;
+        if idx >= self.osd_state.len() {
+            return false;
+        }
+        self.osd_state[idx] & CEPH_OSD_EXISTS != 0
+    }
+
+    /// Get the client-facing address for an OSD.
+    ///
+    /// Returns `None` if the OSD ID is out of range.
+    pub fn get_osd_addr(&self, osd_id: i32) -> Option<&EntityAddrvec> {
+        if osd_id < 0 {
+            return None;
+        }
+        self.osd_addrs_client.get(osd_id as usize)
     }
 
     /// Get the CRUSH map, if available
@@ -2954,3 +3014,93 @@ mark_versioned_encoding!(HitSetParams);
 mark_feature_dependent_encoding!(OsdXInfo);
 mark_feature_dependent_encoding!(PgPool);
 mark_feature_dependent_encoding!(OSDMap);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_osdmap_with_states(states: Vec<u32>) -> OSDMap {
+        let max_osd = states.len() as i32;
+        let mut map = OSDMap::new();
+        map.max_osd = max_osd;
+        map.osd_state = states;
+        map
+    }
+
+    #[test]
+    fn test_is_up_returns_true_for_up_osd() {
+        // CEPH_OSD_EXISTS | CEPH_OSD_UP = 0x3
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(map.is_up(0));
+    }
+
+    #[test]
+    fn test_is_up_returns_false_for_down_osd() {
+        // CEPH_OSD_EXISTS only (no UP bit) = 0x1
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(!map.is_up(1));
+    }
+
+    #[test]
+    fn test_is_up_returns_false_for_nonexistent_osd() {
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(!map.is_up(2));
+    }
+
+    #[test]
+    fn test_is_up_returns_false_for_out_of_range_osd() {
+        let map = make_osdmap_with_states(vec![0x3]);
+        assert!(!map.is_up(5));
+    }
+
+    #[test]
+    fn test_is_up_returns_false_for_negative_osd_id() {
+        let map = make_osdmap_with_states(vec![0x3]);
+        assert!(!map.is_up(-1));
+    }
+
+    #[test]
+    fn test_is_down_is_inverse_of_is_up() {
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(!map.is_down(0)); // UP => not down
+        assert!(map.is_down(1)); // EXISTS but not UP => down
+        assert!(map.is_down(2)); // neither EXISTS nor UP => down
+        assert!(map.is_down(99)); // out of range => down
+    }
+
+    #[test]
+    fn test_exists_returns_true_for_existing_osd() {
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(map.exists(0)); // EXISTS | UP
+        assert!(map.exists(1)); // EXISTS only
+    }
+
+    #[test]
+    fn test_exists_returns_false_for_removed_osd() {
+        let map = make_osdmap_with_states(vec![0x3, 0x1, 0x0]);
+        assert!(!map.exists(2)); // state == 0, no EXISTS bit
+    }
+
+    #[test]
+    fn test_exists_returns_false_for_out_of_range() {
+        let map = make_osdmap_with_states(vec![0x3]);
+        assert!(!map.exists(5));
+        assert!(!map.exists(-1));
+    }
+
+    #[test]
+    fn test_get_osd_addr_returns_none_for_invalid_id() {
+        let map = make_osdmap_with_states(vec![0x3]);
+        assert!(map.get_osd_addr(-1).is_none());
+        assert!(map.get_osd_addr(5).is_none());
+    }
+
+    #[test]
+    fn test_get_osd_addr_returns_addrvec() {
+        let mut map = make_osdmap_with_states(vec![0x3]);
+        map.osd_addrs_client = vec![EntityAddrvec {
+            addrs: vec![EntityAddr::default()],
+        }];
+        assert!(map.get_osd_addr(0).is_some());
+    }
+}

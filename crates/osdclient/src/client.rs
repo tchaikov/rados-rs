@@ -1364,8 +1364,97 @@ impl OSDClient {
         let osdmap = self.get_osdmap().await?;
         let sessions = self.sessions.read().await;
         let mut need_resend = Vec::new();
+        // Sessions whose OSD is down or whose address changed need to be
+        // closed so that the next operation creates a fresh connection.
+        // Follows Ceph Objecter::_scan_requests() which closes sessions for
+        // down or address-changed OSDs.
+        let mut sessions_to_close: Vec<i32> = Vec::new();
 
         for (osd_id, session) in sessions.iter() {
+            // --- Phase 1: Check session-level OSD health ---
+            // Reference: Ceph Objecter::_scan_requests() checks is_up() for
+            // every open session and closes sessions to down OSDs.
+            if osdmap.is_down(*osd_id) {
+                info!(
+                    "OSD {} is DOWN in epoch {}, closing session and migrating pending ops",
+                    osd_id, new_epoch
+                );
+                sessions_to_close.push(*osd_id);
+
+                // Drain all pending ops from this session for resend
+                let metadata = session.get_pending_ops_metadata().await;
+                for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+                    if !osdmap.pools.contains_key(&pool_id) {
+                        if let Some(pending_op) = session.remove_pending_op(tid).await {
+                            let _ = pending_op
+                                .result_tx
+                                .send(Err(OSDClientError::PoolNotFound(pool_id)));
+                        }
+                        continue;
+                    }
+                    // Recalculate target — the down OSD will no longer be primary
+                    if let Ok((_, new_osds)) = self.object_to_osds(pool_id, &object_id).await {
+                        let new_primary = new_osds.first().copied().unwrap_or(-1);
+                        if let Some(mut op) = session.remove_pending_op(tid).await {
+                            op.state = crate::types::OpState::NeedsResend;
+                            op.target.update(new_epoch, new_primary, new_osds.clone());
+                            op.state = crate::types::OpState::Queued;
+                            need_resend.push((new_primary, op));
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // --- Phase 2: Check if the OSD address changed ---
+            // Reference: Ceph Objecter checks the OSD address in the OSDMap
+            // against the session's peer address and re-opens the session when
+            // they diverge (e.g. OSD restarted on a different port).
+            if session.is_connected().await {
+                if let Some(session_addr) = session.get_peer_address().await {
+                    if let Some(map_addrvec) = osdmap.get_osd_addr(*osd_id) {
+                        let session_sockaddr = session_addr.to_socket_addr();
+                        let map_has_match = map_addrvec.addrs.iter().any(|a| {
+                            matches!(a.addr_type, denc::EntityAddrType::Msgr2)
+                                && a.to_socket_addr() == session_sockaddr
+                        });
+                        if !map_has_match {
+                            info!(
+                                "OSD {} address changed in epoch {} (session: {:?}, map: {:?}), closing session",
+                                osd_id, new_epoch, session_sockaddr, map_addrvec
+                            );
+                            sessions_to_close.push(*osd_id);
+
+                            // Drain and re-target all pending ops
+                            let metadata = session.get_pending_ops_metadata().await;
+                            for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+                                if !osdmap.pools.contains_key(&pool_id) {
+                                    if let Some(pending_op) = session.remove_pending_op(tid).await {
+                                        let _ = pending_op
+                                            .result_tx
+                                            .send(Err(OSDClientError::PoolNotFound(pool_id)));
+                                    }
+                                    continue;
+                                }
+                                if let Ok((_, new_osds)) =
+                                    self.object_to_osds(pool_id, &object_id).await
+                                {
+                                    let new_primary = new_osds.first().copied().unwrap_or(-1);
+                                    if let Some(mut op) = session.remove_pending_op(tid).await {
+                                        op.state = crate::types::OpState::NeedsResend;
+                                        op.target.update(new_epoch, new_primary, new_osds.clone());
+                                        op.state = crate::types::OpState::Queued;
+                                        need_resend.push((new_primary, op));
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                }
+            }
+
+            // --- Phase 3: Per-operation target check (existing logic) ---
             let metadata = session.get_pending_ops_metadata().await;
             for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
                 // Check if pool deleted
@@ -1395,6 +1484,19 @@ impl OSDClient {
             }
         }
         drop(sessions);
+
+        // Close sessions to down or address-changed OSDs.
+        // This ensures the next get_or_create_session() creates a fresh
+        // connection with the updated address.
+        if !sessions_to_close.is_empty() {
+            let mut sessions = self.sessions.write().await;
+            for osd_id in &sessions_to_close {
+                if let Some(session) = sessions.remove(osd_id) {
+                    info!("Removing stale session for OSD {}", osd_id);
+                    session.close().await;
+                }
+            }
+        }
 
         // Resend to new targets
         for (new_osd, pending_op) in need_resend {

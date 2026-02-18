@@ -53,42 +53,45 @@ let backoff_ms = (INITIAL_BACKOFF_MS * (1 << (attempt - 1))).min(1000);
 
 **What it does**:
 - Triggered automatically when OSDMap updates arrive via `handle_osdmap()`
+- Checks OSD up/down state for all active sessions (closes sessions to down OSDs)
+- Detects OSD address changes and closes stale sessions
 - Checks all pending operations across all sessions
 - Recalculates target OSD using CRUSH for each pending operation
 - Migrates operations to correct OSD sessions when targets change
 
 **Key Features**:
 ```rust
-// Called from handle_osdmap() when OSDMap epoch changes (line 1431)
+// Called from handle_osdmap() when OSDMap epoch changes
 async fn scan_requests_on_map_change(&self, new_epoch: u32) -> Result<()> {
-    // 1. Get current OSDMap
     let osdmap = self.get_osdmap().await?;
 
-    // 2. For each session, check pending operations
     for (osd_id, session) in sessions.iter() {
-        let metadata = session.get_pending_ops_metadata().await;
+        // Phase 1: Check if OSD is DOWN — close session, migrate all ops
+        // Reference: Ceph Objecter::_scan_requests()
+        if osdmap.is_down(*osd_id) {
+            sessions_to_close.push(*osd_id);
+            // Drain and re-target all pending ops via CRUSH
+        }
 
-        // 3. Check if pool deleted or target changed
-        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
-            // Recalculate target OSD using CRUSH
-            let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
-            let new_primary = new_osds.first().copied().unwrap_or(-1);
+        // Phase 2: Check if OSD address changed — close session
+        if session_addr != map_addr {
+            sessions_to_close.push(*osd_id);
+            // Drain and re-target all pending ops via CRUSH
+        }
 
-            // 4. Migrate if target has changed
+        // Phase 3: Per-operation target check (CRUSH remapping)
+        for (tid, pool_id, object_id, _) in metadata {
+            let new_primary = object_to_osds(pool_id, &object_id)?;
             if new_primary != *osd_id {
-                let mut op = session.remove_pending_op(tid).await.unwrap();
-                op.state = OpState::NeedsResend;
-                op.target.update(new_epoch, new_primary, new_osds.clone());
-                op.state = OpState::Queued;
                 need_resend.push((new_primary, op));
             }
         }
     }
 
-    // 5. Resend to new targets
-    for (new_osd, pending_op) in need_resend {
-        let session = self.get_or_create_session(new_osd).await?;
-        session.insert_migrated_op(pending_op, new_epoch).await?;
+    // Close stale sessions, resend to new targets
+    for osd_id in sessions_to_close { sessions.remove(&osd_id); }
+    for (new_osd, op) in need_resend {
+        get_or_create_session(new_osd).insert_migrated_op(op, new_epoch);
     }
 }
 ```
@@ -292,7 +295,7 @@ Prioritized by alignment with Ceph Objecter:
 |---------|----------------|--------|--------|-------|
 | Per-connection incarnation | `Objecter.h:2502` incarnation field | Prevents stale op replay | Medium | Track connection restarts per-OSD |
 | Redirect handling | `Objecter.cc` redirect logic | Correct PG routing | Medium | Follow MOSDOpReply redirects |
-| OSD address change detection | Check OSDMap during reconnect | Faster recovery | Easy | Validate address in OSDMap |
+| ~~OSD address change detection~~ | ~~Check OSDMap during reconnect~~ | ~~Faster recovery~~ | ~~Easy~~ | ✅ DONE — `scan_requests_on_map_change()` validates addresses |
 
 #### **Priority 2: MEDIUM (Reliability Features)**
 
@@ -319,8 +322,9 @@ Prioritized by alignment with Ceph Objecter:
 - Has more aggressive per-message acknowledgment tracking
 
 **rados-rs**:
-- Implicit connection state via msgr2 Connection lifecycle
-- Simpler retry model (tracker timeout + OSDMap rescanning)
+- Explicit connection state machine (Disconnected → Connecting → Connected → Closed)
+- Proactive OSD health checking on OSDMap changes (is_up/is_down)
+- Address change detection on OSDMap changes
 - Cleaner separation: msgr2 handles protocol, osdclient handles business logic
 - Relies on OSDMap as authoritative source of truth
 
@@ -328,6 +332,8 @@ Prioritized by alignment with Ceph Objecter:
 - ✅ Simpler implementation, easier to maintain
 - ✅ Clear separation of concerns (msgr2 vs osdclient)
 - ✅ Per-operation timeout tracking (matches Ceph exactly)
+- ✅ OSD down detection and session recovery on OSDMap change
+- ✅ OSD address change detection and session re-opening
 - ⚠️ Missing per-connection incarnation (HIGH priority to add)
 - ⚠️ Missing redirect handling (HIGH priority to add)
 
@@ -408,11 +414,10 @@ These features are present in Ceph's Objecter and are important for correctness:
    - **Implementation**: Parse `RequestRedirect` in `MOSDOpReply`, resubmit to new target
    - **Benefit**: Faster operation completion without waiting for OSDMap update
 
-3. **OSD Address Validation During Reconnect** (Easy)
-   - **Why**: Faster recovery when OSD moves to new address
-   - **Ceph reference**: Check OSDMap before reconnecting
-   - **Implementation**: In `retry_with_reconnect()`, check if OSDMap has newer address
-   - **Benefit**: Avoid wasted reconnection attempts to stale addresses
+3. ~~**OSD Address Validation During Reconnect**~~ ✅ DONE
+   - `scan_requests_on_map_change()` now detects address changes in the OSDMap
+     and proactively closes stale sessions, creating fresh connections with the
+     updated address on the next operation.
 
 ### Phase 2: Reliability Features (MEDIUM Priority)
 
