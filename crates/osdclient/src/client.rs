@@ -1227,6 +1227,29 @@ impl OSDClient {
 
         if result.is_success() {
             debug!("Pool created successfully: {}", pool_name);
+
+            // Request OSDMap update for the target epoch
+            // Pool operations modify the OSDMap, so we need to ensure we receive the update
+            let target_epoch = result.epoch;
+            let current_epoch = self
+                .osdmap_rx
+                .borrow()
+                .as_ref()
+                .map(|m| m.epoch.as_u32())
+                .unwrap_or(0);
+
+            if target_epoch > current_epoch {
+                debug!(
+                    "Requesting OSDMap update from epoch {} to {}",
+                    current_epoch, target_epoch
+                );
+                // Re-subscribe to request missing epochs
+                self.mon_client
+                    .subscribe("osdmap", current_epoch as u64, 0)
+                    .await
+                    .ok(); // Ignore subscription errors - updates will arrive eventually
+            }
+
             Ok(())
         } else {
             Err(OSDClientError::Other(format!(
@@ -1302,6 +1325,29 @@ impl OSDClient {
 
         if result.is_success() {
             debug!("Pool deleted successfully: {}", pool_name);
+
+            // Request OSDMap update for the target epoch
+            // Pool operations modify the OSDMap, so we need to ensure we receive the update
+            let target_epoch = result.epoch;
+            let current_epoch = self
+                .osdmap_rx
+                .borrow()
+                .as_ref()
+                .map(|m| m.epoch.as_u32())
+                .unwrap_or(0);
+
+            if target_epoch > current_epoch {
+                debug!(
+                    "Requesting OSDMap update from epoch {} to {}",
+                    current_epoch, target_epoch
+                );
+                // Re-subscribe to request missing epochs
+                self.mon_client
+                    .subscribe("osdmap", current_epoch as u64, 0)
+                    .await
+                    .ok(); // Ignore subscription errors - updates will arrive eventually
+            }
+
             Ok(())
         } else {
             Err(OSDClientError::Other(format!(
