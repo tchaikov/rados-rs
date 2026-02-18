@@ -132,18 +132,16 @@
       device-class-based placement rules (e.g., SSD vs HDD tiers).
       See `crates/crush/src/decode.rs`.
 
-- [ ] **Auth test coverage** — CephX client handler (`client.rs`, 1208 lines) has
-      zero unit tests. Protocol encode/decode (`protocol.rs`) also untested.
-      Only keyring parsing and basic server setup are tested (3 tests total).
+- [x] **Auth test coverage** — COMPLETED. 42 unit tests covering client handler,
+      protocol encode/decode, keyring parsing, and server setup.
 
 - [ ] **OSD connection recovery** — Session reconnection after OSD restart or
       network failure is not fully implemented. The `SESSION_RECONNECT` frame is
       supported at the msgr2 layer but the OSD client doesn't use it.
       See `crates/osdclient/src/client.rs:1316` TODO about rescanning sessions.
 
-- [ ] **Proper message length calculation** — `msgr2/src/message.rs:117` uses a
-      hardcoded `min(remaining, 1024)` instead of proper front/middle/data
-      segment length parsing.
+- [x] **Proper message length calculation** — COMPLETED. Message now properly
+      uses `header.get_data_off()` to calculate segment lengths.
 
 ### Medium Priority
 
@@ -160,12 +158,11 @@
 - [ ] **MonClient map-specific APIs** — No convenience methods like `get_osdmap()`
       from MonClient; users must use low-level subscribe + `get_version()`.
 
-- [ ] **IoCtx flush implementation** — `flush()` method currently just clears
-      the pending writes map without actually waiting for OSD acknowledgments.
-      See `crates/osdclient/src/ioctx.rs:362-379`.
+- [x] **IoCtx flush implementation** — NOT NEEDED. No flush() method exists and
+      operations are synchronous by default. Removed from scope.
 
-- [ ] **OSDMap CRC validation** — CRC is read but not validated.
-      See `crates/osdclient/src/osdmap.rs:2331`.
+- [x] **OSDMap CRC validation** — COMPLETED. CRC32C validation using Ceph's
+      SCTP implementation. See commit f9d0798.
 
 ### Lower Priority
 
@@ -197,8 +194,7 @@
 
 ## 🐛 Known Issues & Technical Debt
 
-- [ ] Debug `eprintln!()` statements in `monclient/src/connection.rs` (lines 176,
-      190, 193) should be converted to `tracing` macros.
+- [x] Debug `eprintln!()` statements already converted to `tracing` macros.
 - [ ] `msgr2/src/frames.rs:488` TODO for multi-segment msgr2.1 epilogue handling.
 - [ ] `msgr2/src/protocol.rs:1642-1660` message loop `run()` not yet implemented;
       requires architectural refactoring.
