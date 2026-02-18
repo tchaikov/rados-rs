@@ -544,9 +544,13 @@ impl OSDClient {
         oid: &str,
         built_op: crate::operation::BuiltOp,
     ) -> Result<crate::types::OpResult> {
-        // TODO: honor built_op.priority when MOSDOp supports it
         let timeout = built_op.timeout;
-        self.execute_op(pool, oid, built_op.into_ops(), timeout)
+        let priority = if built_op.priority < 0 {
+            crate::messages::CEPH_MSG_PRIO_DEFAULT
+        } else {
+            built_op.priority
+        };
+        self.execute_op(pool, oid, built_op.into_ops(), timeout, priority)
             .await
     }
 
@@ -573,6 +577,7 @@ impl OSDClient {
         oid: &str,
         ops: Vec<OSDOp>,
         timeout: Option<std::time::Duration>,
+        priority: i32,
     ) -> Result<crate::types::OpResult> {
         // Create initial object ID
         let mut object = ObjectId::new(pool, oid);
@@ -631,8 +636,8 @@ impl OSDClient {
                 self.config.client_inc as i32,
             );
 
-            // Submit operation
-            let result_rx = session.submit_op(msg.clone()).await?;
+            // Submit operation (priority is set in message header)
+            let result_rx = session.submit_op(msg.clone(), priority).await?;
 
             // Wait for result with timeout (per-op override or default from tracker)
             let effective_timeout = timeout.unwrap_or_else(|| self.tracker.operation_timeout());
@@ -669,7 +674,9 @@ impl OSDClient {
         );
 
         let ops = vec![OSDOp::read(offset, len)];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         // Check overall result code
         if result.result != 0 {
@@ -716,7 +723,9 @@ impl OSDClient {
         );
 
         let ops = vec![OSDOp::sparse_read(offset, len)];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         // Check overall result code
         if result.result != 0 {
@@ -795,7 +804,9 @@ impl OSDClient {
         );
 
         let ops = vec![OSDOp::write(offset, data)];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         if result.result != 0 {
             return Err(OSDClientError::OSDError {
@@ -819,7 +830,9 @@ impl OSDClient {
         debug!("write_full pool={} oid={} len={}", pool, oid, data.len());
 
         let ops = vec![OSDOp::write_full(data)];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         if result.result != 0 {
             return Err(OSDClientError::OSDError {
@@ -837,7 +850,9 @@ impl OSDClient {
     pub async fn stat(&self, pool: u64, oid: &str) -> Result<StatResult> {
         debug!("stat pool={} oid={}", pool, oid);
         let ops = vec![OSDOp::stat()];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         // Check overall result code first
         if result.result != 0 {
@@ -875,7 +890,9 @@ impl OSDClient {
     pub async fn delete(&self, pool: u64, oid: &str) -> Result<()> {
         debug!("delete pool={} oid={}", pool, oid);
         let ops = vec![OSDOp::delete()];
-        let result = self.execute_op(pool, oid, ops, None).await?;
+        let result = self
+            .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+            .await?;
 
         // Check overall result code
         if result.result != 0 {
@@ -1033,8 +1050,10 @@ impl OSDClient {
                 self.global_id,
             );
 
-            // Submit operation
-            let result_rx = session.submit_op(msg).await?;
+            // Submit operation (use default priority for internal PGLS operations)
+            let result_rx = session
+                .submit_op(msg, crate::messages::CEPH_MSG_PRIO_DEFAULT)
+                .await?;
 
             // Wait for result with timeout
             let result = tokio::time::timeout(self.tracker.operation_timeout(), result_rx)

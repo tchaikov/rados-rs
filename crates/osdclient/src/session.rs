@@ -135,6 +135,9 @@ pub struct PendingOp {
     pub should_resend: bool,
     /// Maximum retry attempts
     pub max_attempts: i32,
+    /// Operation priority (set in message header)
+    /// Default is CEPH_MSG_PRIO_DEFAULT (127)
+    pub priority: i32,
     /// Connection incarnation when this operation was sent
     /// Used to detect stale operations after connection restarts.
     /// Following Ceph Objecter pattern: each connection restart increments
@@ -490,8 +493,8 @@ impl OSDSession {
         send_tx: &mpsc::Sender<msgr2::message::Message>,
         pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
     ) -> Result<()> {
-        // Encode the operation
-        let msg = Self::encode_operation(&pending_op.op, tid)?;
+        // Encode the operation (priority is preserved from original op)
+        let msg = Self::encode_operation(&pending_op.op, tid, pending_op.priority)?;
 
         // Update tid in pending_op
         pending_op.tid = tid;
@@ -529,14 +532,19 @@ impl OSDSession {
     /// Encode an operation into a msgr2 message
     ///
     /// Helper to eliminate duplication between submit_op and retry logic
-    fn encode_operation(op: &MOSDOp, tid: u64) -> Result<msgr2::message::Message> {
+    /// Priority is set in the message header (not the MOSDOp payload)
+    fn encode_operation(op: &MOSDOp, tid: u64, priority: i32) -> Result<msgr2::message::Message> {
         let ceph_msg = CephMessage::from_payload(op, 0, CrcFlags::ALL)
             .map_err(|e| OSDClientError::Encoding(format!("Failed to encode MOSDOp: {}", e)))?;
+
+        // Convert i32 priority to u16 for message header (clamped to valid range)
+        let priority_u16 = priority.clamp(0, u16::MAX as i32) as u16;
 
         let mut msg =
             msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
                 .with_version(ceph_msg.header.version)
-                .with_tid(tid);
+                .with_tid(tid)
+                .with_priority(priority_u16);
         msg.header.compat_version = ceph_msg.header.compat_version;
         msg.data = ceph_msg.data;
 
@@ -546,7 +554,12 @@ impl OSDSession {
     /// Submit an operation to the OSD
     ///
     /// This queues the message for sending (non-blocking, like ceph_con_send)
-    pub async fn submit_op(&self, mut op: MOSDOp) -> Result<oneshot::Receiver<Result<OpResult>>> {
+    /// Priority is set in the message header (not the MOSDOp payload)
+    pub async fn submit_op(
+        &self,
+        mut op: MOSDOp,
+        priority: i32,
+    ) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
 
         // Create HObject from operation for backoff checking
@@ -602,6 +615,8 @@ impl OSDSession {
                     ),
                     should_resend: false,
                     max_attempts: 10,
+                    // Store priority for retries (set in message header, not MOSDOp payload)
+                    priority,
                     // Capture current session incarnation
                     // Following Ceph pattern: operation stores incarnation when sent
                     // Reference: ~/dev/linux/net/ceph/osd_client.c:2348
@@ -619,8 +634,8 @@ impl OSDSession {
             tracker.track(tid, self.osd_id, deadline);
         }
 
-        // Encode the operation using shared helper
-        let msg = Self::encode_operation(&op, tid)?;
+        // Encode the operation using shared helper (priority goes in message header)
+        let msg = Self::encode_operation(&op, tid, priority)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         debug!("Submitting operation tid={} to OSD {}", tid, self.osd_id);
@@ -822,7 +837,7 @@ impl OSDSession {
                     "OSD {} backoff lifted: will resend operation tid={} for object={} in range [{:?}, {:?})",
                     osd_id, tid, pending_op.op.object.oid, begin, end
                 );
-                ops_to_resend.push((*tid, pending_op.op.clone()));
+                ops_to_resend.push((*tid, pending_op.op.clone(), pending_op.priority));
             }
         }
 
@@ -830,8 +845,8 @@ impl OSDSession {
 
         // Resend the operations
         // IMPORTANT: Use try_send() to avoid deadlock (we're in the io_task)
-        for (tid, op) in ops_to_resend {
-            match Self::encode_operation(&op, tid) {
+        for (tid, op, priority) in ops_to_resend {
+            match Self::encode_operation(&op, tid, priority) {
                 Ok(msg) => match send_tx.try_send(msg) {
                     Ok(()) => {
                         info!(
@@ -987,10 +1002,10 @@ impl OSDSession {
             pending.insert(tid, pending_op);
         }
 
-        // Get a reference to the op for sending
+        // Get a reference to the op and priority for sending
         let pending = self.pending_ops.read().await;
-        let op = match pending.get(&tid) {
-            Some(p) => p.op.clone(),
+        let (op, priority) = match pending.get(&tid) {
+            Some(p) => (p.op.clone(), p.priority),
             None => {
                 return Err(OSDClientError::Internal(
                     "Operation disappeared after insertion".into(),
@@ -999,8 +1014,8 @@ impl OSDSession {
         };
         drop(pending);
 
-        // Encode and send the operation using shared helper
-        let msg = Self::encode_operation(&op, tid)?;
+        // Encode and send the operation using shared helper (priority preserved from original)
+        let msg = Self::encode_operation(&op, tid, priority)?;
 
         // Send to channel
         self.send_tx

@@ -26,6 +26,13 @@ pub const CEPH_OSD_BACKOFF_OP_BLOCK: u8 = 1;
 pub const CEPH_OSD_BACKOFF_OP_ACK_BLOCK: u8 = 2;
 pub const CEPH_OSD_BACKOFF_OP_UNBLOCK: u8 = 3;
 
+/// Message priority levels (from include/msgr.h)
+/// Priority is stored in the message header, not the message payload
+pub const CEPH_MSG_PRIO_LOW: i32 = 64;
+pub const CEPH_MSG_PRIO_DEFAULT: i32 = 127;
+pub const CEPH_MSG_PRIO_HIGH: i32 = 196;
+pub const CEPH_MSG_PRIO_HIGHEST: i32 = 255;
+
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
 pub struct MOSDOp {
