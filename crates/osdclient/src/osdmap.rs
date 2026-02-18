@@ -1,5 +1,6 @@
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
+use libc;
 use denc::{
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
     EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
@@ -186,129 +187,47 @@ impl Denc for ShardIdSet {
     }
 }
 
-/// Helper function to format UTime as timestamp string for serialization
+/// Format a UTime as a timestamp string matching ceph-dencoder's output.
+///
+/// Mirrors `utime_t::localtime()` in `src/include/utime.cc`:
+/// - If sec < 10 years (315,360,000 s): format as `"<sec>.<usec:06>"` (relative time)
+/// - Otherwise: ISO 8601 local time with timezone offset, e.g. `"2024-09-29T14:51:58.799272+0800"`
 fn format_utime_as_timestamp(utime: &UTime) -> String {
-    use std::time::Duration;
-
-    // Special case: zero timestamp outputs as "0.000000"
+    // Zero timestamp
     if utime.sec == 0 && utime.nsec == 0 {
         return "0.000000".to_string();
     }
 
-    // Special case: timestamps < 1 year output as "seconds.microseconds"
-    // This matches ceph-dencoder behavior for small timestamps
-    if utime.sec < 31536000 {
-        // 365 days
+    // C++ threshold: 60*60*24*365*10 (10 years). Treat as relative time.
+    if utime.sec < 60 * 60 * 24 * 365 * 10 {
         let microseconds = utime.nsec / 1000;
         return format!("{}.{:06}", utime.sec, microseconds);
     }
 
-    // Convert UTime to SystemTime
-    let _duration = Duration::new(utime.sec as u64, utime.nsec);
-
-    // Format as ISO 8601 with nanoseconds
-    // Note: The nsec field in UTime is already nanoseconds, but we need microseconds for display
+    // Absolute time: convert via localtime_r, matching C++ localtime() call.
     let microseconds = utime.nsec / 1000;
+    unsafe {
+        let tt = utime.sec as libc::time_t;
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&tt, &mut tm);
 
-    // Convert to datetime components using local timezone to match ceph-dencoder
-    // Ceph uses localtime() which respects the system timezone
+        let year = tm.tm_year + 1900;
+        let month = tm.tm_mon + 1;
+        let day = tm.tm_mday;
+        let hour = tm.tm_hour;
+        let min = tm.tm_min;
+        let sec = tm.tm_sec;
+        let gmtoff = tm.tm_gmtoff; // offset from UTC in seconds
 
-    // Get local time offset
-    let local_offset = get_local_timezone_offset();
-    let adjusted_secs = (utime.sec as i64) + local_offset;
+        let tz_sign = if gmtoff >= 0 { '+' } else { '-' };
+        let tz_hours = gmtoff.unsigned_abs() / 3600;
+        let tz_mins = (gmtoff.unsigned_abs() % 3600) / 60;
 
-    // Days since epoch (1970-01-01)
-    let days = adjusted_secs / 86400;
-    let remaining_secs = adjusted_secs % 86400;
-
-    // Calculate year, month, day from days since epoch
-    let (year, month, day) = days_to_ymd(days);
-
-    // Calculate hours, minutes, seconds
-    let hours = remaining_secs / 3600;
-    let minutes = (remaining_secs % 3600) / 60;
-    let seconds = remaining_secs % 60;
-
-    // Format timezone offset
-    let tz_sign = if local_offset >= 0 { '+' } else { '-' };
-    let tz_hours = local_offset.abs() / 3600;
-    let tz_mins = (local_offset.abs() % 3600) / 60;
-
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}{}{:02}{:02}",
-        year, month, day, hours, minutes, seconds, microseconds,
-        tz_sign, tz_hours, tz_mins
-    )
-}
-
-/// Get local timezone offset in seconds from UTC
-fn get_local_timezone_offset() -> i64 {
-    // Simple approach: check TZ environment variable or use a common default
-    // For more accurate timezone handling, would need time/chrono crate
-
-    // Try to get timezone from environment
-    if let Ok(tz) = std::env::var("TZ") {
-        // Parse common timezone formats like "UTC+8" or "Asia/Shanghai"
-        // For now, just handle numeric offsets
-        if tz.starts_with("UTC") || tz.starts_with("GMT") {
-            let offset_str = tz.trim_start_matches("UTC").trim_start_matches("GMT");
-            if let Ok(hours) = offset_str.parse::<i64>() {
-                return hours * 3600;
-            }
-        }
+        format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}{}{:02}{:02}",
+            year, month, day, hour, min, sec, microseconds, tz_sign, tz_hours, tz_mins
+        )
     }
-
-    // Use a simple heuristic: check if we're in a common timezone
-    // This is a workaround - ideally we'd use chrono or time crate
-    // For now, default to +0800 (China Standard Time) since that's what the test shows
-    // TODO: Use proper timezone detection with time/chrono crate
-    8 * 3600
-}
-
-/// Convert days since Unix epoch to year/month/day
-/// Simplified algorithm - should match ceph's output
-fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
-    // Days since 1970-01-01
-    // This is a simplified Gregorian calendar calculation
-
-    // Adjust for epoch (Unix epoch is 1970-01-01)
-    let mut year = 1970;
-
-    // Handle years
-    loop {
-        let days_in_year = if is_leap_year(year) { 366 } else { 365 };
-        if days >= days_in_year {
-            days -= days_in_year;
-            year += 1;
-        } else {
-            break;
-        }
-    }
-
-    // Handle months
-    let days_in_months = if is_leap_year(year) {
-        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    } else {
-        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    };
-
-    let mut month = 1;
-    for &days_in_month in &days_in_months {
-        if days >= days_in_month as i64 {
-            days -= days_in_month as i64;
-            month += 1;
-        } else {
-            break;
-        }
-    }
-
-    let day = days as u32 + 1; // Days are 1-indexed
-
-    (year, month, day)
-}
-
-fn is_leap_year(year: i32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
 }
 
 // String encoding implementation to match Ceph's string handling
