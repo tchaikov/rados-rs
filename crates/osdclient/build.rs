@@ -3,9 +3,9 @@ use std::env;
 fn main() {
     // Get Ceph library path from environment or use default
     let ceph_lib = env::var("CEPH_LIB").unwrap_or_else(|_| {
-        // Default to kefu's Ceph development build location
-        // Users can override with CEPH_LIB environment variable
-        "/home/kefu/dev/ceph/build/lib".to_string()
+        // Try standard Ceph development build location
+        let home = env::var("HOME").expect("HOME environment variable not set");
+        format!("{}/dev/ceph/build/lib", home)
     });
 
     // Link with libceph-common for CRC32C implementation
