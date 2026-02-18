@@ -342,10 +342,10 @@ impl Preamble {
         self.flags.encode(&mut buf, 0).unwrap();
         self.reserved.encode(&mut buf, 0).unwrap();
 
-        // Calculate CRC using Ceph's non-standard CRC32C algorithm
-        // Ceph's ceph_crc32c() produces different results than standard CRC32C
-        // We need to match Ceph's algorithm: !crc32c_append(0xFFFFFFFF, data)
-        let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        // Calculate CRC using Ceph's SCTP CRC32C algorithm
+        // For preamble CRC, Ceph uses ceph_crc32c(0, data, len) with initial value 0
+        // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 295
+        let crc = denc::ceph_crc32c(&buf[..28], 0);
 
         crc.encode(&mut buf, 0).unwrap();
 
@@ -360,8 +360,8 @@ impl Preamble {
 
         // Verify CRC BEFORE decoding (need original buffer)
         // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
-        // Use Ceph's non-standard CRC32C algorithm: !crc32c_append(0xFFFFFFFF, data)
-        let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        // Use Ceph's SCTP CRC32C with initial value 0 (matching frames_v2.cc line 295)
+        let calculated_crc = denc::ceph_crc32c(&buf[..28], 0);
 
         // Now decode the fields
         let mut cursor = buf;
@@ -570,7 +570,9 @@ impl FrameAssembler {
         for (i, segment) in segments.iter().enumerate().take(self.descs.len()) {
             frame.extend_from_slice(segment);
             epilogue.crc_values[i] = if self.with_data_crc {
-                crc32c::crc32c(segment)
+                // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
+                // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 573
+                denc::ceph_crc32c(segment, 0xFFFFFFFF)
             } else {
                 0
             };
@@ -598,8 +600,8 @@ impl FrameAssembler {
             frame.extend_from_slice(&segments[0]);
             let first_crc = if self.with_data_crc {
                 // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
-                // This is the raw CRC without final XOR
-                !crc32c::crc32c(&segments[0])
+                // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 157
+                denc::ceph_crc32c(&segments[0], 0xFFFFFFFF)
             } else {
                 0u32
             };
@@ -626,8 +628,8 @@ impl FrameAssembler {
             frame.extend_from_slice(segment);
             epilogue.crc_values[i - 1] = if self.with_data_crc {
                 // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
-                // This is the raw CRC without final XOR
-                !crc32c::crc32c(segment)
+                // Reference: ~/dev/ceph/src/msg/async/frames_v2.cc line 168
+                denc::ceph_crc32c(segment, 0xFFFFFFFF)
             } else {
                 0
             };

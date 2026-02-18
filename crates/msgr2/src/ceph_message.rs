@@ -12,7 +12,6 @@
 
 use crate::error::{Error, Result};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crc32c::crc32c;
 
 // Re-export message type constants
 pub use crate::message::{CEPH_MSG_AUTH, CEPH_MSG_AUTH_REPLY, CEPH_MSG_PING, CEPH_MSG_PING_ACK};
@@ -145,7 +144,7 @@ impl CephMsgHeader {
                 .encode(&mut buf, 0)
                 .unwrap();
         }
-        crc32c(&buf)
+        denc::ceph_crc32c(&buf, 0)
     }
 }
 
@@ -220,9 +219,9 @@ impl CephMessage {
         };
 
         if _crc_flags.contains(CrcFlags::DATA) {
-            footer.front_crc = crc32c(&front);
-            footer.middle_crc = crc32c(&middle);
-            footer.data_crc = crc32c(&data);
+            footer.front_crc = denc::ceph_crc32c(&front, 0);
+            footer.middle_crc = denc::ceph_crc32c(&middle, 0);
+            footer.data_crc = denc::ceph_crc32c(&data, 0);
         } else {
             footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
@@ -306,7 +305,7 @@ impl CephMessage {
                 unsafe { std::ptr::addr_of!(footer.middle_crc).read_unaligned() };
             let data_crc_expected = unsafe { std::ptr::addr_of!(footer.data_crc).read_unaligned() };
 
-            let front_crc = crc32c(&front);
+            let front_crc = denc::ceph_crc32c(&front, 0);
             if front_crc != front_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Front CRC mismatch: got {}, expected {}",
@@ -314,7 +313,7 @@ impl CephMessage {
                 )));
             }
 
-            let middle_crc = crc32c(&middle);
+            let middle_crc = denc::ceph_crc32c(&middle, 0);
             if middle_crc != middle_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Middle CRC mismatch: got {}, expected {}",
@@ -322,7 +321,7 @@ impl CephMessage {
                 )));
             }
 
-            let data_crc = crc32c(&data);
+            let data_crc = denc::ceph_crc32c(&data, 0);
             if data_crc != data_crc_expected {
                 return Err(Error::Deserialization(format!(
                     "Data CRC mismatch: got {}, expected {}",

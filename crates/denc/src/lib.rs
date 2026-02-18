@@ -1,3 +1,4 @@
+pub mod ceph_crc32c;
 pub mod constants;
 pub mod denc;
 pub mod encoding_metadata;
@@ -13,6 +14,7 @@ pub mod pg_nls_response;
 pub mod types;
 pub mod zerocopy;
 
+pub use ceph_crc32c::*;
 pub use denc::*;
 pub use encoding_metadata::*;
 pub use entity_addr::*;

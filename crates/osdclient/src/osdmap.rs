@@ -2386,20 +2386,16 @@ impl VersionedEncode for OSDMapIncremental {
             let mut actual_crc = 0xFFFFFFFF_u32; // Ceph's standard CRC initial value
 
             // CRC the outer header (6 bytes: struct_v, compat, len)
-            actual_crc = crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &header_bytes);
+            actual_crc = denc::ceph_crc32c_append(actual_crc, &header_bytes);
 
             // CRC the client and OSD sections (everything before inc_crc)
             if crc_offset > 0 {
-                actual_crc =
-                    crate::ceph_crc32c::ceph_crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
+                actual_crc = denc::ceph_crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
             }
 
             // CRC the tail (full_crc field after inc_crc)
             if crc_tail_offset < outer_bytes.len() {
-                actual_crc = crate::ceph_crc32c::ceph_crc32c_append(
-                    actual_crc,
-                    &outer_bytes[crc_tail_offset..],
-                );
+                actual_crc = denc::ceph_crc32c_append(actual_crc, &outer_bytes[crc_tail_offset..]);
             }
 
             // Verify CRC matches
