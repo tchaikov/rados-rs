@@ -470,7 +470,7 @@ fn test_corpus_comparison() {
         // Level 2: Types depending on Level 1
         ("entity_addr_t", Some(0x40000000000000), false), // MSG_ADDR2 feature
         ("pool_snap_info_t", None, false),
-        ("osd_xinfo_t", None, false),
+        ("osd_xinfo_t", Some(0x8000000000000000), false), // SERVER_OCTOPUS feature for version 4
         // Level 3: Complex types
         ("pg_merge_meta_t", None, false),
         ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields

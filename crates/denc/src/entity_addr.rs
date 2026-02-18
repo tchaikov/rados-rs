@@ -233,7 +233,7 @@ impl EntityAddr {
         buf.copy_to_slice(&mut sockaddr_data);
 
         Ok(Self {
-            addr_type: EntityAddrType::Legacy,
+            addr_type: EntityAddrType::Any, // Legacy format defaults to Any type
             nonce,
             sockaddr_data,
         })
@@ -280,6 +280,14 @@ impl EntityAddr {
         }
 
         // Note: take() already consumed the bytes from buf, no need to advance
+
+        // Convert Legacy type to Any when decoding msgr2 format (matching Ceph behavior)
+        // Legacy is a format marker, not a semantic type in msgr2
+        let addr_type = if addr_type == EntityAddrType::Legacy {
+            EntityAddrType::Any
+        } else {
+            addr_type
+        };
 
         Ok(Self {
             addr_type,
@@ -542,7 +550,7 @@ mod tests {
 
         // Decode
         let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.addr_type, EntityAddrType::Legacy);
+        assert_eq!(decoded.addr_type, EntityAddrType::Any); // Legacy format defaults to Any type
         assert_eq!(decoded.nonce, 0x12345678);
         assert_eq!(decoded.sockaddr_data.len(), STORAGE_SIZE);
         assert_eq!(&decoded.sockaddr_data[0..4], &[1, 2, 3, 4]);
