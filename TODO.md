@@ -149,9 +149,9 @@
 
 ### Medium Priority
 
-- [ ] **Extended attributes (xattrs)** — `OpCode::GetXattr`/`SetXattr` are defined
-      in `osdclient/src/types.rs` and `OpData::Xattr` variant exists. Foundation
-      is in place but IoCtx API methods still need to be exposed.
+- [x] **Extended attributes (xattrs)** — COMPLETED. All xattr opcodes (GetXattr,
+      SetXattr, RemoveXattr, ListXattrs) are implemented with OSDOp builders and
+      IoCtx API methods (get_xattr, set_xattr, remove_xattr, list_xattrs).
 
 - [x] **Rotating key support** — COMPLETED. Ticket renewal is fully integrated in
       MonClient tick loop (`crates/monclient/src/client.rs` lines 960-1050). The system
@@ -181,15 +181,17 @@
 
 - [ ] **Watch/Notify** — Not implemented. Needed for RBD and CephFS cache coherency.
 
-- [ ] **Object locking** — Advisory locking API (`lock_exclusive`, `lock_shared`)
-      partially implemented. `OpCode::Call` and `OpData::Call` variants added for
-      object class method invocation, which is the foundation for lock operations.
-      Full IoCtx API methods still need to be added.
+- [x] **Object locking** — COMPLETED. Advisory locking API (lock_exclusive,
+      lock_shared, unlock) fully implemented with OpCode::Call for object class
+      method invocation. Lock types, flags, and request structures in lock.rs.
+      IoCtx API methods available for all lock operations.
 
 - [ ] **Snapshots** — Snap context is encoded in MOSDOp but snapshot operations
       (snap create/remove/rollback) are not exposed.
 
-- [ ] **Object classes** — RADOS class method calls (`call()`) not implemented.
+- [x] **Object classes** — COMPLETED. RADOS class method calls via OpCode::Call
+      are fully implemented. The call() builder method allows invoking any object
+      class method with custom input data.
 
 - [x] **Batch/compound operations** — COMPLETED. `OpBuilder` in
       `crates/osdclient/src/operation.rs` provides fluent API for building single or

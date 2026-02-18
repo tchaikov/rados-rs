@@ -310,6 +310,254 @@ impl IoCtx {
         );
         Ok(all_objects)
     }
+
+    /// Acquire an exclusive lock on an object
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Lock name (can have multiple named locks per object)
+    /// * `cookie` - Unique lock identifier for this client
+    /// * `description` - Human-readable description
+    /// * `duration` - Lock duration (None = infinite)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock is already held by another client
+    pub async fn lock_exclusive(
+        &self,
+        oid: impl Into<String>,
+        name: &str,
+        cookie: &str,
+        description: &str,
+        duration: Option<std::time::Duration>,
+    ) -> Result<()> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        debug!(
+            "Acquiring exclusive lock '{}' on object '{}' in pool {}",
+            name, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .op(OSDOp::lock_exclusive(name, cookie, description, duration))
+            .build();
+
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
+
+    /// Acquire a shared lock on an object
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Lock name
+    /// * `cookie` - Unique lock identifier for this client
+    /// * `tag` - Shared lock tag (all shared locks with same tag are compatible)
+    /// * `description` - Human-readable description
+    /// * `duration` - Lock duration (None = infinite)
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an incompatible lock is held
+    pub async fn lock_shared(
+        &self,
+        oid: impl Into<String>,
+        name: &str,
+        cookie: &str,
+        tag: &str,
+        description: &str,
+        duration: Option<std::time::Duration>,
+    ) -> Result<()> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        debug!(
+            "Acquiring shared lock '{}' on object '{}' in pool {}",
+            name, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .op(OSDOp::lock_shared(name, cookie, tag, description, duration))
+            .build();
+
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
+
+    /// Release a lock on an object
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Lock name to unlock
+    /// * `cookie` - Lock identifier that was used when acquiring the lock
+    pub async fn unlock(&self, oid: impl Into<String>, name: &str, cookie: &str) -> Result<()> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        debug!(
+            "Releasing lock '{}' on object '{}' in pool {}",
+            name, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)).build();
+
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
+
+    /// Get an extended attribute value
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Attribute name
+    ///
+    /// # Returns
+    ///
+    /// The attribute value as bytes
+    pub async fn get_xattr(
+        &self,
+        oid: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<Bytes> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        let name_str = name.into();
+        debug!(
+            "Getting xattr '{}' from object '{}' in pool {}",
+            name_str, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)).build();
+
+        let result = self
+            .client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+
+        // Extract value from first op result
+        if let Some(op_result) = result.ops.first() {
+            Ok(op_result.outdata.clone())
+        } else {
+            Err(OSDClientError::Other("No op result".into()))
+        }
+    }
+
+    /// Set an extended attribute
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Attribute name
+    /// * `value` - Attribute value
+    pub async fn set_xattr(
+        &self,
+        oid: impl Into<String>,
+        name: impl Into<String>,
+        value: Bytes,
+    ) -> Result<()> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        let name_str = name.into();
+        debug!(
+            "Setting xattr '{}' on object '{}' in pool {}",
+            name_str, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .op(OSDOp::set_xattr(name_str, value))
+            .build();
+
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
+
+    /// Remove an extended attribute
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    /// * `name` - Attribute name to remove
+    pub async fn remove_xattr(
+        &self,
+        oid: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<()> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+
+        let oid_str = oid.into();
+        let name_str = name.into();
+        debug!(
+            "Removing xattr '{}' from object '{}' in pool {}",
+            name_str, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)).build();
+
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
+
+    /// List all extended attribute names for an object
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    ///
+    /// # Returns
+    ///
+    /// Vector of attribute names
+    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+        use crate::operation::OpBuilder;
+        use crate::types::OSDOp;
+        use denc::denc::Denc;
+
+        let oid_str = oid.into();
+        debug!(
+            "Listing xattrs for object '{}' in pool {}",
+            oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new().op(OSDOp::list_xattrs()).build();
+
+        let result = self
+            .client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+
+        // Parse outdata as list of strings
+        if let Some(op_result) = result.ops.first() {
+            let mut data = &op_result.outdata[..];
+            let names = Vec::<String>::decode(&mut data, 0).map_err(|e| {
+                OSDClientError::Other(format!("Failed to decode xattr list: {}", e))
+            })?;
+            Ok(names)
+        } else {
+            Err(OSDClientError::Other("No op result".into()))
+        }
+    }
 }
 
 impl Clone for IoCtx {

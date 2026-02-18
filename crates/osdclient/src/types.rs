@@ -722,6 +722,225 @@ impl OSDOp {
             indata: indata.freeze(),
         }
     }
+
+    /// Create a CALL operation for object class method invocation
+    ///
+    /// # Arguments
+    /// * `class` - Object class name (e.g., "lock", "rbd")
+    /// * `method` - Method name (e.g., "lock", "unlock")
+    /// * `indata` - Method-specific input data
+    pub fn call(class: impl Into<String>, method: impl Into<String>, indata: Bytes) -> Self {
+        use bytes::BytesMut;
+        use denc::denc::Denc;
+
+        let class = class.into();
+        let method = method.into();
+
+        // Encode class and method into indata buffer (prepended to actual indata)
+        let mut buf = BytesMut::new();
+        class
+            .encode(&mut buf, 0)
+            .expect("Failed to encode class name");
+        method
+            .encode(&mut buf, 0)
+            .expect("Failed to encode method name");
+        buf.extend_from_slice(&indata);
+
+        Self {
+            op: OpCode::Call,
+            flags: 0,
+            op_data: OpData::Call {
+                class_len: class.len() as u32,
+                method_len: method.len() as u32,
+                indata_len: indata.len() as u32,
+            },
+            indata: buf.freeze(),
+        }
+    }
+
+    /// Create an exclusive lock operation
+    ///
+    /// # Arguments
+    /// * `name` - Lock name (can have multiple named locks per object)
+    /// * `cookie` - Unique lock identifier for this client
+    /// * `description` - Human-readable description
+    /// * `duration` - Lock duration (None = infinite)
+    pub fn lock_exclusive(
+        name: &str,
+        cookie: &str,
+        description: &str,
+        duration: Option<std::time::Duration>,
+    ) -> Self {
+        use crate::lock::{LockFlags, LockRequest, LockType};
+
+        let request = LockRequest {
+            name: name.to_string(),
+            lock_type: LockType::Exclusive,
+            cookie: cookie.to_string(),
+            tag: String::new(),
+            description: description.to_string(),
+            duration: duration.unwrap_or(std::time::Duration::ZERO),
+            flags: LockFlags::empty(),
+        };
+
+        Self::call(
+            "lock",
+            "lock",
+            request.encode().expect("Failed to encode lock request"),
+        )
+    }
+
+    /// Create a shared lock operation
+    ///
+    /// # Arguments
+    /// * `name` - Lock name
+    /// * `cookie` - Unique lock identifier for this client
+    /// * `tag` - Shared lock tag (all shared locks with same tag are compatible)
+    /// * `description` - Human-readable description
+    /// * `duration` - Lock duration (None = infinite)
+    pub fn lock_shared(
+        name: &str,
+        cookie: &str,
+        tag: &str,
+        description: &str,
+        duration: Option<std::time::Duration>,
+    ) -> Self {
+        use crate::lock::{LockFlags, LockRequest, LockType};
+
+        let request = LockRequest {
+            name: name.to_string(),
+            lock_type: LockType::Shared,
+            cookie: cookie.to_string(),
+            tag: tag.to_string(),
+            description: description.to_string(),
+            duration: duration.unwrap_or(std::time::Duration::ZERO),
+            flags: LockFlags::empty(),
+        };
+
+        Self::call(
+            "lock",
+            "lock",
+            request.encode().expect("Failed to encode lock request"),
+        )
+    }
+
+    /// Create an unlock operation
+    ///
+    /// # Arguments
+    /// * `name` - Lock name to unlock
+    /// * `cookie` - Lock identifier that was used when acquiring the lock
+    pub fn unlock(name: &str, cookie: &str) -> Self {
+        use crate::lock::UnlockRequest;
+
+        let request = UnlockRequest {
+            name: name.to_string(),
+            cookie: cookie.to_string(),
+        };
+
+        Self::call(
+            "lock",
+            "unlock",
+            request.encode().expect("Failed to encode unlock request"),
+        )
+    }
+
+    /// Get an extended attribute
+    ///
+    /// # Arguments
+    /// * `name` - Attribute name
+    pub fn get_xattr(name: impl Into<String>) -> Self {
+        use bytes::BytesMut;
+        use denc::denc::Denc;
+
+        let name = name.into();
+        let mut extent_buf = BytesMut::new();
+        name.encode(&mut extent_buf, 0)
+            .expect("Failed to encode xattr name");
+
+        Self {
+            op: OpCode::GetXattr,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: name.len() as u32,
+                value_len: 0,
+                cmp_op: 0,
+                cmp_mode: 0,
+            },
+            indata: extent_buf.freeze(),
+        }
+    }
+
+    /// Set an extended attribute
+    ///
+    /// # Arguments
+    /// * `name` - Attribute name
+    /// * `value` - Attribute value
+    pub fn set_xattr(name: impl Into<String>, value: Bytes) -> Self {
+        use bytes::BytesMut;
+        use denc::denc::Denc;
+
+        let name = name.into();
+        let mut extent_buf = BytesMut::new();
+        name.encode(&mut extent_buf, 0)
+            .expect("Failed to encode xattr name");
+
+        Self {
+            op: OpCode::SetXattr,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: name.len() as u32,
+                value_len: value.len() as u32,
+                cmp_op: 0,
+                cmp_mode: 0,
+            },
+            indata: {
+                let mut buf = extent_buf;
+                buf.extend_from_slice(&value);
+                buf.freeze()
+            },
+        }
+    }
+
+    /// Remove an extended attribute
+    ///
+    /// # Arguments
+    /// * `name` - Attribute name to remove
+    pub fn remove_xattr(name: impl Into<String>) -> Self {
+        use bytes::BytesMut;
+        use denc::denc::Denc;
+
+        let name = name.into();
+        let mut extent_buf = BytesMut::new();
+        name.encode(&mut extent_buf, 0)
+            .expect("Failed to encode xattr name");
+
+        Self {
+            op: OpCode::RemoveXattr,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: name.len() as u32,
+                value_len: 0,
+                cmp_op: 0,
+                cmp_mode: 0,
+            },
+            indata: extent_buf.freeze(),
+        }
+    }
+
+    /// List all extended attributes
+    pub fn list_xattrs() -> Self {
+        Self {
+            op: OpCode::ListXattrs,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: 0,
+                value_len: 0,
+                cmp_op: 0,
+                cmp_mode: 0,
+            },
+            indata: Bytes::new(),
+        }
+    }
 }
 
 /// Calculate operation budget (bytes consumed by operations)
