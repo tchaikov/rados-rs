@@ -236,8 +236,7 @@ fn format_utime_as_timestamp(utime: &UTime) -> String {
 
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}{}{:02}{:02}",
-        year, month, day, hours, minutes, seconds, microseconds,
-        tz_sign, tz_hours, tz_mins
+        year, month, day, hours, minutes, seconds, microseconds, tz_sign, tz_hours, tz_mins
     )
 }
 

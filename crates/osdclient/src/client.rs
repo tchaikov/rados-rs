@@ -249,6 +249,10 @@ impl OSDClient {
 
     /// Get or create a session for an OSD
     async fn get_or_create_session(&self, osd_id: i32) -> Result<Arc<OSDSession>> {
+        // Get OSD address early (before acquiring any locks)
+        // This reduces lock contention by doing I/O outside critical section
+        let current_addr = self.get_osd_address(osd_id).await?;
+
         // Check if we already have a session
         {
             let sessions = self.sessions.read().await;
@@ -257,56 +261,27 @@ impl OSDClient {
                     // Validate that session's address matches current OSDMap
                     // This prevents wasted reconnection attempts to stale addresses
                     // Reference: Ceph Objecter checks OSDMap during reconnect
-                    if let Ok(current_addr) = self.get_osd_address(osd_id).await {
-                        let session_addr = session.get_peer_address().await;
-
-                        // Compare addresses (ignoring nonce which can change)
-                        if let Some(session_addr) = session_addr {
-                            if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
-                                return Ok(Arc::clone(session));
-                            } else {
-                                info!(
-                                    "OSD {} address changed in OSDMap (was {:?}, now {:?}), creating new session",
-                                    osd_id,
-                                    session_addr.to_socket_addr(),
-                                    current_addr.to_socket_addr()
-                                );
-                                // Address changed, fall through to create new session
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Create a new session
-        let mut sessions = self.sessions.write().await;
-
-        // Double-check after acquiring write lock
-        if let Some(session) = sessions.get(&osd_id) {
-            if session.is_connected().await {
-                // Re-validate address with write lock held
-                if let Ok(current_addr) = self.get_osd_address(osd_id).await {
                     let session_addr = session.get_peer_address().await;
 
+                    // Compare addresses (ignoring nonce which can change)
                     if let Some(session_addr) = session_addr {
                         if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
                             return Ok(Arc::clone(session));
+                        } else {
+                            info!(
+                                "OSD {} address changed in OSDMap (was {:?}, now {:?}), creating new session",
+                                osd_id,
+                                session_addr.to_socket_addr(),
+                                current_addr.to_socket_addr()
+                            );
+                            // Address changed, fall through to create new session
                         }
                     }
                 }
-
-                // Address changed, remove old session
-                info!("Removing old session for OSD {} with stale address", osd_id);
-                sessions.remove(&osd_id);
             }
-            // Disconnected session stays in the map; it will be replaced below and
-            // its pending ops kicked into the new session after creation.
         }
 
-        // Create new session
-        info!("Creating new session for OSD {}", osd_id);
-
+        // Prepare session outside the write lock to minimize critical section
         // Get service auth provider from monitor client
         let auth_provider = self
             .mon_client
@@ -323,17 +298,45 @@ impl OSDClient {
             self.self_weak.clone(),
         );
 
-        // Get OSD address from OSDMap
-        let osd_addr = self.get_osd_address(osd_id).await?;
-
-        // Connect to OSD - this spawns the I/O task with a child shutdown token
+        // Connect to OSD BEFORE acquiring write lock - this is the expensive operation
+        // that can take seconds and should not block other session lookups
+        info!("Creating new session for OSD {}", osd_id);
         session
-            .connect(osd_addr, self.shutdown_token.child_token())
+            .connect(current_addr.clone(), self.shutdown_token.child_token())
             .await?;
 
-        // Wrap in Arc and store, replacing any disconnected session.
-        // insert() returns the old value so we can kick its pending ops.
         let session = Arc::new(session);
+
+        // Now acquire write lock only to insert the connected session
+        let mut sessions = self.sessions.write().await;
+
+        // Double-check after acquiring write lock to avoid race condition
+        if let Some(existing) = sessions.get(&osd_id) {
+            if existing.is_connected().await {
+                // Re-validate address with write lock held
+                let session_addr = existing.get_peer_address().await;
+
+                if let Some(session_addr) = session_addr {
+                    if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
+                        // Another task created a session while we were connecting
+                        // Close our redundant session and return existing one
+                        let existing_clone = Arc::clone(existing);
+                        drop(sessions);
+                        session.close().await;
+                        return Ok(existing_clone);
+                    }
+                }
+
+                // Address changed, remove old session
+                info!("Removing old session for OSD {} with stale address", osd_id);
+                sessions.remove(&osd_id);
+            }
+            // Disconnected session stays in the map; it will be replaced below and
+            // its pending ops kicked into the new session after creation.
+        }
+
+        // Insert the new session, replacing any disconnected session.
+        // insert() returns the old value so we can kick its pending ops.
         let old_session = sessions.insert(osd_id, Arc::clone(&session));
         drop(sessions);
 
@@ -1362,7 +1365,17 @@ impl OSDClient {
     /// This implements Ceph's `_scan_requests` pattern from Objecter.
     async fn scan_requests_on_map_change(&self, new_epoch: u32) -> Result<()> {
         let osdmap = self.get_osdmap().await?;
-        let sessions = self.sessions.read().await;
+
+        // Collect session metadata under read lock, then release immediately
+        // This minimizes lock contention by avoiding I/O operations while holding the lock
+        let session_snapshot: Vec<(i32, Arc<OSDSession>)> = {
+            let sessions = self.sessions.read().await;
+            sessions
+                .iter()
+                .map(|(id, sess)| (*id, Arc::clone(sess)))
+                .collect()
+        };
+
         let mut need_resend = Vec::new();
         // Sessions whose OSD is down or whose address changed need to be
         // closed so that the next operation creates a fresh connection.
@@ -1370,11 +1383,12 @@ impl OSDClient {
         // down or address-changed OSDs.
         let mut sessions_to_close: Vec<i32> = Vec::new();
 
-        for (osd_id, session) in sessions.iter() {
+        // Process sessions without holding the lock
+        for (osd_id, session) in session_snapshot {
             // --- Phase 1: Check session-level OSD health ---
             // Reference: Ceph Objecter::_scan_requests() checks is_up() for
             // every open session and closes sessions to down OSDs.
-            let should_close = if osdmap.is_down(*osd_id) {
+            let should_close = if osdmap.is_down(osd_id) {
                 info!(
                     "OSD {} is DOWN in epoch {}, closing session and migrating pending ops",
                     osd_id, new_epoch
@@ -1385,15 +1399,15 @@ impl OSDClient {
                 // Reference: Ceph Objecter checks the OSD address in the OSDMap
                 // against the session's peer address and re-opens the session
                 // when they diverge (e.g. OSD restarted on a different port).
-                self.session_address_stale(session, *osd_id, &osdmap, new_epoch)
+                self.session_address_stale(&session, osd_id, &osdmap, new_epoch)
                     .await
             } else {
                 false
             };
 
             if should_close {
-                sessions_to_close.push(*osd_id);
-                self.drain_session_ops(session, &osdmap, new_epoch, &mut need_resend)
+                sessions_to_close.push(osd_id);
+                self.drain_session_ops(&session, &osdmap, new_epoch, &mut need_resend)
                     .await;
                 continue;
             }
@@ -1415,7 +1429,7 @@ impl OSDClient {
                 let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
                 let new_primary = new_osds.first().copied().unwrap_or(-1);
 
-                if new_primary != *osd_id {
+                if new_primary != osd_id {
                     if let Some(mut op) = session.remove_pending_op(tid).await {
                         // Mark as needing resend, then update target
                         op.state = crate::types::OpState::NeedsResend;
@@ -1427,7 +1441,6 @@ impl OSDClient {
                 }
             }
         }
-        drop(sessions);
 
         // Close sessions to down or address-changed OSDs.
         // This ensures the next get_or_create_session() creates a fresh
@@ -1437,7 +1450,11 @@ impl OSDClient {
             for osd_id in &sessions_to_close {
                 if let Some(session) = sessions.remove(osd_id) {
                     info!("Removing stale session for OSD {}", osd_id);
+                    // Release write lock before closing session (which may do I/O)
+                    drop(sessions);
                     session.close().await;
+                    // Re-acquire write lock if there are more sessions to close
+                    sessions = self.sessions.write().await;
                 }
             }
         }
