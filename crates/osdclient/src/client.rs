@@ -546,7 +546,8 @@ impl OSDClient {
     ) -> Result<crate::types::OpResult> {
         // TODO: honor built_op.priority when MOSDOp supports it
         let timeout = built_op.timeout;
-        self.execute_op(pool, oid, built_op.into_ops(), timeout).await
+        self.execute_op(pool, oid, built_op.into_ops(), timeout)
+            .await
     }
 
     /// Execute an OSD operation with automatic redirect handling
@@ -634,8 +635,7 @@ impl OSDClient {
             let result_rx = session.submit_op(msg.clone()).await?;
 
             // Wait for result with timeout (per-op override or default from tracker)
-            let effective_timeout =
-                timeout.unwrap_or_else(|| self.tracker.operation_timeout());
+            let effective_timeout = timeout.unwrap_or_else(|| self.tracker.operation_timeout());
             let result = tokio::time::timeout(effective_timeout, result_rx)
                 .await
                 .map_err(|_| OSDClientError::Timeout(effective_timeout))?

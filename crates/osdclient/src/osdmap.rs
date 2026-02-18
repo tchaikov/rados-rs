@@ -432,29 +432,36 @@ pub enum HitSetParams {
 }
 
 // Custom Serialize implementation to match ceph-dencoder format
+// Reference: ~/dev/ceph/src/osd/HitSet.cc BloomHitSet::Params::dump()
 impl Serialize for HitSetParams {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("HitSetParams", 1)?;
+        // Use max field count (4 for Bloom) as hint; Serde treats it as advisory
+        let mut state = serializer.serialize_struct("HitSetParams", 4)?;
 
         match self {
             HitSetParams::None => {
                 state.serialize_field("type", "none")?;
             }
             HitSetParams::ExplicitHash(_params) => {
+                // ExplicitHashHitSetParams is a unit struct — no additional fields
                 state.serialize_field("type", "explicit_hash")?;
-                // TODO: serialize params fields
             }
             HitSetParams::ExplicitObject(_params) => {
+                // ExplicitObjectHitSetParams is a unit struct — no additional fields
                 state.serialize_field("type", "explicit_object")?;
-                // TODO: serialize params fields
             }
-            HitSetParams::Bloom(_params) => {
+            HitSetParams::Bloom(params) => {
+                // Matches BloomHitSet::Params::dump(): false_positive_probability, target_size, seed
                 state.serialize_field("type", "bloom")?;
-                // TODO: serialize params fields
+                // fpp_micro stores FPP * 1_000_000 as an integer; dump as float
+                let fpp = params.fpp_micro as f64 / 1_000_000.0;
+                state.serialize_field("false_positive_probability", &fpp)?;
+                state.serialize_field("target_size", &params.target_size)?;
+                state.serialize_field("seed", &params.seed)?;
             }
         }
 

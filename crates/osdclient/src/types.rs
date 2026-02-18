@@ -730,15 +730,17 @@ pub fn calc_op_budget(ops: &[OSDOp]) -> usize {
 
             // Read operations contribute expected response size
             if op.op.is_read() {
-                if let OpData::Extent { length, .. } = op.op_data {
-                    if length > 0 {
-                        return length as usize;
-                    }
+                match op.op_data {
+                    OpData::Extent { length, .. } if length > 0 => return length as usize,
+                    // Attribute operations (getxattr): budget = name_len + value_len
+                    // Matches C++ Objecter::calc_op_budget() (Objecter.cc:3535-3538)
+                    OpData::Xattr {
+                        name_len,
+                        value_len,
+                        ..
+                    } => return (name_len + value_len) as usize,
+                    _ => {}
                 }
-                // Attribute operations (getxattr, etc.)
-                // In C++: name_len + value_len from op.xattr
-                // For now we'll estimate conservatively
-                // TODO: Add xattr fields to OpData::Xattr variant if needed
             }
 
             0
