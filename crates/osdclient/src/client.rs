@@ -1349,11 +1349,7 @@ impl OSDClient {
     /// `scan_requests_on_map_change()` when OSDMap updates arrive.  This function
     /// only resubmits to the same OSD's new session, so there is no mutual
     /// recursion with `get_or_create_session` and no boxing is required.
-    async fn kick_into_session(
-        &self,
-        old_session: &OSDSession,
-        new_session: &Arc<OSDSession>,
-    ) {
+    async fn kick_into_session(&self, old_session: &OSDSession, new_session: &Arc<OSDSession>) {
         if self.shutdown_token.is_cancelled() {
             return;
         }
@@ -1389,7 +1385,9 @@ impl OSDClient {
 
             // Pool deleted — fail immediately.
             if !osdmap.pools.contains_key(&pool_id) {
-                let _ = pending_op.result_tx.send(Err(OSDClientError::PoolNotFound(pool_id)));
+                let _ = pending_op
+                    .result_tx
+                    .send(Err(OSDClientError::PoolNotFound(pool_id)));
                 continue;
             }
 
