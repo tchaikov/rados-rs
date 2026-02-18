@@ -139,10 +139,11 @@
 - [x] **Auth test coverage** — COMPLETED. 42 unit tests covering client handler,
       protocol encode/decode, keyring parsing, and server setup.
 
-- [ ] **OSD connection recovery** — Session reconnection after OSD restart or
-      network failure is not fully implemented. The `SESSION_RECONNECT` frame is
-      supported at the msgr2 layer but the OSD client doesn't use it.
-      See `crates/osdclient/src/client.rs:1316` TODO about rescanning sessions.
+- [x] **OSD connection recovery** — COMPLETED. Session recovery on OSDMap changes
+      is fully implemented. The system detects down OSDs via `is_down()`, checks for
+      address changes via `session_address_stale()`, drains pending operations with
+      `drain_session_ops()`, and closes stale sessions. Operations are automatically
+      re-targeted and migrated to new OSDs. See `crates/osdclient/src/client.rs:1360-1520`.
 
 - [x] **Proper message length calculation** — COMPLETED. Message now properly
       uses `header.get_data_off()` to calculate segment lengths.
@@ -226,7 +227,7 @@
 1. ~~Add unit tests for CephX client handler and protocol encode/decode~~ ✅ DONE (42 tests)
 2. ~~Implement proper message length calculation in msgr2~~ ✅ DONE (commit bd89f5f)
 3. ~~Fix IoCtx `flush()` to wait for actual OSD acknowledgments~~ ✅ NOT NEEDED (ops are sync)
-4. Add OSD session reconnection using `SESSION_RECONNECT` (frame exists but not used by OSDClient)
+4. ~~Add OSD session reconnection using `SESSION_RECONNECT`~~ ✅ DONE (session recovery on OSDMap changes)
 5. ~~Replace debug `eprintln!()` with `tracing` macros~~ ✅ DONE
 
 ### Phase 2: Erasure Coding & Device Classes (High Priority)

@@ -1364,8 +1364,41 @@ impl OSDClient {
         let osdmap = self.get_osdmap().await?;
         let sessions = self.sessions.read().await;
         let mut need_resend = Vec::new();
+        // Sessions whose OSD is down or whose address changed need to be
+        // closed so that the next operation creates a fresh connection.
+        // Follows Ceph Objecter::_scan_requests() which closes sessions for
+        // down or address-changed OSDs.
+        let mut sessions_to_close: Vec<i32> = Vec::new();
 
         for (osd_id, session) in sessions.iter() {
+            // --- Phase 1: Check session-level OSD health ---
+            // Reference: Ceph Objecter::_scan_requests() checks is_up() for
+            // every open session and closes sessions to down OSDs.
+            let should_close = if osdmap.is_down(*osd_id) {
+                info!(
+                    "OSD {} is DOWN in epoch {}, closing session and migrating pending ops",
+                    osd_id, new_epoch
+                );
+                true
+            } else if session.is_connected().await {
+                // --- Phase 2: Check if the OSD address changed ---
+                // Reference: Ceph Objecter checks the OSD address in the OSDMap
+                // against the session's peer address and re-opens the session
+                // when they diverge (e.g. OSD restarted on a different port).
+                self.session_address_stale(session, *osd_id, &osdmap, new_epoch)
+                    .await
+            } else {
+                false
+            };
+
+            if should_close {
+                sessions_to_close.push(*osd_id);
+                self.drain_session_ops(session, &osdmap, new_epoch, &mut need_resend)
+                    .await;
+                continue;
+            }
+
+            // --- Phase 3: Per-operation target check (existing logic) ---
             let metadata = session.get_pending_ops_metadata().await;
             for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
                 // Check if pool deleted
@@ -1396,6 +1429,19 @@ impl OSDClient {
         }
         drop(sessions);
 
+        // Close sessions to down or address-changed OSDs.
+        // This ensures the next get_or_create_session() creates a fresh
+        // connection with the updated address.
+        if !sessions_to_close.is_empty() {
+            let mut sessions = self.sessions.write().await;
+            for osd_id in &sessions_to_close {
+                if let Some(session) = sessions.remove(osd_id) {
+                    info!("Removing stale session for OSD {}", osd_id);
+                    session.close().await;
+                }
+            }
+        }
+
         // Resend to new targets
         for (new_osd, pending_op) in need_resend {
             let session = self.get_or_create_session(new_osd).await?;
@@ -1404,6 +1450,73 @@ impl OSDClient {
             }
         }
         Ok(())
+    }
+
+    /// Check if a session's address no longer matches the OSDMap.
+    ///
+    /// Returns `true` when the session's peer address does not appear in the
+    /// OSDMap's client address vector for the given OSD, indicating the OSD
+    /// restarted on a different address.
+    async fn session_address_stale(
+        &self,
+        session: &OSDSession,
+        osd_id: i32,
+        osdmap: &crate::osdmap::OSDMap,
+        new_epoch: u32,
+    ) -> bool {
+        let Some(session_addr) = session.get_peer_address().await else {
+            return false;
+        };
+        let Some(map_addrvec) = osdmap.get_osd_addr(osd_id) else {
+            return false;
+        };
+        let session_sockaddr = session_addr.to_socket_addr();
+        let map_has_match = map_addrvec.addrs.iter().any(|a| {
+            matches!(a.addr_type, denc::EntityAddrType::Msgr2)
+                && a.to_socket_addr() == session_sockaddr
+        });
+        if !map_has_match {
+            info!(
+                "OSD {} address changed in epoch {} (session: {:?}, map: {:?}), closing session",
+                osd_id, new_epoch, session_sockaddr, map_addrvec
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain all pending operations from a session that is about to be closed.
+    ///
+    /// Each operation is either failed (if its pool was deleted) or re-targeted
+    /// via CRUSH and appended to `need_resend` for resubmission.
+    async fn drain_session_ops(
+        &self,
+        session: &OSDSession,
+        osdmap: &crate::osdmap::OSDMap,
+        new_epoch: u32,
+        need_resend: &mut Vec<(i32, crate::session::PendingOp)>,
+    ) {
+        let metadata = session.get_pending_ops_metadata().await;
+        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+            if !osdmap.pools.contains_key(&pool_id) {
+                if let Some(pending_op) = session.remove_pending_op(tid).await {
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::PoolNotFound(pool_id)));
+                }
+                continue;
+            }
+            if let Ok((_, new_osds)) = self.object_to_osds(pool_id, &object_id).await {
+                let new_primary = new_osds.first().copied().unwrap_or(-1);
+                if let Some(mut op) = session.remove_pending_op(tid).await {
+                    op.state = crate::types::OpState::NeedsResend;
+                    op.target.update(new_epoch, new_primary, new_osds.clone());
+                    op.state = crate::types::OpState::Queued;
+                    need_resend.push((new_primary, op));
+                }
+            }
+        }
     }
 
     /// Resend pending ops from a disconnected session into a freshly created one.
