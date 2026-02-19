@@ -2193,9 +2193,8 @@ mod tests {
         let mut queue = PriorityQueue::new();
 
         queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low.to_u16()));
-        queue.push_back(
-            Message::new(3, Bytes::new()).with_priority(MessagePriority::High.to_u16()),
-        );
+        queue
+            .push_back(Message::new(3, Bytes::new()).with_priority(MessagePriority::High.to_u16()));
         queue.push_back(
             Message::new(2, Bytes::new()).with_priority(MessagePriority::Normal.to_u16()),
         );

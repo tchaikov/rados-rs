@@ -91,6 +91,9 @@ impl SharedState {
 
 /// Internal command for the I/O task
 enum IoCommand {
+    /// Send a Ceph message (seq assigned at send time for correct priority ordering)
+    SendMessage(Message, tokio::sync::oneshot::Sender<Result<()>>),
+    /// Send a pre-built frame directly (used for keepalive, not priority-queued)
     SendFrame(Frame, tokio::sync::oneshot::Sender<Result<()>>),
     Shutdown,
 }
@@ -126,8 +129,9 @@ impl SendHalf {
     /// Send a Ceph message
     ///
     /// This method is safe to call concurrently with `RecvHalf::recv_message()`.
-    pub async fn send_message(&self, mut msg: Message) -> Result<()> {
-        let msg_type = msg.msg_type();
+    /// Sequence numbers are assigned by the I/O task at actual send time so that
+    /// priority reordering produces monotonically increasing seq on the wire.
+    pub async fn send_message(&self, msg: Message) -> Result<()> {
         let msg_size = msg.total_size() as usize;
 
         // Wait for throttle if configured
@@ -135,39 +139,10 @@ impl SendHalf {
             throttle.wait_for_send(msg_size).await;
         }
 
-        // Update sequence numbers under lock
-        let (seq, ack_seq) = {
-            let mut shared = self.shared.lock().await;
-            shared.out_seq += 1;
-            msg.header.seq = shared.out_seq;
-            msg.header.ack_seq = shared.in_seq;
-
-            // Record message for potential replay
-            shared.record_sent_message(msg.clone());
-
-            (shared.out_seq, shared.in_seq)
-        };
-
-        tracing::debug!(
-            "SendHalf: sending message type=0x{:04x}, seq={}, ack_seq={}",
-            msg_type,
-            seq,
-            ack_seq
-        );
-
-        // Convert to frame
-        let msg_frame = MessageFrame::new(
-            msg.header.clone(),
-            msg.front.clone(),
-            msg.middle.clone(),
-            msg.data.clone(),
-        );
-        let frame = create_frame_from_trait(&msg_frame, Tag::Message);
-
-        // Send the frame via the I/O task
+        // Send the message to the I/O task for seq assignment and framing
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
-            .send(IoCommand::SendFrame(frame, tx))
+            .send(IoCommand::SendMessage(msg, tx))
             .await
             .map_err(|_| Error::Protocol("I/O task closed".into()))?;
 
@@ -242,7 +217,86 @@ impl Drop for SendHalf {
     }
 }
 
-/// Internal I/O task that handles frame send/receive
+/// An outbound message entry waiting to be sent, paired with a reply channel.
+struct OutboundEntry {
+    msg: Message,
+    reply: tokio::sync::oneshot::Sender<Result<()>>,
+}
+
+/// Priority queue for outbound message entries (high → normal → low).
+struct OutboundQueue {
+    high: VecDeque<OutboundEntry>,
+    normal: VecDeque<OutboundEntry>,
+    low: VecDeque<OutboundEntry>,
+}
+
+impl OutboundQueue {
+    fn new() -> Self {
+        Self {
+            high: VecDeque::new(),
+            normal: VecDeque::new(),
+            low: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, entry: OutboundEntry) {
+        match entry.msg.priority() {
+            crate::message::MessagePriority::High => self.high.push_back(entry),
+            crate::message::MessagePriority::Normal => self.normal.push_back(entry),
+            crate::message::MessagePriority::Low => self.low.push_back(entry),
+        }
+    }
+
+    fn pop(&mut self) -> Option<OutboundEntry> {
+        self.high
+            .pop_front()
+            .or_else(|| self.normal.pop_front())
+            .or_else(|| self.low.pop_front())
+    }
+}
+
+/// Assign seq/ack_seq, record in sent_messages, convert to frame, and send.
+///
+/// Returns `true` on success, `false` on send failure (connection broken).
+/// The result is always forwarded to the caller via the reply channel.
+async fn send_outbound_entry(
+    entry: OutboundEntry,
+    connection_state: &mut crate::protocol::ConnectionState,
+    shared: &Arc<Mutex<SharedState>>,
+) -> bool {
+    let OutboundEntry { mut msg, reply } = entry;
+
+    // Assign sequence numbers under lock
+    let (seq, ack_seq) = {
+        let mut state = shared.lock().await;
+        state.out_seq += 1;
+        msg.header.seq = state.out_seq;
+        msg.header.ack_seq = state.in_seq;
+        state.record_sent_message(msg.clone());
+        (state.out_seq, state.in_seq)
+    };
+
+    tracing::debug!(
+        "I/O task: sending message type=0x{:04x}, seq={}, ack_seq={}",
+        msg.msg_type(),
+        seq,
+        ack_seq
+    );
+
+    // Convert to frame and send (move fields — msg is not used after this)
+    let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
+    let frame = create_frame_from_trait(&msg_frame, Tag::Message);
+    let result = connection_state.send_frame(&frame).await;
+    let success = result.is_ok();
+    let _ = reply.send(result);
+    success
+}
+
+/// Internal I/O task that handles frame send/receive with priority ordering.
+///
+/// Messages submitted via `IoCommand::SendMessage` are buffered in a priority
+/// queue and sent highest-priority-first. Sequence numbers are assigned at
+/// actual send time so the wire order matches the sequence order.
 async fn io_task(
     mut connection_state: crate::protocol::ConnectionState,
     mut cmd_rx: mpsc::Receiver<IoCommand>,
@@ -251,20 +305,64 @@ async fn io_task(
     throttle: Option<MessageThrottle>,
     shutdown: Arc<Notify>,
 ) {
-    loop {
+    let mut outbound = OutboundQueue::new();
+
+    'outer: loop {
+        // Phase 1: Drain all pending commands into the priority queue (non-blocking)
+        loop {
+            match cmd_rx.try_recv() {
+                Ok(IoCommand::SendMessage(msg, reply)) => {
+                    outbound.push(OutboundEntry { msg, reply });
+                }
+                Ok(IoCommand::SendFrame(frame, reply)) => {
+                    // Non-message frames (keepalive) bypass priority queue
+                    let result = connection_state.send_frame(&frame).await;
+                    let failed = result.is_err();
+                    let _ = reply.send(result);
+                    if failed {
+                        tracing::error!("I/O task: frame send error, shutting down");
+                        break 'outer;
+                    }
+                }
+                Ok(IoCommand::Shutdown) => {
+                    tracing::debug!("I/O task: shutdown command received");
+                    return;
+                }
+                Err(_) => break, // Channel empty or closed
+            }
+        }
+
+        // Phase 2: Send the highest-priority queued message
+        if let Some(entry) = outbound.pop() {
+            if !send_outbound_entry(entry, &mut connection_state, &shared).await {
+                tracing::error!("I/O task: send error, shutting down");
+                break;
+            }
+            continue; // Loop back to drain more before blocking
+        }
+
+        // Phase 3: Nothing pending — block in select!
         tokio::select! {
-            // Handle shutdown
             _ = shutdown.notified() => {
                 tracing::debug!("I/O task: shutdown requested");
                 break;
             }
 
-            // Handle send commands
             cmd = cmd_rx.recv() => {
                 match cmd {
+                    Some(IoCommand::SendMessage(msg, reply)) => {
+                        outbound.push(OutboundEntry { msg, reply });
+                        // Don't send yet — loop back to drain any additional
+                        // commands that arrived, so we can prioritise correctly
+                    }
                     Some(IoCommand::SendFrame(frame, reply)) => {
                         let result = connection_state.send_frame(&frame).await;
+                        let failed = result.is_err();
                         let _ = reply.send(result);
+                        if failed {
+                            tracing::error!("I/O task: frame send error, shutting down");
+                            break;
+                        }
                     }
                     Some(IoCommand::Shutdown) | None => {
                         tracing::debug!("I/O task: command channel closed");

@@ -15,7 +15,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::message::Message;
-use crate::protocol::Connection;
+use crate::protocol::{Connection, PriorityQueue};
 
 /// Keepalive configuration for [`run_io_loop`]
 pub struct KeepaliveConfig {
@@ -58,8 +58,24 @@ pub async fn run_io_loop<R, Fut>(
         .as_ref()
         .map(|k| tokio::time::interval_at(tokio::time::Instant::now() + k.interval, k.interval));
     let mut last_keepalive_sent: Option<std::time::Instant> = None;
+    let mut outbound = PriorityQueue::new();
 
     loop {
+        // Phase 1: Drain all pending messages into PriorityQueue (non-blocking)
+        while let Ok(msg) = send_rx.try_recv() {
+            outbound.push_back(msg);
+        }
+
+        // Phase 2: If we have queued messages, send highest priority first
+        if let Some(msg) = outbound.pop_front() {
+            if let Err(e) = connection.send_message(msg).await {
+                tracing::error!("I/O loop: send error: {}", e);
+                break;
+            }
+            continue; // Loop back to drain more before blocking
+        }
+
+        // Phase 3: Nothing pending — block in select!
         tokio::select! {
             _ = shutdown_token.cancelled() => {
                 tracing::debug!("I/O loop: shutdown token cancelled");
@@ -69,10 +85,9 @@ pub async fn run_io_loop<R, Fut>(
             msg_opt = send_rx.recv() => {
                 match msg_opt {
                     Some(msg) => {
-                        if let Err(e) = connection.send_message(msg).await {
-                            tracing::error!("I/O loop: send error: {}", e);
-                            break;
-                        }
+                        outbound.push_back(msg);
+                        // Don't send yet — loop back to drain any additional
+                        // messages that arrived, so we can prioritise correctly
                     }
                     None => {
                         tracing::debug!("I/O loop: send channel closed");
