@@ -3,6 +3,33 @@ use crate::header::MsgHeader;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt;
 
+/// Message priority levels for priority-based queueing
+/// Matches Ceph's priority scheme where higher values are sent first
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u16)]
+pub enum MessagePriority {
+    Low = 0,
+    Normal = 1,
+    High = 2,
+}
+
+impl MessagePriority {
+    /// Convert a u16 priority value to MessagePriority
+    /// Values >= 2 map to High, 1 maps to Normal, 0 maps to Low
+    pub fn from_u16(priority: u16) -> Self {
+        match priority {
+            0 => MessagePriority::Low,
+            1 => MessagePriority::Normal,
+            _ => MessagePriority::High, // 2 and above -> High
+        }
+    }
+
+    /// Convert MessagePriority to u16 for message header
+    pub fn to_u16(self) -> u16 {
+        self as u16
+    }
+}
+
 pub const CEPH_MSG_PING: u16 = 0x0001;
 pub const CEPH_MSG_PING_ACK: u16 = 0x0002;
 pub const CEPH_MSG_MON_MAP: u16 = 0x0004;
@@ -37,11 +64,11 @@ impl Message {
     }
 
     pub fn ping() -> Self {
-        Self::new(CEPH_MSG_PING, Bytes::new())
+        Self::new(CEPH_MSG_PING, Bytes::new()).with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn ping_ack() -> Self {
-        Self::new(CEPH_MSG_PING_ACK, Bytes::new())
+        Self::new(CEPH_MSG_PING_ACK, Bytes::new()).with_priority(MessagePriority::High.to_u16())
     }
 
     pub fn with_seq(mut self, seq: u64) -> Self {
@@ -204,6 +231,11 @@ impl Message {
 
     pub fn tid(&self) -> u64 {
         self.header.tid
+    }
+
+    /// Get the message priority as MessagePriority enum
+    pub fn priority(&self) -> MessagePriority {
+        MessagePriority::from_u16(self.header.get_priority())
     }
 
     pub fn total_len(&self) -> usize {
@@ -438,5 +470,49 @@ mod tests {
         // total_len = header + front + middle + data
         // = MsgHeader::LENGTH + 5 + 2 + 3
         assert_eq!(msg.total_len(), MsgHeader::LENGTH + 10);
+    }
+}
+
+#[cfg(test)]
+mod priority_tests {
+    use super::*;
+
+    #[test]
+    fn test_ping_has_high_priority() {
+        let ping = Message::ping();
+        assert_eq!(ping.priority(), MessagePriority::High);
+        assert_eq!(ping.header.get_priority(), MessagePriority::High.to_u16());
+    }
+
+    #[test]
+    fn test_ping_ack_has_high_priority() {
+        let ping_ack = Message::ping_ack();
+        assert_eq!(ping_ack.priority(), MessagePriority::High);
+        assert_eq!(
+            ping_ack.header.get_priority(),
+            MessagePriority::High.to_u16()
+        );
+    }
+
+    #[test]
+    fn test_message_priority_from_u16() {
+        assert_eq!(MessagePriority::from_u16(0), MessagePriority::Low);
+        assert_eq!(MessagePriority::from_u16(1), MessagePriority::Normal);
+        assert_eq!(MessagePriority::from_u16(2), MessagePriority::High);
+        assert_eq!(MessagePriority::from_u16(5), MessagePriority::High); // Values >= 2 map to High
+    }
+
+    #[test]
+    fn test_message_priority_to_u16() {
+        assert_eq!(MessagePriority::Low.to_u16(), 0);
+        assert_eq!(MessagePriority::Normal.to_u16(), 1);
+        assert_eq!(MessagePriority::High.to_u16(), 2);
+    }
+
+    #[test]
+    fn test_message_with_priority() {
+        let msg = Message::new(CEPH_MSG_MON_MAP, Bytes::from("test"))
+            .with_priority(MessagePriority::High.to_u16());
+        assert_eq!(msg.priority(), MessagePriority::High);
     }
 }

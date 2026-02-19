@@ -4,6 +4,7 @@
 //! handling frame I/O, encryption, and state machine coordination.
 
 use bytes::{Bytes, BytesMut};
+use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -17,6 +18,77 @@ use crate::message::Message;
 use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, StateResult};
 use crate::FeatureSet;
 use std::borrow::Cow;
+
+/// Priority-based message queue.
+///
+/// Higher-priority messages are sent first, matching Ceph's ProtocolV2 behaviour.
+/// Within a priority level, ordering is FIFO.
+///
+/// Intended for the **outgoing** queue (deciding what to send next). Do not use
+/// for `sent_messages` (ACK replay buffer), which must preserve insertion/sequence
+/// order for correct `discard_acknowledged_messages()` processing.
+#[derive(Debug, Clone, Default)]
+pub struct PriorityQueue {
+    high: VecDeque<Message>,
+    normal: VecDeque<Message>,
+    low: VecDeque<Message>,
+}
+
+impl PriorityQueue {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Push a message into the appropriate priority sub-queue.
+    pub fn push_back(&mut self, msg: Message) {
+        match msg.priority() {
+            crate::message::MessagePriority::High => self.high.push_back(msg),
+            crate::message::MessagePriority::Normal => self.normal.push_back(msg),
+            crate::message::MessagePriority::Low => self.low.push_back(msg),
+        }
+    }
+
+    /// Pop the highest-priority message available.
+    pub fn pop_front(&mut self) -> Option<Message> {
+        self.high
+            .pop_front()
+            .or_else(|| self.normal.pop_front())
+            .or_else(|| self.low.pop_front())
+    }
+
+    /// Peek at the next message to be sent (highest-priority queue's front).
+    pub fn front(&self) -> Option<&Message> {
+        self.high
+            .front()
+            .or_else(|| self.normal.front())
+            .or_else(|| self.low.front())
+    }
+
+    /// Iterate over all messages in priority order (high → normal → low).
+    pub fn iter(&self) -> impl Iterator<Item = &Message> {
+        self.high
+            .iter()
+            .chain(self.normal.iter())
+            .chain(self.low.iter())
+    }
+
+    /// Clear all queues.
+    pub fn clear(&mut self) {
+        self.high.clear();
+        self.normal.clear();
+        self.low.clear();
+    }
+
+    /// Total number of queued messages across all priority levels.
+    pub fn len(&self) -> usize {
+        self.high.len() + self.normal.len() + self.low.len()
+    }
+
+    /// Returns `true` if all priority queues are empty.
+    pub fn is_empty(&self) -> bool {
+        self.high.is_empty() && self.normal.is_empty() && self.low.is_empty()
+    }
+}
 
 /// Action to take after successful reconnection in retry_with_reconnect
 enum ReconnectAction<T> {
@@ -1980,7 +2052,7 @@ impl Connection {
     /// conn.establish_session().await?;
     ///
     /// // Split the connection
-    /// let (send_half, recv_half) = conn.split();
+    /// let (send_half, mut recv_half) = conn.split();
     ///
     /// // Spawn a task to receive messages
     /// tokio::spawn(async move {
@@ -2069,5 +2141,95 @@ impl Connection {
 
         // TCP stream will be dropped when ConnectionState is dropped
         tracing::debug!("Connection marked down, sent messages preserved for reconnection");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::message::MessagePriority;
+
+    #[test]
+    fn test_priority_queue_ordering() {
+        let mut queue = PriorityQueue::new();
+
+        let low_msg =
+            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+        let normal_msg =
+            Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
+        let high_msg =
+            Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
+
+        // Add in random order
+        queue.push_back(normal_msg);
+        queue.push_back(low_msg);
+        queue.push_back(high_msg);
+
+        assert_eq!(queue.len(), 3);
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 3); // High first
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 2); // Normal second
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 1); // Low last
+        assert!(queue.is_empty());
+    }
+
+    #[test]
+    fn test_priority_queue_fifo_within_priority() {
+        let mut queue = PriorityQueue::new();
+
+        for i in 1u16..=3 {
+            queue.push_back(
+                Message::new(i, Bytes::from(format!("msg{i}")))
+                    .with_priority(MessagePriority::Normal.to_u16()),
+            );
+        }
+
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 1);
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 2);
+        assert_eq!(queue.pop_front().unwrap().msg_type(), 3);
+    }
+
+    #[test]
+    fn test_priority_queue_iter() {
+        let mut queue = PriorityQueue::new();
+
+        queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low.to_u16()));
+        queue.push_back(
+            Message::new(3, Bytes::new()).with_priority(MessagePriority::High.to_u16()),
+        );
+        queue.push_back(
+            Message::new(2, Bytes::new()).with_priority(MessagePriority::Normal.to_u16()),
+        );
+
+        let types: Vec<u16> = queue.iter().map(|m| m.msg_type()).collect();
+        assert_eq!(types, vec![3, 2, 1]); // High, Normal, Low
+    }
+
+    #[test]
+    fn test_priority_queue_clear() {
+        let mut queue = PriorityQueue::new();
+        queue.push_back(Message::new(1, Bytes::new()));
+        queue.push_back(Message::new(2, Bytes::new()).with_priority(2));
+        queue.push_back(Message::new(3, Bytes::new()).with_priority(1));
+
+        assert_eq!(queue.len(), 3);
+        queue.clear();
+        assert_eq!(queue.len(), 0);
+        assert!(queue.is_empty());
+        assert!(queue.pop_front().is_none());
+    }
+
+    #[test]
+    fn test_priority_queue_front() {
+        let mut queue = PriorityQueue::new();
+
+        queue.push_back(
+            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16()),
+        );
+        queue.push_back(
+            Message::new(2, Bytes::from("high")).with_priority(MessagePriority::High.to_u16()),
+        );
+
+        assert_eq!(queue.front().unwrap().msg_type(), 2);
+        assert_eq!(queue.len(), 2); // front() does not remove
     }
 }
