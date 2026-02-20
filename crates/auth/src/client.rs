@@ -5,15 +5,15 @@ use crate::protocol::{
     AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
-use crate::types::{entity_type, CephXSession, CephXTicketBlob, CryptoKey, EntityName};
+use crate::types::{EntityType, CephXSession, CephXTicketBlob, CryptoKey, EntityName};
 use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
 use std::time::Duration;
 use tracing::{debug, trace, warn};
 
-/// Decoded service ticket information: (service_id, session_key, secret_id, ticket_blob, validity)
-type DecodedServiceTicket = (u32, CryptoKey, u64, CephXTicketBlob, Duration);
+/// Decoded service ticket information: (service_type, session_key, secret_id, ticket_blob, validity)
+type DecodedServiceTicket = (EntityType, CryptoKey, u64, CephXTicketBlob, Duration);
 
 /// Authentication result from handler
 #[derive(Debug, PartialEq)]
@@ -46,7 +46,7 @@ pub struct CephXClientHandler {
     /// Mirrors `want_keys` in `AuthClientHandler` (C++) / `want_keys` in the Linux kernel
     /// client. AUTH is always implied and should not be included here. Defaults to
     /// `MON | OSD | MGR`, matching what librados requests.
-    want_keys: u32,
+    want_keys: EntityType,
 }
 
 impl CephXClientHandler {
@@ -65,15 +65,15 @@ impl CephXClientHandler {
             secret_key: None,
             auth_mode,
             // Default matches librados: MON | OSD | MGR
-            want_keys: entity_type::MON | entity_type::OSD | entity_type::MGR,
+            want_keys: EntityType::MON | EntityType::OSD | EntityType::MGR,
         })
     }
 
     /// Set the service ticket types to request alongside the AUTH ticket.
     ///
-    /// `keys` is a bitmask of `entity_type::*` values. AUTH is always requested
+    /// `keys` is a bitmask of `EntityType::*` values. AUTH is always requested
     /// implicitly and does not need to be included. Defaults to `MON | OSD | MGR`.
-    pub fn set_want_keys(&mut self, keys: u32) {
+    pub fn set_want_keys(&mut self, keys: EntityType) {
         self.want_keys = keys;
     }
 
@@ -166,7 +166,7 @@ impl CephXClientHandler {
 
         // Request the configured service tickets alongside AUTH.
         // Mirrors `other_keys = want_keys & ~CEPH_ENTITY_TYPE_AUTH` from the Linux kernel client.
-        let other_keys: u32 = self.want_keys & !entity_type::AUTH;
+        let other_keys: u32 = (self.want_keys & !EntityType::AUTH).bits();
         let auth_request = CephXAuthenticate::new(
             client_challenge,
             session_key,
@@ -438,7 +438,7 @@ impl CephXClientHandler {
             match self.try_decode_single_ticket(buf, auth_session_key) {
                 Ok(ticket_info) => {
                     trace!(
-                        "Decoded extra ticket {}/{} for service {}",
+                        "Decoded extra ticket {}/{} for service {:?}",
                         i + 1,
                         num,
                         ticket_info.0
@@ -473,7 +473,7 @@ impl CephXClientHandler {
     ) -> Result<DecodedServiceTicket> {
         use denc::Denc;
 
-        let service_id = u32::decode(buf, 0)?;
+        let service_type = EntityType::from_bits_retain(u32::decode(buf, 0)?);
         let encrypted_ticket = crate::protocol::EncryptedServiceTicket::decode(buf, 0)?;
         let (session_key, validity) =
             self.decrypt_service_ticket(&encrypted_ticket, auth_session_key)?;
@@ -494,7 +494,7 @@ impl CephXClientHandler {
         let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)?;
 
         Ok((
-            service_id,
+            service_type,
             session_key,
             ticket_blob.secret_id,
             ticket_blob,
@@ -616,17 +616,17 @@ impl CephXClientHandler {
                 "Storing {} ticket handlers in session",
                 ticket_handlers.len()
             );
-            for (service_id, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
+            for (service_type, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
                 trace!(
-                    "Storing ticket for service {} (secret_id={})",
-                    service_id,
+                    "Storing ticket for service {:?} (secret_id={})",
+                    service_type,
                     secret_id
                 );
-                let handler = session.get_ticket_handler(service_id);
+                let handler = session.get_ticket_handler(service_type);
                 handler.update(session_key, secret_id, ticket_blob, validity);
                 debug!(
-                    "✓ Stored ticket for service {} (secret_id={}, have_key={}, expired={})",
-                    service_id,
+                    "✓ Stored ticket for service {:?} (secret_id={}, have_key={}, expired={})",
+                    service_type,
                     secret_id,
                     handler.have_key,
                     handler.is_expired()
@@ -634,10 +634,10 @@ impl CephXClientHandler {
             }
             // Log all available tickets
             debug!("Available service tickets after storage:");
-            for (service_id, handler) in &session.ticket_handlers {
+            for (service_type, handler) in &session.ticket_handlers {
                 debug!(
-                    "  Service {}: have_key={}, expired={}",
-                    service_id,
+                    "  Service {:?}: have_key={}, expired={}",
+                    service_type,
                     handler.have_key,
                     handler.is_expired()
                 );
@@ -723,7 +723,7 @@ impl CephXClientHandler {
 
         // Process all service tickets
         let mut first_session_key_bytes: Option<Bytes> = None;
-        let mut ticket_handlers: Vec<(u32, CryptoKey, u64, CephXTicketBlob, Duration)> = Vec::new();
+        let mut ticket_handlers: Vec<(EntityType, CryptoKey, u64, CephXTicketBlob, Duration)> = Vec::new();
 
         for (i, ticket_info) in ticket_reply.tickets.iter().enumerate() {
             debug!(
@@ -751,7 +751,7 @@ impl CephXClientHandler {
             }
 
             ticket_handlers.push((
-                ticket_info.service_id,
+                EntityType::from_bits_retain(ticket_info.service_id),
                 session_key,
                 ticket_info.ticket_blob.secret_id,
                 ticket_info.ticket_blob.clone(),
@@ -831,13 +831,13 @@ impl CephXClientHandler {
     /// Returns the server_challenge value
     pub fn decrypt_authorize_challenge(
         &self,
-        service_id: u32,
+        service_type: EntityType,
         mut encrypted_payload: Bytes,
     ) -> Result<u64> {
         use crate::protocol::{CephXAuthorizeReply, CephXEncryptedEnvelope};
         use denc::Denc;
 
-        debug!("Decrypting authorize challenge for service {}", service_id);
+        debug!("Decrypting authorize challenge for service {:?}", service_type);
         trace!(
             "decrypt_authorize_challenge: payload length={}",
             encrypted_payload.len()
@@ -850,17 +850,17 @@ impl CephXClientHandler {
             .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
 
         // Get ticket handler for the service
-        let handler = session.ticket_handlers.get(&service_id).ok_or_else(|| {
+        let handler = session.ticket_handlers.get(&service_type).ok_or_else(|| {
             CephXError::AuthenticationFailed(format!(
-                "No ticket handler for service {}",
-                service_id
+                "No ticket handler for service {:?}",
+                service_type
             ))
         })?;
 
         if !handler.have_key {
             return Err(CephXError::AuthenticationFailed(format!(
-                "No session key for service {}",
-                service_id
+                "No session key for service {:?}",
+                service_type
             )));
         }
 
@@ -928,7 +928,7 @@ impl CephXClientHandler {
     /// * `server_challenge` - Optional server challenge (for challenge-response)
     pub fn build_authorizer(
         &mut self,
-        service_id: u32,
+        service_type: EntityType,
         global_id: u64,
         server_challenge: Option<u64>,
     ) -> Result<Bytes> {
@@ -936,8 +936,8 @@ impl CephXClientHandler {
         use rand::RngCore;
 
         debug!(
-            "Building authorizer for service_id={} (global_id={})",
-            service_id, global_id
+            "Building authorizer for service_type={:?} (global_id={})",
+            service_type, global_id
         );
 
         // Get session or return error
@@ -951,14 +951,14 @@ impl CephXClientHandler {
 
         // Debug: log all available ticket handlers
         debug!(
-            "build_authorizer: Requesting service_id={}, Session has {} ticket handlers",
-            service_id,
+            "build_authorizer: Requesting service_type={:?}, Session has {} ticket handlers",
+            service_type,
             session.ticket_handlers.len()
         );
-        for (sid, handler) in &session.ticket_handlers {
+        for (stype, handler) in &session.ticket_handlers {
             debug!(
-                "  Ticket handler for service {}: have_key={}, expired={}, ticket_blob={}",
-                sid,
+                "  Ticket handler for service {:?}: have_key={}, expired={}, ticket_blob={}",
+                stype,
                 handler.have_key,
                 handler.is_expired(),
                 if handler.ticket_blob.is_some() {
@@ -970,12 +970,12 @@ impl CephXClientHandler {
         }
 
         // Get or create ticket handler
-        let handler = session.get_ticket_handler(service_id);
+        let handler = session.get_ticket_handler(service_type);
 
         if !handler.have_key {
             return Err(CephXError::AuthenticationFailed(format!(
-                "No ticket available for service {}",
-                service_id
+                "No ticket available for service {:?}",
+                service_type
             )));
         }
 
@@ -984,8 +984,8 @@ impl CephXClientHandler {
             .as_ref()
             .ok_or_else(|| {
                 CephXError::AuthenticationFailed(format!(
-                    "No ticket blob for service {}",
-                    service_id
+                    "No ticket blob for service {:?}",
+                    service_type
                 ))
             })?
             .clone();
@@ -995,15 +995,15 @@ impl CephXClientHandler {
         let secret_id = handler.secret_id;
 
         debug!(
-            "Building authorizer: global_id={}, service_id={}, secret_id={}, session_key_len={}",
+            "Building authorizer: global_id={}, service_type={:?}, secret_id={}, session_key_len={}",
             actual_global_id,
-            service_id,
+            service_type,
             secret_id,
             session_key.get_secret().len()
         );
 
         // Build CephXAuthorizeA
-        let authorize_a = CephXAuthorizeA::new(actual_global_id, service_id, ticket_blob);
+        let authorize_a = CephXAuthorizeA::new(actual_global_id, service_type.bits(), ticket_blob);
 
         // Generate nonce
         let mut rng = rand::thread_rng();
@@ -1154,10 +1154,10 @@ impl CephXClientHandler {
     pub fn build_ticket_renewal_request(
         &mut self,
         global_id: u64,
-        needed_keys: u32,
+        needed_keys: EntityType,
     ) -> Result<Bytes> {
         debug!(
-            "Building ticket renewal request for global_id={}, needed_keys=0x{:x}",
+            "Building ticket renewal request for global_id={}, needed_keys={:?}",
             global_id, needed_keys
         );
 
@@ -1182,7 +1182,7 @@ impl CephXClientHandler {
         // The authorizer proves we have a valid AUTH ticket
         let auth_ticket_handler = session
             .ticket_handlers
-            .get(&crate::types::service_id::AUTH)
+            .get(&EntityType::AUTH)
             .ok_or_else(|| {
                 CephXError::AuthenticationFailed("No AUTH ticket handler available".into())
             })?;
@@ -1196,7 +1196,7 @@ impl CephXClientHandler {
         // Build authorizer using the AUTH ticket
         // The authorizer proves we have a valid AUTH ticket
         let authorizer = self.build_authorizer(
-            crate::types::service_id::AUTH,
+            EntityType::AUTH,
             global_id,
             None, // No server challenge for ticket renewal
         )?;
@@ -1204,7 +1204,7 @@ impl CephXClientHandler {
         payload.extend_from_slice(&authorizer);
 
         // 3. Encode service ticket request with needed keys
-        let ticket_request = crate::protocol::CephXServiceTicketRequest::new(needed_keys);
+        let ticket_request = crate::protocol::CephXServiceTicketRequest::new(needed_keys.bits());
         ticket_request.encode(&mut payload, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to encode ticket request: {:?}", e))
         })?;

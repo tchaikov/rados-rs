@@ -18,7 +18,7 @@ tracing-subscriber = { workspace = true }
 rand = { workspace = true }
 crc32c = { workspace = true }
 serde = { workspace = true }
-bitflags = "2.4"
+bitflags = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 aes-gcm = "0.10"

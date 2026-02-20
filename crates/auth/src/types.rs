@@ -13,26 +13,28 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// Ceph entity type constants from src/include/msgr.h
-/// These identify different types of Ceph daemons
-pub mod entity_type {
-    /// Monitor daemon
-    pub const MON: u32 = 0x01;
-    /// Metadata Server
-    pub const MDS: u32 = 0x02;
-    /// Object Storage Daemon
-    pub const OSD: u32 = 0x04;
-    /// Client (librados users, ceph-fuse, etc.)
-    pub const CLIENT: u32 = 0x08;
-    /// Manager daemon
-    pub const MGR: u32 = 0x10;
-    /// Auth service (for ticket requests)
-    pub const AUTH: u32 = 0x20;
+bitflags::bitflags! {
+    /// Ceph entity type flags from `src/include/msgr.h`
+    ///
+    /// Used both as individual service identifiers (ticket HashMap keys) and
+    /// as bitmasks (e.g. `want_keys = EntityType::MON | EntityType::OSD`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct EntityType: u32 {
+        /// Monitor daemon
+        const MON    = 0x01;
+        /// Metadata Server
+        const MDS    = 0x02;
+        /// Object Storage Daemon
+        const OSD    = 0x04;
+        /// Client (librados users, ceph-fuse, etc.)
+        const CLIENT = 0x08;
+        /// Manager daemon
+        const MGR    = 0x10;
+        /// Auth service (for ticket requests)
+        const AUTH   = 0x20;
+    }
 }
 
-/// Service ID constants for ticket handlers
-/// Used as keys in the ticket_handlers HashMap
-pub use entity_type as service_id;
 
 /// Global ID type for Ceph entities
 pub type GlobalId = u64;
@@ -52,23 +54,16 @@ pub type GlobalId = u64;
 /// - `denc::types::EntityName` - General encoding version (typed)
 ///
 /// C++ encoding format:
-/// - `__u32 type` - Entity type (CEPH_ENTITY_TYPE_CLIENT=1, etc.)
+/// - `__u32 type` - Entity type (CEPH_ENTITY_TYPE_CLIENT=8, etc.)
 /// - `std::string id` - Entity ID (e.g., "admin" for "client.admin")
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityName {
-    pub entity_type: u32,
+    pub entity_type: EntityType,
     pub id: String,
 }
 
-/// Entity type constants from include/msgr.h
-pub const CEPH_ENTITY_TYPE_MON: u32 = 0x01;
-pub const CEPH_ENTITY_TYPE_MDS: u32 = 0x02;
-pub const CEPH_ENTITY_TYPE_OSD: u32 = 0x04;
-pub const CEPH_ENTITY_TYPE_CLIENT: u32 = 0x08;
-pub const CEPH_ENTITY_TYPE_MGR: u32 = 0x10;
-
 impl EntityName {
-    pub fn new(entity_type: u32, id: &str) -> Self {
+    pub fn new(entity_type: EntityType, id: &str) -> Self {
         Self {
             entity_type,
             id: id.to_string(),
@@ -77,17 +72,17 @@ impl EntityName {
 
     /// Create a client entity (most common case)
     pub fn client(id: &str) -> Self {
-        Self::new(CEPH_ENTITY_TYPE_CLIENT, id)
+        Self::new(EntityType::CLIENT, id)
     }
 
     /// Convert to string format like "client.admin"
     pub fn to_str(&self) -> String {
         let type_str = match self.entity_type {
-            CEPH_ENTITY_TYPE_MON => "mon",
-            CEPH_ENTITY_TYPE_CLIENT => "client",
-            CEPH_ENTITY_TYPE_OSD => "osd",
-            CEPH_ENTITY_TYPE_MDS => "mds",
-            CEPH_ENTITY_TYPE_MGR => "mgr",
+            EntityType::MON => "mon",
+            EntityType::CLIENT => "client",
+            EntityType::OSD => "osd",
+            EntityType::MDS => "mds",
+            EntityType::MGR => "mgr",
             _ => "unknown",
         };
         format!("{}.{}", type_str, self.id)
@@ -113,11 +108,11 @@ impl std::str::FromStr for EntityName {
         }
 
         let entity_type = match parts[0] {
-            "mon" => CEPH_ENTITY_TYPE_MON,
-            "client" => CEPH_ENTITY_TYPE_CLIENT,
-            "osd" => CEPH_ENTITY_TYPE_OSD,
-            "mds" => CEPH_ENTITY_TYPE_MDS,
-            "mgr" => CEPH_ENTITY_TYPE_MGR,
+            "mon" => EntityType::MON,
+            "client" => EntityType::CLIENT,
+            "osd" => EntityType::OSD,
+            "mds" => EntityType::MDS,
+            "mgr" => EntityType::MGR,
             _ => {
                 return Err(CephXError::ProtocolError(format!(
                     "Unknown entity type: {}",
@@ -136,8 +131,8 @@ impl Denc for EntityName {
         buf: &mut B,
         _features: u64,
     ) -> std::result::Result<(), RadosError> {
-        // Encode type (u32)
-        self.entity_type.encode(buf, 0)?;
+        // Encode type as u32 on the wire
+        self.entity_type.bits().encode(buf, 0)?;
 
         // Encode id (string with length prefix)
         (self.id.len() as u32).encode(buf, 0)?;
@@ -153,7 +148,7 @@ impl Denc for EntityName {
             ));
         }
 
-        let entity_type = u32::decode(buf, 0)?;
+        let entity_type = EntityType::from_bits_retain(u32::decode(buf, 0)?);
 
         let id_len = u32::decode(buf, 0)? as usize;
         if buf.remaining() < id_len {
@@ -776,7 +771,7 @@ impl Denc for CephXAuthenticator {
 /// Corresponds to C++ `ceph_x_ticket_handler` in Linux kernel auth_x.h
 #[derive(Debug, Clone)]
 pub struct TicketHandler {
-    pub service: u32,
+    pub service: EntityType,
     pub session_key: CryptoKey,
     pub have_key: bool,
     pub secret_id: u64,
@@ -786,7 +781,7 @@ pub struct TicketHandler {
 }
 
 impl TicketHandler {
-    pub fn new(service: u32) -> Self {
+    pub fn new(service: EntityType) -> Self {
         Self {
             service,
             session_key: CryptoKey::new(Bytes::new()),
@@ -841,9 +836,9 @@ pub struct CephXSession {
     pub global_id: GlobalId,
     pub session_key: CryptoKey,
     pub ticket: Option<CephXTicketBlob>,
-    pub service_tickets: HashMap<u32, CephXTicketBlob>,
+    pub service_tickets: HashMap<EntityType, CephXTicketBlob>,
     /// Ticket handlers for service tickets (OSD, MDS, etc.)
-    pub ticket_handlers: HashMap<u32, TicketHandler>,
+    pub ticket_handlers: HashMap<EntityType, TicketHandler>,
 }
 
 impl CephXSession {
@@ -858,32 +853,32 @@ impl CephXSession {
         }
     }
 
-    pub fn add_service_ticket(&mut self, service_id: u32, ticket: CephXTicketBlob) {
-        self.service_tickets.insert(service_id, ticket);
+    pub fn add_service_ticket(&mut self, service_type: EntityType, ticket: CephXTicketBlob) {
+        self.service_tickets.insert(service_type, ticket);
     }
 
-    pub fn get_service_ticket(&self, service_id: u32) -> Option<&CephXTicketBlob> {
-        self.service_tickets.get(&service_id)
+    pub fn get_service_ticket(&self, service_type: EntityType) -> Option<&CephXTicketBlob> {
+        self.service_tickets.get(&service_type)
     }
 
     /// Get or create a ticket handler for a service
-    pub fn get_ticket_handler(&mut self, service_id: u32) -> &mut TicketHandler {
+    pub fn get_ticket_handler(&mut self, service_type: EntityType) -> &mut TicketHandler {
         self.ticket_handlers
-            .entry(service_id)
-            .or_insert_with(|| TicketHandler::new(service_id))
+            .entry(service_type)
+            .or_insert_with(|| TicketHandler::new(service_type))
     }
 
     /// Check if we have a valid ticket for a service
-    pub fn has_valid_ticket(&self, service_id: u32) -> bool {
-        if let Some(handler) = self.ticket_handlers.get(&service_id) {
+    pub fn has_valid_ticket(&self, service_type: EntityType) -> bool {
+        if let Some(handler) = self.ticket_handlers.get(&service_type) {
             handler.have_key && !handler.is_expired()
         } else {
             false
         }
     }
 
-    pub fn create_authenticator(&self, service_id: u32) -> CephXAuthenticator {
-        CephXAuthenticator::new(self.global_id, service_id)
+    pub fn create_authenticator(&self, service_type: EntityType) -> CephXAuthenticator {
+        CephXAuthenticator::new(self.global_id, service_type.bits())
     }
 
     pub fn sign_authenticator(&self, auth: &CephXAuthenticator) -> Result<Bytes> {

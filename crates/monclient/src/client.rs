@@ -976,22 +976,16 @@ impl MonClient {
                 if let Some(session) = handler.get_session() {
                     // Check each ticket handler to see if any need renewal
                     let mut needs_renewal = false;
-                    let mut needed_keys = 0u32;
+                    let mut needed_keys = auth::EntityType::empty();
 
-                    for (service_id, ticket_handler) in &session.ticket_handlers {
+                    for (service_type, ticket_handler) in &session.ticket_handlers {
                         if ticket_handler.need_key() {
                             debug!(
-                                "Service ticket for {} needs renewal (renew_after reached)",
-                                match *service_id {
-                                    auth::service_id::MON => "MON",
-                                    auth::service_id::OSD => "OSD",
-                                    auth::service_id::MDS => "MDS",
-                                    auth::service_id::MGR => "MGR",
-                                    _ => "UNKNOWN",
-                                }
+                                "Service ticket for {:?} needs renewal (renew_after reached)",
+                                *service_type
                             );
                             needs_renewal = true;
-                            needed_keys |= *service_id;
+                            needed_keys |= *service_type;
                         }
                     }
 
@@ -1009,7 +1003,7 @@ impl MonClient {
             // If renewal is needed, build and send the request
             if let Some((global_id, needed_keys)) = renewal_info {
                 debug!(
-                    "Building ticket renewal request for services: 0x{:x}",
+                    "Building ticket renewal request for services: {:?}",
                     needed_keys
                 );
 
