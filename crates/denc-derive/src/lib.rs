@@ -2,6 +2,92 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
+/// Derive macro for field-by-field Denc encoding/decoding
+///
+/// Generates a `Denc` implementation that encodes/decodes each named field
+/// in declaration order, passing `features` through to each field's impl.
+///
+/// Requires every field type to implement `denc::Denc`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(denc::Denc)]
+/// struct MyMessage {
+///     version: u8,
+///     payload: Bytes,
+///     count: u32,
+/// }
+/// ```
+#[proc_macro_derive(Denc)]
+pub fn derive_denc(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let name = &input.ident;
+
+    let fields = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Named(fields) => fields,
+            _ => panic!("Denc derive only supports named fields"),
+        },
+        _ => panic!("Denc can only be derived for structs"),
+    };
+
+    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
+    let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
+
+    let encode_stmts = field_names.iter().map(|name| {
+        quote! { self.#name.encode(buf, features)?; }
+    });
+
+    let decode_fields = fields.named.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! {
+            #field_name: <#field_type as denc::Denc>::decode(buf, features)?
+        }
+    });
+
+    let where_clauses = field_types.iter().map(|ty| {
+        quote! { #ty: denc::Denc }
+    });
+
+    let expanded = quote! {
+        impl denc::Denc for #name
+        where
+            #(#where_clauses,)*
+        {
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<(), denc::RadosError> {
+                #(#encode_stmts)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn decode<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<Self, denc::RadosError>
+            where
+                Self: Sized,
+            {
+                ::std::result::Result::Ok(Self {
+                    #(#decode_fields,)*
+                })
+            }
+
+            fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
+                let mut size: usize = 0;
+                #(size += self.#field_names.encoded_size(features)?;)*
+                ::std::option::Option::Some(size)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
 /// Derive macro for zero-copy encoding/decoding of POD types
 ///
 /// This generates a `Denc` implementation for the type using the `zerocopy`

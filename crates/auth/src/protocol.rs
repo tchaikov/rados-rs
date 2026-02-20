@@ -222,41 +222,10 @@ impl Denc for ServiceTicketInfo {
 /// - `struct_v: u8` - Structure version (currently 1)
 /// - `num_tickets: u32` - Number of tickets in the list (implicit in Vec encoding)
 /// - `tickets: Vec<ServiceTicketInfo>` - List of service tickets
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct ServiceTicketReply {
     pub struct_v: u8,
     pub tickets: Vec<ServiceTicketInfo>,
-}
-
-impl Denc for ServiceTicketReply {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        self.struct_v.encode(buf, 0)?;
-        // Encode Vec length as u32
-        (self.tickets.len() as u32).encode(buf, 0)?;
-        // Encode each ticket
-        for ticket in &self.tickets {
-            ticket.encode(buf, features)?;
-        }
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let struct_v = u8::decode(buf, 0)?;
-        let num_tickets = u32::decode(buf, 0)? as usize;
-        let mut tickets = Vec::with_capacity(num_tickets);
-        for _ in 0..num_tickets {
-            tickets.push(ServiceTicketInfo::decode(buf, features)?);
-        }
-        Ok(Self { struct_v, tickets })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut size = 1 + 4; // struct_v + num_tickets
-        for ticket in &self.tickets {
-            size += ticket.encoded_size(features)?;
-        }
-        Some(size)
-    }
 }
 
 /// Authentication modes
