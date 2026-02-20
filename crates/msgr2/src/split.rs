@@ -80,7 +80,7 @@ impl SharedState {
     /// Discard acknowledged messages up to the given sequence number
     pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
         while let Some(msg) = self.sent_messages.front() {
-            if msg.header.seq <= ack_seq {
+            if msg.header.get_seq() <= ack_seq {
                 self.sent_messages.pop_front();
             } else {
                 break;
@@ -270,8 +270,8 @@ async fn send_outbound_entry(
     let (seq, ack_seq) = {
         let mut state = shared.lock().await;
         state.out_seq += 1;
-        msg.header.seq = state.out_seq;
-        msg.header.ack_seq = state.in_seq;
+        msg.header.set_seq(state.out_seq);
+        msg.header.set_ack_seq(state.in_seq);
         state.record_sent_message(msg.clone());
         (state.out_seq, state.in_seq)
     };
@@ -454,7 +454,7 @@ async fn parse_message_frame(frame: &Frame, shared: &Arc<Mutex<SharedState>>) ->
     let ack_seq = header.get_ack_seq();
 
     let msg = Message {
-        header: header.clone(),
+        header,
         front,
         middle,
         data,

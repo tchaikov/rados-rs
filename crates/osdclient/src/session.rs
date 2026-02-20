@@ -24,6 +24,7 @@ use crate::types::{OpResult, RequestId, StripedPgId};
 use monclient::MOSDMap;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
+use msgr2::message::MessagePriority;
 use msgr2::MapSender;
 
 /// Connection state for OSD session
@@ -542,9 +543,9 @@ impl OSDSession {
 
         let mut msg =
             msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_OP, ceph_msg.front)
-                .with_version(ceph_msg.header.version)
+                .with_version(ceph_msg.header.version.get())
                 .with_tid(tid)
-                .with_priority(priority_u16);
+                .with_priority(MessagePriority::from(priority_u16));
         msg.header.compat_version = ceph_msg.header.compat_version;
         msg.data = ceph_msg.data;
 

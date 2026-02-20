@@ -291,13 +291,23 @@ impl StripedPgId {
 /// - `denc::types::EntityName` - General encoding version (typed)
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
-#[derive(Debug, Clone, PartialEq, Eq, denc::ZeroCopyDencode)]
-#[repr(C, packed)]
+#[derive(
+    Debug,
+    Clone,
+    PartialEq,
+    Eq,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C)]
 pub struct EntityName {
     /// Entity type (CEPH_ENTITY_TYPE_*)
     pub entity_type: u8,
     /// Entity number
-    pub num: u64,
+    pub num: denc::zerocopy::little_endian::U64,
 }
 
 /// Entity type constants (from Ceph's msgr.h)
@@ -310,7 +320,10 @@ pub const CEPH_ENTITY_TYPE_AUTH: u8 = 0x20;
 
 impl EntityName {
     pub fn new(entity_type: u8, num: u64) -> Self {
-        Self { entity_type, num }
+        Self {
+            entity_type,
+            num: denc::zerocopy::little_endian::U64::new(num),
+        }
     }
 }
 
@@ -334,10 +347,10 @@ impl std::str::FromStr for EntityName {
             _ => return Err(format!("Unknown entity type: {}", parts[0])),
         };
 
-        let num = parts[1]
+        let num: u64 = parts[1]
             .parse()
             .map_err(|e| format!("Invalid entity number: {}", e))?;
-        Ok(Self { entity_type, num })
+        Ok(Self::new(entity_type, num))
     }
 }
 
@@ -366,21 +379,33 @@ impl RequestId {
 ///
 /// Used for distributed tracing with Zipkin/Jaeger.
 /// In most cases, all fields are 0 (tracing disabled).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, denc::ZeroCopyDencode)]
-#[repr(C, packed)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
+#[repr(C)]
 pub struct BlkinTraceInfo {
-    pub trace_id: u64,
-    pub span_id: u64,
-    pub parent_span_id: u64,
+    pub trace_id: denc::zerocopy::little_endian::U64,
+    pub span_id: denc::zerocopy::little_endian::U64,
+    pub parent_span_id: denc::zerocopy::little_endian::U64,
 }
 
 impl BlkinTraceInfo {
     /// Create empty trace info (tracing disabled)
     pub const fn empty() -> Self {
+        use denc::zerocopy::little_endian::U64;
         Self {
-            trace_id: 0,
-            span_id: 0,
-            parent_span_id: 0,
+            trace_id: U64::ZERO,
+            span_id: U64::ZERO,
+            parent_span_id: U64::ZERO,
         }
     }
 }

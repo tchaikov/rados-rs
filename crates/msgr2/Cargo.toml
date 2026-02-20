@@ -7,6 +7,7 @@ edition = "2021"
 denc = { path = "../denc" }
 auth = { path = "../auth" }
 cephconfig = { path = "../cephconfig" }
+zerocopy = { version = "0.8", features = ["derive"] }
 async-trait = "0.1"
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros"] }
 tokio-util = "0.7"

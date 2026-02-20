@@ -5,27 +5,29 @@ use std::mem::size_of;
 //
 // ceph:src/include/msgr.h:ceph_msg_header2
 //
-#[repr(C, packed)]
-#[derive(Debug, denc::ZeroCopyDencode)]
+#[repr(C)]
+#[derive(
+    Debug,
+    Copy,
+    Clone,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
 pub struct MsgHeader {
-    pub seq: u64,
-    pub tid: u64,
-    pub msg_type: u16,
-    pub priority: u16,
-    pub version: u16,
-    pub data_pre_padding_len: u32,
-    pub data_off: u16,
-    pub ack_seq: u64,
+    seq: denc::zerocopy::little_endian::U64,
+    tid: denc::zerocopy::little_endian::U64,
+    pub msg_type: denc::zerocopy::little_endian::U16,
+    pub priority: denc::zerocopy::little_endian::U16,
+    pub version: denc::zerocopy::little_endian::U16,
+    pub data_pre_padding_len: denc::zerocopy::little_endian::U32,
+    pub data_off: denc::zerocopy::little_endian::U16,
+    pub ack_seq: denc::zerocopy::little_endian::U64,
     pub flags: u8,
-    pub compat_version: u16,
-    pub reserved: u16,
-}
-
-impl Clone for MsgHeader {
-    fn clone(&self) -> Self {
-        // Use read_unaligned to safely copy from packed struct
-        unsafe { std::ptr::addr_of!(*self).read_unaligned() }
-    }
+    pub compat_version: denc::zerocopy::little_endian::U16,
+    pub reserved: denc::zerocopy::little_endian::U16,
 }
 
 impl MsgHeader {
@@ -41,116 +43,115 @@ impl MsgHeader {
     }
 
     pub fn new_default(msg_type: u16, priority: u16) -> Self {
+        use denc::zerocopy::little_endian::{U16, U32, U64};
         Self {
-            seq: 0,
-            tid: 0,
-            msg_type,
-            priority,
-            version: 2, // Protocol V2
-            data_pre_padding_len: 0,
-            data_off: 0,
-            ack_seq: 0,
+            seq: U64::new(0),
+            tid: U64::new(0),
+            msg_type: U16::new(msg_type),
+            priority: U16::new(priority),
+            version: U16::new(2), // Protocol V2
+            data_pre_padding_len: U32::new(0),
+            data_off: U16::new(0),
+            ack_seq: U64::new(0),
             flags: 0,
-            compat_version: 1,
-            reserved: 0,
+            compat_version: U16::new(1),
+            reserved: U16::new(0),
         }
     }
 
-    // Safe accessors for packed fields
-    // These methods safely copy values from the packed struct without taking references,
-    // avoiding undefined behavior from unaligned field access.
+    // Safe accessors for fields
+    // These methods get values from the zerocopy LE types
 
-    /// Get sequence number (safe copy from packed field)
+    /// Get sequence number
     #[inline]
     pub fn get_seq(&self) -> u64 {
-        // SAFETY: Reading a copy of a packed field is safe
-        unsafe { std::ptr::addr_of!(self.seq).read_unaligned() }
+        self.seq.get()
     }
 
-    /// Get transaction ID (safe copy from packed field)
+    /// Get transaction ID
     #[inline]
     pub fn get_tid(&self) -> u64 {
-        unsafe { std::ptr::addr_of!(self.tid).read_unaligned() }
+        self.tid.get()
     }
 
-    /// Get message type (safe copy from packed field)
+    /// Get message type
     #[inline]
     pub fn get_msg_type(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.msg_type).read_unaligned() }
+        self.msg_type.get()
     }
 
-    /// Get priority (safe copy from packed field)
+    /// Get priority
     #[inline]
     pub fn get_priority(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.priority).read_unaligned() }
+        self.priority.get()
     }
 
-    /// Get version (safe copy from packed field)
+    /// Get version
     #[inline]
     pub fn get_version(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.version).read_unaligned() }
+        self.version.get()
     }
 
-    /// Get data pre-padding length (safe copy from packed field)
+    /// Get data pre-padding length
     #[inline]
     pub fn get_data_pre_padding_len(&self) -> u32 {
-        unsafe { std::ptr::addr_of!(self.data_pre_padding_len).read_unaligned() }
+        self.data_pre_padding_len.get()
     }
 
-    /// Get data offset (safe copy from packed field)
+    /// Get data offset
     #[inline]
     pub fn get_data_off(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.data_off).read_unaligned() }
+        self.data_off.get()
     }
 
-    /// Get acknowledgment sequence (safe copy from packed field)
+    /// Get acknowledgment sequence
     #[inline]
     pub fn get_ack_seq(&self) -> u64 {
-        unsafe { std::ptr::addr_of!(self.ack_seq).read_unaligned() }
+        self.ack_seq.get()
     }
 
-    /// Get flags (safe copy from packed field)
+    /// Get flags
     #[inline]
     pub fn get_flags(&self) -> u8 {
-        unsafe { std::ptr::addr_of!(self.flags).read_unaligned() }
+        self.flags
     }
 
-    /// Get compatible version (safe copy from packed field)
+    /// Get compatible version
     #[inline]
     pub fn get_compat_version(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.compat_version).read_unaligned() }
+        self.compat_version.get()
     }
 
-    /// Get reserved field (safe copy from packed field)
+    /// Get reserved field
     #[inline]
     pub fn get_reserved(&self) -> u16 {
-        unsafe { std::ptr::addr_of!(self.reserved).read_unaligned() }
+        self.reserved.get()
     }
 
-    // Safe setters for packed fields
-    // These methods safely write values to the packed struct without taking mutable references.
+    // Safe setters for fields
+    // These methods set values using the zerocopy LE types
 
-    /// Set sequence number (safe write to packed field)
+    /// Set sequence number
     #[inline]
     pub fn set_seq(&mut self, value: u64) {
-        unsafe { std::ptr::addr_of_mut!(self.seq).write_unaligned(value) }
+        self.seq = denc::zerocopy::little_endian::U64::new(value);
     }
 
-    /// Set transaction ID (safe write to packed field)
+    /// Set transaction ID
     #[inline]
     pub fn set_tid(&mut self, value: u64) {
-        unsafe { std::ptr::addr_of_mut!(self.tid).write_unaligned(value) }
+        self.tid = denc::zerocopy::little_endian::U64::new(value);
     }
 
-    /// Set acknowledgment sequence (safe write to packed field)
+    /// Set acknowledgment sequence
     #[inline]
     pub fn set_ack_seq(&mut self, value: u64) {
-        unsafe { std::ptr::addr_of_mut!(self.ack_seq).write_unaligned(value) }
+        self.ack_seq = denc::zerocopy::little_endian::U64::new(value);
     }
 
-    /// Set flags (safe write to packed field)
+    /// Set flags
     #[inline]
     pub fn set_flags(&mut self, value: u8) {
-        unsafe { std::ptr::addr_of_mut!(self.flags).write_unaligned(value) }
+        self.flags = value;
     }
 }

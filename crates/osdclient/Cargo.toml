@@ -15,6 +15,7 @@ bitflags = "2.4"
 serde = { workspace = true }
 crc32c = { workspace = true }
 libc = "0.2"
+zerocopy = { version = "0.8", features = ["derive"] }
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }

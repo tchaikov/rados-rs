@@ -52,7 +52,7 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
         #denc_impl
 
         // Implement the marker trait
-        impl denc::zerocopy::ZeroCopyDencode for #name {}
+        impl denc::zero_copy::ZeroCopyDencode for #name {}
     };
 
     TokenStream::from(expanded)
@@ -60,63 +60,30 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
 
 fn generate_packed_denc(
     name: &syn::Ident,
-    field_names: &[&Option<syn::Ident>],
+    _field_names: &[&Option<syn::Ident>],
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> proc_macro2::TokenStream {
     let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
 
-    let decode_fields = fields.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-
-        quote! {
-            #field_name: <#field_type as denc::Denc>::decode(buf, 0)?
-        }
-    });
-
     quote! {
         impl denc::Denc for #name
         where
-            #(#field_types: denc::zerocopy::ZeroCopyDencode,)*
+            #(#field_types: denc::zero_copy::ZeroCopyDencode,)*
         {
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
                 _features: u64,
             ) -> ::std::result::Result<(), denc::RadosError> {
-                let size = ::std::mem::size_of::<Self>();
-                if buf.remaining_mut() < size {
+                let bytes = <Self as denc::zerocopy::IntoBytes>::as_bytes(self);
+                if buf.remaining_mut() < bytes.len() {
                     return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
-                        "Insufficient buffer space: need {} bytes, have {}",
-                        size,
+                        "Insufficient buffer: need {}, have {}",
+                        bytes.len(),
                         buf.remaining_mut()
                     )));
                 }
-
-                // Zero-copy for little-endian systems
-                #[cfg(target_endian = "little")]
-                {
-                    // SAFETY: Type is repr(C, packed) with primitive types,
-                    // and we're on little-endian where memory layout matches wire format
-                    unsafe {
-                        let src_ptr = self as *const Self as *const u8;
-                        let src_slice = ::std::slice::from_raw_parts(src_ptr, size);
-                        buf.put_slice(src_slice);
-                    }
-                }
-
-                // Field-by-field for big-endian
-                // Use read_unaligned to safely read from packed struct fields
-                #[cfg(not(target_endian = "little"))]
-                {
-                    unsafe {
-                        #(
-                            let field_val = ::std::ptr::addr_of!(self.#field_names).read_unaligned();
-                            denc::Denc::encode(&field_val, buf, 0)?;
-                        )*
-                    }
-                }
-
+                buf.put_slice(bytes);
                 ::std::result::Result::Ok(())
             }
 
@@ -130,33 +97,17 @@ fn generate_packed_denc(
                 let size = ::std::mem::size_of::<Self>();
                 if buf.remaining() < size {
                     return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
-                        "Insufficient bytes: need {} bytes, have {}",
+                        "Insufficient bytes: need {}, have {}",
                         size,
                         buf.remaining()
                     )));
                 }
-
-                // Zero-copy for little-endian systems
-                #[cfg(target_endian = "little")]
-                {
-                    // SAFETY: Type is repr(C, packed) with primitive types,
-                    // and we're on little-endian where memory layout matches wire format
-                    unsafe {
-                        let mut value = ::std::mem::MaybeUninit::<Self>::uninit();
-                        let dst_ptr = value.as_mut_ptr() as *mut u8;
-                        let dst_slice = ::std::slice::from_raw_parts_mut(dst_ptr, size);
-                        buf.copy_to_slice(dst_slice);
-                        ::std::result::Result::Ok(value.assume_init())
-                    }
-                }
-
-                // Field-by-field for big-endian
-                #[cfg(not(target_endian = "little"))]
-                {
-                    ::std::result::Result::Ok(Self {
-                        #(#decode_fields,)*
-                    })
-                }
+                let mut bytes = ::std::vec![0u8; size];
+                buf.copy_to_slice(&mut bytes);
+                <Self as denc::zerocopy::FromBytes>::read_from_bytes(&bytes)
+                    .map_err(|e| denc::RadosError::Protocol(
+                        format!("zerocopy decode failed: {:?}", e)
+                    ))
             }
 
             fn encoded_size(&self, _features: u64) -> ::std::option::Option<usize> {
@@ -185,7 +136,7 @@ fn generate_standard_denc(
     quote! {
         impl denc::Denc for #name
         where
-            #(#field_types: denc::zerocopy::ZeroCopyDencode,)*
+            #(#field_types: denc::zero_copy::ZeroCopyDencode,)*
         {
             fn encode<B: bytes::BufMut>(
                 &self,

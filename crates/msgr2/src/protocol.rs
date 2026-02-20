@@ -765,7 +765,7 @@ impl ConnectionState {
     /// Discard acknowledged messages up to the given sequence number
     pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
         while let Some(msg) = self.session.sent_messages.front() {
-            if msg.header.seq <= ack_seq {
+            if msg.header.get_seq() <= ack_seq {
                 self.session.sent_messages.pop_front();
             } else {
                 break;
@@ -1501,7 +1501,7 @@ impl Connection {
                                 // Resend the message with its original sequence number
                                 // (following Ceph's practice of preserving message sequence)
                                 let msg_frame = MessageFrame::new(
-                                    msg.header.clone(),
+                                    msg.header,
                                     msg.front.clone(),
                                     msg.middle.clone(),
                                     msg.data.clone(),
@@ -1795,10 +1795,10 @@ impl Connection {
 
         // Increment sequence number (pre-increment, like C++ does with ++out_seq)
         self.state.out_seq += 1;
-        msg.header.seq = self.state.out_seq;
+        msg.header.set_seq(self.state.out_seq);
 
         // Piggyback ACK in message header (like Ceph does)
-        msg.header.ack_seq = self.state.in_seq;
+        msg.header.set_ack_seq(self.state.in_seq);
 
         let seq = msg.seq();
         let ack_seq = msg.header.get_ack_seq(); // Safe accessor for packed field
@@ -1822,7 +1822,7 @@ impl Connection {
 
         // Convert Message to MessageFrame
         let msg_frame = MessageFrame::new(
-            msg.header.clone(),
+            msg.header,
             msg.front.clone(),
             msg.middle.clone(),
             msg.data.clone(),
@@ -1935,7 +1935,7 @@ impl Connection {
                     let ack_seq = header.get_ack_seq();
 
                     let msg = Message {
-                        header: header.clone(),
+                        header,
                         front,
                         middle,
                         data,
@@ -2153,12 +2153,10 @@ mod tests {
     fn test_priority_queue_ordering() {
         let mut queue = PriorityQueue::new();
 
-        let low_msg =
-            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
+        let low_msg = Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low);
         let normal_msg =
-            Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
-        let high_msg =
-            Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
+            Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal);
+        let high_msg = Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High);
 
         // Add in random order
         queue.push_back(normal_msg);
@@ -2179,7 +2177,7 @@ mod tests {
         for i in 1u16..=3 {
             queue.push_back(
                 Message::new(i, Bytes::from(format!("msg{i}")))
-                    .with_priority(MessagePriority::Normal.to_u16()),
+                    .with_priority(MessagePriority::Normal),
             );
         }
 
@@ -2192,12 +2190,9 @@ mod tests {
     fn test_priority_queue_iter() {
         let mut queue = PriorityQueue::new();
 
-        queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low.to_u16()));
-        queue
-            .push_back(Message::new(3, Bytes::new()).with_priority(MessagePriority::High.to_u16()));
-        queue.push_back(
-            Message::new(2, Bytes::new()).with_priority(MessagePriority::Normal.to_u16()),
-        );
+        queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low));
+        queue.push_back(Message::new(3, Bytes::new()).with_priority(MessagePriority::High));
+        queue.push_back(Message::new(2, Bytes::new()).with_priority(MessagePriority::Normal));
 
         let types: Vec<u16> = queue.iter().map(|m| m.msg_type()).collect();
         assert_eq!(types, vec![3, 2, 1]); // High, Normal, Low
@@ -2207,8 +2202,8 @@ mod tests {
     fn test_priority_queue_clear() {
         let mut queue = PriorityQueue::new();
         queue.push_back(Message::new(1, Bytes::new()));
-        queue.push_back(Message::new(2, Bytes::new()).with_priority(2));
-        queue.push_back(Message::new(3, Bytes::new()).with_priority(1));
+        queue.push_back(Message::new(2, Bytes::new()).with_priority(MessagePriority::High));
+        queue.push_back(Message::new(3, Bytes::new()).with_priority(MessagePriority::Normal));
 
         assert_eq!(queue.len(), 3);
         queue.clear();
@@ -2221,12 +2216,8 @@ mod tests {
     fn test_priority_queue_front() {
         let mut queue = PriorityQueue::new();
 
-        queue.push_back(
-            Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16()),
-        );
-        queue.push_back(
-            Message::new(2, Bytes::from("high")).with_priority(MessagePriority::High.to_u16()),
-        );
+        queue.push_back(Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low));
+        queue.push_back(Message::new(2, Bytes::from("high")).with_priority(MessagePriority::High));
 
         assert_eq!(queue.front().unwrap().msg_type(), 2);
         assert_eq!(queue.len(), 2); // front() does not remove

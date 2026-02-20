@@ -137,16 +137,24 @@ impl Default for Banner {
     }
 }
 
-#[repr(C, packed)]
-#[derive(Debug, denc::ZeroCopyDencode)]
+#[repr(C)]
+#[derive(
+    Debug,
+    Copy,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
 pub struct ConnectMessage {
-    pub features: FeatureSet,
-    pub host_type: u32,
-    pub global_seq: u32,
-    pub connect_seq: u32,
-    pub protocol_version: u32,
-    pub authorizer_protocol: u32,
-    pub authorizer_len: u32,
+    pub features: denc::zerocopy::little_endian::U64,
+    pub host_type: denc::zerocopy::little_endian::U32,
+    pub global_seq: denc::zerocopy::little_endian::U32,
+    pub connect_seq: denc::zerocopy::little_endian::U32,
+    pub protocol_version: denc::zerocopy::little_endian::U32,
+    pub authorizer_protocol: denc::zerocopy::little_endian::U32,
+    pub authorizer_len: denc::zerocopy::little_endian::U32,
     pub flags: u8,
     padding: [u8; 3], // Explicit padding to match wire format
 }
@@ -156,22 +164,33 @@ impl ConnectMessage {
     pub const PROTOCOL_VERSION: u32 = 2; // msgr2
 
     pub fn new(features: FeatureSet, host_type: u32) -> Self {
+        use denc::zerocopy::little_endian::{U32, U64};
         Self {
-            features,
-            host_type,
-            global_seq: 0,
-            connect_seq: 0,
-            protocol_version: Self::PROTOCOL_VERSION,
-            authorizer_protocol: 0,
-            authorizer_len: 0,
+            features: U64::new(features.bits()),
+            host_type: U32::new(host_type),
+            global_seq: U32::new(0),
+            connect_seq: U32::new(0),
+            protocol_version: U32::new(Self::PROTOCOL_VERSION),
+            authorizer_protocol: U32::new(0),
+            authorizer_len: U32::new(0),
             flags: 0,
             padding: [0; 3],
         }
     }
 
+    /// Get features as FeatureSet
+    pub fn get_features(&self) -> FeatureSet {
+        FeatureSet::from(self.features.get())
+    }
+
+    /// Set features from FeatureSet
+    pub fn set_features(&mut self, features: FeatureSet) {
+        self.features = denc::zerocopy::little_endian::U64::new(features.bits());
+    }
+
     pub fn with_auth(mut self, auth_protocol: u32, authorizer_len: u32) -> Self {
-        self.authorizer_protocol = auth_protocol;
-        self.authorizer_len = authorizer_len;
+        self.authorizer_protocol = denc::zerocopy::little_endian::U32::new(auth_protocol);
+        self.authorizer_len = denc::zerocopy::little_endian::U32::new(authorizer_len);
         self
     }
 
@@ -187,8 +206,7 @@ impl ConnectMessage {
 
 impl Clone for ConnectMessage {
     fn clone(&self) -> Self {
-        // Use read_unaligned to safely copy from packed struct
-        unsafe { std::ptr::addr_of!(*self).read_unaligned() }
+        *self
     }
 }
 

@@ -97,9 +97,6 @@ impl denc::Denc for FeatureSet {
     }
 }
 
-// Implement ZeroCopyDencode marker to indicate this type is safe for zerocopy
-impl denc::zerocopy::ZeroCopyDencode for FeatureSet {}
-
 /// Authentication method enum (from include/ceph_fs.h)
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,

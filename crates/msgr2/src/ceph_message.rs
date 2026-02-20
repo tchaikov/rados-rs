@@ -11,7 +11,7 @@
 //! Reference: ~/dev/ceph/src/msg/Message.h and ~/dev/ceph/src/msg/Message.cc
 
 use crate::error::{Error, Result};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use crc32c::crc32c;
 
 // Re-export message type constants
@@ -19,12 +19,21 @@ pub use crate::message::{CEPH_MSG_AUTH, CEPH_MSG_AUTH_REPLY, CEPH_MSG_PING, CEPH
 
 /// Old footer format for wire compatibility
 /// Reference: ~/dev/linux/include/linux/ceph/msgr.h
-#[repr(C, packed)]
-#[derive(Debug, Clone, Default, denc::ZeroCopyDencode)]
+#[repr(C)]
+#[derive(
+    Debug,
+    Clone,
+    Default,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
 pub struct CephMsgFooterOld {
-    pub front_crc: u32,
-    pub middle_crc: u32,
-    pub data_crc: u32,
+    pub front_crc: denc::zerocopy::little_endian::U32,
+    pub middle_crc: denc::zerocopy::little_endian::U32,
+    pub data_crc: denc::zerocopy::little_endian::U32,
     pub flags: u8,
 }
 
@@ -45,107 +54,63 @@ impl CephMsgFooterOld {
 
 /// Ceph message header
 /// Reference: ~/dev/linux/include/linux/ceph/msgr.h struct ceph_msg_header
-#[repr(C, packed)]
-#[derive(Debug, Clone, denc::ZeroCopyDencode)]
+#[repr(C)]
+#[derive(
+    Debug,
+    Clone,
+    denc::ZeroCopyDencode,
+    zerocopy::FromBytes,
+    zerocopy::IntoBytes,
+    zerocopy::KnownLayout,
+    zerocopy::Immutable,
+)]
 pub struct CephMsgHeader {
-    pub seq: u64,
-    pub tid: u64,
-    pub msg_type: u16,
-    pub priority: u16,
-    pub version: u16,
-    pub front_len: u32,
-    pub middle_len: u32,
-    pub data_len: u32,
-    pub data_off: u16,
+    pub seq: denc::zerocopy::little_endian::U64,
+    pub tid: denc::zerocopy::little_endian::U64,
+    pub msg_type: denc::zerocopy::little_endian::U16,
+    pub priority: denc::zerocopy::little_endian::U16,
+    pub version: denc::zerocopy::little_endian::U16,
+    pub front_len: denc::zerocopy::little_endian::U32,
+    pub middle_len: denc::zerocopy::little_endian::U32,
+    pub data_len: denc::zerocopy::little_endian::U32,
+    pub data_off: denc::zerocopy::little_endian::U16,
     pub src_type: u8,
-    pub src_num: u64,
-    pub compat_version: u16,
-    pub reserved: u16,
-    pub crc: u32,
+    pub src_num: denc::zerocopy::little_endian::U64,
+    pub compat_version: denc::zerocopy::little_endian::U16,
+    pub reserved: denc::zerocopy::little_endian::U16,
+    pub crc: denc::zerocopy::little_endian::U32,
 }
 
 impl CephMsgHeader {
     pub const LENGTH: usize = 53; // Total size of packed struct
 
     pub fn new(msg_type: u16, version: u16) -> Self {
+        use denc::zerocopy::little_endian::{U16, U32, U64};
         Self {
-            seq: 0,
-            tid: 0,
-            msg_type,
-            priority: 0,
-            version,
-            front_len: 0,
-            middle_len: 0,
-            data_len: 0,
-            data_off: 0,
+            seq: U64::new(0),
+            tid: U64::new(0),
+            msg_type: U16::new(msg_type),
+            priority: U16::new(0),
+            version: U16::new(version),
+            front_len: U32::new(0),
+            middle_len: U32::new(0),
+            data_len: U32::new(0),
+            data_off: U16::new(0),
             src_type: 0,
-            src_num: 0,
-            compat_version: version,
-            reserved: 0,
-            crc: 0,
+            src_num: U64::new(0),
+            compat_version: U16::new(version),
+            reserved: U16::new(0),
+            crc: U32::new(0),
         }
     }
 
     /// Calculate header CRC (excluding the crc field itself)
     pub fn calc_crc(&self) -> u32 {
-        use denc::Denc;
-        let mut buf = BytesMut::with_capacity(Self::LENGTH - 4);
-        // SAFETY: Using read_unaligned to safely read from packed struct fields
-        unsafe {
-            std::ptr::addr_of!(self.seq)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.tid)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.msg_type)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.priority)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.version)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.front_len)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.middle_len)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.data_len)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.data_off)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.src_type)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.src_num)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.compat_version)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-            std::ptr::addr_of!(self.reserved)
-                .read_unaligned()
-                .encode(&mut buf, 0)
-                .unwrap();
-        }
-        crc32c(&buf)
+        use denc::zerocopy::IntoBytes;
+        // CRC covers all fields except the last 4 bytes (the crc field itself)
+        let bytes = self.as_bytes();
+        let crc_bytes = &bytes[..bytes.len() - 4];
+        crc32c(crc_bytes)
     }
 }
 
@@ -208,10 +173,11 @@ impl CephMessage {
 
         // Create header with proper version and compat_version
         let mut header = CephMsgHeader::new(T::msg_type(), T::msg_version(features));
-        header.compat_version = T::msg_compat_version(features);
-        header.front_len = front.len() as u32;
-        header.middle_len = middle.len() as u32;
-        header.data_len = data.len() as u32;
+        header.compat_version =
+            denc::zerocopy::little_endian::U16::new(T::msg_compat_version(features));
+        header.front_len = denc::zerocopy::little_endian::U32::new(front.len() as u32);
+        header.middle_len = denc::zerocopy::little_endian::U32::new(middle.len() as u32);
+        header.data_len = denc::zerocopy::little_endian::U32::new(data.len() as u32);
 
         // Create footer with CRCs
         let mut footer = CephMsgFooterOld {
@@ -220,15 +186,15 @@ impl CephMessage {
         };
 
         if _crc_flags.contains(CrcFlags::DATA) {
-            footer.front_crc = crc32c(&front);
-            footer.middle_crc = crc32c(&middle);
-            footer.data_crc = crc32c(&data);
+            footer.front_crc = denc::zerocopy::little_endian::U32::new(crc32c(&front));
+            footer.middle_crc = denc::zerocopy::little_endian::U32::new(crc32c(&middle));
+            footer.data_crc = denc::zerocopy::little_endian::U32::new(crc32c(&data));
         } else {
             footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
 
         if _crc_flags.contains(CrcFlags::HEADER) {
-            header.crc = header.calc_crc();
+            header.crc = denc::zerocopy::little_endian::U32::new(header.calc_crc());
         }
 
         Ok(Self {
@@ -278,10 +244,9 @@ impl CephMessage {
         let footer = CephMsgFooterOld::decode(src, 0)?;
 
         // 3. Decode payload sections
-        // SAFETY: Reading from packed struct fields using read_unaligned
-        let front_len = unsafe { std::ptr::addr_of!(header.front_len).read_unaligned() };
-        let middle_len = unsafe { std::ptr::addr_of!(header.middle_len).read_unaligned() };
-        let data_len = unsafe { std::ptr::addr_of!(header.data_len).read_unaligned() };
+        let front_len = header.front_len.get();
+        let middle_len = header.middle_len.get();
+        let data_len = header.data_len.get();
 
         if src.remaining() < (front_len + middle_len + data_len) as usize {
             return Err(Error::Deserialization("Incomplete message payload".into()));
@@ -297,14 +262,11 @@ impl CephMessage {
         src.copy_to_slice(&mut data);
 
         // Verify CRCs if not disabled
-        // SAFETY: Reading from packed struct fields using read_unaligned
-        let flags = unsafe { std::ptr::addr_of!(footer.flags).read_unaligned() };
+        let flags = footer.flags;
         if flags & MsgFooterFlags::NOCRC.bits() == 0 {
-            let front_crc_expected =
-                unsafe { std::ptr::addr_of!(footer.front_crc).read_unaligned() };
-            let middle_crc_expected =
-                unsafe { std::ptr::addr_of!(footer.middle_crc).read_unaligned() };
-            let data_crc_expected = unsafe { std::ptr::addr_of!(footer.data_crc).read_unaligned() };
+            let front_crc_expected = footer.front_crc.get();
+            let middle_crc_expected = footer.middle_crc.get();
+            let data_crc_expected = footer.data_crc.get();
 
             let front_crc = crc32c(&front);
             if front_crc != front_crc_expected {
@@ -418,9 +380,9 @@ mod tests {
         let ping = MPing;
         let msg = CephMessage::from_payload(&ping, 0, CrcFlags::ALL).unwrap();
 
-        // Copy packed struct fields to local variables to avoid unaligned references
-        let msg_type = msg.header.msg_type;
-        let version = msg.header.version;
+        // Get field values
+        let msg_type = msg.header.msg_type.get();
+        let version = msg.header.version.get();
 
         assert_eq!(msg_type, CEPH_MSG_PING);
         assert_eq!(version, 1);
@@ -438,9 +400,9 @@ mod tests {
         let ping_ack = MPingAck;
         let msg = CephMessage::from_payload(&ping_ack, 0, CrcFlags::ALL).unwrap();
 
-        // Copy packed struct fields to local variables to avoid unaligned references
-        let msg_type = msg.header.msg_type;
-        let version = msg.header.version;
+        // Get field values
+        let msg_type = msg.header.msg_type.get();
+        let version = msg.header.version.get();
 
         assert_eq!(msg_type, CEPH_MSG_PING_ACK);
         assert_eq!(version, 1);
