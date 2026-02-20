@@ -430,34 +430,10 @@ impl Denc for OSDOp {
 ///
 /// This contains the object size and modification time returned by the OSD.
 /// Format: u64 size + SystemTime (u32 sec + u32 nsec as utime_t)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, denc::Denc)]
 pub struct OsdStatData {
     pub size: u64,
     pub mtime: std::time::SystemTime,
-}
-
-impl Denc for OsdStatData {
-    const USES_VERSIONING: bool = false;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.size.encode(buf, features)?;
-        self.mtime.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let size = u64::decode(buf, features)?;
-        let mtime = std::time::SystemTime::decode(buf, features)?;
-
-        Ok(Self { size, mtime })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        // u64 size + SystemTime (u32 sec + u32 nsec)
-        let size_bytes = self.size.encoded_size(features)?;
-        let mtime_bytes = self.mtime.encoded_size(features)?;
-        Some(size_bytes + mtime_bytes)
-    }
 }
 
 // ============= UTime (utime_t/timespec) =============

@@ -100,36 +100,10 @@ impl Denc for CephXServiceTicket {
 /// Wire format:
 /// - `version: u8` - Service ticket version
 /// - `encrypted_data: Bytes` - Length-prefixed encrypted CephXServiceTicket
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct EncryptedServiceTicket {
     pub version: u8,
     pub encrypted_data: Bytes,
-}
-
-impl Denc for EncryptedServiceTicket {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.version.encode(buf, 0)?;
-        self.encrypted_data.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let version = u8::decode(buf, 0)?;
-        let encrypted_data = Bytes::decode(buf, 0)?;
-        Ok(Self {
-            version,
-            encrypted_data,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // version (1) + length_prefix (4) + encrypted_data length
-        Some(1 + 4 + self.encrypted_data.len())
-    }
 }
 
 /// Complete service ticket information
@@ -315,29 +289,9 @@ impl<T: Denc> Denc for CephXEncryptedEnvelope<T> {
 /// - `__u16 request_type` - Request type (CEPHX_GET_AUTH_SESSION_KEY, etc.)
 ///
 /// This is the header for all CephX protocol messages after initial authentication.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::Denc)]
 pub struct CephXRequestHeader {
     pub request_type: u16,
-}
-
-impl Denc for CephXRequestHeader {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.request_type.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let request_type = u16::decode(buf, 0)?;
-        Ok(Self { request_type })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(2)
-    }
 }
 
 /// CephX response header structure
@@ -349,35 +303,10 @@ impl Denc for CephXRequestHeader {
 /// - `__s32 status` - Status code (0 = success)
 ///
 /// This is the header for all CephX protocol response messages.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::Denc)]
 pub struct CephXResponseHeader {
     pub request_type: u16,
     pub status: i32,
-}
-
-impl Denc for CephXResponseHeader {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.request_type.encode(buf, 0)?;
-        self.status.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let request_type = u16::decode(buf, 0)?;
-        let status = i32::decode(buf, 0)?;
-        Ok(Self {
-            request_type,
-            status,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(6)
-    }
 }
 
 /// CephX authenticate request structure
@@ -503,35 +432,10 @@ impl Denc for CephXServerChallenge {
 ///
 /// This structure is used in the challenge-response authentication
 /// to calculate the session key from server and client challenges.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXChallengeBlob {
     pub server_challenge: u64,
     pub client_challenge: u64,
-}
-
-impl Denc for CephXChallengeBlob {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.server_challenge.encode(buf, 0)?;
-        self.client_challenge.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let server_challenge = u64::decode(buf, 0)?;
-        let client_challenge = u64::decode(buf, 0)?;
-        Ok(Self {
-            server_challenge,
-            client_challenge,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(16)
-    }
 }
 
 /// CephX request structure
