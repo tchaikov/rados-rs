@@ -1312,7 +1312,7 @@ impl MonClient {
         let ack = MMonCommandAck::decode(&msg.front)?;
 
         // Get the transaction ID from the message header
-        let tid = msg.header.tid;
+        let tid = msg.header.get_tid();
 
         debug!(
             "Received command ack: tid={}, r={}, rs={}",
@@ -1351,9 +1351,7 @@ impl MonClient {
         // Decode the pool operation reply message from the front payload
         let reply = MPoolOpReply::decode(&msg.front)?;
 
-        // Get the transaction ID from the message header
-        let tid = msg.header.tid;
-
+        let tid = msg.tid();
         debug!(
             "Received pool op reply: tid={}, reply_code={}, epoch={}",
             tid, reply.reply_code, reply.epoch
@@ -1414,7 +1412,7 @@ impl MonClient {
         let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
 
         // Set the transaction ID in the message header to match the payload
-        message.header.tid = req_id;
+        message.header.set_tid(req_id);
 
         active_con.send_message(message).await?;
 
@@ -1503,7 +1501,7 @@ impl MonClient {
         let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
 
         // Set the transaction ID in the message header
-        message.header.tid = tid;
+        message.header.set_tid(tid);
 
         tracing::trace!(
             "send_command: About to send command message with tid={}",
@@ -1554,7 +1552,7 @@ impl MonClient {
         let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
 
         // Set the transaction ID in the message header
-        message.header.tid = tid;
+        message.header.set_tid(tid);
 
         active_con.send_message(message).await?;
 

@@ -182,7 +182,7 @@ impl MonConnection {
                     let osdmap_tx = osdmap_tx_for_task.clone();
                     let mon_msg_tx = mon_msg_tx_for_task.clone();
                     async move {
-                        let msg_type = msg.header.msg_type;
+                        let msg_type = msg.msg_type();
                         match msg_type {
                             CEPH_MSG_OSD_MAP => {
                                 // Send to OSDClient if configured
@@ -256,12 +256,10 @@ impl MonConnection {
     /// Send a message to the monitor
     pub async fn send_message(&self, msg: msgr2::message::Message) -> Result<()> {
         // Copy fields from packed struct to avoid alignment issues
-        let msg_type = msg.msg_type();
-        let tid = msg.header.tid;
         tracing::debug!(
             "MonConnection::send_message: Sending message type 0x{:04x} (tid={}) to mon.{}",
-            msg_type,
-            tid,
+            msg.msg_type(),
+            msg.tid(),
             self.rank
         );
         self.send_tx

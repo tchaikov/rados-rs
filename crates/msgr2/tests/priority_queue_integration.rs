@@ -40,11 +40,9 @@ fn test_priority_queue_mixed_priorities() {
     let mut queue = msgr2::protocol::PriorityQueue::new();
 
     // Create messages with all three priority levels
-    let low_msg = Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low.to_u16());
-    let normal_msg =
-        Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal.to_u16());
-    let high_msg =
-        Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High.to_u16());
+    let low_msg = Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low);
+    let normal_msg = Message::new(2, Bytes::from("normal")).with_priority(MessagePriority::Normal);
+    let high_msg = Message::new(3, Bytes::from("high")).with_priority(MessagePriority::High);
 
     // Add in reverse priority order
     queue.push_back(low_msg);
@@ -64,19 +62,18 @@ fn test_priority_queue_maintains_fifo_within_priority() {
     // Add multiple normal priority messages
     for i in 0..10 {
         let msg = Message::new(i, Bytes::from(format!("msg{}", i)))
-            .with_priority(MessagePriority::Normal.to_u16());
+            .with_priority(MessagePriority::Normal);
         queue.push_back(msg);
     }
 
     // Add a high priority message in the middle
-    let high_msg =
-        Message::new(100, Bytes::from("urgent")).with_priority(MessagePriority::High.to_u16());
+    let high_msg = Message::new(100, Bytes::from("urgent")).with_priority(MessagePriority::High);
     queue.push_back(high_msg);
 
     // Add more normal priority messages
     for i in 10..20 {
         let msg = Message::new(i, Bytes::from(format!("msg{}", i)))
-            .with_priority(MessagePriority::Normal.to_u16());
+            .with_priority(MessagePriority::Normal);
         queue.push_back(msg);
     }
 
@@ -94,11 +91,11 @@ fn test_priority_queue_iter_priority_order() {
     let mut queue = msgr2::protocol::PriorityQueue::new();
 
     // Add messages in various priorities
-    queue.push_back(Message::new(1, Bytes::new()).with_priority(0)); // Low
-    queue.push_back(Message::new(2, Bytes::new()).with_priority(1)); // Normal
-    queue.push_back(Message::new(3, Bytes::new()).with_priority(2)); // High
-    queue.push_back(Message::new(4, Bytes::new()).with_priority(1)); // Normal
-    queue.push_back(Message::new(5, Bytes::new()).with_priority(2)); // High
+    queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low));
+    queue.push_back(Message::new(2, Bytes::new()).with_priority(MessagePriority::Normal));
+    queue.push_back(Message::new(3, Bytes::new()).with_priority(MessagePriority::High));
+    queue.push_back(Message::new(4, Bytes::new()).with_priority(MessagePriority::Normal));
+    queue.push_back(Message::new(5, Bytes::new()).with_priority(MessagePriority::High));
 
     // Iterator should return messages in priority order
     let types: Vec<u16> = queue.iter().map(|m| m.msg_type()).collect();
@@ -111,8 +108,8 @@ fn test_heartbeat_not_delayed_by_bulk() {
 
     // Simulate 100 bulk data messages queued
     for i in 0..100 {
-        let msg = Message::new(i, Bytes::from(vec![0u8; 1024]))
-            .with_priority(MessagePriority::Normal.to_u16());
+        let msg =
+            Message::new(i, Bytes::from(vec![0u8; 1024])).with_priority(MessagePriority::Normal);
         queue.push_back(msg);
     }
 
