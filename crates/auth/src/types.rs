@@ -37,31 +37,16 @@ bitflags::bitflags! {
 
 impl std::fmt::Display for EntityType {
     /// Formats a single-bit EntityType as its Ceph name (e.g. "mon", "osd").
-    ///
-    /// For multi-bit masks the individual names are joined with `|`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut first = true;
-        for (name, flag) in &[
-            ("mon",    EntityType::MON),
-            ("mds",    EntityType::MDS),
-            ("osd",    EntityType::OSD),
-            ("client", EntityType::CLIENT),
-            ("mgr",    EntityType::MGR),
-            ("auth",   EntityType::AUTH),
-        ] {
-            if self.contains(*flag) {
-                if !first {
-                    f.write_str("|")?;
-                }
-                f.write_str(name)?;
-                first = false;
-            }
-        }
-        if first {
-            // No known bits set
-            write!(f, "unknown(0x{:x})", self.bits())?;
-        }
-        Ok(())
+        write!(f, "{}", match *self {
+            EntityType::MON    => "mon",
+            EntityType::MDS    => "mds",
+            EntityType::OSD    => "osd",
+            EntityType::CLIENT => "client",
+            EntityType::MGR    => "mgr",
+            EntityType::AUTH   => "auth",
+            _                  => "unknown",
+        })
     }
 }
 
