@@ -35,6 +35,55 @@ bitflags::bitflags! {
     }
 }
 
+impl std::fmt::Display for EntityType {
+    /// Formats a single-bit EntityType as its Ceph name (e.g. "mon", "osd").
+    ///
+    /// For multi-bit masks the individual names are joined with `|`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut first = true;
+        for (name, flag) in &[
+            ("mon",    EntityType::MON),
+            ("mds",    EntityType::MDS),
+            ("osd",    EntityType::OSD),
+            ("client", EntityType::CLIENT),
+            ("mgr",    EntityType::MGR),
+            ("auth",   EntityType::AUTH),
+        ] {
+            if self.contains(*flag) {
+                if !first {
+                    f.write_str("|")?;
+                }
+                f.write_str(name)?;
+                first = false;
+            }
+        }
+        if first {
+            // No known bits set
+            write!(f, "unknown(0x{:x})", self.bits())?;
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for EntityType {
+    type Err = CephXError;
+
+    /// Parses a single Ceph entity type name: "mon", "mds", "osd", "client", "mgr", "auth".
+    fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "mon"    => Ok(EntityType::MON),
+            "mds"    => Ok(EntityType::MDS),
+            "osd"    => Ok(EntityType::OSD),
+            "client" => Ok(EntityType::CLIENT),
+            "mgr"    => Ok(EntityType::MGR),
+            "auth"   => Ok(EntityType::AUTH),
+            _ => Err(CephXError::ProtocolError(format!(
+                "Unknown entity type: {}",
+                s
+            ))),
+        }
+    }
+}
 
 /// Global ID type for Ceph entities
 pub type GlobalId = u64;
@@ -75,23 +124,11 @@ impl EntityName {
         Self::new(EntityType::CLIENT, id)
     }
 
-    /// Convert to string format like "client.admin"
-    pub fn to_str(&self) -> String {
-        let type_str = match self.entity_type {
-            EntityType::MON => "mon",
-            EntityType::CLIENT => "client",
-            EntityType::OSD => "osd",
-            EntityType::MDS => "mds",
-            EntityType::MGR => "mgr",
-            _ => "unknown",
-        };
-        format!("{}.{}", type_str, self.id)
-    }
 }
 
 impl std::fmt::Display for EntityName {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_str())
+        write!(f, "{}.{}", self.entity_type, self.id)
     }
 }
 
@@ -99,29 +136,11 @@ impl std::str::FromStr for EntityName {
     type Err = CephXError;
 
     fn from_str(s: &str) -> Result<Self> {
-        let parts: Vec<&str> = s.split('.').collect();
-        if parts.len() != 2 {
-            return Err(CephXError::ProtocolError(format!(
-                "Invalid entity name format: {}",
-                s
-            )));
-        }
-
-        let entity_type = match parts[0] {
-            "mon" => EntityType::MON,
-            "client" => EntityType::CLIENT,
-            "osd" => EntityType::OSD,
-            "mds" => EntityType::MDS,
-            "mgr" => EntityType::MGR,
-            _ => {
-                return Err(CephXError::ProtocolError(format!(
-                    "Unknown entity type: {}",
-                    parts[0]
-                )))
-            }
-        };
-
-        Ok(Self::new(entity_type, parts[1]))
+        let (type_str, id) = s.split_once('.').ok_or_else(|| {
+            CephXError::ProtocolError(format!("Invalid entity name format: {}", s))
+        })?;
+        let entity_type = type_str.parse()?;
+        Ok(Self::new(entity_type, id))
     }
 }
 

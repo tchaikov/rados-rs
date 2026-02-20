@@ -441,22 +441,6 @@ pub struct OsdStatData {
 // Re-export UTime from denc crate to avoid duplication
 pub use denc::UTime;
 
-// ============= Size Constants =============
-
-/// Size of spg_t encoding (with version header)
-pub const SPG_T_ENCODED_SIZE: usize = 24; // 6 (header) + 17 (pgid) + 1 (shard)
-
-/// Size of osd_reqid_t encoding (with version header)
-pub const OSD_REQID_T_ENCODED_SIZE: usize = 27; // 6 (header) + 9 (name) + 8 (tid) + 4 (inc)
-
-/// Size of blkin_trace_info encoding
-pub const BLKIN_TRACE_INFO_SIZE: usize = 24; // 3 x u64
-
-/// Size of jspan_context encoding (with version header, when invalid)
-pub const JSPAN_CONTEXT_ENCODED_SIZE: usize = 7; // 6 (header) + 1 (is_valid)
-
-/// Size of ceph_osd_op structure
-pub const OSD_OP_ENCODED_SIZE: usize = 38; // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len)
 
 #[cfg(test)]
 mod tests {
@@ -562,20 +546,20 @@ mod tests {
     #[test]
     fn test_size_constants() {
         let spgid = StripedPgId::new(3, 0, -1);
-        assert_eq!(spgid.encoded_size(0), Some(SPG_T_ENCODED_SIZE));
+        assert_eq!(spgid.encoded_size(0), Some(24)); // 6 (header) + 17 (pgid) + 1 (shard)
 
         let reqid = OsdReqId {
             name: EntityName::new(0x08, 0),
             tid: 1,
             inc: 1,
         };
-        assert_eq!(reqid.encoded_size(0), Some(OSD_REQID_T_ENCODED_SIZE));
+        assert_eq!(reqid.encoded_size(0), Some(27)); // 6 (header) + 9 (name) + 8 (tid) + 4 (inc)
 
         let trace = BlkinTraceInfo::empty();
-        assert_eq!(trace.encoded_size(0), Some(BLKIN_TRACE_INFO_SIZE));
+        assert_eq!(trace.encoded_size(0), Some(24)); // 3 x u64
 
         let ctx = JaegerSpanContext::invalid();
-        assert_eq!(ctx.encoded_size(0), Some(JSPAN_CONTEXT_ENCODED_SIZE));
+        assert_eq!(ctx.encoded_size(0), Some(7)); // 6 (header) + 1 (is_valid)
     }
 
     #[test]
@@ -800,7 +784,7 @@ mod tests {
             op_data: OpData::None,
             indata: Bytes::new(),
         };
-        assert_eq!(op.encoded_size(0), Some(OSD_OP_ENCODED_SIZE));
+        assert_eq!(op.encoded_size(0), Some(38)); // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len)
     }
 
     #[test]
