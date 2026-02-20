@@ -16,13 +16,7 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     let name = &input.ident;
 
     let denc_impl = match &input.data {
-        Data::Struct(data_struct) => match &data_struct.fields {
-            Fields::Named(fields) => {
-                let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
-                generate_zerocopy_denc(name, &field_names, &fields.named)
-            }
-            _ => panic!("ZeroCopyDencode only supports named fields"),
-        },
+        Data::Struct(_) => generate_zerocopy_denc(name),
         _ => panic!("ZeroCopyDencode can only be derived for structs"),
     };
 
@@ -36,18 +30,9 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn generate_zerocopy_denc(
-    name: &syn::Ident,
-    _field_names: &[&Option<syn::Ident>],
-    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
-) -> proc_macro2::TokenStream {
-    let field_types: Vec<_> = fields.iter().map(|f| &f.ty).collect();
-
+fn generate_zerocopy_denc(name: &syn::Ident) -> proc_macro2::TokenStream {
     quote! {
-        impl denc::Denc for #name
-        where
-            #(#field_types: denc::zero_copy::ZeroCopyDencode,)*
-        {
+        impl denc::Denc for #name {
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,

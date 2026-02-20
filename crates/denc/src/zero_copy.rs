@@ -6,10 +6,7 @@
 //!
 //! The derive macro generates Denc implementations that use zerocopy when possible.
 
-use zerocopy::little_endian::{I16, I32, I64, U16, U32, U64};
-
-/// Marker trait for types that are safe for zero-copy encoding/decoding
-///
+/// Marker trait for types that are safe for zero-copy encoding/decoding///
 /// This trait marks types that can be safely transmitted using direct memory
 /// copy via the zerocopy crate. Types must implement FromBytes + IntoBytes
 /// from the zerocopy crate.
@@ -63,17 +60,10 @@ pub trait ZeroCopyDencode:
     }
 }
 
-// Implement ZeroCopyDencode for u8 and byte arrays
+// Implement ZeroCopyDencode for u8 and byte arrays (only field types that aren't
+// zerocopy LE types — the LE types satisfy the supertrait bounds by their own derives)
 impl ZeroCopyDencode for u8 {}
 impl<const N: usize> ZeroCopyDencode for [u8; N] {}
-
-// Implement ZeroCopyDencode for zerocopy little-endian types
-impl ZeroCopyDencode for U16 {}
-impl ZeroCopyDencode for U32 {}
-impl ZeroCopyDencode for U64 {}
-impl ZeroCopyDencode for I16 {}
-impl ZeroCopyDencode for I32 {}
-impl ZeroCopyDencode for I64 {}
 
 #[cfg(test)]
 mod tests {
@@ -87,15 +77,5 @@ mod tests {
     #[test]
     fn test_arrays_are_zerocopy() {
         assert!(<[u8; 16]>::can_use_zerocopy());
-    }
-
-    #[test]
-    fn test_le_types_are_zerocopy() {
-        assert!(U16::can_use_zerocopy());
-        assert!(U32::can_use_zerocopy());
-        assert!(U64::can_use_zerocopy());
-        assert!(I16::can_use_zerocopy());
-        assert!(I32::can_use_zerocopy());
-        assert!(I64::can_use_zerocopy());
     }
 }
