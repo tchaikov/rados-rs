@@ -6,8 +6,6 @@
 //!
 //! The derive macro generates Denc implementations that use zerocopy when possible.
 
-use crate::{Denc, RadosError};
-use bytes::{Buf, BufMut};
 use zerocopy::little_endian::{I16, I32, I64, U16, U32, U64};
 
 /// Marker trait for types that are safe for zero-copy encoding/decoding
@@ -61,7 +59,7 @@ pub trait ZeroCopyDencode:
 {
     /// Returns true if this type can use zero-copy optimization
     fn can_use_zerocopy() -> bool {
-        true // Always true now - zerocopy handles endianness
+        true // Always true — zerocopy handles endianness
     }
 }
 
@@ -76,135 +74,6 @@ impl ZeroCopyDencode for U64 {}
 impl ZeroCopyDencode for I16 {}
 impl ZeroCopyDencode for I32 {}
 impl ZeroCopyDencode for I64 {}
-
-// Implement Denc for zerocopy little-endian types
-// These encode/decode as little-endian bytes
-
-impl Denc for U16 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u16_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 2 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for U16: need 2, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(U16::new(buf.get_u16_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(2)
-    }
-}
-
-impl Denc for U32 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u32_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for U32: need 4, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(U32::new(buf.get_u32_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(4)
-    }
-}
-
-impl Denc for U64 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u64_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for U64: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(U64::new(buf.get_u64_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
-}
-
-impl Denc for I16 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_i16_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 2 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for I16: need 2, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(I16::new(buf.get_i16_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(2)
-    }
-}
-
-impl Denc for I32 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_i32_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for I32: need 4, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(I32::new(buf.get_i32_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(4)
-    }
-}
-
-impl Denc for I64 {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_i64_le(self.get());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for I64: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(I64::new(buf.get_i64_le()))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
-}
 
 #[cfg(test)]
 mod tests {
