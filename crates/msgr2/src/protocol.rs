@@ -484,9 +484,21 @@ impl FrameIO {
                 padded_size
             }
         } else {
-            // Plaintext: add CRC for single-segment frames
-            let needs_crc = preamble.num_segments == 1 && total_segment_size > 0;
-            total_segment_size + if needs_crc { 4 } else { 0 }
+            // Plaintext (CRC mode)
+            if total_segment_size == 0 {
+                0
+            } else if preamble.num_segments == 1 {
+                // Single segment (rev1): segment + 4-byte CRC inline, no epilogue
+                total_segment_size + crate::frames::FRAME_CRC_SIZE
+            } else {
+                // Multi-segment: 17 extra bytes total
+                // Rev1: CRC(4) after seg0 + epilogue_rev1(1 + 3×4 = 13) = 17
+                // Rev0: epilogue_rev0(1 + 4×4 = 17) = 17
+                total_segment_size
+                    + crate::frames::FRAME_CRC_SIZE
+                    + 1
+                    + (crate::frames::MAX_NUM_SEGMENTS - 1) * crate::frames::FRAME_CRC_SIZE
+            }
         };
 
         if total_payload_size == 0 {
@@ -547,6 +559,8 @@ impl FrameIO {
         };
 
         // Parse segments from the full payload
+        let is_rev1 = state_machine.is_rev1();
+        let is_multi = preamble.num_segments > 1;
         let mut segments = Vec::new();
         let mut offset = 0;
         for i in 0..preamble.num_segments as usize {
@@ -556,14 +570,17 @@ impl FrameIO {
                 let segment_data = &full_payload[offset..offset + segment_len];
                 segments.push(Bytes::copy_from_slice(segment_data));
 
-                // For secure frames, skip 16-byte alignment padding
                 if has_encryption {
-                    const CRYPTO_BLOCK_SIZE: usize = 16;
+                    // Secure frames: skip 16-byte alignment padding
                     let aligned_len =
                         (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
                     offset += aligned_len;
                 } else {
                     offset += segment_len;
+                    // Plaintext rev1 multi-segment: 4-byte CRC follows segment 0
+                    if is_rev1 && is_multi && i == 0 {
+                        offset += crate::frames::FRAME_CRC_SIZE;
+                    }
                 }
             } else {
                 // Empty segment - still add it to maintain segment indices
@@ -571,8 +588,20 @@ impl FrameIO {
             }
         }
 
-        // For secure multi-segment frames, skip the epilogue (already at the end of full_payload)
-        // The epilogue was included in total_payload_size but we don't need to parse it
+        // Verify epilogue for plaintext multi-segment frames
+        if !has_encryption && is_multi && total_segment_size > 0 {
+            // Epilogue starts at current offset; first byte is late_status (rev1) or late_flags (rev0)
+            if offset < full_payload.len() {
+                let late_status = full_payload[offset];
+                if (late_status & crate::frames::FRAME_LATE_STATUS_ABORTED_MASK)
+                    == crate::frames::FRAME_LATE_STATUS_ABORTED
+                {
+                    return Err(crate::Error::Protocol(
+                        "Frame transmission aborted by sender".to_string(),
+                    ));
+                }
+            }
+        }
 
         tracing::debug!("Parsed {} segments", segments.len());
 

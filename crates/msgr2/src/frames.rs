@@ -7,7 +7,7 @@
 //   - Tag enum and protocol constants
 
 use crate::header::MsgHeader;
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use denc::Denc;
 use denc::RadosError;
 
@@ -460,7 +460,7 @@ impl FrameAssembler {
         self.assemble_frame(F::TAG, &segments, alignments)
     }
 
-    // Deserialize from wire format
+    // Deserialize from wire format (assumes msgr2.1 / rev1 framing)
     pub fn from_wire<F: FrameTrait>(mut buf: Bytes) -> Result<F, RadosError> {
         // Decode preamble
         let preamble = Preamble::decode(buf.split_to(PREAMBLE_SIZE))?;
@@ -473,7 +473,9 @@ impl FrameAssembler {
             )));
         }
 
-        // Extract segments based on preamble
+        let is_multi = preamble.num_segments > 1;
+
+        // Extract segments, handling rev1 inter-segment CRC for multi-segment frames
         let mut segments = Vec::new();
         for i in 0..preamble.num_segments as usize {
             let len = preamble.segments[i].logical_len as usize;
@@ -483,9 +485,37 @@ impl FrameAssembler {
                 ));
             }
             segments.push(buf.split_to(len));
+
+            // Rev1 multi-segment: segment 0 is followed by a 4-byte CRC
+            if is_multi && i == 0 {
+                if buf.len() < FRAME_CRC_SIZE {
+                    return Err(RadosError::Protocol(
+                        "Missing CRC after first segment".to_string(),
+                    ));
+                }
+                buf.advance(FRAME_CRC_SIZE);
+            }
         }
 
-        // TODO: Handle epilogue in msgr2.0 or multi-segment msgr2.1
+        // Verify and consume the epilogue for multi-segment frames
+        if is_multi {
+            // epilogue_crc_rev1: 1 byte late_status + (MAX_NUM_SEGMENTS-1) × 4-byte CRC values
+            let epilogue_size = 1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE;
+            if buf.len() < epilogue_size {
+                return Err(RadosError::Protocol(format!(
+                    "Epilogue too short: need {}, have {}",
+                    epilogue_size,
+                    buf.len()
+                )));
+            }
+            let late_status = buf[0];
+            if (late_status & FRAME_LATE_STATUS_ABORTED_MASK) == FRAME_LATE_STATUS_ABORTED {
+                return Err(RadosError::Protocol(
+                    "Frame transmission aborted by sender".to_string(),
+                ));
+            }
+            buf.advance(epilogue_size);
+        }
 
         F::from_segments(segments)
     }
@@ -1115,6 +1145,53 @@ mod tests {
         // Decode and verify preamble CRC
         let preamble = Preamble::decode(wire_bytes.slice(..PREAMBLE_SIZE)).unwrap();
         assert_ne!(preamble.crc, 0); // CRC should be calculated
+    }
+
+    #[test]
+    fn test_message_frame_from_wire_roundtrip() {
+        // Assemble a multi-segment MessageFrame and verify from_wire can parse it back
+        let header = MsgHeader::new_default(42, 100);
+        let front = Bytes::from("front payload");
+        let middle = Bytes::from("middle payload");
+        let data = Bytes::from("data payload");
+
+        let frame = MessageFrame::new(header.clone(), front.clone(), middle.clone(), data.clone());
+
+        // Assemble with rev1 (multi-segment)
+        let mut assembler = FrameAssembler::new(true);
+        let wire_bytes = assembler.to_wire(&frame, 0).unwrap();
+
+        // Parse back using from_wire
+        let decoded = MessageFrame::from_wire(wire_bytes).unwrap();
+
+        assert_eq!(decoded.front, front);
+        assert_eq!(decoded.middle, middle);
+        assert_eq!(decoded.data, data);
+    }
+
+    #[test]
+    fn test_message_frame_from_wire_aborted() {
+        // Build a frame and corrupt the epilogue late_status to ABORTED
+        let frame = MessageFrame::new(
+            MsgHeader::new_default(1, 100),
+            Bytes::from("front"),
+            Bytes::from("middle"),
+            Bytes::from("data"),
+        );
+
+        let mut assembler = FrameAssembler::new(true);
+        let wire_bytes = assembler.to_wire(&frame, 0).unwrap();
+
+        // Locate the epilogue: it's 13 bytes from the end
+        let epilogue_offset = wire_bytes.len() - 13;
+        let mut corrupted = BytesMut::from(&wire_bytes[..]);
+        // Set late_status to ABORTED (0x1)
+        corrupted[epilogue_offset] = FRAME_LATE_STATUS_ABORTED;
+
+        let result = MessageFrame::from_wire(corrupted.freeze());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("aborted"), "Expected 'aborted' in '{}'", err);
     }
 
     #[test]

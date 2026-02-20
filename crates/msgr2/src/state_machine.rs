@@ -2190,6 +2190,12 @@ impl StateMachine {
         self.frame_decryptor.is_some()
     }
 
+    /// Check if using msgr2.1 (rev1) — true when the peer supports REVISION_1
+    pub fn is_rev1(&self) -> bool {
+        let peer = crate::FeatureSet::from(self.peer_supported_features);
+        peer.contains(crate::FeatureSet::REVISION_1)
+    }
+
     /// Check if compression is enabled
     pub fn has_compression(&self) -> bool {
         self.compression_ctx.is_some()
