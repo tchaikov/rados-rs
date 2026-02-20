@@ -20,33 +20,21 @@ pub const CEPHX_GET_ROTATING_KEY: u16 = 0x0400;
 /// - `uint32_t keys` - Bitmask of service types (MON|OSD|MDS|MGR)
 ///
 /// This structure is used to request service tickets from the monitor.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXServiceTicketRequest {
+    struct_v: u8,
     pub keys: u32,
 }
 
-impl Denc for CephXServiceTicketRequest {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        1u8.encode(buf, 0)?; // struct_v
-        self.keys.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let keys = u32::decode(buf, 0)?;
-        Ok(Self { keys })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(5) // 1 byte struct_v + 4 bytes keys
+impl CephXServiceTicketRequest {
+    const STRUCT_V: u8 = 1;
+    pub fn new(keys: u32) -> Self {
+        Self {
+            struct_v: Self::STRUCT_V,
+            keys,
+        }
     }
 }
-
 /// CephX service ticket structure (encrypted payload)
 ///
 /// Corresponds to C++ `struct CephXServiceTicket` in `/src/auth/cephx/CephxProtocol.h`
@@ -58,37 +46,20 @@ impl Denc for CephXServiceTicketRequest {
 ///
 /// This structure is sent encrypted inside the AUTH_DONE response.
 /// It contains the session key and validity for a specific service.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXServiceTicket {
+    struct_v: u8,
     pub session_key: CryptoKey,
     pub validity: std::time::Duration,
 }
 
-impl Denc for CephXServiceTicket {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        1u8.encode(buf, 0)?; // struct_v
-        self.session_key.encode(buf, 0)?;
-        self.validity.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let session_key = CryptoKey::decode(buf, 0)?;
-        let validity = std::time::Duration::decode(buf, 0)?;
-        Ok(Self {
+impl CephXServiceTicket {
+    pub fn new(session_key: CryptoKey, validity: std::time::Duration) -> Self {
+        Self {
+            struct_v: 1,
             session_key,
             validity,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // struct_v (1) + session_key (variable) + validity (8)
-        Some(1 + self.session_key.encoded_size(0)? + 8)
+        }
     }
 }
 
@@ -323,47 +294,41 @@ pub struct CephXResponseHeader {
 /// This is sent by client in response to server's challenge.
 #[derive(Debug, Clone, Serialize)]
 pub struct CephXAuthenticate {
+    struct_v: u8,
     pub client_challenge: u64,
     pub key: u64, // Encrypted session key (result of cephx_calc_client_server_challenge)
     pub old_ticket: CephXTicketBlob,
     pub other_keys: u32, // What other service keys we want
 }
 
+impl CephXAuthenticate {
+    const STRUCT_V: u8 = 3;
+    pub fn new(client_challenge: u64, key: u64, old_ticket: CephXTicketBlob, other_keys: u32) -> Self {
+        Self {
+            struct_v: Self::STRUCT_V,
+            client_challenge,
+            key,
+            old_ticket,
+            other_keys,
+        }
+    }
+}
 impl Denc for CephXAuthenticate {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode struct version (must be first!)
-        3u8.encode(buf, 0)?; // struct_v = 3
-
-        // Encode client_challenge
-        self.client_challenge.encode(buf, 0)?;
-
-        // Encode key (as u64, not a buffer)
-        self.key.encode(buf, 0)?;
-
-        // Encode old_ticket
+        self.struct_v.encode(buf, features)?;
+        self.client_challenge.encode(buf, features)?;
+        self.key.encode(buf, features)?;
         self.old_ticket.encode(buf, features)?;
-
-        // Encode other_keys
-        self.other_keys.encode(buf, 0)?;
+        self.other_keys.encode(buf, features)?;
 
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        // Decode struct version
-        let struct_v = u8::decode(buf, 0)?;
-        if !(1..=3).contains(&struct_v) {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported CephXAuthenticate version: {}",
-                struct_v
-            )));
-        }
-
-        let client_challenge = u64::decode(buf, 0)?;
-        let key = u64::decode(buf, 0)?;
+        let struct_v = u8::decode(buf, features)?;
+        let client_challenge = u64::decode(buf, features)?;
+        let key = u64::decode(buf, features)?;
         let old_ticket = CephXTicketBlob::decode(buf, features)?;
-
-        // other_keys was added in v2
         let other_keys = if struct_v >= 2 {
             u32::decode(buf, 0)?
         } else {
@@ -371,6 +336,7 @@ impl Denc for CephXAuthenticate {
         };
 
         Ok(Self {
+            struct_v,
             client_challenge,
             key,
             old_ticket,
@@ -379,7 +345,13 @@ impl Denc for CephXAuthenticate {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(1 + 8 + 8 + self.old_ticket.encoded_size(features)? + 4)
+        Some(
+            self.struct_v.encoded_size(features)?
+                + self.client_challenge.encoded_size(features)?
+                + self.key.encoded_size(features)?
+                + self.old_ticket.encoded_size(features)?
+                + self.other_keys.encoded_size(features)?,
+        )
     }
 }
 
@@ -788,7 +760,7 @@ mod tests {
 
     #[test]
     fn test_service_ticket_request_encode_decode() {
-        let request = CephXServiceTicketRequest { keys: 0x12345678 };
+        let request = CephXServiceTicketRequest::new(0x12345678);
 
         let mut buf = BytesMut::new();
         request.encode(&mut buf, 0).unwrap();
@@ -807,10 +779,7 @@ mod tests {
             CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
                 .unwrap();
         let validity = Duration::from_secs(3600);
-        let ticket = CephXServiceTicket {
-            session_key: key.clone(),
-            validity,
-        };
+        let ticket = CephXServiceTicket::new(key.clone(), validity);
 
         let mut buf = BytesMut::new();
         ticket.encode(&mut buf, 0).unwrap();
@@ -851,10 +820,7 @@ mod tests {
                 encrypted_data: encrypted_data.clone(),
             },
             ticket_enc: 1,
-            ticket_blob: CephXTicketBlob {
-                secret_id: 42,
-                blob: ticket_blob_data.clone(),
-            },
+            ticket_blob: CephXTicketBlob::new(42, ticket_blob_data.clone()),
         };
 
         let mut buf = BytesMut::new();
@@ -885,10 +851,7 @@ mod tests {
                 encrypted_data: encrypted_data.clone(),
             },
             ticket_enc: 1,
-            ticket_blob: CephXTicketBlob {
-                secret_id: 42,
-                blob: ticket_blob_data.clone(),
-            },
+            ticket_blob: CephXTicketBlob::new(42, ticket_blob_data.clone()),
         };
 
         let reply = ServiceTicketReply {
@@ -978,15 +941,12 @@ mod tests {
 
     #[test]
     fn test_cephx_authenticate_encode_decode() {
-        let auth = CephXAuthenticate {
-            client_challenge: 0x1234567890abcdef,
-            key: 0xabcd,
-            old_ticket: CephXTicketBlob {
-                secret_id: 0,
-                blob: Bytes::new(),
-            },
-            other_keys: 0x0F, // Request all services
-        };
+        let auth = CephXAuthenticate::new(
+            0x1234567890abcdef,
+            0xabcd,
+            CephXTicketBlob::default(),
+            0x0F, // Request all services
+        );
 
         let mut buf = BytesMut::new();
         auth.encode(&mut buf, 0).unwrap();
@@ -1090,10 +1050,7 @@ mod tests {
 
     #[test]
     fn test_cephx_reply_with_ticket() {
-        let ticket_blob = CephXTicketBlob {
-            secret_id: 42,
-            blob: Bytes::from(vec![1, 2, 3, 4]),
-        };
+        let ticket_blob = CephXTicketBlob::new(42, Bytes::from(vec![1, 2, 3, 4]));
         let reply = CephXReply::success().with_ticket(ticket_blob.clone());
 
         assert_eq!(reply.tickets.len(), 1);
@@ -1105,10 +1062,7 @@ mod tests {
         let key =
             CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
                 .unwrap();
-        let ticket_blob = CephXTicketBlob {
-            secret_id: 42,
-            blob: Bytes::from(vec![1, 2, 3, 4]),
-        };
+        let ticket_blob = CephXTicketBlob::new(42, Bytes::from(vec![1, 2, 3, 4]));
         let reply = CephXReply::success()
             .with_session_key(key.clone())
             .with_ticket(ticket_blob.clone());
@@ -1133,10 +1087,7 @@ mod tests {
 
     #[test]
     fn test_cephx_authorize_a_encode_decode() {
-        let ticket_blob = CephXTicketBlob {
-            secret_id: 99,
-            blob: Bytes::from(vec![10, 20, 30]),
-        };
+        let ticket_blob = CephXTicketBlob::new(99, Bytes::from(vec![10, 20, 30]));
         let auth_a = CephXAuthorizeA::new(12345, 4, ticket_blob.clone());
 
         assert_eq!(auth_a.global_id, 12345);

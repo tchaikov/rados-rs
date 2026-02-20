@@ -5,7 +5,7 @@ use crate::protocol::{
     AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
-use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName};
+use crate::types::{entity_type, CephXSession, CephXTicketBlob, CryptoKey, EntityName};
 use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
@@ -41,6 +41,12 @@ pub struct CephXClientHandler {
     secret_key: Option<CryptoKey>,
     /// Auth mode (Authorizer for OSDs, Mon for monitors)
     auth_mode: AuthMode,
+    /// Bitmask of service ticket types to request alongside AUTH.
+    ///
+    /// Mirrors `want_keys` in `AuthClientHandler` (C++) / `want_keys` in the Linux kernel
+    /// client. AUTH is always implied and should not be included here. Defaults to
+    /// `MON | OSD | MGR`, matching what librados requests.
+    want_keys: u32,
 }
 
 impl CephXClientHandler {
@@ -58,7 +64,17 @@ impl CephXClientHandler {
             session: None,
             secret_key: None,
             auth_mode,
+            // Default matches librados: MON | OSD | MGR
+            want_keys: entity_type::MON | entity_type::OSD | entity_type::MGR,
         })
+    }
+
+    /// Set the service ticket types to request alongside the AUTH ticket.
+    ///
+    /// `keys` is a bitmask of `entity_type::*` values. AUTH is always requested
+    /// implicitly and does not need to be included. Defaults to `MON | OSD | MGR`.
+    pub fn set_want_keys(&mut self, keys: u32) {
+        self.want_keys = keys;
     }
 
     /// Set the client's secret key
@@ -148,13 +164,15 @@ impl CephXClientHandler {
             request_type: CEPHX_GET_AUTH_SESSION_KEY,
         };
 
-        // Build the authenticate request
-        let auth_request = CephXAuthenticate {
+        // Request the configured service tickets alongside AUTH.
+        // Mirrors `other_keys = want_keys & ~CEPH_ENTITY_TYPE_AUTH` from the Linux kernel client.
+        let other_keys: u32 = self.want_keys & !entity_type::AUTH;
+        let auth_request = CephXAuthenticate::new(
             client_challenge,
-            key: session_key,
-            old_ticket: CephXTicketBlob::default(), // No old ticket for initial auth
-            other_keys: 0x3F,                       // Request all service keys (MON|OSD|MDS|MGR)
-        };
+            session_key,
+            CephXTicketBlob::default(), // No old ticket for initial auth
+            other_keys,
+        );
 
         // Encode header + authenticate (NO auth_mode for second request)
         let mut payload = BytesMut::new();
@@ -1186,7 +1204,7 @@ impl CephXClientHandler {
         payload.extend_from_slice(&authorizer);
 
         // 3. Encode service ticket request with needed keys
-        let ticket_request = crate::protocol::CephXServiceTicketRequest { keys: needed_keys };
+        let ticket_request = crate::protocol::CephXServiceTicketRequest::new(needed_keys);
         ticket_request.encode(&mut payload, 0).map_err(|e| {
             CephXError::ProtocolError(format!("Failed to encode ticket request: {:?}", e))
         })?;

@@ -445,19 +445,26 @@ impl Serialize for CryptoKey {
 /// - `__u8 struct_v` - Structure version (currently 1)
 /// - `uint64_t secret_id` - Secret/rotating key ID
 /// - `buffer::list blob` - Encrypted ticket data
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::Denc)]
 pub struct CephXTicketBlob {
+    struct_v: u8,
     pub secret_id: u64,
     pub blob: Bytes, // Encrypted ticket data
 }
 
 impl CephXTicketBlob {
     pub fn new(secret_id: u64, blob: Bytes) -> Self {
-        Self { secret_id, blob }
+        let struct_v = 1u8;
+        Self {
+            struct_v,
+            secret_id,
+            blob,
+        }
     }
 
     pub fn empty() -> Self {
         Self {
+            struct_v: 1u8,
             secret_id: 0,
             blob: Bytes::new(),
         }
@@ -470,53 +477,15 @@ impl Default for CephXTicketBlob {
     }
 }
 
-impl Denc for CephXTicketBlob {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode struct version
-        buf.put_u8(1);
-
-        // Encode secret_id
-        self.secret_id.encode(buf, 0)?;
-
-        // Encode blob with length prefix
-        self.blob.encode(buf, features)?;
-
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXTicketBlob".to_string(),
-            ));
-        }
-
-        let _struct_v = buf.get_u8();
-
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for secret_id".to_string(),
-            ));
-        }
-
-        let secret_id = u64::decode(buf, 0)?;
-        let blob = Bytes::decode(buf, features)?;
-
-        Ok(Self { secret_id, blob })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(1 + 8 + self.blob.encoded_size(features)?)
-    }
-}
-
 /// Authentication ticket containing authorization information
 ///
 /// Corresponds to C++ `AuthTicket` struct in `/src/auth/Auth.h`
 #[derive(Debug, Clone)]
 pub struct AuthTicket {
+    struct_v: u8,
     pub name: EntityName,
     pub global_id: u64,
+    old_auid: u64,
     pub created: SystemTime,
     pub expires: SystemTime,
     pub caps: AuthCapsInfo,
@@ -524,10 +493,15 @@ pub struct AuthTicket {
 }
 
 impl AuthTicket {
+    const STRUCT_V: u8 = 2;
+    const AUTH_UID_DEFAULT: u64 = u64::MAX;
+
     pub fn new(name: EntityName, global_id: u64) -> Self {
         Self {
+            struct_v: Self::STRUCT_V,
             name,
             global_id,
+            old_auid: Self::AUTH_UID_DEFAULT,
             created: SystemTime::now(),
             expires: SystemTime::now(),
             caps: AuthCapsInfo::default(),
@@ -543,62 +517,37 @@ impl AuthTicket {
 
 impl Denc for AuthTicket {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode struct version
-        buf.put_u8(2);
-
-        // Encode entity name
+        self.struct_v.encode(buf, features)?;
         self.name.encode(buf, features)?;
-
-        // Encode global_id
-        self.global_id.encode(buf, 0)?;
-
-        // Encode old_auid (always CEPH_AUTH_UID_DEFAULT = -1)
-        u64::MAX.encode(buf, 0)?;
-
-        // Encode created time using SystemTime's Denc implementation
+        self.global_id.encode(buf, features)?;
+        self.old_auid.encode(buf, features)?;
         self.created.encode(buf, features)?;
-
-        // Encode expires time using SystemTime's Denc implementation
         self.expires.encode(buf, features)?;
-
-        // Encode caps
         self.caps.encode(buf, features)?;
-
-        // Encode flags
-        self.flags.encode(buf, 0)?;
-
+        self.flags.encode(buf, features)?;
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for AuthTicket".to_string(),
-            ));
-        }
-
-        let struct_v = buf.get_u8();
-
+        let struct_v = u8::decode(buf, features)?;
         let name = EntityName::decode(buf, features)?;
-        let global_id = u64::decode(buf, 0)?;
-
+        let global_id = u64::decode(buf, features)?;
         // Decode old_auid if struct_v >= 2
-        if struct_v >= 2 {
-            let _old_auid = u64::decode(buf, 0)?;
-        }
-
-        // Decode created time using SystemTime's Denc implementation
+        let old_auid = if struct_v >= 2 {
+            u64::decode(buf, features)?
+        } else {
+            u64::MAX
+        };
         let created = SystemTime::decode(buf, features)?;
-
-        // Decode expires time using SystemTime's Denc implementation
         let expires = SystemTime::decode(buf, features)?;
-
         let caps = AuthCapsInfo::decode(buf, features)?;
-        let flags = u32::decode(buf, 0)?;
+        let flags = u32::decode(buf, features)?;
 
         Ok(Self {
+            struct_v,
             name,
             global_id,
+            old_auid,
             created,
             expires,
             caps,
@@ -608,14 +557,14 @@ impl Denc for AuthTicket {
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
         Some(
-            1 + // struct_v
-            self.name.encoded_size(features)? +
-            8 + // global_id
-            8 + // old_auid
-            4 + 4 + // created time
-            4 + 4 + // expires time
-            self.caps.encoded_size(features)? +
-            4, // flags
+            self.struct_v.encoded_size(features)?
+                + self.name.encoded_size(features)?
+                + self.global_id.encoded_size(features)?
+                + self.old_auid.encoded_size(features)?
+                + self.created.encoded_size(features)?
+                + self.expires.encoded_size(features)?
+                + self.caps.encoded_size(features)?
+                + self.flags.encoded_size(features)?,
         )
     }
 }

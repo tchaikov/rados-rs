@@ -75,6 +75,20 @@ impl MonitorAuthProvider {
         })
     }
 
+    /// Set the service ticket types to request alongside the AUTH ticket.
+    ///
+    /// `keys` is a bitmask of `auth::types::entity_type::*` values. Defaults to
+    /// `MON | OSD | MGR`, which is appropriate for rados clients. MDS clients
+    /// should add `entity_type::MDS`.
+    pub fn set_want_keys(&mut self, keys: u32) -> Result<()> {
+        let mut handler = self
+            .handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        handler.set_want_keys(keys);
+        Ok(())
+    }
+
     /// Set the secret key from base64 string
     pub fn set_secret_key_from_base64(&mut self, key_str: &str) -> Result<()> {
         let mut handler = self

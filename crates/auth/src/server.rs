@@ -281,10 +281,10 @@ impl CephXServerHandler {
             let encrypted_ticket = service_secret.encrypt(&encoded_ticket)?;
 
             // Create ticket blob
-            let ticket_blob = CephXTicketBlob {
-                secret_id: 0, // Not used in basic implementation
-                blob: encrypted_ticket,
-            };
+            let ticket_blob = CephXTicketBlob::new(
+                0, // Not used in basic implementation
+                encrypted_ticket,
+            );
 
             tickets.push(ticket_blob);
         }
