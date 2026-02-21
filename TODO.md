@@ -1,16 +1,15 @@
 # RADOS-RS Development TODO
 
-> **Last Updated**: 2026-02-19
+> **Last Updated**: 2026-02-21
 >
 > This document reflects the current implementation status based on a thorough
 > code review. The project has 10 crates totaling ~41,000 lines of Rust code,
 > with 372 unit tests passing and integration tests validated against a real
 > Ceph cluster via Docker CI.
 >
-> **Recent Verification** (2026-02-19): Comprehensive verification completed.
-> Many items previously listed as TODO are now confirmed complete, including:
-> CRUSH CHOOSE_INDEP, device classes, PgPool encoding, rotating keys, batch
-> operations via OpBuilder, and **priority-based message queueing** (commit f815d64).
+> **Recent Verification** (2026-02-21): Denc macro refactoring completed across
+> monclient message types and osdclient pgmap types. Fault recovery cleanup
+> implemented in msgr2 state machine.
 
 ---
 
@@ -18,20 +17,48 @@
 
 | Crate | Purpose | Completeness | Tests |
 |-------|---------|-------------|-------|
-| **denc** | Encoding/decoding (Denc trait) | ✅ ~98% | 50+ unit, corpus |
-| **denc-derive** | `#[derive(ZeroCopyDencode)]` proc macro | ✅ 100% | via denc |
+| **denc** | Encoding/decoding (Denc trait) | ✅ ~99% | 50+ unit, corpus |
+| **denc-macros** | `#[derive(Denc, ZeroCopyDencode, VersionedDenc)]` proc macros | ✅ 100% | via denc |
 | **dencoder** | ceph-dencoder compatible CLI tool | ✅ 100% | corpus comparison |
 | **auth** | CephX authentication | ✅ ~90% | 42 unit |
-| **msgr2** | Messenger protocol v2.1 | ✅ ~99% | 38+ unit |
+| **msgr2** | Messenger protocol v2.1 | ✅ ~99% | 80+ unit |
 | **crush** | CRUSH algorithm & object placement | ✅ ~95% | 20 unit |
-| **monclient** | Monitor client | ✅ ~85% | 66+ unit |
+| **monclient** | Monitor client | ✅ ~90% | 80+ unit |
 | **osdclient** | OSD client, IoCtx, OSDMap | ✅ ~90% | 74+ unit |
 | **cephconfig** | ceph.conf parser | ✅ 100% | 22 unit |
 | **rados** | CLI tool (put/get/stat/rm/ls) | ✅ functional | integration |
 
 ---
 
-## 🎉 Recent Achievements (2026-02-19)
+## 🎉 Recent Achievements (2026-02-21)
+
+### Denc Macro Refactoring (2026-02-21)
+
+**`VersionedDenc` derive macro** added to `denc-macros`:
+- Generates both `impl VersionedEncode` and `impl Denc` from a single `#[derive]`
+- Supports `#[denc(version = N, compat = M, feature_dependent)]` attributes
+- Applied to `StoreStatfs`, `Pow2Hist`, `PgMap` in `osdclient/pgmap_types.rs`
+- Eliminates ~60–80 lines of boilerplate per type
+
+**Message type `Denc` derives** in `monclient/messages.rs`:
+- `SubscribeItem`, `MMonSubscribe`, `MMonSubscribeAck` (fsid changed to `UuidD`)
+- `MMonGetVersion`, `MMonGetVersionReply`, `MMonMap`, `MConfig`, `MAuthReply`
+- `MAuthReply` field order corrected to match wire encoding (`auth_payload` before `result_msg`)
+- `encode_payload`/`decode_payload` reduced to single-line delegations per type
+
+**`PgScrubbingStatus` extracted** from `PgStat` to mirror C++ `pg_scrubbing_status_t`.
+
+### Fault Recovery Cleanup (2026-02-21)
+
+Added `StateMachine::fault_reset()` in `msgr2/src/state_machine.rs`:
+- Clears `frame_decryptor`, `frame_encryptor`, `compression_ctx`, `session_key`
+- Clears and re-enables `pre_auth_rxbuf`/`pre_auth_txbuf` for next attempt
+- Preserves session identity fields (cookies, global_id) for SESSION_RECONNECT
+- Called from `protocol.rs` when `StateResult::Fault` is matched
+
+---
+
+## 🎉 Previous Achievements (2026-02-19)
 
 ### Priority-Based Message Queueing (Commit f815d64)
 **Problem**: Both msgr2 send paths were FIFO — high-priority messages (ping, keepalive) could be delayed behind bulk data transfers, causing timeout failures.
@@ -81,6 +108,8 @@
 - [x] Core `Denc` trait with buffer-based encode/decode
 - [x] `VersionedEncode` trait with ENCODE_START/DECODE_START pattern
 - [x] `ZeroCopyDencode` derive macro for POD types
+- [x] `Denc` derive macro for field-by-field structs
+- [x] `VersionedDenc` derive macro (generates both `VersionedEncode` + `Denc` impls, supports `feature_dependent` flag)
 - [x] Primitives: u8–u64, i8–i64, f32, f64, bool
 - [x] Collections: `Vec<T>`, `String`, `BTreeMap`, `HashMap`, `Option<T>`, `Bytes`
 - [x] Core types: `EVersion`, `UTime`, `UuidD`, `EntityName`, `EntityType`, `FsId`
@@ -372,7 +401,7 @@ pub struct SharedState {
 
 ### TIER 2: HIGH PRIORITY — Robustness & Error Handling
 
-#### State Cleanup on Fault Recovery
+#### ✅ State Cleanup on Fault Recovery — COMPLETED (2026-02-21)
 
 **C++ Implementation** (`ProtocolV2.h` line 154):
 - `_fault()` method with comprehensive cleanup:
@@ -382,29 +411,23 @@ pub struct SharedState {
   - `reset_session()` — Full session reset
   - `discard_out_queue()` — Clear pending sends
 
-**Rust Status**:
-- ✅ Fault handling exists (`StateResult::Fault`)
-- ⚠️ Incomplete cleanup: no explicit crypto/throttle/buffer reset
+**Rust Implementation**:
+- ✅ `StateMachine::fault_reset()` added to `crates/msgr2/src/state_machine.rs`
+- ✅ Called from `protocol.rs` when `StateResult::Fault` is matched
+- Clears: `frame_decryptor`, `frame_encryptor`, `compression_ctx`, `session_key`, pre-auth buffers
+- Preserves: session identity (cookies, global_id) for SESSION_RECONNECT
 
-**Recommendation**:
 ```rust
-// Add to msgr2/src/state_machine.rs
-impl StateMachine {
-    pub fn fault_reset(&mut self) {
-        self.session_stream_handlers = None;      // Clear crypto
-        self.session_compression_handlers = None; // Clear compression
-        self.throttle.reset();                    // Clear throttle state
-        self.recv_buffer.clear();                 // Clear buffers
-    }
+pub fn fault_reset(&mut self) {
+    self.frame_decryptor = None;
+    self.frame_encryptor = None;
+    self.compression_ctx = None;
+    self.session_key = None;
+    self.pre_auth_rxbuf.clear();
+    self.pre_auth_txbuf.clear();
+    self.pre_auth_enabled = true;
 }
 ```
-
-**Files to modify**:
-- `crates/msgr2/src/state_machine.rs` — Add `fault_reset()`
-- `crates/msgr2/src/protocol.rs` — Call `fault_reset()` on errors
-- `crates/msgr2/src/crypto.rs` — Add `reset()` method
-
-**Effort**: LOW COMPLEXITY
 
 ---
 
@@ -641,7 +664,7 @@ impl PriorityQueue {
 | Phase | Goal | Status | Items |
 |-------|------|--------|-------|
 | **Phase 1** (Critical) | Fix session recovery to match C++ | ✅ DONE | Sent message queue ✅, session identity ✅, priority queue ✅ |
-| **Phase 2** (Robustness) | Improve error safety | 🔄 PARTIAL | Fault reset ⏳, type consolidation ⏳, compression stats ❌ |
+| **Phase 2** (Robustness) | Improve error safety | 🔄 PARTIAL | Fault reset ✅, type consolidation ⏳, compression stats ❌ |
 | **Phase 3** (Idiomatic) | Cleaner Rust patterns | ✅ MOSTLY DONE | Async/lock improvements ✅, iterator style ⏳, error handling ✅ |
 | **Phase 4** (Observability) | Visibility into runtime state | ❌ TODO | Connection diagnostics ❌, compression/throttle metrics ❌ |
 
@@ -652,6 +675,7 @@ impl PriorityQueue {
 | ~~**HIGH**~~ | ~~Session recovery changes~~ | ✅ DONE | Priority queue + sent message tracking integrated and tested |
 | **MEDIUM** | EntityName consolidation | ⏳ TODO | Deprecation warnings, migration guide, test all conversions |
 | ~~**LOW**~~ | ~~Async/error refactoring~~ | ✅ DONE | Lock contention improvements completed |
+| ~~**LOW**~~ | ~~Fault recovery cleanup~~ | ✅ DONE | `StateMachine::fault_reset()` implemented |
 | **LOW** | Compression stats tracking | ⏳ TODO | Non-breaking addition; no protocol changes |
 | **LOW** | Connection diagnostics | ⏳ TODO | Purely observability; no protocol changes |
 

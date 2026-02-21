@@ -1551,6 +1551,7 @@ impl Connection {
                         continue;
                     }
                     StateResult::Fault(msg) => {
+                        self.state.state_machine.fault_reset();
                         return Err(Error::Protocol(format!("Session setup fault: {}", msg)));
                     }
                     result => {

@@ -2054,6 +2054,23 @@ impl StateMachine {
         self.last_keepalive_ack
     }
 
+    /// Reset transient per-connection state after a fault.
+    ///
+    /// Clears crypto/compression handlers and pre-authentication buffers so
+    /// the state machine is ready for a fresh connection attempt.  Session
+    /// identity fields (client/server cookies, global_id) are intentionally
+    /// preserved so that SESSION_RECONNECT can be attempted if the peer
+    /// supports it.
+    pub fn fault_reset(&mut self) {
+        self.frame_decryptor = None;
+        self.frame_encryptor = None;
+        self.compression_ctx = None;
+        self.session_key = None;
+        self.pre_auth_rxbuf.clear();
+        self.pre_auth_txbuf.clear();
+        self.pre_auth_enabled = true; // re-enable for next connection attempt
+    }
+
     /// Create a new state machine for server connection
     pub fn new_server() -> Self {
         Self::new_server_with_auth(None)
