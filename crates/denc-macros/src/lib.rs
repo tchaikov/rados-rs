@@ -3,31 +3,83 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-/// Parse the optional `#[denc(crate = "...")]` helper attribute.
+/// Parsed values from `#[denc(key = value, ...)]` attributes.
+struct DencAttrs {
+    /// Crate path for generated code (default: `::denc`).
+    krate: TokenStream2,
+    /// Encoding version for `VersionedDenc`.
+    version: Option<u8>,
+    /// Compat version for `VersionedDenc` (defaults to `version` if absent).
+    compat: Option<u8>,
+}
+
+/// Parse all key-value pairs from `#[denc(...)]` attributes.
 ///
-/// Returns the crate path to use in generated code. Defaults to `::denc` so
-/// that external crates need no annotation. Use `#[denc(crate = "crate")]`
-/// when deriving inside the `denc` crate itself.
-fn find_denc_crate(attrs: &[syn::Attribute]) -> TokenStream2 {
+/// Supports:
+/// - `crate = "path"` — override the denc crate path
+/// - `version = N`    — encoding version (required for `VersionedDenc`)
+/// - `compat = N`     — compat version (defaults to `version`)
+fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
+    let mut krate = quote! { ::denc };
+    let mut version = None;
+    let mut compat = None;
+
     for attr in attrs {
-        if attr.path().is_ident("denc") {
-            if let Ok(nv) = attr.parse_args::<syn::MetaNameValue>() {
-                if nv.path.is_ident("crate") {
-                    if let syn::Expr::Lit(syn::ExprLit {
-                        lit: syn::Lit::Str(s),
-                        ..
-                    }) = nv.value
-                    {
-                        let tokens: TokenStream2 = s
-                            .parse()
-                            .expect("Invalid crate path in #[denc(crate = \"...\")]");
-                        return tokens;
-                    }
+        if !attr.path().is_ident("denc") {
+            continue;
+        }
+        let Ok(nvs) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated,
+        ) else {
+            continue;
+        };
+        for nv in nvs {
+            if nv.path.is_ident("crate") {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Str(s),
+                    ..
+                }) = nv.value
+                {
+                    krate = s
+                        .parse()
+                        .expect("Invalid crate path in #[denc(crate = \"...\")]");
+                }
+            } else if nv.path.is_ident("version") {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(i),
+                    ..
+                }) = nv.value
+                {
+                    version = Some(
+                        i.base10_parse::<u8>()
+                            .expect("Invalid version in #[denc(version = N)]"),
+                    );
+                }
+            } else if nv.path.is_ident("compat") {
+                if let syn::Expr::Lit(syn::ExprLit {
+                    lit: syn::Lit::Int(i),
+                    ..
+                }) = nv.value
+                {
+                    compat = Some(
+                        i.base10_parse::<u8>()
+                            .expect("Invalid compat in #[denc(compat = N)]"),
+                    );
                 }
             }
         }
     }
-    quote! { ::denc }
+
+    DencAttrs {
+        krate,
+        version,
+        compat,
+    }
+}
+
+/// Return just the crate path from `#[denc(crate = "...")]` (for existing derives).
+fn find_denc_crate(attrs: &[syn::Attribute]) -> TokenStream2 {
+    parse_denc_attrs(attrs).krate
 }
 
 /// Derive macro for field-by-field Denc encoding/decoding.
@@ -310,6 +362,172 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
         quote! { #denc_mut_impl #fixed_size }
     } else {
         quote! { #denc_mut_impl }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Derive macro for versioned Ceph encoding (ENCODE_START/DECODE_START pattern).
+///
+/// Generates both `impl VersionedEncode` and `impl Denc` for the struct.
+/// Each field must implement `denc::Denc`. Fields are encoded/decoded in
+/// declaration order.
+///
+/// # Required attribute
+///
+/// ```ignore
+/// #[denc(version = N)]           // encoding version
+/// #[denc(version = N, compat = M)]  // encoding version + compat version (defaults to N)
+/// ```
+///
+/// # Crate path
+///
+/// Same `#[denc(crate = "crate")]` convention as the `Denc` derive.
+/// All options can be combined in one attribute:
+/// ```ignore
+/// #[denc(version = 1, compat = 1, crate = "crate")]
+/// ```
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(denc::VersionedDenc)]
+/// #[denc(version = 1, compat = 1)]
+/// pub struct StoreStatfs {
+///     pub total: u64,
+///     pub available: u64,
+///     // ...
+/// }
+/// ```
+///
+/// # Limitations
+///
+/// Only suitable for types with a **single fixed version**. Types with
+/// version-range decoding or feature-dependent encoding must implement
+/// `VersionedEncode` manually.
+#[proc_macro_derive(VersionedDenc, attributes(denc))]
+pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let attrs = parse_denc_attrs(&input.attrs);
+    let krate = &attrs.krate;
+    let name = &input.ident;
+
+    let version = attrs
+        .version
+        .expect("#[denc(version = N)] is required when using #[derive(VersionedDenc)]");
+    let compat = attrs.compat.unwrap_or(version);
+
+    let fields = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Named(fields) => fields,
+            _ => panic!("VersionedDenc derive only supports named fields"),
+        },
+        _ => panic!("VersionedDenc can only be derived for structs"),
+    };
+
+    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
+    let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
+
+    let encode_stmts = field_names.iter().map(|name| {
+        quote! { self.#name.encode(buf, features)?; }
+    });
+
+    let decode_fields = fields.named.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! {
+            #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
+        }
+    });
+
+    let size_stmts = field_names.iter().map(|name| {
+        quote! { size += self.#name.encoded_size(features)?; }
+    });
+
+    let where_clauses: Vec<_> = field_types
+        .iter()
+        .map(|ty| quote! { #ty: #krate::Denc })
+        .collect();
+
+    let expanded = quote! {
+        impl #krate::VersionedEncode for #name
+        where
+            #(#where_clauses,)*
+        {
+            fn encoding_version(&self, _features: u64) -> u8 {
+                #version
+            }
+
+            fn compat_version(&self, _features: u64) -> u8 {
+                #compat
+            }
+
+            fn encode_content<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+                _version: u8,
+            ) -> ::std::result::Result<(), #krate::RadosError> {
+                #(#encode_stmts)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn decode_content<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+                _version: u8,
+                compat_version: u8,
+            ) -> ::std::result::Result<Self, #krate::RadosError> {
+                if compat_version > #version {
+                    return ::std::result::Result::Err(#krate::RadosError::Protocol(
+                        ::std::format!(
+                            concat!(stringify!(#name), " compat version {} is not supported (max: {})"),
+                            compat_version,
+                            #version,
+                        ),
+                    ));
+                }
+                ::std::result::Result::Ok(Self {
+                    #(#decode_fields,)*
+                })
+            }
+
+            fn encoded_size_content(
+                &self,
+                features: u64,
+                _version: u8,
+            ) -> ::std::option::Option<usize> {
+                let mut size: usize = 0;
+                #(#size_stmts)*
+                ::std::option::Option::Some(size)
+            }
+        }
+
+        impl #krate::Denc for #name
+        where
+            #(#where_clauses,)*
+        {
+            const USES_VERSIONING: bool = true;
+
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<(), #krate::RadosError> {
+                <Self as #krate::VersionedEncode>::encode_versioned(self, buf, features)
+            }
+
+            fn decode<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<Self, #krate::RadosError> {
+                <Self as #krate::VersionedEncode>::decode_versioned(buf, features)
+            }
+
+            fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
+                <Self as #krate::VersionedEncode>::encoded_size_versioned(self, features)
+            }
+        }
     };
 
     TokenStream::from(expanded)

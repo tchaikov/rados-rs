@@ -6,7 +6,7 @@ use denc::{Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, Version
 
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, denc::Denc)]
 pub struct PgCount {
     /// Number of PGs for which this OSD is in the acting set
     pub acting: i32,
@@ -22,49 +22,14 @@ impl PgCount {
     }
 }
 
-impl Denc for PgCount {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 12 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for PgCount: need 12, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_i32_le(self.acting);
-        buf.put_i32_le(self.up_not_acting);
-        buf.put_i32_le(self.primary);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 12 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for PgCount: need 12, have {}",
-                buf.remaining()
-            )));
-        }
-        let acting = buf.get_i32_le();
-        let up_not_acting = buf.get_i32_le();
-        let primary = buf.get_i32_le();
-        Ok(PgCount {
-            acting,
-            up_not_acting,
-            primary,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(12)
-    }
-}
-
 impl FixedSize for PgCount {
     const SIZE: usize = 12;
 }
 
 /// Filesystem statistics from the object store
 /// C++ definition: store_statfs_t in osd/osd_types.h
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct StoreStatfs {
     /// Total bytes
     pub total: u64,
@@ -95,93 +60,6 @@ impl StoreStatfs {
 
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
-    }
-}
-
-impl VersionedEncode for StoreStatfs {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 80 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for StoreStatfs: need 80, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u64_le(self.total);
-        buf.put_u64_le(self.available);
-        buf.put_u64_le(self.internally_reserved);
-        buf.put_i64_le(self.allocated);
-        buf.put_i64_le(self.data_stored);
-        buf.put_i64_le(self.data_compressed);
-        buf.put_i64_le(self.data_compressed_allocated);
-        buf.put_i64_le(self.data_compressed_original);
-        buf.put_i64_le(self.omap_allocated);
-        buf.put_i64_le(self.internal_metadata);
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        _features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported StoreStatfs version: {}",
-                version
-            )));
-        }
-        if buf.remaining() < 80 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for StoreStatfs: need 80, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(StoreStatfs {
-            total: buf.get_u64_le(),
-            available: buf.get_u64_le(),
-            internally_reserved: buf.get_u64_le(),
-            allocated: buf.get_i64_le(),
-            data_stored: buf.get_i64_le(),
-            data_compressed: buf.get_i64_le(),
-            data_compressed_allocated: buf.get_i64_le(),
-            data_compressed_original: buf.get_i64_le(),
-            omap_allocated: buf.get_i64_le(),
-            internal_metadata: buf.get_i64_le(),
-        })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
-    }
-}
-
-impl Denc for StoreStatfs {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(6 + 80) // 6 bytes for ENCODE_START header + 80 bytes for content
     }
 }
 
@@ -699,7 +577,8 @@ impl Denc for PoolStat {
 /// Power-of-2 histogram
 /// C++ definition: pow2_hist_t in common/histogram.h
 /// Version 1, wraps vector<int32_t>
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct Pow2Hist {
     pub values: Vec<i32>,
 }
@@ -707,64 +586,6 @@ pub struct Pow2Hist {
 impl Pow2Hist {
     pub fn new() -> Self {
         Self::default()
-    }
-}
-
-impl VersionedEncode for Pow2Hist {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        self.values.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported Pow2Hist version: {} (expected 1)",
-                version
-            )));
-        }
-
-        let values = Vec::<i32>::decode(buf, features)?;
-        Ok(Pow2Hist { values })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
-    }
-}
-
-impl Denc for Pow2Hist {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let values_size = self.values.encoded_size(features)?;
-        Some(6 + values_size) // 6 bytes for ENCODE_START header + values
     }
 }
 
