@@ -27,7 +27,7 @@ pub const POOL_OP_CREATE_UNMANAGED_SNAP: u32 = 0x21;
 pub const POOL_OP_DELETE_UNMANAGED_SNAP: u32 = 0x22;
 
 /// MMonSubscribe - Subscribe to cluster maps
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MMonSubscribe {
     pub what: HashMap<String, SubscribeItem>,
     pub hostname: String,
@@ -70,29 +70,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-
-        // Encode map size using Denc
-        (self.what.len() as u32).encode(&mut buf, 0)?;
-
-        // Encode each subscription
-        for (name, item) in &self.what {
-            // Encode name using Denc
-            name.encode(&mut buf, 0)?;
-            tracing::debug!(
-                "Subscription: '{}' start={} flags={}",
-                name,
-                item.start,
-                item.flags
-            );
-
-            // Encode subscribe item using Denc
-            item.encode(&mut buf, 0)?;
-        }
-
-        // Encode hostname (version 3) using Denc
-        self.hostname.encode(&mut buf, 0)?;
-        tracing::debug!("Hostname: '{}'", self.hostname);
-
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -103,29 +81,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        let count = u32::decode(&mut data, 0)? as usize;
-        let mut what = HashMap::new();
-
-        for _ in 0..count {
-            // Decode name using Denc
-            let name = String::decode(&mut data, 0)?;
-
-            // Decode subscribe item using Denc
-            let item = SubscribeItem::decode(&mut data, 0)?;
-
-            what.insert(name, item);
-        }
-
-        // Decode hostname (version 3) using Denc
-        let hostname = if data.remaining() >= 4 {
-            String::decode(&mut data, 0).unwrap_or_else(|_| "unknown".to_string())
-        } else {
-            "unknown".to_string()
-        };
-
-        Ok(Self { what, hostname })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonSubscribe decode failed".into()))
     }
 }
 
