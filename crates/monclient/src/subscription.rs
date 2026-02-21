@@ -186,7 +186,7 @@ impl Default for MonSub {
 }
 
 /// A subscription item
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, denc::Denc)]
 pub struct SubscribeItem {
     /// Version to start from
     pub start: u64,

@@ -86,8 +86,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
             );
 
             // Encode subscribe item using Denc
-            item.start.encode(&mut buf, 0)?;
-            item.flags.encode(&mut buf, 0)?;
+            item.encode(&mut buf, 0)?;
         }
 
         // Encode hostname (version 3) using Denc
@@ -114,10 +113,9 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
             let name = String::decode(&mut data, 0)?;
 
             // Decode subscribe item using Denc
-            let start = u64::decode(&mut data, 0)?;
-            let flags = u8::decode(&mut data, 0)?;
+            let item = SubscribeItem::decode(&mut data, 0)?;
 
-            what.insert(name, SubscribeItem { start, flags });
+            what.insert(name, item);
         }
 
         // Decode hostname (version 3) using Denc
