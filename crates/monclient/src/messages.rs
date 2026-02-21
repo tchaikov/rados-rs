@@ -131,7 +131,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
 }
 
 /// MMonGetVersion - Query map version
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MMonGetVersion {
     pub tid: u64,
     pub what: String,
@@ -161,8 +161,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.tid.encode(&mut buf, 0)?;
-        self.what.encode(&mut buf, 0)?;
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -173,17 +172,13 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        let tid = u64::decode(&mut data, 0)?;
-        let what = String::decode(&mut data, 0)?;
-
-        Ok(Self { tid, what })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonGetVersion decode failed".into()))
     }
 }
 
 /// MMonGetVersionReply - Version query response
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MMonGetVersionReply {
     pub tid: u64,
     pub version: u64,
@@ -215,9 +210,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.tid.encode(&mut buf, 0)?;
-        self.version.encode(&mut buf, 0)?;
-        self.oldest_version.encode(&mut buf, 0)?;
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -228,22 +221,13 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        let tid = u64::decode(&mut data, 0)?;
-        let version = u64::decode(&mut data, 0)?;
-        let oldest_version = u64::decode(&mut data, 0)?;
-
-        Ok(Self {
-            tid,
-            version,
-            oldest_version,
-        })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonGetVersionReply decode failed".into()))
     }
 }
 
 /// MMonMap - Monitor map update
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MMonMap {
     pub monmap_bl: Bytes,
 }
@@ -269,8 +253,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonMap {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        // Use Denc for Bytes which handles length prefix automatically
-        self.monmap_bl.encode(&mut buf, 0)?;
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -281,16 +264,13 @@ impl msgr2::ceph_message::CephMessagePayload for MMonMap {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        // Use Denc for Bytes which handles length prefix automatically
-        let monmap_bl = Bytes::decode(&mut data, 0)?;
-        Ok(Self { monmap_bl })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonMap decode failed".into()))
     }
 }
 
 /// MConfig - Runtime configuration update
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MConfig {
     pub config: HashMap<String, String>,
 }
@@ -316,11 +296,7 @@ impl msgr2::ceph_message::CephMessagePayload for MConfig {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        (self.config.len() as u32).encode(&mut buf, 0)?;
-        for (key, value) in &self.config {
-            key.encode(&mut buf, 0)?;
-            value.encode(&mut buf, 0)?;
-        }
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -332,14 +308,7 @@ impl msgr2::ceph_message::CephMessagePayload for MConfig {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        let count = u32::decode(&mut data, 0)? as usize;
-        let mut config = HashMap::with_capacity(count);
-        for _ in 0..count {
-            let key = String::decode(&mut data, 0)?;
-            let value = String::decode(&mut data, 0)?;
-            config.insert(key, value);
-        }
-        Ok(Self { config })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MConfig decode failed".into()))
     }
 }
 
@@ -1070,13 +1039,15 @@ impl msgr2::ceph_message::CephMessagePayload for MAuth {
 ///
 /// This message is sent by the monitor in response to MAuth.
 /// Note: This is NOT a PaxosServiceMessage (it inherits from Message in C++).
-#[derive(Debug, Clone)]
+/// Field order matches wire encoding: auth_payload is encoded before result_msg
+/// (see C++ MAuthReply.h:50-57).
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MAuthReply {
     pub protocol: u32,
     pub result: i32,
     pub global_id: u64,
-    pub result_msg: String,
     pub auth_payload: Bytes,
+    pub result_msg: String,
 }
 
 impl MAuthReply {
@@ -1112,17 +1083,7 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-
-        self.protocol.encode(&mut buf, 0)?;
-        self.result.encode(&mut buf, 0)?;
-        self.global_id.encode(&mut buf, 0)?;
-
-        // Encode auth_payload BEFORE result_msg (matches C++ MAuthReply.h:50-57)
-        self.auth_payload.encode(&mut buf, 0)?;
-
-        // Encode result_msg as string
-        self.result_msg.encode(&mut buf, 0)?;
-
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -1133,25 +1094,8 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        let protocol = u32::decode(&mut data, 0)?;
-        let result = i32::decode(&mut data, 0)?;
-        let global_id = u64::decode(&mut data, 0)?;
-
-        // Decode auth_payload BEFORE result_msg (matches C++ MAuthReply.h:50-57)
-        let auth_payload = Bytes::decode(&mut data, 0)?;
-
-        // Decode result_msg as string
-        let result_msg = String::decode(&mut data, 0)?;
-
-        Ok(Self {
-            protocol,
-            result,
-            global_id,
-            result_msg,
-            auth_payload,
-        })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MAuthReply decode failed".into()))
     }
 }
 
