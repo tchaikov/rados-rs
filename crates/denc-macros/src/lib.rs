@@ -3,7 +3,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-/// Parsed values from `#[denc(key = value, ...)]` attributes.
+/// Parsed values from `#[denc(...)]` attributes.
 struct DencAttrs {
     /// Crate path for generated code (default: `::denc`).
     krate: TokenStream2,
@@ -11,61 +11,75 @@ struct DencAttrs {
     version: Option<u8>,
     /// Compat version for `VersionedDenc` (defaults to `version` if absent).
     compat: Option<u8>,
+    /// Whether to emit `const FEATURE_DEPENDENT: bool = true` (bare flag).
+    feature_dependent: bool,
 }
 
-/// Parse all key-value pairs from `#[denc(...)]` attributes.
+/// Parse all items from `#[denc(...)]` attributes.
 ///
-/// Supports:
-/// - `crate = "path"` — override the denc crate path
-/// - `version = N`    — encoding version (required for `VersionedDenc`)
-/// - `compat = N`     — compat version (defaults to `version`)
+/// Supports key-value pairs and bare flags:
+/// - `crate = "path"`   — override the denc crate path
+/// - `version = N`      — encoding version (required for `VersionedDenc`)
+/// - `compat = N`       — compat version (defaults to `version`)
+/// - `feature_dependent` — emit `FEATURE_DEPENDENT = true` in generated impls
 fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
     let mut krate = quote! { ::denc };
     let mut version = None;
     let mut compat = None;
+    let mut feature_dependent = false;
 
     for attr in attrs {
         if !attr.path().is_ident("denc") {
             continue;
         }
-        let Ok(nvs) = attr.parse_args_with(
-            syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated,
+        let Ok(metas) = attr.parse_args_with(
+            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
         ) else {
             continue;
         };
-        for nv in nvs {
-            if nv.path.is_ident("crate") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(s),
-                    ..
-                }) = nv.value
-                {
-                    krate = s
-                        .parse()
-                        .expect("Invalid crate path in #[denc(crate = \"...\")]");
+        for meta in metas {
+            match meta {
+                // Bare flag: `feature_dependent`
+                syn::Meta::Path(path) if path.is_ident("feature_dependent") => {
+                    feature_dependent = true;
                 }
-            } else if nv.path.is_ident("version") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Int(i),
-                    ..
-                }) = nv.value
-                {
-                    version = Some(
-                        i.base10_parse::<u8>()
-                            .expect("Invalid version in #[denc(version = N)]"),
-                    );
+                // Key-value: `key = value`
+                syn::Meta::NameValue(nv) if nv.path.is_ident("crate") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = nv.value
+                    {
+                        krate = s
+                            .parse()
+                            .expect("Invalid crate path in #[denc(crate = \"...\")]");
+                    }
                 }
-            } else if nv.path.is_ident("compat") {
-                if let syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Int(i),
-                    ..
-                }) = nv.value
-                {
-                    compat = Some(
-                        i.base10_parse::<u8>()
-                            .expect("Invalid compat in #[denc(compat = N)]"),
-                    );
+                syn::Meta::NameValue(nv) if nv.path.is_ident("version") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(i),
+                        ..
+                    }) = nv.value
+                    {
+                        version = Some(
+                            i.base10_parse::<u8>()
+                                .expect("Invalid version in #[denc(version = N)]"),
+                        );
+                    }
                 }
+                syn::Meta::NameValue(nv) if nv.path.is_ident("compat") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(i),
+                        ..
+                    }) = nv.value
+                    {
+                        compat = Some(
+                            i.base10_parse::<u8>()
+                                .expect("Invalid compat in #[denc(compat = N)]"),
+                        );
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -74,6 +88,7 @@ fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
         krate,
         version,
         compat,
+        feature_dependent,
     }
 }
 
@@ -449,11 +464,21 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
         .map(|ty| quote! { #ty: #krate::Denc })
         .collect();
 
+    // Emit `const FEATURE_DEPENDENT: bool = true;` only when the flag is set.
+    let feature_dependent_ve = if attrs.feature_dependent {
+        quote! { const FEATURE_DEPENDENT: bool = true; }
+    } else {
+        quote! {}
+    };
+    let feature_dependent_denc = feature_dependent_ve.clone();
+
     let expanded = quote! {
         impl #krate::VersionedEncode for #name
         where
             #(#where_clauses,)*
         {
+            #feature_dependent_ve
+
             fn encoding_version(&self, _features: u64) -> u8 {
                 #version
             }
@@ -508,6 +533,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
             #(#where_clauses,)*
         {
             const USES_VERSIONING: bool = true;
+            #feature_dependent_denc
 
             fn encode<B: bytes::BufMut>(
                 &self,

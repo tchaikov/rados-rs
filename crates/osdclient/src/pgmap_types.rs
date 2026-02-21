@@ -2131,7 +2131,8 @@ impl Denc for PgMapDigest {
 /// PGMap (PGMap class in C++)
 /// The complete PG map including all PG stats
 /// Version 8, compat 8
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, denc::VersionedDenc)]
+#[denc(version = 8, compat = 8, feature_dependent)]
 pub struct PgMap {
     pub version: Version,
     pub pg_stat: std::collections::BTreeMap<PgId, PgStat>,
@@ -2140,88 +2141,6 @@ pub struct PgMap {
     pub last_pg_scan: Epoch,
     pub stamp: UTime,
     pub pool_statfs: std::collections::BTreeMap<(i64, i32), StoreStatfs>,
-}
-
-impl VersionedEncode for PgMap {
-    const FEATURE_DEPENDENT: bool = true;
-
-    fn encoding_version(&self, _features: u64) -> u8 {
-        8
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        8
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // Follow exact order from PGMap::encode in PGMap.cc
-        self.version.encode(buf, features)?;
-        self.pg_stat.encode(buf, features)?;
-        self.osd_stat.encode(buf, features)?; // Feature-dependent
-        self.last_osdmap_epoch.encode(buf, features)?;
-        self.last_pg_scan.encode(buf, features)?;
-        self.stamp.encode(buf, features)?;
-        self.pool_statfs.encode(buf, features)?; // Feature-dependent
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        if version != 8 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported PgMap version: {} (expected 8)",
-                version
-            )));
-        }
-
-        let pg_version = Version::decode(buf, features)?;
-        let pg_stat = std::collections::BTreeMap::<PgId, PgStat>::decode(buf, features)?;
-        let osd_stat = std::collections::BTreeMap::<i32, OsdStat>::decode(buf, features)?;
-        let last_osdmap_epoch = Epoch::decode(buf, features)?;
-        let last_pg_scan = Epoch::decode(buf, features)?;
-        let stamp = UTime::decode(buf, features)?;
-        let pool_statfs =
-            std::collections::BTreeMap::<(i64, i32), StoreStatfs>::decode(buf, features)?;
-
-        Ok(PgMap {
-            version: pg_version,
-            pg_stat,
-            osd_stat,
-            last_osdmap_epoch,
-            last_pg_scan,
-            stamp,
-            pool_statfs,
-        })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
-    }
-}
-
-impl Denc for PgMap {
-    const USES_VERSIONING: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        None // Variable size due to maps
-    }
 }
 
 #[cfg(test)]
