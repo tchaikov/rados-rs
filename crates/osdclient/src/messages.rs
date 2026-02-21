@@ -249,7 +249,7 @@ impl CephMessagePayload for MOSDOp {
     fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use crate::denc_types::OsdReqId;
         use crate::types::{
-            BlkinTraceInfo, EntityName, JaegerSpanContext, CEPH_ENTITY_TYPE_CLIENT,
+            BlkinTraceInfo, JaegerSpanContext, PackedEntityName, CEPH_ENTITY_TYPE_CLIENT,
         };
         use denc::denc::Denc;
 
@@ -270,7 +270,7 @@ impl CephMessagePayload for MOSDOp {
         self.flags.encode(&mut buf, 0)?;
 
         // 5. reqid (osd_reqid_t) - with version header (2,2)
-        let entity_name = EntityName::new(CEPH_ENTITY_TYPE_CLIENT, self.global_id);
+        let entity_name = PackedEntityName::new(CEPH_ENTITY_TYPE_CLIENT, self.global_id);
         let reqid = OsdReqId {
             name: entity_name,
             tid: self.reqid.tid,

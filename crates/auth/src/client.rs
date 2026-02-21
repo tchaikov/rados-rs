@@ -5,7 +5,7 @@ use crate::protocol::{
     AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
-use crate::types::{EntityType, CephXSession, CephXTicketBlob, CryptoKey, EntityName};
+use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName, EntityType};
 use bytes::{BufMut, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
@@ -723,7 +723,8 @@ impl CephXClientHandler {
 
         // Process all service tickets
         let mut first_session_key_bytes: Option<Bytes> = None;
-        let mut ticket_handlers: Vec<(EntityType, CryptoKey, u64, CephXTicketBlob, Duration)> = Vec::new();
+        let mut ticket_handlers: Vec<(EntityType, CryptoKey, u64, CephXTicketBlob, Duration)> =
+            Vec::new();
 
         for (i, ticket_info) in ticket_reply.tickets.iter().enumerate() {
             debug!(
@@ -837,7 +838,10 @@ impl CephXClientHandler {
         use crate::protocol::{CephXAuthorizeReply, CephXEncryptedEnvelope};
         use denc::Denc;
 
-        debug!("Decrypting authorize challenge for service {:?}", service_type);
+        debug!(
+            "Decrypting authorize challenge for service {:?}",
+            service_type
+        );
         trace!(
             "decrypt_authorize_challenge: payload length={}",
             encrypted_payload.len()
@@ -1180,12 +1184,13 @@ impl CephXClientHandler {
 
         // 2. Build and encode authorizer from AUTH ticket handler
         // The authorizer proves we have a valid AUTH ticket
-        let auth_ticket_handler = session
-            .ticket_handlers
-            .get(&EntityType::AUTH)
-            .ok_or_else(|| {
-                CephXError::AuthenticationFailed("No AUTH ticket handler available".into())
-            })?;
+        let auth_ticket_handler =
+            session
+                .ticket_handlers
+                .get(&EntityType::AUTH)
+                .ok_or_else(|| {
+                    CephXError::AuthenticationFailed("No AUTH ticket handler available".into())
+                })?;
 
         if !auth_ticket_handler.have_key {
             return Err(CephXError::AuthenticationFailed(

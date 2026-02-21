@@ -303,7 +303,12 @@ pub struct CephXAuthenticate {
 
 impl CephXAuthenticate {
     const STRUCT_V: u8 = 3;
-    pub fn new(client_challenge: u64, key: u64, old_ticket: CephXTicketBlob, other_keys: u32) -> Self {
+    pub fn new(
+        client_challenge: u64,
+        key: u64,
+        old_ticket: CephXTicketBlob,
+        other_keys: u32,
+    ) -> Self {
         Self {
             struct_v: Self::STRUCT_V,
             client_challenge,

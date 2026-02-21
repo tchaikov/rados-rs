@@ -16,7 +16,6 @@ serde = { workspace = true, features = ["derive"] }
 tracing = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-bitflags = { workspace = true }
 hex = "0.4"
 aes = "0.8"
 cbc = { version = "0.1", features = ["std"] }

@@ -260,7 +260,11 @@ impl AuthProvider for ServiceAuthProvider {
             .handler
             .lock()
             .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
-        let result = handler.build_authorizer(EntityType::from_bits_retain(service_id), global_id, self.server_challenge);
+        let result = handler.build_authorizer(
+            EntityType::from_bits_retain(service_id),
+            global_id,
+            self.server_challenge,
+        );
 
         if let Err(ref e) = result {
             debug!("build_authorizer failed: {:?}", e);
@@ -318,7 +322,10 @@ impl AuthProvider for ServiceAuthProvider {
                 .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
 
             // Decrypt and extract server_challenge
-            match handler.decrypt_authorize_challenge(EntityType::from_bits_retain(service_id), payload.clone()) {
+            match handler.decrypt_authorize_challenge(
+                EntityType::from_bits_retain(service_id),
+                payload.clone(),
+            ) {
                 Ok(server_challenge) => {
                     debug!(
                         "Successfully extracted server_challenge: 0x{:016x}",
@@ -358,7 +365,10 @@ impl AuthProvider for ServiceAuthProvider {
         // Get the session key for this service from the ticket handler
         let session_key = if let Some(session) = handler.get_session() {
             // Get the ticket handler for the connected service
-            let stype = self.service_id.map(EntityType::from_bits_retain).unwrap_or(EntityType::OSD);
+            let stype = self
+                .service_id
+                .map(EntityType::from_bits_retain)
+                .unwrap_or(EntityType::OSD);
             session
                 .ticket_handlers
                 .get(&stype)

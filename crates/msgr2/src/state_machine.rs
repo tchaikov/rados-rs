@@ -8,9 +8,9 @@ use crate::frames::{
     CompressionRequestFrame, Frame, FrameTrait, HelloFrame, Keepalive2AckFrame, ServerIdentFrame,
     Tag,
 };
-use auth::EntityName;
 use bytes::{Bytes, BytesMut};
 use denc::Denc;
+use denc::EntityName;
 use std::fmt::Debug;
 use tracing;
 
@@ -345,7 +345,7 @@ impl State for HelloConnecting {
             self.hello_sent = true;
             // Create HELLO frame
             let hello_frame = HelloFrame::new(
-                denc::EntityType::TYPE_CLIENT.value() as u8,
+                denc::EntityType::CLIENT.bits() as u8,
                 denc::EntityAddr::default(),
             );
             let frame = create_frame_from_trait(&hello_frame, Tag::Hello);
@@ -1597,7 +1597,7 @@ impl State for HelloAccepting {
             Tag::Hello => {
                 // Send HELLO response and transition to auth
                 let hello_frame = HelloFrame::new(
-                    denc::EntityType::TYPE_CLIENT.value() as u8,
+                    denc::EntityType::CLIENT.bits() as u8,
                     denc::EntityAddr::default(),
                 );
                 let response_frame = create_frame_from_trait(&hello_frame, Tag::Hello);

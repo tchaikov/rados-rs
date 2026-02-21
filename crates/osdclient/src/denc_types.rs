@@ -8,8 +8,8 @@ use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
 
 use crate::types::{
-    EntityName, JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PgId, RequestRedirect,
-    StripedPgId,
+    JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PackedEntityName, PgId,
+    RequestRedirect, StripedPgId,
 };
 
 #[cfg(test)]
@@ -86,7 +86,7 @@ denc::impl_denc_for_versioned!(StripedPgId);
 /// This structure uses a special versioning scheme (DENC_START_OSD_REQID)
 /// that enforces version 2 and compat 2.
 pub struct OsdReqId {
-    pub name: EntityName,
+    pub name: PackedEntityName,
     pub tid: u64,
     pub inc: i32,
 }
@@ -125,7 +125,7 @@ impl VersionedEncode for OsdReqId {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Decode entity_name_t
-        let name = EntityName::decode(buf, features)?;
+        let name = PackedEntityName::decode(buf, features)?;
 
         // Decode tid (u64)
         let tid = u64::decode(buf, 0)?;
@@ -441,7 +441,6 @@ pub struct OsdStatData {
 // Re-export UTime from denc crate to avoid duplication
 pub use denc::UTime;
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -476,13 +475,13 @@ mod tests {
 
     #[test]
     fn test_entity_name_roundtrip() {
-        let name = EntityName::new(0x08, 0); // CEPH_ENTITY_TYPE_CLIENT
+        let name = PackedEntityName::new(0x08, 0); // CEPH_ENTITY_TYPE_CLIENT
         let mut buf = BytesMut::new();
 
         name.encode(&mut buf, 0).unwrap();
         assert_eq!(buf.len(), 9);
 
-        let decoded = EntityName::decode(&mut buf, 0).unwrap();
+        let decoded = PackedEntityName::decode(&mut buf, 0).unwrap();
         // Copy values to avoid taking references to packed struct fields
         let entity_type = decoded.entity_type;
         let num = decoded.num;
@@ -493,7 +492,7 @@ mod tests {
     #[test]
     fn test_osd_reqid_roundtrip() {
         let reqid = OsdReqId {
-            name: EntityName::new(0x08, 0),
+            name: PackedEntityName::new(0x08, 0),
             tid: 1,
             inc: 1,
         };
@@ -549,7 +548,7 @@ mod tests {
         assert_eq!(spgid.encoded_size(0), Some(24)); // 6 (header) + 17 (pgid) + 1 (shard)
 
         let reqid = OsdReqId {
-            name: EntityName::new(0x08, 0),
+            name: PackedEntityName::new(0x08, 0),
             tid: 1,
             inc: 1,
         };

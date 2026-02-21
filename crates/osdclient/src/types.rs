@@ -276,19 +276,15 @@ impl StripedPgId {
     }
 }
 
-/// Entity name for zero-copy wire protocol encoding (packed struct)
+/// Packed entity name for zero-copy wire protocol encoding (9 bytes: u8 type + u64 num)
 ///
-/// This is the most efficient representation for network communication, using a packed
-/// struct with numeric fields. It's designed for zero-copy encoding/decoding in message
-/// headers and protocol buffers.
+/// This is the most efficient representation for OSD network communication, using a packed
+/// struct with numeric fields for zero-copy encoding/decoding in message headers.
 ///
-/// **When to use:** For encoding/decoding entity names in network messages, especially
-/// in performance-critical paths where zero-copy operations are important.
+/// **When to use:** For encoding/decoding entity names in OSD network messages where
+/// zero-copy operations are important (MOSDOp, OsdReqId).
 ///
-/// **Related types:**
-/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
-/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
-/// - `denc::types::EntityName` - General encoding version (typed)
+/// **See also:** `denc::EntityName` — the canonical entity name type used everywhere else.
 ///
 /// Represents a Ceph entity like "client.0", "osd.1", etc.
 #[derive(
@@ -303,7 +299,7 @@ impl StripedPgId {
     zerocopy::Immutable,
 )]
 #[repr(C)]
-pub struct EntityName {
+pub struct PackedEntityName {
     /// Entity type (CEPH_ENTITY_TYPE_*)
     pub entity_type: u8,
     /// Entity number
@@ -318,7 +314,7 @@ pub const CEPH_ENTITY_TYPE_CLIENT: u8 = 0x08;
 pub const CEPH_ENTITY_TYPE_MGR: u8 = 0x10;
 pub const CEPH_ENTITY_TYPE_AUTH: u8 = 0x20;
 
-impl EntityName {
+impl PackedEntityName {
     pub fn new(entity_type: u8, num: u64) -> Self {
         Self {
             entity_type,
@@ -327,7 +323,7 @@ impl EntityName {
     }
 }
 
-impl std::str::FromStr for EntityName {
+impl std::str::FromStr for PackedEntityName {
     type Err = String;
 
     /// Parse from string like "client.0"

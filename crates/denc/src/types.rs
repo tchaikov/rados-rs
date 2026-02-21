@@ -4,11 +4,10 @@ pub use crate::ids::{Epoch, GlobalId, OsdId, PoolId};
 
 use crate::denc::Denc;
 use crate::error::RadosError;
-use crate::mark_simple_encoding;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
-use std::convert::TryFrom;
 use std::fmt;
+use std::str::FromStr;
 
 // ============= Basic types used across multiple modules =============
 
@@ -197,99 +196,145 @@ impl crate::denc::FixedSize for UTime {
     const SIZE: usize = 8;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-pub struct EntityType(u32);
-
-impl EntityType {
-    pub const TYPE_MON: Self = Self(0x01);
-    pub const TYPE_MDS: Self = Self(0x02);
-    pub const TYPE_OSD: Self = Self(0x04);
-    pub const TYPE_CLIENT: Self = Self(0x08);
-    pub const TYPE_MGR: Self = Self(0x10);
-
-    pub const fn value(self) -> u32 {
-        self.0
+bitflags::bitflags! {
+    /// Ceph entity type flags from `src/include/msgr.h`
+    ///
+    /// Used both as individual service identifiers (ticket HashMap keys) and
+    /// as bitmasks (e.g. `want_keys = EntityType::MON | EntityType::OSD`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct EntityType: u32 {
+        const MON    = 0x01;
+        const MDS    = 0x02;
+        const OSD    = 0x04;
+        const CLIENT = 0x08;
+        const MGR    = 0x10;
+        const AUTH   = 0x20;
     }
 }
 
-impl TryFrom<u8> for EntityType {
-    type Error = RadosError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0x01 => Ok(Self::TYPE_MON),
-            0x02 => Ok(Self::TYPE_MDS),
-            0x04 => Ok(Self::TYPE_OSD),
-            0x08 => Ok(Self::TYPE_CLIENT),
-            0x10 => Ok(Self::TYPE_MGR),
-            _ => Err(RadosError::Protocol(format!(
-                "Unknown entity type: {}",
-                value
-            ))),
-        }
+impl serde::Serialize for EntityType {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_u32(self.bits())
     }
 }
 
 impl fmt::Display for EntityType {
+    /// Formats a single-bit EntityType as its Ceph name (e.g. "mon", "osd").
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match *self {
-            Self::TYPE_MON => write!(f, "mon"),
-            Self::TYPE_MDS => write!(f, "mds"),
-            Self::TYPE_OSD => write!(f, "osd"),
-            Self::TYPE_CLIENT => write!(f, "client"),
-            Self::TYPE_MGR => write!(f, "mgr"),
-            _ => write!(f, "unknown({})", self.0),
+        write!(
+            f,
+            "{}",
+            match *self {
+                EntityType::MON => "mon",
+                EntityType::MDS => "mds",
+                EntityType::OSD => "osd",
+                EntityType::CLIENT => "client",
+                EntityType::MGR => "mgr",
+                EntityType::AUTH => "auth",
+                _ => "unknown",
+            }
+        )
+    }
+}
+
+impl FromStr for EntityType {
+    type Err = RadosError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "mon" => Ok(EntityType::MON),
+            "mds" => Ok(EntityType::MDS),
+            "osd" => Ok(EntityType::OSD),
+            "client" => Ok(EntityType::CLIENT),
+            "mgr" => Ok(EntityType::MGR),
+            "auth" => Ok(EntityType::AUTH),
+            _ => Err(RadosError::Protocol(format!("Unknown entity type: {}", s))),
         }
     }
 }
 
-/// Entity name for general encoding/decoding (typed version with EntityType newtype)
+/// Canonical entity name (entity_name_t in C++)
 ///
-/// This is a typed representation that uses the EntityType newtype wrapper for better
-/// type safety. It's suitable for general-purpose encoding/decoding operations where
-/// you want compile-time type checking.
+/// Wire format: u32 (entity_type) + u32 (id_len) + bytes (id)
+/// Matches the C++ `entity_name_t` struct in `src/include/entity_name.h`.
 ///
-/// **When to use:** For general encoding/decoding operations where type safety is
-/// important and you're not in a performance-critical path requiring zero-copy.
+/// This is the single canonical definition used across the codebase.
+/// The `auth` and `monclient` crates import this type directly.
 ///
-/// **Related types:**
-/// - `monclient::types::EntityName` - Human-readable runtime version (String-based)
-/// - `osdclient::types::EntityName` - Zero-copy wire protocol version (packed struct)
-/// - `auth::types::EntityName` - Authentication protocol version (hybrid format)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+/// For the OSD zero-copy packed format (9 bytes: u8 type + u64 num),
+/// see `osdclient::types::PackedEntityName`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct EntityName {
     pub entity_type: EntityType,
-    pub num: u64,
+    pub id: String,
 }
 
 impl EntityName {
-    pub fn new(entity_type: EntityType, num: u64) -> Self {
-        Self { entity_type, num }
+    pub fn new(entity_type: EntityType, id: impl Into<String>) -> Self {
+        Self {
+            entity_type,
+            id: id.into(),
+        }
     }
 
-    pub fn client(num: u64) -> Self {
-        Self::new(EntityType::TYPE_CLIENT, num)
+    pub fn client(id: impl Into<String>) -> Self {
+        Self::new(EntityType::CLIENT, id)
     }
 
-    pub fn osd(num: u64) -> Self {
-        Self::new(EntityType::TYPE_OSD, num)
+    pub fn osd(id: impl Into<String>) -> Self {
+        Self::new(EntityType::OSD, id)
     }
 
-    pub fn mon(num: u64) -> Self {
-        Self::new(EntityType::TYPE_MON, num)
+    pub fn mon(id: impl Into<String>) -> Self {
+        Self::new(EntityType::MON, id)
     }
 }
 
 impl fmt::Display for EntityName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.entity_type, self.num)
+        write!(f, "{}.{}", self.entity_type, self.id)
     }
 }
 
-// Denc implementations for EntityType and EntityName
+impl FromStr for EntityName {
+    type Err = RadosError;
 
-// ============= Encoding Metadata Registration =============
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let (type_str, id) = s
+            .split_once('.')
+            .ok_or_else(|| RadosError::Protocol(format!("Invalid entity name format: {}", s)))?;
+        let entity_type = type_str.parse()?;
+        Ok(Self::new(entity_type, id))
+    }
+}
 
-// Both EntityType and EntityName are simple types (no versioning, no feature dependency)
-mark_simple_encoding!(EntityType);
-mark_simple_encoding!(EntityName);
+impl Denc for EntityName {
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        self.entity_type.bits().encode(buf, 0)?;
+        (self.id.len() as u32).encode(buf, 0)?;
+        buf.put_slice(self.id.as_bytes());
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        let type_val = u32::decode(buf, 0)?;
+        let entity_type = EntityType::from_bits_retain(type_val);
+        let id_len = u32::decode(buf, 0)? as usize;
+        if buf.remaining() < id_len {
+            return Err(RadosError::Protocol(format!(
+                "Insufficient bytes for EntityName id: need {}, have {}",
+                id_len,
+                buf.remaining()
+            )));
+        }
+        let mut id_bytes = vec![0u8; id_len];
+        buf.copy_to_slice(&mut id_bytes);
+        let id = String::from_utf8(id_bytes)
+            .map_err(|e| RadosError::Protocol(format!("Invalid UTF-8 in EntityName: {}", e)))?;
+        Ok(Self { entity_type, id })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(4 + 4 + self.id.len())
+    }
+}

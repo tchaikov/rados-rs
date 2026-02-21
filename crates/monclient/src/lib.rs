@@ -58,4 +58,4 @@ pub use messages::{
 };
 pub use monmap::{MonInfo, MonMap};
 pub use subscription::{MonSub, SubscribeItem, CEPH_SUBSCRIBE_ONETIME};
-pub use types::{CommandResult, EntityName};
+pub use types::CommandResult;
