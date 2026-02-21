@@ -8,7 +8,7 @@ use crate::subscription::SubscribeItem;
 use bytes::{Buf, Bytes, BytesMut};
 use denc::UuidD;
 use std::collections::HashMap;
-use uuid::Uuid;
+
 
 // Message type constants (add to msgr2::message)
 pub const CEPH_MSG_MON_SUBSCRIBE: u16 = 0x000f;
@@ -87,17 +87,17 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
 }
 
 /// MMonSubscribeAck - Acknowledgment of subscription
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MMonSubscribeAck {
     pub interval: u32,
-    pub fsid: Uuid,
+    pub fsid: UuidD,
 }
 
 impl MMonSubscribeAck {
     /// Message version
     const VERSION: u16 = 1;
 
-    pub fn new(interval: u32, fsid: Uuid) -> Self {
+    pub fn new(interval: u32, fsid: UuidD) -> Self {
         Self { interval, fsid }
     }
 }
@@ -114,11 +114,7 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        self.interval.encode(&mut buf, 0)?;
-
-        // Encode UUID using Denc
-        let uuid_denc = UuidD::from_bytes(*self.fsid.as_bytes());
-        uuid_denc.encode(&mut buf, 0)?;
+        self.encode(&mut buf, 0)?;
         Ok(buf.freeze())
     }
 
@@ -129,15 +125,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
         _data: &[u8],
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
-
         let mut data = front;
-        let interval = u32::decode(&mut data, 0)?;
-
-        // Decode UUID using Denc
-        let uuid_denc = UuidD::decode(&mut data, 0)?;
-        let fsid = Uuid::from_bytes(uuid_denc.bytes);
-
-        Ok(Self { interval, fsid })
+        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonSubscribeAck decode failed".into()))
     }
 }
 
