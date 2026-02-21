@@ -7,6 +7,7 @@
 
 use crate::error::{Error, Result};
 use bytes::Bytes;
+use std::cell::Cell;
 
 /// Compression algorithm identifiers (from Ceph's Compressor.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -228,6 +229,68 @@ impl Compressor for ZlibCompressor {
     }
 }
 
+/// Accumulated statistics for a compression context.
+///
+/// Snapshot returned by [`CompressionContext::stats`]. All byte counts refer
+/// to payload data (not framing overhead).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct CompressionStats {
+    /// Total uncompressed bytes passed to `compress()`
+    pub bytes_before_compression: u64,
+    /// Total compressed bytes produced by `compress()`
+    pub bytes_after_compression: u64,
+    /// Number of `compress()` calls that produced output
+    pub compression_ops: u64,
+    /// Total compressed bytes passed to `decompress()`
+    pub bytes_before_decompression: u64,
+    /// Total decompressed bytes produced by `decompress()`
+    pub bytes_after_decompression: u64,
+    /// Number of `decompress()` calls
+    pub decompression_ops: u64,
+}
+
+impl CompressionStats {
+    /// Compression ratio (output / input). Returns `1.0` when nothing has been compressed yet.
+    pub fn compression_ratio(&self) -> f64 {
+        if self.bytes_before_compression == 0 {
+            1.0
+        } else {
+            self.bytes_after_compression as f64 / self.bytes_before_compression as f64
+        }
+    }
+
+    /// Bytes saved by compression (`before - after`). Returns `0` if compression expanded data.
+    pub fn bytes_saved(&self) -> u64 {
+        self.bytes_before_compression
+            .saturating_sub(self.bytes_after_compression)
+    }
+}
+
+/// Internal per-field Cell storage — lets `compress()`/`decompress()` update counters
+/// through a shared `&self` reference without requiring `&mut self`.
+#[derive(Default)]
+struct StatsCell {
+    bytes_before_compression: Cell<u64>,
+    bytes_after_compression: Cell<u64>,
+    compression_ops: Cell<u64>,
+    bytes_before_decompression: Cell<u64>,
+    bytes_after_decompression: Cell<u64>,
+    decompression_ops: Cell<u64>,
+}
+
+impl StatsCell {
+    fn snapshot(&self) -> CompressionStats {
+        CompressionStats {
+            bytes_before_compression: self.bytes_before_compression.get(),
+            bytes_after_compression: self.bytes_after_compression.get(),
+            compression_ops: self.compression_ops.get(),
+            bytes_before_decompression: self.bytes_before_decompression.get(),
+            bytes_after_decompression: self.bytes_after_decompression.get(),
+            decompression_ops: self.decompression_ops.get(),
+        }
+    }
+}
+
 /// Compression context that holds the active compressor
 pub struct CompressionContext {
     compressor: Box<dyn Compressor>,
@@ -236,6 +299,8 @@ pub struct CompressionContext {
     threshold: usize,
     /// Algorithm for debugging
     algorithm: CompressionAlgorithm,
+    /// Accumulated statistics (interior-mutable so compress/decompress stay &self)
+    stats: StatsCell,
 }
 
 impl std::fmt::Debug for CompressionContext {
@@ -243,6 +308,7 @@ impl std::fmt::Debug for CompressionContext {
         f.debug_struct("CompressionContext")
             .field("algorithm", &self.algorithm)
             .field("threshold", &self.threshold)
+            .field("stats", &self.stats.snapshot())
             .finish()
     }
 }
@@ -262,6 +328,7 @@ impl CompressionContext {
             compressor,
             threshold: 512, // Default: compress frames >= 512 bytes
             algorithm,
+            stats: StatsCell::default(),
         }
     }
 
@@ -279,6 +346,7 @@ impl CompressionContext {
             compressor,
             threshold,
             algorithm,
+            stats: StatsCell::default(),
         }
     }
 
@@ -290,12 +358,30 @@ impl CompressionContext {
     /// Compress data
     pub fn compress(&self, data: &[u8]) -> Result<Bytes> {
         let compressed = self.compressor.compress(data)?;
+        self.stats
+            .bytes_before_compression
+            .set(self.stats.bytes_before_compression.get() + data.len() as u64);
+        self.stats
+            .bytes_after_compression
+            .set(self.stats.bytes_after_compression.get() + compressed.len() as u64);
+        self.stats
+            .compression_ops
+            .set(self.stats.compression_ops.get() + 1);
         Ok(Bytes::from(compressed))
     }
 
     /// Decompress data
     pub fn decompress(&self, data: &[u8], original_size: usize) -> Result<Bytes> {
         let decompressed = self.compressor.decompress(data, original_size)?;
+        self.stats
+            .bytes_before_decompression
+            .set(self.stats.bytes_before_decompression.get() + data.len() as u64);
+        self.stats
+            .bytes_after_decompression
+            .set(self.stats.bytes_after_decompression.get() + decompressed.len() as u64);
+        self.stats
+            .decompression_ops
+            .set(self.stats.decompression_ops.get() + 1);
         Ok(Bytes::from(decompressed))
     }
 
@@ -307,6 +393,11 @@ impl CompressionContext {
     /// Get the compression threshold
     pub fn threshold(&self) -> usize {
         self.threshold
+    }
+
+    /// Snapshot of accumulated compression statistics.
+    pub fn stats(&self) -> CompressionStats {
+        self.stats.snapshot()
     }
 }
 
@@ -410,6 +501,58 @@ mod tests {
 
         assert_eq!(decompressed, data);
         assert_eq!(compressor.algorithm(), CompressionAlgorithm::Zlib);
+    }
+
+    #[test]
+    fn test_compression_stats_tracking() {
+        let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
+        let data = b"Hello, World! This is a test of compression statistics tracking.".repeat(10);
+
+        // Initial stats should be zero
+        let initial = ctx.stats();
+        assert_eq!(initial.bytes_before_compression, 0);
+        assert_eq!(initial.bytes_after_compression, 0);
+        assert_eq!(initial.compression_ops, 0);
+        assert_eq!(initial.bytes_before_decompression, 0);
+        assert_eq!(initial.bytes_after_decompression, 0);
+        assert_eq!(initial.decompression_ops, 0);
+        assert_eq!(initial.compression_ratio(), 1.0);
+        assert_eq!(initial.bytes_saved(), 0);
+
+        // After compression
+        let compressed = ctx.compress(&data).unwrap();
+        let after_compress = ctx.stats();
+        assert_eq!(after_compress.bytes_before_compression, data.len() as u64);
+        assert_eq!(
+            after_compress.bytes_after_compression,
+            compressed.len() as u64
+        );
+        assert_eq!(after_compress.compression_ops, 1);
+        assert_eq!(after_compress.decompression_ops, 0);
+        // Snappy should compress repeated data
+        assert!(after_compress.compression_ratio() < 1.0);
+        assert!(after_compress.bytes_saved() > 0);
+
+        // After decompression
+        ctx.decompress(&compressed, data.len()).unwrap();
+        let after_decompress = ctx.stats();
+        assert_eq!(
+            after_decompress.bytes_before_decompression,
+            compressed.len() as u64
+        );
+        assert_eq!(
+            after_decompress.bytes_after_decompression,
+            data.len() as u64
+        );
+        assert_eq!(after_decompress.decompression_ops, 1);
+        // Compression stats unchanged
+        assert_eq!(after_decompress.compression_ops, 1);
+
+        // Second compress — ops accumulate
+        ctx.compress(&data).unwrap();
+        let final_stats = ctx.stats();
+        assert_eq!(final_stats.compression_ops, 2);
+        assert_eq!(final_stats.bytes_before_compression, data.len() as u64 * 2);
     }
 
     #[test]

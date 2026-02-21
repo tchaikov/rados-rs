@@ -22,6 +22,7 @@ pub mod throttle;
 
 // Re-export working components
 pub use banner::*;
+pub use compression::{CompressionAlgorithm, CompressionStats};
 pub use error::*;
 pub use frames::*;
 pub use header::*;
