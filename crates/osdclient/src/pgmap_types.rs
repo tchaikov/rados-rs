@@ -1612,6 +1612,27 @@ where
     }
 }
 
+/// Scrubbing schedule status for a PG
+/// C++ definition: pg_scrubbing_status_t in osd/osd_types.h
+///
+/// Note: not encoded as a standalone unit — its fields are split across
+/// two positions inside PgStat's versioned encoding (first 6 fields at
+/// version 27+, last 3 at version 30+). Access them individually through
+/// `PgStat::encode_content` / `decode_content`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PgScrubbingStatus {
+    pub scheduled_at: UTime,
+    pub duration_seconds: i32,
+    pub sched_status: u16,
+    pub is_active: bool,
+    pub is_deep: bool,
+    pub is_periodic: bool,
+    // Only present in PgStat encoding v30+:
+    pub osd_to_respond: u16,
+    pub ordinal_of_requested_replica: u8,
+    pub num_to_reserve: u8,
+}
+
 /// PG statistics (pg_stat_t in C++)
 /// Aggregate stats for a single placement group
 /// Version 30, compat 22
@@ -1672,16 +1693,7 @@ pub struct PgStat {
     pub objects_trimmed: i64,
     pub snaptrim_duration: f64,
 
-    // pg_scrubbing_status_t fields inlined
-    pub scrub_sched_scheduled_at: UTime,
-    pub scrub_sched_duration_seconds: i32,
-    pub scrub_sched_status: u16,
-    pub scrub_sched_is_active: bool,
-    pub scrub_sched_is_deep: bool,
-    pub scrub_sched_is_periodic: bool,
-    pub scrub_sched_osd_to_respond: u16,
-    pub scrub_sched_ordinal_of_requested_replica: u8,
-    pub scrub_sched_num_to_reserve: u8,
+    pub scrub_sched_status: PgScrubbingStatus,
 
     // Boolean flags packed in C++ bitfields
     pub stats_invalid: bool,
@@ -1765,13 +1777,15 @@ impl VersionedEncode for PgStat {
         self.object_location_counts.encode(buf, features)?;
         self.last_scrub_duration.encode(buf, features)?;
 
-        // Encode pg_scrubbing_status_t fields
-        self.scrub_sched_scheduled_at.encode(buf, features)?;
-        self.scrub_sched_duration_seconds.encode(buf, features)?;
-        self.scrub_sched_status.encode(buf, features)?;
-        self.scrub_sched_is_active.encode(buf, features)?;
-        self.scrub_sched_is_deep.encode(buf, features)?;
-        self.scrub_sched_is_periodic.encode(buf, features)?;
+        // Encode pg_scrubbing_status_t fields (first 6, v27+)
+        self.scrub_sched_status.scheduled_at.encode(buf, features)?;
+        self.scrub_sched_status
+            .duration_seconds
+            .encode(buf, features)?;
+        self.scrub_sched_status.sched_status.encode(buf, features)?;
+        self.scrub_sched_status.is_active.encode(buf, features)?;
+        self.scrub_sched_status.is_deep.encode(buf, features)?;
+        self.scrub_sched_status.is_periodic.encode(buf, features)?;
 
         self.objects_scrubbed.encode(buf, features)?;
         buf.put_f64_le(self.scrub_duration);
@@ -1779,10 +1793,16 @@ impl VersionedEncode for PgStat {
         buf.put_f64_le(self.snaptrim_duration);
         self.log_dups_size.encode(buf, features)?;
 
-        self.scrub_sched_osd_to_respond.encode(buf, features)?;
-        self.scrub_sched_ordinal_of_requested_replica
+        // Encode pg_scrubbing_status_t fields (last 3, v30+)
+        self.scrub_sched_status
+            .osd_to_respond
             .encode(buf, features)?;
-        self.scrub_sched_num_to_reserve.encode(buf, features)?;
+        self.scrub_sched_status
+            .ordinal_of_requested_replica
+            .encode(buf, features)?;
+        self.scrub_sched_status
+            .num_to_reserve
+            .encode(buf, features)?;
 
         Ok(())
     }
@@ -1856,13 +1876,13 @@ impl VersionedEncode for PgStat {
             std::collections::BTreeMap::<Vec<PgShard>, i32>::decode(buf, features)?;
         let last_scrub_duration = i32::decode(buf, features)?;
 
-        // Decode pg_scrubbing_status_t fields
-        let scrub_sched_scheduled_at = UTime::decode(buf, features)?;
-        let scrub_sched_duration_seconds = i32::decode(buf, features)?;
-        let scrub_sched_status = u16::decode(buf, features)?;
-        let scrub_sched_is_active = bool::decode(buf, features)?;
-        let scrub_sched_is_deep = bool::decode(buf, features)?;
-        let scrub_sched_is_periodic = bool::decode(buf, features)?;
+        // Decode pg_scrubbing_status_t fields (first 6, v27+)
+        let scrub_scheduled_at = UTime::decode(buf, features)?;
+        let scrub_duration_seconds = i32::decode(buf, features)?;
+        let scrub_status = u16::decode(buf, features)?;
+        let scrub_is_active = bool::decode(buf, features)?;
+        let scrub_is_deep = bool::decode(buf, features)?;
+        let scrub_is_periodic = bool::decode(buf, features)?;
 
         let objects_scrubbed = i64::decode(buf, features)?;
         let scrub_duration = buf.get_f64_le();
@@ -1870,9 +1890,10 @@ impl VersionedEncode for PgStat {
         let snaptrim_duration = buf.get_f64_le();
         let log_dups_size = i64::decode(buf, features)?;
 
-        let scrub_sched_osd_to_respond = u16::decode(buf, features)?;
-        let scrub_sched_ordinal_of_requested_replica = u8::decode(buf, features)?;
-        let scrub_sched_num_to_reserve = u8::decode(buf, features)?;
+        // Decode pg_scrubbing_status_t fields (last 3, v30+)
+        let scrub_osd_to_respond = u16::decode(buf, features)?;
+        let scrub_ordinal_of_requested_replica = u8::decode(buf, features)?;
+        let scrub_num_to_reserve = u8::decode(buf, features)?;
 
         Ok(PgStat {
             version: pg_version,
@@ -1919,15 +1940,17 @@ impl VersionedEncode for PgStat {
             snaptrimq_len,
             objects_trimmed,
             snaptrim_duration,
-            scrub_sched_scheduled_at,
-            scrub_sched_duration_seconds,
-            scrub_sched_status,
-            scrub_sched_is_active,
-            scrub_sched_is_deep,
-            scrub_sched_is_periodic,
-            scrub_sched_osd_to_respond,
-            scrub_sched_ordinal_of_requested_replica,
-            scrub_sched_num_to_reserve,
+            scrub_sched_status: PgScrubbingStatus {
+                scheduled_at: scrub_scheduled_at,
+                duration_seconds: scrub_duration_seconds,
+                sched_status: scrub_status,
+                is_active: scrub_is_active,
+                is_deep: scrub_is_deep,
+                is_periodic: scrub_is_periodic,
+                osd_to_respond: scrub_osd_to_respond,
+                ordinal_of_requested_replica: scrub_ordinal_of_requested_replica,
+                num_to_reserve: scrub_num_to_reserve,
+            },
             stats_invalid,
             dirty_stats_invalid,
             omap_stats_invalid,
