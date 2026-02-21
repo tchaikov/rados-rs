@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/denc", "crates/dencoder", "crates/msgr2", "crates/auth", "crates/monclient", "crates/crush", "crates/osdclient", "crates/rados", "crates/cephconfig"]
+members = ["crates/denc", "crates/denc-macros", "crates/dencoder", "crates/msgr2", "crates/auth", "crates/monclient", "crates/crush", "crates/osdclient", "crates/rados", "crates/cephconfig"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -1,13 +1,51 @@
 use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{parse_macro_input, Data, DeriveInput, Fields};
 
-/// Derive macro for field-by-field Denc encoding/decoding
+/// Parse the optional `#[denc(crate = "...")]` helper attribute.
+///
+/// Returns the crate path to use in generated code. Defaults to `::denc` so
+/// that external crates need no annotation. Use `#[denc(crate = "crate")]`
+/// when deriving inside the `denc` crate itself.
+fn find_denc_crate(attrs: &[syn::Attribute]) -> TokenStream2 {
+    for attr in attrs {
+        if attr.path().is_ident("denc") {
+            if let Ok(nv) = attr.parse_args::<syn::MetaNameValue>() {
+                if nv.path.is_ident("crate") {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = nv.value
+                    {
+                        let tokens: TokenStream2 = s
+                            .parse()
+                            .expect("Invalid crate path in #[denc(crate = \"...\")]");
+                        return tokens;
+                    }
+                }
+            }
+        }
+    }
+    quote! { ::denc }
+}
+
+/// Derive macro for field-by-field Denc encoding/decoding.
 ///
 /// Generates a `Denc` implementation that encodes/decodes each named field
 /// in declaration order, passing `features` through to each field's impl.
 ///
 /// Requires every field type to implement `denc::Denc`.
+///
+/// # Crate path
+///
+/// When deriving inside the `denc` crate itself, add the helper attribute:
+/// ```ignore
+/// #[derive(crate::Denc)]
+/// #[denc(crate = "crate")]
+/// struct Foo { ... }
+/// ```
+/// External crates need no annotation; `::denc` is the default.
 ///
 /// # Example
 ///
@@ -19,9 +57,10 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields};
 ///     count: u32,
 /// }
 /// ```
-#[proc_macro_derive(Denc)]
+#[proc_macro_derive(Denc, attributes(denc))]
 pub fn derive_denc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
 
     let fields = match &input.data {
@@ -43,16 +82,16 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
         let field_name = &f.ident;
         let field_type = &f.ty;
         quote! {
-            #field_name: <#field_type as denc::Denc>::decode(buf, features)?
+            #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
         }
     });
 
     let where_clauses = field_types.iter().map(|ty| {
-        quote! { #ty: denc::Denc }
+        quote! { #ty: #krate::Denc }
     });
 
     let expanded = quote! {
-        impl denc::Denc for #name
+        impl #krate::Denc for #name
         where
             #(#where_clauses,)*
         {
@@ -60,7 +99,7 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
                 &self,
                 buf: &mut B,
                 features: u64,
-            ) -> ::std::result::Result<(), denc::RadosError> {
+            ) -> ::std::result::Result<(), #krate::RadosError> {
                 #(#encode_stmts)*
                 ::std::result::Result::Ok(())
             }
@@ -68,7 +107,7 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
             fn decode<B: bytes::Buf>(
                 buf: &mut B,
                 features: u64,
-            ) -> ::std::result::Result<Self, denc::RadosError>
+            ) -> ::std::result::Result<Self, #krate::RadosError>
             where
                 Self: Sized,
             {
@@ -88,21 +127,17 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-/// Derive macro for zero-copy encoding/decoding of POD types
+/// Derive macro for zero-copy encoding/decoding of POD types.
 ///
-/// This generates a `Denc` implementation for the type using the `zerocopy`
-/// crate's `IntoBytes`/`FromBytes` traits. All fields must implement
-/// `ZeroCopyDencode`, which requires them to also implement zerocopy's traits.
-///
-/// Types must be `#[repr(C)]` and derive `FromBytes`, `IntoBytes`,
-/// `KnownLayout`, and `Immutable` from the zerocopy crate.
-#[proc_macro_derive(ZeroCopyDencode)]
+/// See `Denc` derive for the `#[denc(crate = "...")]` attribute.
+#[proc_macro_derive(ZeroCopyDencode, attributes(denc))]
 pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
 
     let denc_impl = match &input.data {
-        Data::Struct(_) => generate_zerocopy_denc(name),
+        Data::Struct(_) => generate_zerocopy_denc(name, &krate),
         _ => panic!("ZeroCopyDencode can only be derived for structs"),
     };
 
@@ -110,23 +145,23 @@ pub fn derive_zerocopy_dencode(input: TokenStream) -> TokenStream {
         #denc_impl
 
         // Implement the marker trait
-        impl denc::zero_copy::ZeroCopyDencode for #name {}
+        impl #krate::zero_copy::ZeroCopyDencode for #name {}
     };
 
     TokenStream::from(expanded)
 }
 
-fn generate_zerocopy_denc(name: &syn::Ident) -> proc_macro2::TokenStream {
+fn generate_zerocopy_denc(name: &syn::Ident, krate: &TokenStream2) -> TokenStream2 {
     quote! {
-        impl denc::Denc for #name {
+        impl #krate::Denc for #name {
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
                 _features: u64,
-            ) -> ::std::result::Result<(), denc::RadosError> {
-                let bytes = <Self as denc::zerocopy::IntoBytes>::as_bytes(self);
+            ) -> ::std::result::Result<(), #krate::RadosError> {
+                let bytes = <Self as #krate::zerocopy::IntoBytes>::as_bytes(self);
                 if buf.remaining_mut() < bytes.len() {
-                    return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
+                    return ::std::result::Result::Err(#krate::RadosError::Protocol(format!(
                         "Insufficient buffer: need {}, have {}",
                         bytes.len(),
                         buf.remaining_mut()
@@ -139,13 +174,13 @@ fn generate_zerocopy_denc(name: &syn::Ident) -> proc_macro2::TokenStream {
             fn decode<B: bytes::Buf>(
                 buf: &mut B,
                 _features: u64,
-            ) -> ::std::result::Result<Self, denc::RadosError>
+            ) -> ::std::result::Result<Self, #krate::RadosError>
             where
                 Self: Sized,
             {
                 let size = ::std::mem::size_of::<Self>();
                 if buf.remaining() < size {
-                    return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
+                    return ::std::result::Result::Err(#krate::RadosError::Protocol(format!(
                         "Insufficient bytes: need {}, have {}",
                         size,
                         buf.remaining()
@@ -153,8 +188,8 @@ fn generate_zerocopy_denc(name: &syn::Ident) -> proc_macro2::TokenStream {
                 }
                 let mut bytes = ::std::vec![0u8; size];
                 buf.copy_to_slice(&mut bytes);
-                <Self as denc::zerocopy::FromBytes>::read_from_bytes(&bytes)
-                    .map_err(|e| denc::RadosError::Protocol(
+                <Self as #krate::zerocopy::FromBytes>::read_from_bytes(&bytes)
+                    .map_err(|e| #krate::RadosError::Protocol(
                         format!("zerocopy decode failed: {:?}", e)
                     ))
             }
@@ -166,27 +201,13 @@ fn generate_zerocopy_denc(name: &syn::Ident) -> proc_macro2::TokenStream {
     }
 }
 
-/// Derive macro for efficient buffer-based encoding/decoding
+/// Derive macro for efficient buffer-based encoding/decoding.
 ///
-/// This generates implementations of the `DencMut` trait, which enables zero-allocation
-/// encoding by writing directly to mutable buffers. It also automatically implements
-/// `FixedSize` when all fields have fixed size.
-///
-/// # Example
-///
-/// ```ignore
-/// use denc::DencMut;
-///
-/// #[derive(DencMut)]
-/// struct MyStruct {
-///     field1: u32,
-///     field2: u64,
-///     field3: Vec<u8>,
-/// }
-/// ```
-#[proc_macro_derive(DencMut)]
+/// See `Denc` derive for the `#[denc(crate = "...")]` attribute.
+#[proc_macro_derive(DencMut, attributes(denc))]
 pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
+    let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
 
     let (denc_mut_impl, fixed_size_impl) = match &input.data {
@@ -195,57 +216,57 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
                 let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
                 let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
 
-                // Generate encode implementation
                 let encode_fields = field_names.iter().map(|name| {
-                    quote! {
-                        self.#name.encode(buf, features)?;
-                    }
+                    quote! { self.#name.encode(buf, features)?; }
                 });
 
-                // Generate decode implementation
                 let decode_fields = fields.named.iter().map(|f| {
                     let field_name = &f.ident;
                     let field_type = &f.ty;
-
                     quote! {
-                        #field_name: <#field_type as denc::DencMut>::decode(buf, features)?
+                        #field_name: <#field_type as #krate::DencMut>::decode(buf, features)?
                     }
                 });
 
-                // Generate encoded_size implementation
                 let size_calculations = field_names.iter().map(|name| {
-                    quote! {
-                        size += self.#name.encoded_size(features)?;
-                    }
+                    quote! { size += self.#name.encoded_size(features)?; }
                 });
 
-                // Combined DencMut implementation
                 let denc_mut_impl = quote! {
-                    impl denc::DencMut for #name {
-                        fn encode<B: bytes::BufMut>(&self, buf: &mut B, features: u64) -> ::std::result::Result<(), denc::RadosError> {
-                            // Try to preallocate if we know the size
+                    impl #krate::DencMut for #name {
+                        fn encode<B: bytes::BufMut>(
+                            &self,
+                            buf: &mut B,
+                            features: u64,
+                        ) -> ::std::result::Result<(), #krate::RadosError> {
                             if let Some(size) = self.encoded_size(features) {
                                 if buf.remaining_mut() < size {
-                                    return ::std::result::Result::Err(denc::RadosError::Protocol(format!(
-                                        "Insufficient buffer space: need {} bytes, have {}",
-                                        size,
-                                        buf.remaining_mut()
-                                    )));
+                                    return ::std::result::Result::Err(
+                                        #krate::RadosError::Protocol(format!(
+                                            "Insufficient buffer space: need {} bytes, have {}",
+                                            size,
+                                            buf.remaining_mut()
+                                        ))
+                                    );
                                 }
                             }
-
                             #(#encode_fields)*
-
                             ::std::result::Result::Ok(())
                         }
 
-                        fn decode<B: bytes::Buf>(buf: &mut B, features: u64) -> ::std::result::Result<Self, denc::RadosError> {
+                        fn decode<B: bytes::Buf>(
+                            buf: &mut B,
+                            features: u64,
+                        ) -> ::std::result::Result<Self, #krate::RadosError> {
                             ::std::result::Result::Ok(Self {
                                 #(#decode_fields,)*
                             })
                         }
 
-                        fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
+                        fn encoded_size(
+                            &self,
+                            features: u64,
+                        ) -> ::std::option::Option<usize> {
                             let mut size = 0;
                             #(#size_calculations)*
                             ::std::option::Option::Some(size)
@@ -253,10 +274,7 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
                     }
                 };
 
-                // Check if all fields are FixedSize
                 let all_fixed_size = fields.named.iter().all(|f| {
-                    // This is a heuristic - we check if the type looks like a primitive
-                    // In practice, the FixedSize trait bound will be checked at compile time
                     let type_str = quote!(#f.ty).to_string();
                     type_str == "u8"
                         || type_str == "u16"
@@ -265,18 +283,15 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
                         || type_str == "i32"
                         || type_str == "i64"
                         || type_str == "bool"
-                        || type_str.starts_with("[") // Arrays
+                        || type_str.starts_with('[')
                 });
 
                 let fixed_size_impl = if all_fixed_size {
                     let size_sum = field_types.iter().map(|ty| {
-                        quote! {
-                            <#ty as denc::FixedSize>::SIZE
-                        }
+                        quote! { <#ty as #krate::FixedSize>::SIZE }
                     });
-
                     Some(quote! {
-                        impl denc::FixedSize for #name {
+                        impl #krate::FixedSize for #name {
                             const SIZE: usize = #(#size_sum)+*;
                         }
                     })
@@ -291,16 +306,10 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
         _ => panic!("DencMut can only be derived for structs"),
     };
 
-    // Combine all implementations
     let expanded = if let Some(fixed_size) = fixed_size_impl {
-        quote! {
-            #denc_mut_impl
-            #fixed_size
-        }
+        quote! { #denc_mut_impl #fixed_size }
     } else {
-        quote! {
-            #denc_mut_impl
-        }
+        quote! { #denc_mut_impl }
     };
 
     TokenStream::from(expanded)

@@ -29,4 +29,4 @@ pub use zero_copy::*;
 pub use zerocopy;
 
 // Re-export derive macros
-pub use denc_derive::{Denc, DencMut, ZeroCopyDencode};
+pub use denc_macros::{Denc, DencMut, ZeroCopyDencode};

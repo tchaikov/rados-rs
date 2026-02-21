@@ -253,6 +253,20 @@ impl FromStr for EntityType {
     }
 }
 
+impl Denc for EntityType {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.bits().encode(buf, features)
+    }
+
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(EntityType::from_bits_retain(u32::decode(buf, features)?))
+    }
+
+    fn encoded_size(&self, features: u64) -> Option<usize> {
+        self.bits().encoded_size(features)
+    }
+}
+
 /// Canonical entity name (entity_name_t in C++)
 ///
 /// Wire format: u32 (entity_type) + u32 (id_len) + bytes (id)
@@ -263,7 +277,8 @@ impl FromStr for EntityType {
 ///
 /// For the OSD zero-copy packed format (9 bytes: u8 type + u64 num),
 /// see `osdclient::types::PackedEntityName`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, crate::Denc)]
+#[denc(crate = "crate")]
 pub struct EntityName {
     pub entity_type: EntityType,
     pub id: String,
@@ -305,36 +320,5 @@ impl FromStr for EntityName {
             .ok_or_else(|| RadosError::Protocol(format!("Invalid entity name format: {}", s)))?;
         let entity_type = type_str.parse()?;
         Ok(Self::new(entity_type, id))
-    }
-}
-
-impl Denc for EntityName {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        self.entity_type.bits().encode(buf, 0)?;
-        (self.id.len() as u32).encode(buf, 0)?;
-        buf.put_slice(self.id.as_bytes());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let type_val = u32::decode(buf, 0)?;
-        let entity_type = EntityType::from_bits_retain(type_val);
-        let id_len = u32::decode(buf, 0)? as usize;
-        if buf.remaining() < id_len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for EntityName id: need {}, have {}",
-                id_len,
-                buf.remaining()
-            )));
-        }
-        let mut id_bytes = vec![0u8; id_len];
-        buf.copy_to_slice(&mut id_bytes);
-        let id = String::from_utf8(id_bytes)
-            .map_err(|e| RadosError::Protocol(format!("Invalid UTF-8 in EntityName: {}", e)))?;
-        Ok(Self { entity_type, id })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(4 + 4 + self.id.len())
     }
 }
