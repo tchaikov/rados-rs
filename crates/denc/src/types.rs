@@ -18,7 +18,10 @@ pub type FsId = [u8; 16];
 pub type Version = u64;
 
 /// Version with epoch (eversion_t in C++)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, crate::Denc,
+)]
+#[denc(crate = "crate")]
 pub struct EVersion {
     pub version: Version,
     pub epoch: Epoch,
@@ -30,29 +33,12 @@ impl EVersion {
     }
 }
 
-impl Denc for EVersion {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.version.encode(buf, features)?;
-        self.epoch.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let version = Version::decode(buf, features)?;
-        let epoch = Epoch::decode(buf, features)?;
-        Ok(EVersion { version, epoch })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(self.version.encoded_size(features)? + self.epoch.encoded_size(features)?)
-    }
-}
-
 /// Universal Time structure (utime_t in C++)
 ///
 /// Represents time with second and nanosecond precision.
 /// Wire format: u32 sec + u32 nsec
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, crate::Denc)]
+#[denc(crate = "crate")]
 pub struct UTime {
     pub sec: u32,
     pub nsec: u32,
@@ -67,30 +53,6 @@ impl UTime {
     /// Create a new UTime from seconds and nanoseconds
     pub const fn new(sec: u32, nsec: u32) -> Self {
         Self { sec, nsec }
-    }
-}
-
-impl Denc for UTime {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u32_le(self.sec);
-        buf.put_u32_le(self.nsec);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for UTime: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        let sec = buf.get_u32_le();
-        let nsec = buf.get_u32_le();
-        Ok(UTime { sec, nsec })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
     }
 }
 
@@ -109,7 +71,8 @@ impl Serialize for UTime {
 }
 
 /// UUID structure (uuid_d in C++)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, crate::Denc)]
+#[denc(crate = "crate")]
 pub struct UuidD {
     pub bytes: [u8; 16],
 }
@@ -159,28 +122,6 @@ impl std::fmt::Display for UuidD {
             self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
             self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
         )
-    }
-}
-
-impl Denc for UuidD {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_slice(&self.bytes);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for UuidD".to_string(),
-            ));
-        }
-        let mut uuid_bytes = [0u8; 16];
-        buf.copy_to_slice(&mut uuid_bytes);
-        Ok(UuidD { bytes: uuid_bytes })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(16)
     }
 }
 
