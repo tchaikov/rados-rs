@@ -40,7 +40,7 @@ fn test_frame_compression_roundtrip_snappy() {
 
     // Decompress the frame
     let decompressed_frame = compressed_frame
-        .decompress(&ctx, original_size)
+        .decompress(&ctx)
         .expect("Decompression should succeed");
 
     // Verify compression flag is cleared
@@ -66,9 +66,8 @@ fn test_frame_compression_roundtrip_zstd() {
     let ctx = CompressionContext::new(CompressionAlgorithm::Zstd);
     let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
 
-    let original_size: usize = frame.segments.iter().map(|s| s.len()).sum();
     let decompressed_frame = compressed_frame
-        .decompress(&ctx, original_size)
+        .decompress(&ctx)
         .expect("Decompression should succeed");
 
     assert_eq!(decompressed_frame.segments[0], payload);
@@ -83,9 +82,8 @@ fn test_frame_compression_roundtrip_lz4() {
     let ctx = CompressionContext::new(CompressionAlgorithm::Lz4);
     let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
 
-    let original_size: usize = frame.segments.iter().map(|s| s.len()).sum();
     let decompressed_frame = compressed_frame
-        .decompress(&ctx, original_size)
+        .decompress(&ctx)
         .expect("Decompression should succeed");
 
     assert_eq!(decompressed_frame.segments[0], payload);
@@ -100,9 +98,8 @@ fn test_frame_compression_roundtrip_zlib() {
     let ctx = CompressionContext::new(CompressionAlgorithm::Zlib);
     let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
 
-    let original_size: usize = frame.segments.iter().map(|s| s.len()).sum();
     let decompressed_frame = compressed_frame
-        .decompress(&ctx, original_size)
+        .decompress(&ctx)
         .expect("Decompression should succeed");
 
     assert_eq!(decompressed_frame.segments[0], payload);
@@ -185,7 +182,7 @@ fn test_frame_decompression_of_uncompressed_frame() {
 
     // Try to decompress (should return frame as-is)
     let result = frame
-        .decompress(&ctx, data.len())
+        .decompress(&ctx)
         .expect("Decompression should succeed");
 
     // Verify frame is unchanged
@@ -239,9 +236,8 @@ fn test_all_algorithms_roundtrip() {
             .compress(&ctx)
             .unwrap_or_else(|_| panic!("Compression should succeed for {:?}", algo));
 
-        let original_size: usize = frame.segments.iter().map(|s| s.len()).sum();
         let decompressed = compressed
-            .decompress(&ctx, original_size)
+            .decompress(&ctx)
             .unwrap_or_else(|_| panic!("Decompression should succeed for {:?}", algo));
 
         assert_eq!(
@@ -259,7 +255,7 @@ fn test_snappy_decompress_with_incorrect_size_hint() {
 
     let compressed = ctx.compress(&data).expect("Compression should succeed");
     let decompressed = ctx
-        .decompress(&compressed, 1)
+        .decompress(&compressed)
         .expect("Decompression should succeed even with bad size hint");
 
     assert_eq!(&decompressed[..], &data[..]);

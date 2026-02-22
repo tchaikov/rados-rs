@@ -52,7 +52,14 @@ impl CephMsgFooterOld {
     pub const LENGTH: usize = 13; // 3 * u32 + u8
 }
 
-/// Ceph message header
+/// Ceph message header (msgr1-style header inside the message body).
+///
+/// **Naming note:** This is the *inner* per-message header carried inside a
+/// msgr2 `Message` frame's segment 0 (also called `ceph_msg_header` in the
+/// kernel client). It is distinct from [`crate::header::MsgHeader`], which is
+/// the msgr2 *frame* header that describes how many segments a frame has and
+/// their sizes.
+///
 /// Reference: ~/dev/linux/include/linux/ceph/msgr.h struct ceph_msg_header
 #[repr(C)]
 #[derive(

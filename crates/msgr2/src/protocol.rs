@@ -19,6 +19,10 @@ use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, Sta
 use crate::FeatureSet;
 use std::borrow::Cow;
 
+/// Zero padding buffer — avoids heap allocation for small alignment padding.
+/// Large enough to cover INLINE_SIZE (48) padding in one slice.
+const ZEROS: [u8; 64] = [0u8; 64];
+
 /// Priority-based message queue.
 ///
 /// Higher-priority messages are sent first, matching Ceph's ProtocolV2 behaviour.
@@ -101,10 +105,6 @@ enum ReconnectAction<T> {
 /// Frame I/O layer - handles encryption-aware frame send/recv
 pub struct FrameIO {
     stream: TcpStream,
-}
-
-impl Drop for FrameIO {
-    fn drop(&mut self) {}
 }
 
 impl FrameIO {
@@ -220,7 +220,7 @@ impl FrameIO {
                 let aligned_len = (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
                 let padding_needed = aligned_len - segment_len;
                 if padding_needed > 0 {
-                    payload_bytes.extend_from_slice(&vec![0u8; padding_needed]);
+                    payload_bytes.extend_from_slice(&ZEROS[..padding_needed]);
                 }
             }
 
@@ -252,7 +252,7 @@ impl FrameIO {
 
             // Pad to 48 bytes if inline data < 48 bytes
             if inline_size < Self::INLINE_SIZE {
-                preamble_block.extend_from_slice(&vec![0u8; Self::INLINE_SIZE - inline_size]);
+                preamble_block.extend_from_slice(&ZEROS[..Self::INLINE_SIZE - inline_size]);
             }
 
             // Encrypt preamble block (32 + 48 = 80 bytes → 96 bytes with GCM tag)
@@ -303,7 +303,7 @@ impl FrameIO {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join("");
-        tracing::debug!("Wire bytes (hex): {}", hex_str);
+        tracing::trace!("Wire bytes (hex): {}", hex_str);
 
         // Record ENCRYPTED data for AUTH_SIGNATURE computation (after encryption)
         state_machine.record_sent(&final_bytes);
@@ -315,26 +315,8 @@ impl FrameIO {
             );
         }
 
-        tracing::debug!(
-            "DEBUG: About to write_all {} bytes for frame tag={:?}",
-            final_bytes.len(),
-            frame.preamble.tag
-        );
-        if frame.preamble.tag == Tag::ClientIdent {
-            tracing::debug!(
-                "DEBUG: CLIENT_IDENT hex (first 128 bytes): {}",
-                final_bytes
-                    .iter()
-                    .take(128)
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<Vec<_>>()
-                    .join("")
-            );
-        }
         self.stream.write_all(&final_bytes).await?;
-        tracing::debug!("DEBUG: write_all succeeded, flushing...");
         self.stream.flush().await?;
-        tracing::debug!("DEBUG: flush succeeded for tag={:?}", frame.preamble.tag);
         Ok(())
     }
 
@@ -348,9 +330,9 @@ impl FrameIO {
     /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
     /// - Reads remaining encrypted payload if needed
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
-        tracing::debug!("DEBUG: recv_frame called");
+        tracing::debug!("recv_frame called");
         let has_encryption = state_machine.has_encryption();
-        tracing::debug!("DEBUG: recv_frame: has_encryption={}", has_encryption);
+        tracing::debug!("recv_frame: has_encryption={}", has_encryption);
 
         // Read preamble block
         let preamble_block_size = if has_encryption {
@@ -360,23 +342,12 @@ impl FrameIO {
         };
 
         let mut preamble_block_buf = vec![0u8; preamble_block_size];
-        tracing::debug!(
-            "About to read {} bytes for preamble block",
-            preamble_block_size
-        );
-
-        // Try to peek first to see if data is available
-        let mut peek_buf = [0u8; 1];
-        match self.stream.peek(&mut peek_buf).await {
-            Ok(n) => if n == 0 {},
-            Err(_e) => {}
-        }
 
         match self.stream.read_exact(&mut preamble_block_buf).await {
             Ok(_) => {
                 tracing::debug!("Successfully read preamble block");
-                tracing::debug!(
-                    "DEBUG: recv_frame read {} bytes, has_encryption={}, first 32 bytes: {}",
+                tracing::trace!(
+                    "recv_frame read {} bytes, has_encryption={}, first 32 bytes: {}",
                     preamble_block_buf.len(),
                     has_encryption,
                     preamble_block_buf
@@ -430,9 +401,9 @@ impl FrameIO {
             .map(|b| format!("{:02x}", b))
             .collect::<Vec<_>>()
             .join("");
-        tracing::debug!("Raw preamble hex: {}", preamble_hex);
+        tracing::trace!("Raw preamble hex: {}", preamble_hex);
         tracing::debug!(
-            "DEBUG: Decoded preamble: tag={:?} (raw=0x{:02x}), num_segments={}",
+            "Decoded preamble: tag={:?} (raw=0x{:02x}), num_segments={}",
             preamble.tag,
             preamble_bytes[0],
             preamble.num_segments
@@ -577,8 +548,22 @@ impl FrameIO {
                     offset += aligned_len;
                 } else {
                     offset += segment_len;
-                    // Plaintext rev1 multi-segment: 4-byte CRC follows segment 0
-                    if is_rev1 && is_multi && i == 0 {
+                    // Plaintext rev1: 4-byte CRC follows segment 0 (both single and multi-segment)
+                    if is_rev1 && i == 0 {
+                        if offset + crate::frames::FRAME_CRC_SIZE <= full_payload.len() {
+                            let received_crc = u32::from_le_bytes(
+                                full_payload[offset..offset + crate::frames::FRAME_CRC_SIZE]
+                                    .try_into()
+                                    .unwrap(),
+                            );
+                            let expected_crc = !crc32c::crc32c(segment_data);
+                            if received_crc != expected_crc {
+                                return Err(Error::Protocol(format!(
+                                    "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                                    expected_crc, received_crc
+                                )));
+                            }
+                        }
                         offset += crate::frames::FRAME_CRC_SIZE;
                     }
                 }
@@ -590,7 +575,7 @@ impl FrameIO {
 
         // Verify epilogue for plaintext multi-segment frames
         if !has_encryption && is_multi && total_segment_size > 0 {
-            // Epilogue starts at current offset; first byte is late_status (rev1) or late_flags (rev0)
+            // Epilogue: first byte is late_status (rev1) or late_flags (rev0)
             if offset < full_payload.len() {
                 let late_status = full_payload[offset];
                 if (late_status & crate::frames::FRAME_LATE_STATUS_ABORTED_MASK)
@@ -599,6 +584,40 @@ impl FrameIO {
                     return Err(crate::Error::Protocol(
                         "Frame transmission aborted by sender".to_string(),
                     ));
+                }
+                offset += 1;
+
+                // Verify epilogue segment CRCs.
+                // Rev1: 3 CRCs for segments 1-3 (segment 0 was verified inline above).
+                //   Stored as !crc32c(segment_data).
+                // Rev0: 4 CRCs for segments 0-3.
+                //   Stored as crc32c(segment_data).
+                let (crc_start_seg, num_epilogue_crcs, invert) = if is_rev1 {
+                    (1usize, crate::frames::MAX_NUM_SEGMENTS - 1, true)
+                } else {
+                    (0usize, crate::frames::MAX_NUM_SEGMENTS, false)
+                };
+                for seg_idx in crc_start_seg..crc_start_seg + num_epilogue_crcs {
+                    if offset + crate::frames::FRAME_CRC_SIZE > full_payload.len() {
+                        break;
+                    }
+                    let received_crc = u32::from_le_bytes(
+                        full_payload[offset..offset + crate::frames::FRAME_CRC_SIZE]
+                            .try_into()
+                            .unwrap(),
+                    );
+                    offset += crate::frames::FRAME_CRC_SIZE;
+
+                    if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
+                        let computed = crc32c::crc32c(&segments[seg_idx]);
+                        let expected_crc = if invert { !computed } else { computed };
+                        if received_crc != expected_crc {
+                            return Err(Error::Protocol(format!(
+                                "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                                seg_idx, expected_crc, received_crc
+                            )));
+                        }
+                    }
                 }
             }
         }
@@ -610,16 +629,7 @@ impl FrameIO {
         // Step 4: Apply decompression if frame is compressed
         if frame.preamble.is_compressed() {
             if let Some(ctx) = state_machine.compression_ctx() {
-                // Calculate original size from all segment lengths
-                // For compressed frames, we need to know the original uncompressed size
-                // This should be stored somewhere - for now, we'll use a heuristic
-                // In practice, Ceph stores this in the frame metadata
-                let compressed_size: usize = frame.segments.iter().map(|s| s.len()).sum();
-                // Estimate original size as 2x compressed size (conservative estimate)
-                // TODO: Get actual original size from frame metadata
-                let estimated_original_size = compressed_size * 3;
-
-                match frame.decompress(ctx, estimated_original_size) {
+                match frame.decompress(ctx) {
                     Ok(decompressed_frame) => {
                         tracing::debug!(
                             "Frame decompressed: tag={:?}, algorithm={:?}",
@@ -958,7 +968,7 @@ impl Connection {
         config: crate::ConnectionConfig,
     ) -> Result<Self> {
         tracing::debug!(
-            "DEBUG: Connection::connect_with_target() called with addr: {}, target nonce: {}",
+            "Connection::connect_with_target() called with addr: {}, target nonce: {}",
             addr,
             target_entity_addr.nonce
         );
@@ -968,16 +978,16 @@ impl Connection {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
-        tracing::debug!("DEBUG: About to TcpStream::connect({})", addr);
+        tracing::debug!("About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
         let peer_addr = stream.peer_addr()?;
         tracing::debug!(
-            "DEBUG: ✓ TCP connection established - peer: {}, local: {}",
+            "TCP connection established - peer: {}, local: {}",
             peer_addr,
             stream.local_addr()?
         );
-        tracing::info!("✓ TCP connection established to {}", addr);
+        tracing::info!("TCP connection established to {}", addr);
 
         // Get our local address from the connection
         let local_addr = stream.local_addr()?;
@@ -995,7 +1005,7 @@ impl Connection {
             Some(&target_entity_addr),
         );
 
-        tracing::debug!("✓ Created client state machine");
+        tracing::debug!("Created client state machine");
 
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
@@ -1026,23 +1036,23 @@ impl Connection {
     /// * `addr` - The server address to connect to
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
-        tracing::debug!("DEBUG: Connection::connect() called with addr: {}", addr);
+        tracing::debug!("Connection::connect() called with addr: {}", addr);
 
         // Validate config
         if let Err(e) = config.validate() {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
-        tracing::debug!("DEBUG: About to TcpStream::connect({})", addr);
+        tracing::debug!("About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
         let peer_addr = stream.peer_addr()?;
         tracing::debug!(
-            "DEBUG: ✓ TCP connection established - peer: {}, local: {}",
+            "TCP connection established - peer: {}, local: {}",
             peer_addr,
             stream.local_addr()?
         );
-        tracing::info!("✓ TCP connection established to {}", addr);
+        tracing::info!("TCP connection established to {}", addr);
 
         // Get our local address from the connection
         let local_addr = stream.local_addr()?;
@@ -1055,7 +1065,7 @@ impl Connection {
         // Configure addresses
         Self::configure_state_machine_addresses(&mut state_machine, addr, local_addr, None);
 
-        tracing::debug!("✓ Created client state machine");
+        tracing::debug!("Created client state machine");
 
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
@@ -1102,7 +1112,7 @@ impl Connection {
         stream.write_all(&buf).await?;
         stream.flush().await?;
         tracing::info!(
-            "✓ Sent msgr2 banner with features: supported={:x}, required={:x}",
+            "Sent msgr2 banner with features: supported={:x}, required={:x}",
             u64::from(banner.supported_features),
             u64::from(banner.required_features)
         );
@@ -1120,7 +1130,7 @@ impl Connection {
         let server_banner = Banner::decode(&mut bytes)?;
 
         tracing::info!(
-            "✓ Received server banner: supported={:x}, required={:x}",
+            "Received server banner: supported={:x}, required={:x}",
             u64::from(server_banner.supported_features),
             u64::from(server_banner.required_features)
         );
@@ -1162,7 +1172,7 @@ impl Connection {
         let client_banner = Banner::decode(&mut bytes)?;
 
         tracing::info!(
-            "✓ Received client banner: supported={:x}, required={:x}",
+            "Received client banner: supported={:x}, required={:x}",
             u64::from(client_banner.supported_features),
             u64::from(client_banner.required_features)
         );
@@ -1196,7 +1206,7 @@ impl Connection {
         stream.write_all(&buf).await?;
         stream.flush().await?;
         tracing::info!(
-            "✓ Sent msgr2 banner with features: supported={:x}, required={:x}",
+            "Sent msgr2 banner with features: supported={:x}, required={:x}",
             u64::from(banner.supported_features),
             u64::from(banner.required_features)
         );
@@ -1221,7 +1231,7 @@ impl Connection {
         let peer_addr = stream.peer_addr()?;
         let local_addr = stream.local_addr()?;
 
-        tracing::info!("✓ Accepting connection from {}", peer_addr);
+        tracing::info!("Accepting connection from {}", peer_addr);
         tracing::debug!("Local address: {}", local_addr);
 
         // Validate config
@@ -1285,7 +1295,7 @@ impl Connection {
         }
         state_machine.set_server_addr(server_entity_addr);
 
-        tracing::debug!("✓ Created server state machine");
+        tracing::debug!("Created server state machine");
 
         // Perform msgr2 banner exchange (server-side: receive first, then send)
         Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
@@ -1322,15 +1332,12 @@ impl Connection {
         // Server starts by waiting for HELLO from client
         tracing::debug!("Waiting for HELLO frame from client...");
         let hello_frame = self.state.recv_frame().await?;
-        tracing::debug!(
-            "✓ Received HELLO frame (tag: {:?})",
-            hello_frame.preamble.tag
-        );
+        tracing::debug!("Received HELLO frame (tag: {:?})", hello_frame.preamble.tag);
 
         // Process HELLO and send response
         match self.state.handle_frame(hello_frame)? {
             StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("✓ Sending HELLO response");
+                tracing::debug!("Sending HELLO response");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -1345,14 +1352,14 @@ impl Connection {
         tracing::debug!("Waiting for AUTH_REQUEST from client...");
         let auth_request = self.state.recv_frame().await?;
         tracing::debug!(
-            "✓ Received AUTH_REQUEST (tag: {:?})",
+            "Received AUTH_REQUEST (tag: {:?})",
             auth_request.preamble.tag
         );
 
         // Process AUTH_REQUEST and send AUTH_DONE
         match self.state.handle_frame(auth_request)? {
             StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("✓ Sending AUTH_DONE");
+                tracing::debug!("Sending AUTH_DONE");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -1367,18 +1374,18 @@ impl Connection {
         tracing::debug!("Waiting for CLIENT_IDENT from client...");
         let client_ident = self.state.recv_frame().await?;
         tracing::debug!(
-            "✓ Received CLIENT_IDENT (tag: {:?})",
+            "Received CLIENT_IDENT (tag: {:?})",
             client_ident.preamble.tag
         );
 
         // Process CLIENT_IDENT and send SERVER_IDENT
         match self.state.handle_frame(client_ident)? {
             StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("✓ Sending SERVER_IDENT");
+                tracing::debug!("Sending SERVER_IDENT");
                 self.state.send_frame(&frame).await?;
             }
             StateResult::Ready => {
-                tracing::info!("✓ Session established (server-side)");
+                tracing::info!("Session established (server-side)");
                 return Ok(());
             }
             result => {
@@ -1389,7 +1396,7 @@ impl Connection {
             }
         }
 
-        tracing::info!("✓ Session established (server-side)");
+        tracing::info!("Session established (server-side)");
         Ok(())
     }
 
@@ -1407,7 +1414,7 @@ impl Connection {
         // Enter state machine and send HELLO
         match self.state.enter()? {
             StateResult::SendAndWait { frame, .. } => {
-                tracing::debug!("✓ Sending HELLO frame");
+                tracing::debug!("Sending HELLO frame");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -1422,14 +1429,14 @@ impl Connection {
         tracing::debug!("Reading HELLO response from server...");
         let hello_response = self.state.recv_frame().await?;
         tracing::debug!(
-            "✓ Received HELLO response (tag: {:?})",
+            "Received HELLO response (tag: {:?})",
             hello_response.preamble.tag
         );
 
         // Process HELLO response
         match self.state.handle_frame(hello_response)? {
             StateResult::SendAndWait { frame, .. } => {
-                tracing::debug!("✓ Sending AUTH_REQUEST frame");
+                tracing::debug!("Sending AUTH_REQUEST frame");
                 self.state.send_frame(&frame).await?;
             }
             result => {
@@ -1453,7 +1460,7 @@ impl Connection {
 
             let auth_response = self.state.recv_frame().await?;
             tracing::debug!(
-                "✓ Received auth frame (tag: {:?})",
+                "Received auth frame (tag: {:?})",
                 auth_response.preamble.tag
             );
 
@@ -1466,19 +1473,19 @@ impl Connection {
                     let state_kind = self.state.current_state_kind();
                     if state_kind.is_authenticated() {
                         tracing::info!(
-                            "✓ Authentication and signature exchange completed, now in state: {}",
+                            "Authentication and signature exchange completed, now in state: {}",
                             state_kind.as_str()
                         );
                         break;
                     } else if !state_kind.is_auth_state() {
-                        tracing::debug!("✓ Transitioned to state: {}", state_kind.as_str());
+                        tracing::debug!("Transitioned to state: {}", state_kind.as_str());
                         break;
                     }
                     // Continue loop for AUTH_CONNECTING and AUTH_CONNECTING_SIGN states
                 }
                 StateResult::Transition(_) => {
                     let state_kind = self.state.current_state_kind();
-                    tracing::debug!("✓ Transitioned to state: {}", state_kind.as_str());
+                    tracing::debug!("Transitioned to state: {}", state_kind.as_str());
                     // Only break if we're past the auth states
                     if !state_kind.is_auth_state() {
                         break;
@@ -1496,20 +1503,20 @@ impl Connection {
         // Handle compression negotiation if we're in COMPRESSION_CONNECTING state
         if self.state.current_state_kind() == StateKind::CompressionConnecting {
             tracing::debug!(
-                "✓ Now in COMPRESSION_CONNECTING state, handling compression negotiation"
+                "Now in COMPRESSION_CONNECTING state, handling compression negotiation"
             );
 
             // Read COMPRESSION_DONE response
             let compression_response = self.state.recv_frame().await?;
             tracing::debug!(
-                "✓ Received frame (tag: {:?})",
+                "Received frame (tag: {:?})",
                 compression_response.preamble.tag
             );
 
             // Process compression response and transition to SESSION_CONNECTING
             match self.state.handle_frame(compression_response)? {
                 StateResult::SendAndWait { frame, .. } => {
-                    tracing::debug!("✓ Transitioned to SESSION_CONNECTING, sending CLIENT_IDENT");
+                    tracing::debug!("Transitioned to SESSION_CONNECTING, sending CLIENT_IDENT");
                     self.state.send_frame(&frame).await?;
                 }
                 result => {
@@ -1523,23 +1530,23 @@ impl Connection {
 
         // Now we should be in SESSION_CONNECTING state and CLIENT_IDENT has been sent
         if self.state.current_state_kind() == StateKind::SessionConnecting {
-            tracing::debug!("✓ CLIENT_IDENT sent, waiting for SERVER_IDENT");
+            tracing::debug!("CLIENT_IDENT sent, waiting for SERVER_IDENT");
 
             // Loop to handle potential AUTH_SIGNATURE followed by SERVER_IDENT
             loop {
                 tracing::debug!("Reading response frame...");
                 let response_frame = self.state.recv_frame().await?;
-                tracing::debug!("✓ Received frame (tag: {:?})", response_frame.preamble.tag);
+                tracing::debug!("Received frame (tag: {:?})", response_frame.preamble.tag);
 
                 // Process frame
                 match self.state.handle_frame(response_frame)? {
                     StateResult::Ready => {
-                        tracing::info!("🎉 Session established! Ready for message exchange");
+                        tracing::info!("Session established! Ready for message exchange");
                         break;
                     }
                     StateResult::ReconnectReady { msg_seq } => {
                         tracing::info!(
-                            "🎉 Session reconnected! Server acknowledged up to msg_seq={}",
+                            "Session reconnected! Server acknowledged up to msg_seq={}",
                             msg_seq
                         );
 
@@ -1576,7 +1583,7 @@ impl Connection {
                                 self.state.send_frame(&frame).await?;
                             }
 
-                            tracing::info!("✓ Message replay complete");
+                            tracing::info!("Message replay complete");
                         }
 
                         break;
@@ -1641,7 +1648,7 @@ impl Connection {
 
         // Establish new TCP connection
         let mut stream = TcpStream::connect(self.server_addr).await?;
-        tracing::info!("✓ TCP reconnection established to {}", self.server_addr);
+        tracing::info!("TCP reconnection established to {}", self.server_addr);
 
         // Get local address for CLIENT_IDENT
         let local_addr = stream.local_addr()?;
@@ -1687,12 +1694,12 @@ impl Connection {
             .as_ref()
             .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
 
-        tracing::info!("✓ Session state restored, initiating reconnection handshake");
+        tracing::info!("Session state restored, initiating reconnection handshake");
 
         // Run the full session establishment (this will use SESSION_RECONNECT since server_cookie != 0)
         self.establish_session().await?;
 
-        tracing::info!("✓ Reconnection complete, session resumed");
+        tracing::info!("Reconnection complete, session resumed");
 
         Ok(())
     }
@@ -1871,7 +1878,7 @@ impl Connection {
         let version = msg.header.get_version();
         let compat_version = msg.header.get_compat_version();
         tracing::debug!(
-            "DEBUG: send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
+            "send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
             msg_type,
             seq,
             ack_seq,
@@ -1897,12 +1904,9 @@ impl Connection {
         // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message);
 
-        tracing::debug!(
-            "DEBUG: Created frame with {} segments",
-            frame.segments.len()
-        );
+        tracing::debug!("Created frame with {} segments", frame.segments.len());
         for (i, seg) in frame.segments.iter().enumerate() {
-            tracing::debug!("DEBUG:   Segment {}: {} bytes", i, seg.len());
+            tracing::debug!("  Segment {}: {} bytes", i, seg.len());
         }
 
         // Send the frame
@@ -1967,7 +1971,7 @@ impl Connection {
                         payload[6], payload[7],
                     ]);
 
-                    tracing::debug!("✓ Received ACK frame: seq={}", ack_seq);
+                    tracing::debug!("Received ACK frame: seq={}", ack_seq);
 
                     // Discard acknowledged messages from sent queue (following Ceph's practice)
                     self.state.discard_acknowledged_messages(ack_seq);
@@ -2028,7 +2032,7 @@ impl Connection {
                 Tag::Keepalive2Ack => {
                     // Handle Keepalive2Ack frame - just continue waiting for Message
                     // The state machine already updated last_keepalive_ack timestamp
-                    tracing::trace!("✓ Received Keepalive2Ack frame (processed by state machine)");
+                    tracing::trace!("Received Keepalive2Ack frame (processed by state machine)");
                     continue;
                 }
                 _ => {

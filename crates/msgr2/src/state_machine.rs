@@ -489,7 +489,7 @@ impl State for AuthConnecting {
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
-            "DEBUG: AuthConnecting received frame tag: {:?}",
+            "AuthConnecting received frame tag: {:?}",
             frame.preamble.tag
         );
         match frame.preamble.tag {
@@ -506,7 +506,7 @@ impl State for AuthConnecting {
                 let allowed_modes = Vec::<u32>::decode(&mut payload, 0)?;
 
                 tracing::debug!(
-                    "DEBUG: AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
+                    "AUTH_BAD_METHOD - method={}, result={}, allowed={:?}, modes={:?}",
                     rejected_method,
                     result,
                     allowed_methods,
@@ -574,9 +574,9 @@ impl State for AuthConnecting {
                 // Handle CephX multi-round auth
                 if let Some(provider) = &mut self.auth_provider {
                     if let Some(payload) = frame.segments.first() {
-                        tracing::debug!("DEBUG: AUTH_REPLY_MORE payload length: {}", payload.len());
-                        tracing::debug!(
-                            "DEBUG: AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
+                        tracing::debug!("AUTH_REPLY_MORE payload length: {}", payload.len());
+                        tracing::trace!(
+                            "AUTH_REPLY_MORE payload hex (first 128 bytes): {}",
                             payload
                                 .iter()
                                 .take(128)
@@ -621,9 +621,9 @@ impl State for AuthConnecting {
             Tag::AuthDone => {
                 // Parse AUTH_DONE frame to get global_id and connection mode
                 if let Some(segment) = frame.segments.first() {
-                    tracing::debug!("DEBUG: AUTH_DONE frame segment length: {}", segment.len());
-                    tracing::debug!(
-                        "DEBUG: AUTH_DONE frame segment hex (first 64 bytes): {}",
+                    tracing::debug!("AUTH_DONE frame segment length: {}", segment.len());
+                    tracing::trace!(
+                        "AUTH_DONE frame segment hex (first 64 bytes): {}",
                         segment
                             .iter()
                             .take(64)
@@ -643,10 +643,10 @@ impl State for AuthConnecting {
                         Error::protocol_error(&format!("Failed to decode auth_payload: {:?}", e))
                     })?;
 
-                    tracing::debug!("DEBUG: Decoded from AUTH_DONE frame:");
-                    tracing::debug!("DEBUG:   global_id: {}", global_id);
-                    tracing::debug!("DEBUG:   con_mode: {}", con_mode);
-                    tracing::debug!("DEBUG:   auth_payload length: {}", auth_payload.len());
+                    tracing::debug!("Decoded from AUTH_DONE frame:");
+                    tracing::debug!("  global_id: {}", global_id);
+                    tracing::debug!("  con_mode: {}", con_mode);
+                    tracing::debug!("  auth_payload length: {}", auth_payload.len());
 
                     tracing::info!(
                         "Authentication completed successfully - global_id: {}, connection_mode: {}",
@@ -967,12 +967,12 @@ impl State for AuthConnectingSign {
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
-            "DEBUG: AuthConnectingSign::handle_frame received tag: {:?}",
+            "AuthConnectingSign::handle_frame received tag: {:?}",
             frame.preamble.tag
         );
         match frame.preamble.tag {
             Tag::AuthSignature => {
-                tracing::debug!("DEBUG: Received AUTH_SIGNATURE from server");
+                tracing::debug!("Received AUTH_SIGNATURE from server");
                 // Verify server's AUTH_SIGNATURE
                 if let Some(ref expected_sig) = self.expected_server_signature {
                     // Extract server's signature from frame payload
@@ -983,7 +983,7 @@ impl State for AuthConnectingSign {
                         // Verify signature matches expected
                         if server_signature == *expected_sig {
                             tracing::info!(
-                                "✓ Server AUTH_SIGNATURE verified successfully ({} bytes)",
+                                "Server AUTH_SIGNATURE verified successfully ({} bytes)",
                                 server_signature.len()
                             );
                         } else {
@@ -1010,7 +1010,7 @@ impl State for AuthConnectingSign {
 
                 // After verification, transition based on compression support
                 tracing::debug!(
-                    "DEBUG: peer_supported_features = 0x{:x}",
+                    "peer_supported_features = 0x{:x}",
                     self.peer_supported_features
                 );
                 let peer_features = crate::FeatureSet::from(self.peer_supported_features);
@@ -1019,7 +1019,7 @@ impl State for AuthConnectingSign {
                         "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
                     tracing::debug!(
-                        "DEBUG: Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
+                        "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
                     Ok(StateResult::Transition(Box::new(
                         CompressionConnecting::new_with_encryption(
@@ -1033,7 +1033,7 @@ impl State for AuthConnectingSign {
                     )))
                 } else {
                     tracing::debug!("Peer does not support COMPRESSION, transitioning directly to SESSION_CONNECTING");
-                    tracing::debug!("DEBUG: Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
+                    tracing::debug!("Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
                     Ok(StateResult::Transition(Box::new(
                         SessionConnecting::new_with_encryption(
                             self.connection_mode,
@@ -1061,13 +1061,10 @@ impl State for AuthConnectingSign {
 
     fn enter(&mut self) -> Result<StateResult> {
         // Send AUTH_SIGNATURE frame with pre-computed HMAC-SHA256 signature
-        tracing::debug!("DEBUG: AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
-        tracing::debug!(
-            "DEBUG:   signature length: {} bytes",
-            self.our_signature.len()
-        );
-        tracing::debug!(
-            "DEBUG:   signature hex (first 32 bytes): {}",
+        tracing::debug!("AuthConnectingSign::enter - Sending AUTH_SIGNATURE to server");
+        tracing::debug!("  signature length: {} bytes", self.our_signature.len());
+        tracing::trace!(
+            "  signature hex (first 32 bytes): {}",
             self.our_signature
                 .iter()
                 .take(32)
@@ -1208,7 +1205,7 @@ impl State for SessionConnecting {
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
-            "DEBUG: SessionConnecting::handle_frame received tag: {:?}",
+            "SessionConnecting::handle_frame received tag: {:?}",
             frame.preamble.tag
         );
         match frame.preamble.tag {
@@ -1321,7 +1318,7 @@ impl State for SessionConnecting {
                         // Verify signature matches expected
                         if server_signature == *expected_sig {
                             tracing::info!(
-                                "✓ Server AUTH_SIGNATURE verified successfully ({} bytes)",
+                                "Server AUTH_SIGNATURE verified successfully ({} bytes)",
                                 server_signature.len()
                             );
                             Ok(StateResult::Continue)
@@ -1357,7 +1354,7 @@ impl State for SessionConnecting {
                     })?;
 
                     tracing::info!(
-                        "✓ Reconnection successful! Server acknowledged up to msg_seq={}",
+                        "Reconnection successful! Server acknowledged up to msg_seq={}",
                         msg_seq
                     );
 
@@ -1383,7 +1380,7 @@ impl State for SessionConnecting {
                         self.connect_seq
                     );
                     tracing::debug!(
-                        "DEBUG: SESSION_RETRY received, incrementing connect_seq and retrying"
+                        "SESSION_RETRY received, incrementing connect_seq and retrying"
                     );
 
                     // Increment connect_seq and resend RECONNECT
@@ -1409,7 +1406,7 @@ impl State for SessionConnecting {
                         self.global_seq
                     );
                     tracing::debug!(
-                        "DEBUG: SESSION_RETRY_GLOBAL received, updating global_seq and retrying"
+                        "SESSION_RETRY_GLOBAL received, updating global_seq and retrying"
                     );
 
                     // Update global_seq to server's value
@@ -1435,10 +1432,7 @@ impl State for SessionConnecting {
                         "Server sent SESSION_RESET (full={}). Resetting session and sending CLIENT_IDENT",
                         full
                     );
-                    tracing::debug!(
-                        "DEBUG: SESSION_RESET received (full={}), resetting session",
-                        full
-                    );
+                    tracing::debug!("SESSION_RESET received (full={}), resetting session", full);
 
                     // Reset session cookies (server_cookie = 0 will trigger CLIENT_IDENT in enter())
                     self.server_cookie = 0;
@@ -1463,13 +1457,13 @@ impl State for SessionConnecting {
     }
 
     fn enter(&mut self) -> Result<StateResult> {
-        tracing::debug!("DEBUG: SessionConnecting::enter() called");
-        tracing::debug!("DEBUG:   our_global_id={}", self.our_global_id);
-        tracing::debug!("DEBUG:   connection_mode={}", self.connection_mode);
-        tracing::debug!("DEBUG:   client_cookie={}", self.client_cookie);
-        tracing::debug!("DEBUG:   server_cookie={}", self.server_cookie);
+        tracing::debug!("SessionConnecting::enter() called");
+        tracing::debug!("  our_global_id={}", self.our_global_id);
+        tracing::debug!("  connection_mode={}", self.connection_mode);
+        tracing::debug!("  client_cookie={}", self.client_cookie);
+        tracing::debug!("  server_cookie={}", self.server_cookie);
         tracing::debug!(
-            "DEBUG:   has_connection_secret={}",
+            "  has_connection_secret={}",
             self.connection_secret.is_some()
         );
 
@@ -1498,13 +1492,13 @@ impl State for SessionConnecting {
 
             let frame = create_frame_from_trait(&reconnect, Tag::SessionReconnect);
 
-            tracing::debug!("DEBUG: Created SESSION_RECONNECT frame");
-            tracing::debug!("DEBUG:   addrs: {:?}", addrs);
-            tracing::debug!("DEBUG:   client_cookie: {}", self.client_cookie);
-            tracing::debug!("DEBUG:   server_cookie: {}", self.server_cookie);
-            tracing::debug!("DEBUG:   global_seq: {}", self.global_seq);
-            tracing::debug!("DEBUG:   connect_seq: {}", self.connect_seq);
-            tracing::debug!("DEBUG:   in_seq (msg_seq): {}", self.in_seq);
+            tracing::debug!("Created SESSION_RECONNECT frame");
+            tracing::debug!("  addrs: {:?}", addrs);
+            tracing::debug!("  client_cookie: {}", self.client_cookie);
+            tracing::debug!("  server_cookie: {}", self.server_cookie);
+            tracing::debug!("  global_seq: {}", self.global_seq);
+            tracing::debug!("  connect_seq: {}", self.connect_seq);
+            tracing::debug!("  in_seq (msg_seq): {}", self.in_seq);
 
             Ok(StateResult::SendAndWait {
                 frame,
@@ -1554,22 +1548,22 @@ impl State for SessionConnecting {
             let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
 
             tracing::debug!(
-                "DEBUG: Created CLIENT_IDENT frame, {} segments",
+                "Created CLIENT_IDENT frame, {} segments",
                 frame.segments.len()
             );
-            tracing::debug!("DEBUG: CLIENT_IDENT values:");
-            tracing::debug!("DEBUG:   addrs: {:?}", addrs);
-            tracing::debug!("DEBUG:   target_addr: {:?}", target_addr);
-            tracing::debug!("DEBUG:   gid: {}", gid);
-            tracing::debug!("DEBUG:   global_seq: {}", self.global_seq);
-            tracing::debug!("DEBUG:   features_supported: 0x{:x}", features_supported);
-            tracing::debug!("DEBUG:   features_required: 0x{:x}", features_required);
-            tracing::debug!("DEBUG:   flags: 0x{:x}", flags);
-            tracing::debug!("DEBUG:   cookie: {}", self.client_cookie);
+            tracing::debug!("CLIENT_IDENT values:");
+            tracing::debug!("  addrs: {:?}", addrs);
+            tracing::debug!("  target_addr: {:?}", target_addr);
+            tracing::debug!("  gid: {}", gid);
+            tracing::debug!("  global_seq: {}", self.global_seq);
+            tracing::debug!("  features_supported: 0x{:x}", features_supported);
+            tracing::debug!("  features_required: 0x{:x}", features_required);
+            tracing::debug!("  flags: 0x{:x}", flags);
+            tracing::debug!("  cookie: {}", self.client_cookie);
 
             if !frame.segments.is_empty() {
                 let payload_bytes = &frame.segments[0];
-                tracing::debug!(
+                tracing::trace!(
                     "CLIENT_IDENT payload: {} bytes, hex: {}",
                     payload_bytes.len(),
                     hex::encode(&payload_bytes[..payload_bytes.len().min(128)])
@@ -2166,22 +2160,19 @@ impl StateMachine {
     /// Decrypt frame data if in SECURE mode
     pub fn decrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
         tracing::debug!(
-            "DEBUG: decrypt_frame_data called, has_decryptor={}, data_len={}",
+            "decrypt_frame_data called, has_decryptor={}, data_len={}",
             self.frame_decryptor.is_some(),
             data.len()
         );
         if let Some(decryptor) = &mut self.frame_decryptor {
-            tracing::debug!(
-                "DEBUG: Attempting AES-GCM decryption of {} bytes",
-                data.len()
-            );
+            tracing::debug!("Attempting AES-GCM decryption of {} bytes", data.len());
             let result = decryptor
                 .decrypt(data)
                 .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)));
             if let Err(ref e) = result {
-                tracing::debug!("DEBUG: Decryption FAILED: {:?}", e);
+                tracing::debug!("Decryption FAILED: {:?}", e);
             } else {
-                tracing::debug!("DEBUG: Decryption SUCCESS");
+                tracing::debug!("Decryption SUCCESS");
             }
             result
         } else {

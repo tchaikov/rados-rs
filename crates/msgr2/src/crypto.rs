@@ -79,16 +79,25 @@ pub fn parse_connection_secret(secret: &[u8]) -> Result<ConnectionSecret, Crypto
 }
 
 /// AES-128-GCM frame decryptor
-#[derive(Debug)]
 pub struct Aes128GcmDecryptor {
-    key: Vec<u8>,
+    cipher: aes_gcm::Aes128Gcm,
     nonce: Vec<u8>,
     sequence: u64,
+}
+
+impl fmt::Debug for Aes128GcmDecryptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Aes128GcmDecryptor")
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 
 impl Aes128GcmDecryptor {
     /// Create a new decryptor with the given key and nonce
     pub fn new(key: Vec<u8>, nonce: Vec<u8>) -> Result<Self, CryptoError> {
+        use aes_gcm::KeyInit;
+
         if key.len() != 16 {
             return Err(CryptoError::InvalidParameters(format!(
                 "Invalid key length: {} bytes, expected 16",
@@ -102,8 +111,11 @@ impl Aes128GcmDecryptor {
             )));
         }
 
+        let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
+            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
+
         Ok(Self {
-            key,
+            cipher,
             nonce,
             sequence: 0,
         })
@@ -112,10 +124,7 @@ impl Aes128GcmDecryptor {
 
 impl FrameDecryptor for Aes128GcmDecryptor {
     fn decrypt(&mut self, ciphertext: &[u8]) -> Result<Bytes, CryptoError> {
-        use aes_gcm::{
-            aead::{Aead, KeyInit},
-            Aes128Gcm, Nonce,
-        };
+        use aes_gcm::{aead::Aead, Nonce};
 
         tracing::trace!(
             "RX ciphertext ({} bytes): {:02x?}",
@@ -137,13 +146,10 @@ impl FrameDecryptor for Aes128GcmDecryptor {
         counter = counter.wrapping_add(self.sequence);
         counter_bytes.copy_from_slice(&counter.to_le_bytes());
 
-        let cipher = Aes128Gcm::new_from_slice(&self.key)
-            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
-
         let nonce_array = Nonce::from_slice(&full_nonce);
         tracing::trace!("RX nonce: {:02x?}", &full_nonce[..]);
 
-        let plaintext = cipher.decrypt(nonce_array, ciphertext).map_err(|e| {
+        let plaintext = self.cipher.decrypt(nonce_array, ciphertext).map_err(|e| {
             CryptoError::DecryptionFailed(format!(
                 "AES-GCM decrypt failed at sequence {}: {:?}",
                 self.sequence, e
@@ -166,16 +172,25 @@ impl FrameDecryptor for Aes128GcmDecryptor {
 }
 
 /// AES-128-GCM frame encryptor
-#[derive(Debug)]
 pub struct Aes128GcmEncryptor {
-    key: Vec<u8>,
+    cipher: aes_gcm::Aes128Gcm,
     nonce: Vec<u8>,
     sequence: u64,
+}
+
+impl fmt::Debug for Aes128GcmEncryptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Aes128GcmEncryptor")
+            .field("sequence", &self.sequence)
+            .finish()
+    }
 }
 
 impl Aes128GcmEncryptor {
     /// Create a new encryptor with the given key and nonce
     pub fn new(key: Vec<u8>, nonce: Vec<u8>) -> Result<Self, CryptoError> {
+        use aes_gcm::KeyInit;
+
         if key.len() != 16 {
             return Err(CryptoError::InvalidParameters(format!(
                 "Invalid key length: {} bytes, expected 16",
@@ -189,8 +204,11 @@ impl Aes128GcmEncryptor {
             )));
         }
 
+        let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
+            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
+
         Ok(Self {
-            key,
+            cipher,
             nonce,
             sequence: 0,
         })
@@ -199,10 +217,7 @@ impl Aes128GcmEncryptor {
 
 impl FrameEncryptor for Aes128GcmEncryptor {
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Bytes, CryptoError> {
-        use aes_gcm::{
-            aead::{Aead, KeyInit},
-            Aes128Gcm, Nonce,
-        };
+        use aes_gcm::{aead::Aead, Nonce};
 
         // Build nonce from base nonce + sequence number
         // Nonce structure (12 bytes):
@@ -218,12 +233,9 @@ impl FrameEncryptor for Aes128GcmEncryptor {
         counter = counter.wrapping_add(self.sequence);
         counter_bytes.copy_from_slice(&counter.to_le_bytes());
 
-        let cipher = Aes128Gcm::new_from_slice(&self.key)
-            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
-
         let nonce_array = Nonce::from_slice(&full_nonce);
 
-        let ciphertext = cipher.encrypt(nonce_array, plaintext).map_err(|e| {
+        let ciphertext = self.cipher.encrypt(nonce_array, plaintext).map_err(|e| {
             CryptoError::EncryptionFailed(format!("AES-GCM encrypt failed: {:?}", e))
         })?;
 

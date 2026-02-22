@@ -42,8 +42,8 @@ pub trait Compressor: Send + Sync {
     /// Compress data
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>>;
 
-    /// Decompress data with known original size
-    fn decompress(&self, data: &[u8], original_size: usize) -> Result<Vec<u8>>;
+    /// Decompress data. Each algorithm embeds the original size in its stream.
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>>;
 
     /// Get the algorithm identifier
     fn algorithm(&self) -> CompressionAlgorithm;
@@ -58,7 +58,7 @@ impl Compressor for NoneCompressor {
         Ok(data.to_vec())
     }
 
-    fn decompress(&self, data: &[u8], _original_size: usize) -> Result<Vec<u8>> {
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         Ok(data.to_vec())
     }
 
@@ -79,28 +79,12 @@ impl Compressor for SnappyCompressor {
             .map_err(|e| Error::compression_error(&format!("Snappy compression failed: {}", e)))
     }
 
-    fn decompress(&self, data: &[u8], original_size: usize) -> Result<Vec<u8>> {
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Snappy embeds the uncompressed length in its stream header.
         let mut decoder = snap::raw::Decoder::new();
-        match decoder.decompress_vec(data) {
-            Ok(output) => Ok(output),
-            Err(e) => {
-                tracing::debug!(
-                    "Snappy decompress_vec failed, falling back to size-hinted decompress: {}",
-                    e
-                );
-                let mut output = vec![0u8; original_size];
-                let decompressed_len = decoder.decompress(data, &mut output).map_err(|e| {
-                    Error::compression_error(&format!("Snappy decompression failed: {}", e))
-                })?;
-                if decompressed_len != original_size {
-                    return Err(Error::compression_error(&format!(
-                        "Snappy fallback decompression size mismatch: expected {}, got {}",
-                        original_size, decompressed_len,
-                    )));
-                }
-                Ok(output)
-            }
-        }
+        decoder
+            .decompress_vec(data)
+            .map_err(|e| Error::compression_error(&format!("Snappy decompression failed: {}", e)))
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -137,7 +121,8 @@ impl Compressor for ZstdCompressor {
             .map_err(|e| Error::compression_error(&format!("Zstd compression failed: {}", e)))
     }
 
-    fn decompress(&self, data: &[u8], _original_size: usize) -> Result<Vec<u8>> {
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Zstd embeds the uncompressed size in its frame header.
         zstd::decode_all(data)
             .map_err(|e| Error::compression_error(&format!("Zstd decompression failed: {}", e)))
     }
@@ -153,19 +138,26 @@ pub struct Lz4Compressor;
 
 impl Compressor for Lz4Compressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        lz4::block::compress(data, None, false)
+        // prepend_size=true writes a 4-byte little-endian original size header,
+        // which decompress() reads to avoid needing an external size hint.
+        lz4::block::compress(data, None, true)
             .map_err(|e| Error::compression_error(&format!("LZ4 compression failed: {}", e)))
     }
 
-    fn decompress(&self, data: &[u8], original_size: usize) -> Result<Vec<u8>> {
-        lz4::block::decompress(data, None)
-            .or_else(|e| {
-                tracing::debug!(
-                    "LZ4 metadata-driven decompress failed, falling back to size hint: {}",
-                    e
-                );
-                lz4::block::decompress(data, Some(original_size as i32))
-            })
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // `lz4::block::compress` with `prepend_size=true` prefixes the output with
+        // a 4-byte little-endian uncompressed size. Read it and pass it to decompress
+        // explicitly, because `decompress(data, None)` is unreliable across crate versions.
+        if data.len() < 4 {
+            return Err(Error::compression_error(
+                "LZ4 data too short to contain size header",
+            ));
+        }
+        let original_size = i32::from_le_bytes(data[..4].try_into().unwrap());
+        if original_size < 0 {
+            return Err(Error::compression_error("LZ4 size header is negative"));
+        }
+        lz4::block::decompress(&data[4..], Some(original_size))
             .map_err(|e| Error::compression_error(&format!("LZ4 decompression failed: {}", e)))
     }
 
@@ -212,7 +204,8 @@ impl Compressor for ZlibCompressor {
             .map_err(|e| Error::compression_error(&format!("Zlib compression failed: {}", e)))
     }
 
-    fn decompress(&self, data: &[u8], _original_size: usize) -> Result<Vec<u8>> {
+    fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
+        // Zlib streams are self-describing; no external size hint required.
         use flate2::read::ZlibDecoder;
         use std::io::Read;
 
@@ -370,9 +363,9 @@ impl CompressionContext {
         Ok(Bytes::from(compressed))
     }
 
-    /// Decompress data
-    pub fn decompress(&self, data: &[u8], original_size: usize) -> Result<Bytes> {
-        let decompressed = self.compressor.decompress(data, original_size)?;
+    /// Decompress data. Each algorithm embeds the original size in its stream.
+    pub fn decompress(&self, data: &[u8]) -> Result<Bytes> {
+        let decompressed = self.compressor.decompress(data)?;
         self.stats
             .bytes_before_decompression
             .set(self.stats.bytes_before_decompression.get() + data.len() as u64);
@@ -413,7 +406,7 @@ mod tests {
         let compressed = compressor.compress(data).unwrap();
         assert_eq!(compressed, data);
 
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
     }
 
@@ -423,7 +416,7 @@ mod tests {
         let data = b"Hello, World! This is a test of Snappy compression.";
 
         let compressed = compressor.compress(data).unwrap();
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
 
         assert_eq!(decompressed, data);
         assert_eq!(compressor.algorithm(), CompressionAlgorithm::Snappy);
@@ -435,7 +428,7 @@ mod tests {
         let data = b"Hello, World! This is a test of Zstd compression.";
 
         let compressed = compressor.compress(data).unwrap();
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
 
         assert_eq!(decompressed, data);
         assert_eq!(compressor.algorithm(), CompressionAlgorithm::Zstd);
@@ -447,7 +440,7 @@ mod tests {
         let data = b"Hello, World! This is a test of LZ4 compression.";
 
         let compressed = compressor.compress(data).unwrap();
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
 
         assert_eq!(decompressed, data);
         assert_eq!(compressor.algorithm(), CompressionAlgorithm::Lz4);
@@ -460,7 +453,7 @@ mod tests {
 
         // Test compression
         let compressed = ctx.compress(data).unwrap();
-        let decompressed = ctx.decompress(&compressed, data.len()).unwrap();
+        let decompressed = ctx.decompress(&compressed).unwrap();
 
         assert_eq!(&decompressed[..], data);
         assert_eq!(ctx.algorithm(), CompressionAlgorithm::Snappy);
@@ -484,7 +477,7 @@ mod tests {
         let data = vec![b'A'; 10000]; // 10KB of 'A's
 
         let compressed = compressor.compress(&data).unwrap();
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
 
         assert_eq!(decompressed, data);
         // Snappy should compress repeated data well
@@ -497,7 +490,7 @@ mod tests {
         let data = b"Hello, World! This is a test of Zlib compression.";
 
         let compressed = compressor.compress(data).unwrap();
-        let decompressed = compressor.decompress(&compressed, data.len()).unwrap();
+        let decompressed = compressor.decompress(&compressed).unwrap();
 
         assert_eq!(decompressed, data);
         assert_eq!(compressor.algorithm(), CompressionAlgorithm::Zlib);
@@ -534,7 +527,7 @@ mod tests {
         assert!(after_compress.bytes_saved() > 0);
 
         // After decompression
-        ctx.decompress(&compressed, data.len()).unwrap();
+        ctx.decompress(&compressed).unwrap();
         let after_decompress = ctx.stats();
         assert_eq!(
             after_decompress.bytes_before_decompression,
@@ -569,7 +562,7 @@ mod tests {
         for algo in algorithms {
             let ctx = CompressionContext::new(algo);
             let compressed = ctx.compress(&data).unwrap();
-            let decompressed = ctx.decompress(&compressed, data.len()).unwrap();
+            let decompressed = ctx.decompress(&compressed).unwrap();
             assert_eq!(&decompressed[..], &data[..], "Algorithm {:?} failed", algo);
         }
     }
