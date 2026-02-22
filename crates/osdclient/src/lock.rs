@@ -2,8 +2,8 @@
 //!
 //! Implements distributed object locking using Ceph's cls_lock object class.
 
-use bytes::{Bytes, BytesMut};
-use denc::Denc;
+use bytes::{Buf, BufMut};
+use denc::{Denc, RadosError};
 use std::time::Duration;
 
 /// Lock type
@@ -35,42 +35,31 @@ pub struct LockRequest {
     pub flags: LockFlags,
 }
 
-impl LockRequest {
-    /// Encode lock request to bytes
-    pub fn encode(&self) -> Result<Bytes, denc::RadosError> {
-        let mut buf = BytesMut::new();
+impl Denc for LockRequest {
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.name.encode(buf, features)?;
+        (self.lock_type as u8).encode(buf, features)?;
+        self.cookie.encode(buf, features)?;
+        self.tag.encode(buf, features)?;
+        self.description.encode(buf, features)?;
+        (self.duration.as_secs() as u32).encode(buf, features)?;
+        self.duration.subsec_nanos().encode(buf, features)?;
+        self.flags.bits().encode(buf, features)?;
+        Ok(())
+    }
 
-        // Encode fields in order
-        self.name.encode(&mut buf, 0)?;
-        (self.lock_type as u8).encode(&mut buf, 0)?;
-        self.cookie.encode(&mut buf, 0)?;
-        self.tag.encode(&mut buf, 0)?;
-        self.description.encode(&mut buf, 0)?;
+    fn decode<B: Buf>(_buf: &mut B, _features: u64) -> Result<Self, RadosError> {
+        Err(RadosError::Protocol("LockRequest decode is not supported".into()))
+    }
 
-        // Encode duration as UTime (sec + nsec)
-        let secs = self.duration.as_secs() as u32;
-        let nsecs = self.duration.subsec_nanos();
-        secs.encode(&mut buf, 0)?;
-        nsecs.encode(&mut buf, 0)?;
-
-        self.flags.bits().encode(&mut buf, 0)?;
-
-        Ok(buf.freeze())
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        None
     }
 }
 
 /// Unlock request structure
+#[derive(denc::Denc)]
 pub struct UnlockRequest {
     pub name: String,
     pub cookie: String,
-}
-
-impl UnlockRequest {
-    /// Encode unlock request to bytes
-    pub fn encode(&self) -> Result<Bytes, denc::RadosError> {
-        let mut buf = BytesMut::new();
-        self.name.encode(&mut buf, 0)?;
-        self.cookie.encode(&mut buf, 0)?;
-        Ok(buf.freeze())
-    }
 }

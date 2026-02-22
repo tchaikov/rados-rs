@@ -801,6 +801,7 @@ impl OSDOp {
         duration: Option<std::time::Duration>,
     ) -> Self {
         use crate::lock::{LockFlags, LockRequest, LockType};
+        use denc::Denc;
 
         let request = LockRequest {
             name: name.to_string(),
@@ -812,11 +813,9 @@ impl OSDOp {
             flags: LockFlags::empty(),
         };
 
-        Self::call(
-            "lock",
-            "lock",
-            request.encode().expect("Failed to encode lock request"),
-        )
+        let mut buf = bytes::BytesMut::new();
+        Denc::encode(&request, &mut buf, 0).expect("Failed to encode lock request");
+        Self::call("lock", "lock", buf.freeze())
     }
 
     /// Create a shared lock operation
@@ -835,6 +834,7 @@ impl OSDOp {
         duration: Option<std::time::Duration>,
     ) -> Self {
         use crate::lock::{LockFlags, LockRequest, LockType};
+        use denc::Denc;
 
         let request = LockRequest {
             name: name.to_string(),
@@ -846,11 +846,9 @@ impl OSDOp {
             flags: LockFlags::empty(),
         };
 
-        Self::call(
-            "lock",
-            "lock",
-            request.encode().expect("Failed to encode lock request"),
-        )
+        let mut buf = bytes::BytesMut::new();
+        Denc::encode(&request, &mut buf, 0).expect("Failed to encode lock request");
+        Self::call("lock", "lock", buf.freeze())
     }
 
     /// Create an unlock operation
@@ -860,17 +858,16 @@ impl OSDOp {
     /// * `cookie` - Lock identifier that was used when acquiring the lock
     pub fn unlock(name: &str, cookie: &str) -> Self {
         use crate::lock::UnlockRequest;
+        use denc::Denc;
 
         let request = UnlockRequest {
             name: name.to_string(),
             cookie: cookie.to_string(),
         };
 
-        Self::call(
-            "lock",
-            "unlock",
-            request.encode().expect("Failed to encode unlock request"),
-        )
+        let mut buf = bytes::BytesMut::new();
+        Denc::encode(&request, &mut buf, 0).expect("Failed to encode unlock request");
+        Self::call("lock", "unlock", buf.freeze())
     }
 
     /// Get an extended attribute
