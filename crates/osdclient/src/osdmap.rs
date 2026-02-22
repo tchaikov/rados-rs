@@ -1,7 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
 use denc::{
-    features::CEPH_FEATUREMASK_SERVER_OCTOPUS,
+    features::CephFeatures,
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
     EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
 };
@@ -559,7 +559,7 @@ impl VersionedEncode for OsdXInfo {
 
     fn encoding_version(&self, features: u64) -> u8 {
         // Match C++ logic: version 4 if SERVER_OCTOPUS features, else 3
-        if (features & CEPH_FEATUREMASK_SERVER_OCTOPUS) != 0 {
+        if (features & CephFeatures::MASK_SERVER_OCTOPUS.bits()) != 0 {
             4
         } else {
             3
@@ -1161,22 +1161,22 @@ impl VersionedEncode for PgPool {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
-        use denc::features::*;
+        use denc::features::{has_significant_feature, CephFeatures};
 
         // Implement the same logic as Ceph's pg_pool_t::encode
         let mut v = Self::VERSION_CURRENT; // Default to latest
 
         // NOTE: any new encoding dependencies must be reflected by SIGNIFICANT_FEATURES
-        if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_TENTACLE) {
-            if !has_significant_feature(features, CEPH_FEATUREMASK_NEW_OSDOP_ENCODING) {
+        if !has_significant_feature(features, CephFeatures::MASK_SERVER_TENTACLE) {
+            if !has_significant_feature(features, CephFeatures::MASK_NEW_OSDOP_ENCODING) {
                 // this was the first post-hammer thing we added; if it's missing, encode
                 // like hammer.
                 v = 21;
-            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_LUMINOUS) {
+            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_LUMINOUS) {
                 v = 24;
-            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_MIMIC) {
+            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_MIMIC) {
                 v = 26;
-            } else if !has_significant_feature(features, CEPH_FEATUREMASK_SERVER_NAUTILUS) {
+            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_NAUTILUS) {
                 v = 27;
             } else if !self.is_stretch_pool() {
                 v = 29;

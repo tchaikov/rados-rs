@@ -6,7 +6,7 @@
 use crate::denc::{Denc, VersionedEncode};
 use crate::entity_addr::EntityAddrvec;
 use crate::error::RadosError;
-use crate::features::{CEPH_FEATURE_MONENC, CEPH_FEATUREMASK_SERVER_NAUTILUS};
+use crate::features::CephFeatures;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -225,7 +225,7 @@ impl VersionedEncode for MonInfo {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
-        if (features & CEPH_FEATUREMASK_SERVER_NAUTILUS) == 0 {
+        if (features & CephFeatures::MASK_SERVER_NAUTILUS.bits()) == 0 {
             2
         } else {
             6
@@ -395,12 +395,12 @@ impl VersionedEncode for MonMap {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
-        if (features & CEPH_FEATURE_MONENC) == 0 {
+        if (features & CephFeatures::MONENC.bits()) == 0 {
             // Legacy encoding without MONENC
             return 2;
         }
 
-        if (features & CEPH_FEATUREMASK_SERVER_NAUTILUS) == 0 {
+        if (features & CephFeatures::MASK_SERVER_NAUTILUS.bits()) == 0 {
             5
         } else {
             9

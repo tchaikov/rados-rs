@@ -3,7 +3,7 @@
 use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};
 use denc::{
-    features::{CEPH_FEATURE_OSDENC, CEPH_FEATURE_OS_PERF_STAT_NS},
+    features::CephFeatures,
     Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode,
 };
 
@@ -454,8 +454,8 @@ impl VersionedEncode for PoolStat {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
-        // Check if CEPH_FEATURE_OSDENC is present
-        if (features & CEPH_FEATURE_OSDENC) != 0 {
+        // Check if CephFeatures::OSDENC.bits() is present
+        if (features & CephFeatures::OSDENC.bits()) != 0 {
             7 // Version 7 with ENCODE_START
         } else {
             4 // Legacy version without ENCODE_START
@@ -532,7 +532,7 @@ impl Denc for PoolStat {
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
 
-        if (features & CEPH_FEATURE_OSDENC) == 0 {
+        if (features & CephFeatures::OSDENC.bits()) == 0 {
             // Legacy encoding without ENCODE_START - version 4 only has stats + 2 i64
             buf.put_u8(4); // Version byte
             self.stats.encode(buf, features)?;
@@ -547,7 +547,7 @@ impl Denc for PoolStat {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
 
-        if (features & CEPH_FEATURE_OSDENC) == 0 {
+        if (features & CephFeatures::OSDENC.bits()) == 0 {
             // Legacy decoding
             let version = buf.get_u8();
             Self::decode_content(buf, features, version, 0)
@@ -563,7 +563,7 @@ impl Denc for PoolStat {
         let store_stats_size = self.store_stats.encoded_size(features)?;
         let content_size = stats_size + 16 + 4 + 4 + store_stats_size + 4; // stats + 2*i64 + 2*i32 + store_stats + i32
 
-        if (features & CEPH_FEATURE_OSDENC) == 0 {
+        if (features & CephFeatures::OSDENC.bits()) == 0 {
             // Legacy: version byte + content
             Some(1 + content_size)
         } else {
@@ -610,7 +610,7 @@ impl VersionedEncode for ObjectstorePerfStat {
 
     fn encoding_version(&self, features: u64) -> u8 {
         // Check if OS_PERF_STAT_NS feature is present
-        if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
+        if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             2 // Version 2 with nanoseconds
         } else {
             1 // Version 1 with milliseconds
@@ -628,7 +628,7 @@ impl VersionedEncode for ObjectstorePerfStat {
         _version: u8,
     ) -> Result<(), RadosError> {
 
-        if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
+        if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             // Version 2: encode as u64 nanoseconds
             buf.put_u64_le(self.os_commit_latency_ns);
             buf.put_u64_le(self.os_apply_latency_ns);
@@ -649,7 +649,7 @@ impl VersionedEncode for ObjectstorePerfStat {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
 
-        if version == 2 || (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
+        if version == 2 || (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             // Version 2: decode from u64 nanoseconds
             let os_commit_latency_ns = buf.get_u64_le();
             let os_apply_latency_ns = buf.get_u64_le();
@@ -686,7 +686,7 @@ impl Denc for ObjectstorePerfStat {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        let content_size = if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
+        let content_size = if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             16 // 2 * u64
         } else {
             8 // 2 * u32
@@ -1268,9 +1268,9 @@ mod tests {
 
         // Test with features (modern encoding)
         let mut buf = BytesMut::new();
-        original.encode(&mut buf, CEPH_FEATURE_OSDENC).unwrap();
+        original.encode(&mut buf, CephFeatures::OSDENC.bits()).unwrap();
 
-        let decoded = PoolStat::decode(&mut buf, CEPH_FEATURE_OSDENC).unwrap();
+        let decoded = PoolStat::decode(&mut buf, CephFeatures::OSDENC.bits()).unwrap();
         assert_eq!(decoded, original);
 
         // Test without features (legacy encoding - version 4 only has stats + 2 i64)
@@ -1336,10 +1336,10 @@ mod tests {
         // Test with feature flag (version 2, nanoseconds)
         let mut buf = BytesMut::new();
         original
-            .encode(&mut buf, CEPH_FEATURE_OS_PERF_STAT_NS)
+            .encode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits())
             .unwrap();
 
-        let decoded = ObjectstorePerfStat::decode(&mut buf, CEPH_FEATURE_OS_PERF_STAT_NS).unwrap();
+        let decoded = ObjectstorePerfStat::decode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits()).unwrap();
         assert_eq!(decoded, original);
     }
 

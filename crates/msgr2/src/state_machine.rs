@@ -18,8 +18,9 @@ use tracing;
 pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Frame {
     // Use msgr2_frame_assumed features for frame encoding
     // msgr2_frame_assumed = MSG_ADDR2 | SERVER_NAUTILUS
-    use denc::features::{CEPH_FEATUREMASK_MSG_ADDR2, CEPH_FEATUREMASK_SERVER_NAUTILUS};
-    const MSGR2_FRAME_ASSUMED: u64 = CEPH_FEATUREMASK_MSG_ADDR2 | CEPH_FEATUREMASK_SERVER_NAUTILUS;
+    use denc::features::CephFeatures;
+    const MSGR2_FRAME_ASSUMED: u64 =
+        CephFeatures::MASK_MSG_ADDR2.union(CephFeatures::MASK_SERVER_NAUTILUS).bits();
 
     let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED);
     Frame {
@@ -1255,14 +1256,12 @@ impl State for SessionConnecting {
 
                     // Validate that we support the required features
                     // Use the features we advertised in CLIENT_IDENT, not just msgr2 features
-                    use denc::features::{
-                        CEPH_FEATURE_MSG_ADDR2, CEPH_FEATURE_SERVER_NAUTILUS,
-                        CEPH_FEATURE_SERVER_OCTOPUS,
-                    };
-                    let our_features: u64 = CEPH_FEATURE_MSG_ADDR2
-                        | CEPH_FEATURE_SERVER_NAUTILUS
-                        | CEPH_FEATURE_SERVER_OCTOPUS
-                        | (0x3fffffffffffffff); // All features up to bit 61
+                    use denc::features::CephFeatures;
+                    let our_features: u64 = (CephFeatures::MSG_ADDR2
+                        | CephFeatures::SERVER_NAUTILUS
+                        | CephFeatures::SERVER_OCTOPUS)
+                        .bits()
+                        | 0x3fffffffffffffff; // All features up to bit 61
 
                     let missing_features = features_required & !our_features;
                     if missing_features != 0 {
@@ -1514,17 +1513,15 @@ impl State for SessionConnecting {
             let gid = self.our_global_id as i64;
 
             // Features - basic msgr2 features plus common Ceph features
-            use denc::features::{
-                CEPH_FEATURE_MSG_ADDR2, CEPH_FEATURE_SERVER_NAUTILUS,
-                CEPH_FEATURE_SERVER_OCTOPUS,
-            };
+            use denc::features::CephFeatures;
 
-            let features_supported: u64 = CEPH_FEATURE_MSG_ADDR2
-                | CEPH_FEATURE_SERVER_NAUTILUS
-                | CEPH_FEATURE_SERVER_OCTOPUS
-                | (0x3fffffffffffffff); // All features up to bit 61
+            let features_supported: u64 = (CephFeatures::MSG_ADDR2
+                | CephFeatures::SERVER_NAUTILUS
+                | CephFeatures::SERVER_OCTOPUS)
+                .bits()
+                | 0x3fffffffffffffff; // All features up to bit 61
 
-            let features_required: u64 = CEPH_FEATURE_MSG_ADDR2;
+            let features_required: u64 = CephFeatures::MSG_ADDR2.bits();
 
             // Flags - default to 0 (non-lossy)
             let flags: u64 = 0;

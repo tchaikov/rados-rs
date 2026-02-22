@@ -42,7 +42,7 @@
 //! cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
 //! ```
 
-use denc::features::{CEPH_FEATURE_MSG_ADDR2, CEPH_FEATUREMASK_SERVER_OCTOPUS};
+use denc::features::CephFeatures;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -774,9 +774,9 @@ fn test_corpus_comparison() {
         ("uuid_d", None, false),
         ("osd_info_t", None, false),
         // Level 2: Types depending on Level 1
-        ("entity_addr_t", Some(CEPH_FEATURE_MSG_ADDR2), false),
+        ("entity_addr_t", Some(CephFeatures::MSG_ADDR2.bits()), false),
         ("pool_snap_info_t", None, false),
-        ("osd_xinfo_t", Some(CEPH_FEATUREMASK_SERVER_OCTOPUS), false),
+        ("osd_xinfo_t", Some(CephFeatures::MASK_SERVER_OCTOPUS.bits()), false),
         // Level 3: Complex types
         ("pg_merge_meta_t", None, false),
         ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields

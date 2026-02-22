@@ -234,8 +234,8 @@ impl CephMessagePayload for MOSDOp {
     fn msg_version(features: u64) -> u16 {
         // Return v9 if SERVER_SQUID feature is present (Ceph v19+)
         // Return v8 otherwise for backward compatibility with Ceph v18
-        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
-        if features & CEPH_FEATUREMASK_SERVER_SQUID != 0 {
+        use denc::features::CephFeatures;
+        if features & CephFeatures::MASK_SERVER_SQUID.bits() != 0 {
             9
         } else {
             8
@@ -283,8 +283,8 @@ impl CephMessagePayload for MOSDOp {
         trace.encode(&mut buf, 0)?;
 
         // 6b. otel_trace (jspan_context) - added in v9, only encode if SERVER_SQUID feature is present
-        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
-        if features & CEPH_FEATUREMASK_SERVER_SQUID != 0 {
+        use denc::features::CephFeatures;
+        if features & CephFeatures::MASK_SERVER_SQUID.bits() != 0 {
             let otel_trace = JaegerSpanContext::invalid();
             otel_trace.encode(&mut buf, 0)?;
         }
@@ -825,7 +825,7 @@ mod tests {
 
     #[test]
     fn test_mosdop_encoding_v9_with_squid_features() {
-        use denc::features::CEPH_FEATUREMASK_SERVER_SQUID;
+        use denc::features::CephFeatures;
         use msgr2::ceph_message::{CephMessage, CrcFlags};
 
         // Create a PGLS operation using the helper function
@@ -846,7 +846,7 @@ mod tests {
         );
 
         // Encode with SERVER_SQUID features (v9 format)
-        let msg = CephMessage::from_payload(&mosdop, CEPH_FEATUREMASK_SERVER_SQUID, CrcFlags::ALL)
+        let msg = CephMessage::from_payload(&mosdop, CephFeatures::MASK_SERVER_SQUID.bits(), CrcFlags::ALL)
             .unwrap();
 
         // Verify message version is 9
