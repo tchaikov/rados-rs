@@ -3,7 +3,7 @@
 //! The MonMap contains information about all monitors in the cluster.
 
 use crate::error::{MonClientError, Result};
-use crate::types::EntityAddrVec;
+use denc::{EntityAddr, EntityAddrvec, EntityAddrType};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -57,15 +57,17 @@ impl MonMap {
     ///   `[v2:192.168.1.43:40472,v1:192.168.1.43:40473] [v2:192.168.1.43:40474,v1:192.168.1.43:40475]`
     /// are parsed as 2 monitors, each with both v1 and v2 addresses.
     pub fn build_initial(mon_addrs: &[String]) -> Result<Self> {
-        use crate::types::AddrType;
         use std::net::IpAddr;
 
         // Group addresses by IP address (host)
-        let mut ip_to_addrs: HashMap<IpAddr, Vec<crate::types::EntityAddr>> = HashMap::new();
+        let mut ip_to_addrs: HashMap<IpAddr, Vec<EntityAddr>> = HashMap::new();
 
         for addr_str in mon_addrs {
             let addr = parse_mon_addr(addr_str)?;
-            let ip = addr.addr.ip();
+            let ip = addr
+                .to_socket_addr()
+                .ok_or_else(|| MonClientError::InvalidMonMap("Could not parse socket addr".into()))?
+                .ip();
             ip_to_addrs.entry(ip).or_default().push(addr);
         }
 
@@ -81,15 +83,12 @@ impl MonMap {
 
             // Sort addresses: v2 (Msgr2) first, then v1 (Legacy)
             // This ensures get_msgr2() finds v2 addresses first
-            addrs.sort_by_key(|a| match a.addr_type {
-                AddrType::Msgr2 => 0,
-                AddrType::Legacy => 1,
-            });
+            addrs.sort_by_key(|a| if a.is_msgr2() { 0 } else { 1 });
 
             let mon_info = MonInfo {
                 name: format!("mon.{}", rank),
                 rank,
-                addrs: EntityAddrVec { addrs },
+                addrs: EntityAddrvec { addrs },
                 priority: 0,
                 weight: 0,
             };
@@ -125,7 +124,7 @@ impl MonMap {
     }
 
     /// Get monitor addresses by rank
-    pub fn get_addrs(&self, rank: usize) -> Option<&EntityAddrVec> {
+    pub fn get_addrs(&self, rank: usize) -> Option<&EntityAddrvec> {
         self.monitors.get(rank).map(|m| &m.addrs)
     }
 
@@ -231,20 +230,9 @@ impl MonMap {
         // Convert monitors to mon_info BTreeMap
         let mut mon_info = BTreeMap::new();
         for mon in &self.monitors {
-            // Convert EntityAddrVec to EntityAddrvec
-            let mut public_addrs = denc::EntityAddrvec::new();
-            for addr in &mon.addrs.addrs {
-                let denc_addr_type = match addr.addr_type {
-                    crate::types::AddrType::Legacy => denc::EntityAddrType::Legacy,
-                    crate::types::AddrType::Msgr2 => denc::EntityAddrType::Msgr2,
-                };
-                let denc_addr = denc::EntityAddr::from_socket_addr(denc_addr_type, addr.addr);
-                public_addrs.addrs.push(denc_addr);
-            }
-
             let denc_mon = denc::MonInfo {
                 name: mon.name.clone(),
-                public_addrs,
+                public_addrs: mon.addrs.clone(),
                 priority: mon.priority as u16,
                 weight: mon.weight,
                 crush_loc: BTreeMap::new(),
@@ -283,8 +271,6 @@ impl MonMap {
 
     /// Convert from denc MonMap after decoding
     fn from_denc_monmap(denc_monmap: denc::MonMap) -> Result<Self> {
-        use crate::types::{AddrType, EntityAddr, EntityAddrVec};
-
         // Convert fsid from [u8; 16] to Uuid
         let fsid = uuid::Uuid::from_bytes(denc_monmap.fsid);
 
@@ -294,37 +280,13 @@ impl MonMap {
         let modified = (denc_monmap.last_changed.sec as u64) * 1000
             + (denc_monmap.last_changed.nsec as u64) / 1_000_000;
 
-        // Convert mon_info to monitors
+        // Convert mon_info to monitors (addrs are already denc::EntityAddrvec)
         let mut monitors = Vec::new();
         for (rank, (name, mon)) in denc_monmap.mon_info.iter().enumerate() {
-            // Convert EntityAddrvec to EntityAddrVec
-            let mut addrs = EntityAddrVec::new();
-            for denc_addr in &mon.public_addrs.addrs {
-                if let Some(socket_addr) = denc_addr.to_socket_addr() {
-                    let addr_type = match denc_addr.addr_type {
-                        denc::EntityAddrType::Legacy => AddrType::Legacy,
-                        denc::EntityAddrType::Msgr2 => AddrType::Msgr2,
-                        denc::EntityAddrType::None
-                        | denc::EntityAddrType::Any
-                        | denc::EntityAddrType::Cidr => {
-                            // These types should not appear in monitor addresses
-                            // Default to Msgr2 for robustness
-                            AddrType::Msgr2
-                        }
-                    };
-                    let addr = EntityAddr {
-                        addr_type,
-                        nonce: denc_addr.nonce,
-                        addr: socket_addr,
-                    };
-                    addrs.addrs.push(addr);
-                }
-            }
-
             monitors.push(MonInfo {
                 name: name.clone(),
                 rank,
-                addrs,
+                addrs: mon.public_addrs.clone(),
                 priority: mon.priority as i32,
                 weight: mon.weight,
             });
@@ -361,7 +323,7 @@ pub struct MonInfo {
     pub rank: usize,
 
     /// Monitor addresses
-    pub addrs: EntityAddrVec,
+    pub addrs: EntityAddrvec,
 
     /// Priority (for election)
     pub priority: i32,
@@ -371,25 +333,24 @@ pub struct MonInfo {
 }
 
 /// Parse monitor address string
-fn parse_mon_addr(addr_str: &str) -> Result<crate::types::EntityAddr> {
-    use crate::types::{AddrType, EntityAddr};
+fn parse_mon_addr(addr_str: &str) -> Result<EntityAddr> {
     use std::net::SocketAddr;
 
     // Format: "v2:127.0.0.1:3300" or "127.0.0.1:3300"
     let (addr_type, addr_part) = if let Some(stripped) = addr_str.strip_prefix("v2:") {
-        (AddrType::Msgr2, stripped)
+        (EntityAddrType::Msgr2, stripped)
     } else if let Some(stripped) = addr_str.strip_prefix("v1:") {
-        (AddrType::Legacy, stripped)
+        (EntityAddrType::Legacy, stripped)
     } else {
         // Default to msgr2
-        (AddrType::Msgr2, addr_str)
+        (EntityAddrType::Msgr2, addr_str)
     };
 
     let socket_addr: SocketAddr = addr_part.parse().map_err(|e| {
         MonClientError::InvalidMonMap(format!("Invalid address {}: {}", addr_part, e))
     })?;
 
-    Ok(EntityAddr::new(addr_type, socket_addr))
+    Ok(EntityAddr::from_socket_addr(addr_type, socket_addr))
 }
 
 #[cfg(test)]
@@ -451,7 +412,7 @@ mod tests {
         let mon = MonInfo {
             name: "mon.a".to_string(),
             rank: 0,
-            addrs: EntityAddrVec::new(),
+            addrs: EntityAddrvec::new(),
             priority: 0,
             weight: 0,
         };

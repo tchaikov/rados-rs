@@ -658,7 +658,9 @@ impl MonClient {
             .get_msgr2()
             .ok_or(MonClientError::InvalidMonMap("No msgr2 address".into()))?;
 
-        let socket_addr = addr.addr;
+        let socket_addr = addr
+            .to_socket_addr()
+            .ok_or(MonClientError::InvalidMonMap("No socket addr for msgr2 address".into()))?;
         let runtime_config = state.runtime_config;
         drop(state);
 
@@ -1720,7 +1722,7 @@ impl MonClient {
     }
 
     /// Get monitor addresses by rank
-    pub async fn get_mon_addrs(&self, rank: usize) -> Result<crate::types::EntityAddrVec> {
+    pub async fn get_mon_addrs(&self, rank: usize) -> Result<denc::EntityAddrvec> {
         let state = self.state.read().await;
         state
             .monmap

@@ -8,9 +8,9 @@ use crate::denc::Denc;
 use crate::error::RadosError;
 use crate::features::CEPH_FEATURE_MSG_ADDR2;
 use bytes::{Buf, BufMut};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, PartialOrd, Ord)]
 pub enum EntityAddrType {
     #[default]
     None = 0,
@@ -55,7 +55,7 @@ impl Denc for EntityAddrType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntityAddr {
     pub addr_type: EntityAddrType,
     pub nonce: u32,
@@ -161,6 +161,16 @@ impl EntityAddr {
             }
             _ => None,
         }
+    }
+
+    /// Returns true if this address is a msgr2 (v2) address.
+    pub fn is_msgr2(&self) -> bool {
+        matches!(self.addr_type, EntityAddrType::Msgr2)
+    }
+
+    /// Returns true if this address is a legacy (v1) address.
+    pub fn is_legacy(&self) -> bool {
+        matches!(self.addr_type, EntityAddrType::Legacy)
     }
 
     /// Create from SocketAddr
@@ -369,6 +379,83 @@ impl Serialize for EntityAddr {
     }
 }
 
+impl std::fmt::Display for EntityAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let prefix = match self.addr_type {
+            EntityAddrType::Msgr2 => "v2:",
+            EntityAddrType::Legacy => "v1:",
+            _ => "",
+        };
+        write!(f, "{}{}", prefix, self.format_addr())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for EntityAddr {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+
+        struct EntityAddrVisitor;
+
+        impl<'de> Visitor<'de> for EntityAddrVisitor {
+            type Value = EntityAddr;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("an EntityAddr map with type, addr, and nonce fields")
+            }
+
+            fn visit_map<V: MapAccess<'de>>(self, mut map: V) -> Result<EntityAddr, V::Error> {
+                let mut addr_type = EntityAddrType::None;
+                let mut addr_str = String::new();
+                let mut nonce = 0u32;
+
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "type" => {
+                            let s: String = map.next_value()?;
+                            addr_type = match s.as_str() {
+                                "none" => EntityAddrType::None,
+                                "v1" => EntityAddrType::Legacy,
+                                "v2" => EntityAddrType::Msgr2,
+                                "any" => EntityAddrType::Any,
+                                "cidr" => EntityAddrType::Cidr,
+                                _ => {
+                                    return Err(de::Error::custom(format!(
+                                        "unknown addr type: {s}"
+                                    )))
+                                }
+                            };
+                        }
+                        "addr" => {
+                            addr_str = map.next_value()?;
+                        }
+                        "nonce" => {
+                            nonce = map.next_value()?;
+                        }
+                        _ => {
+                            let _ = map.next_value::<de::IgnoredAny>()?;
+                        }
+                    }
+                }
+
+                let sockaddr_data =
+                    if let Ok(socket_addr) = addr_str.parse::<std::net::SocketAddr>() {
+                        EntityAddr::from_socket_addr(addr_type, socket_addr).sockaddr_data
+                    } else {
+                        Vec::new()
+                    };
+
+                Ok(EntityAddr {
+                    addr_type,
+                    nonce,
+                    sockaddr_data,
+                })
+            }
+        }
+
+        deserializer.deserialize_map(EntityAddrVisitor)
+    }
+}
+
 impl Denc for EntityAddr {
     const FEATURE_DEPENDENT: bool = true;
 
@@ -413,7 +500,7 @@ impl Denc for EntityAddr {
 }
 
 /// EntityAddrvec - a vector of EntityAddr (entity_addrvec_t in C++)
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EntityAddrvec {
     pub addrs: Vec<EntityAddr>,
 }
@@ -425,6 +512,16 @@ impl EntityAddrvec {
 
     pub fn with_addr(addr: EntityAddr) -> Self {
         Self { addrs: vec![addr] }
+    }
+
+    /// Returns true if any address is a msgr2 (v2) address.
+    pub fn has_msgr2(&self) -> bool {
+        self.addrs.iter().any(|a| a.is_msgr2())
+    }
+
+    /// Returns the first msgr2 (v2) address, if any.
+    pub fn get_msgr2(&self) -> Option<&EntityAddr> {
+        self.addrs.iter().find(|a| a.is_msgr2())
     }
 }
 
