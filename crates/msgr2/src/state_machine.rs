@@ -1255,9 +1255,10 @@ impl State for SessionConnecting {
 
                     // Validate that we support the required features
                     // Use the features we advertised in CLIENT_IDENT, not just msgr2 features
-                    const CEPH_FEATURE_MSG_ADDR2: u64 = 1 << 59;
-                    const CEPH_FEATURE_SERVER_NAUTILUS: u64 = 1 << 61;
-                    const CEPH_FEATURE_SERVER_OCTOPUS: u64 = 1 << 62;
+                    use denc::features::{
+                        CEPH_FEATURE_MSG_ADDR2, CEPH_FEATURE_SERVER_NAUTILUS,
+                        CEPH_FEATURE_SERVER_OCTOPUS,
+                    };
                     let our_features: u64 = CEPH_FEATURE_MSG_ADDR2
                         | CEPH_FEATURE_SERVER_NAUTILUS
                         | CEPH_FEATURE_SERVER_OCTOPUS
@@ -1513,9 +1514,10 @@ impl State for SessionConnecting {
             let gid = self.our_global_id as i64;
 
             // Features - basic msgr2 features plus common Ceph features
-            const CEPH_FEATURE_MSG_ADDR2: u64 = 1 << 59;
-            const CEPH_FEATURE_SERVER_NAUTILUS: u64 = 1 << 61;
-            const CEPH_FEATURE_SERVER_OCTOPUS: u64 = 1 << 62;
+            use denc::features::{
+                CEPH_FEATURE_MSG_ADDR2, CEPH_FEATURE_SERVER_NAUTILUS,
+                CEPH_FEATURE_SERVER_OCTOPUS,
+            };
 
             let features_supported: u64 = CEPH_FEATURE_MSG_ADDR2
                 | CEPH_FEATURE_SERVER_NAUTILUS

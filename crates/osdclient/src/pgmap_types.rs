@@ -2,7 +2,10 @@
 
 use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};
-use denc::{Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode};
+use denc::{
+    features::{CEPH_FEATURE_OSDENC, CEPH_FEATURE_OS_PERF_STAT_NS},
+    Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode,
+};
 
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
@@ -452,7 +455,6 @@ impl VersionedEncode for PoolStat {
 
     fn encoding_version(&self, features: u64) -> u8 {
         // Check if CEPH_FEATURE_OSDENC is present
-        const CEPH_FEATURE_OSDENC: u64 = 1 << 13;
         if (features & CEPH_FEATURE_OSDENC) != 0 {
             7 // Version 7 with ENCODE_START
         } else {
@@ -529,7 +531,6 @@ impl Denc for PoolStat {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        const CEPH_FEATURE_OSDENC: u64 = 1 << 13;
 
         if (features & CEPH_FEATURE_OSDENC) == 0 {
             // Legacy encoding without ENCODE_START - version 4 only has stats + 2 i64
@@ -545,7 +546,6 @@ impl Denc for PoolStat {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        const CEPH_FEATURE_OSDENC: u64 = 1 << 13;
 
         if (features & CEPH_FEATURE_OSDENC) == 0 {
             // Legacy decoding
@@ -558,7 +558,6 @@ impl Denc for PoolStat {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        const CEPH_FEATURE_OSDENC: u64 = 1 << 13;
 
         let stats_size = self.stats.encoded_size(features)?;
         let store_stats_size = self.store_stats.encoded_size(features)?;
@@ -611,7 +610,6 @@ impl VersionedEncode for ObjectstorePerfStat {
 
     fn encoding_version(&self, features: u64) -> u8 {
         // Check if OS_PERF_STAT_NS feature is present
-        const CEPH_FEATURE_OS_PERF_STAT_NS: u64 = 1 << 34;
         if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
             2 // Version 2 with nanoseconds
         } else {
@@ -629,7 +627,6 @@ impl VersionedEncode for ObjectstorePerfStat {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        const CEPH_FEATURE_OS_PERF_STAT_NS: u64 = 1 << 34;
 
         if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
             // Version 2: encode as u64 nanoseconds
@@ -651,7 +648,6 @@ impl VersionedEncode for ObjectstorePerfStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        const CEPH_FEATURE_OS_PERF_STAT_NS: u64 = 1 << 34;
 
         if version == 2 || (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
             // Version 2: decode from u64 nanoseconds
@@ -690,7 +686,6 @@ impl Denc for ObjectstorePerfStat {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        const CEPH_FEATURE_OS_PERF_STAT_NS: u64 = 1 << 34;
         let content_size = if (features & CEPH_FEATURE_OS_PERF_STAT_NS) != 0 {
             16 // 2 * u64
         } else {
@@ -1250,7 +1245,6 @@ mod tests {
 
     #[test]
     fn test_pool_stat_roundtrip() {
-        const CEPH_FEATURE_OSDENC: u64 = 1 << 13;
 
         let original = PoolStat {
             stats: ObjectStatCollection {
@@ -1333,7 +1327,6 @@ mod tests {
 
     #[test]
     fn test_objectstore_perf_stat_roundtrip_v2() {
-        const CEPH_FEATURE_OS_PERF_STAT_NS: u64 = 1 << 34;
 
         let original = ObjectstorePerfStat {
             os_commit_latency_ns: 5_000_000, // 5ms in ns

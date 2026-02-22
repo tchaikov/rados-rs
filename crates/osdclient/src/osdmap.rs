@@ -1,6 +1,7 @@
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
 use denc::{
+    features::CEPH_FEATUREMASK_SERVER_OCTOPUS,
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
     EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
 };
@@ -558,8 +559,7 @@ impl VersionedEncode for OsdXInfo {
 
     fn encoding_version(&self, features: u64) -> u8 {
         // Match C++ logic: version 4 if SERVER_OCTOPUS features, else 3
-        if (features & 0x8000000000000000) != 0 {
-            // CEPH_FEATUREMASK_SERVER_OCTOPUS
+        if (features & CEPH_FEATUREMASK_SERVER_OCTOPUS) != 0 {
             4
         } else {
             3

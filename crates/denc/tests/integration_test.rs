@@ -1,4 +1,4 @@
-use denc::{Denc, EntityAddr, EntityAddrType};
+use denc::{features::CEPH_FEATURE_MSG_ADDR2, Denc, EntityAddr, EntityAddrType};
 use std::fs;
 use std::path::PathBuf;
 
@@ -72,7 +72,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
                 );
 
                 // Try to encode back with different feature combinations
-                let features_to_test = [0u64, 1u64 << 59]; // without and with MSG_ADDR2
+                let features_to_test = [0u64, CEPH_FEATURE_MSG_ADDR2]; // without and with MSG_ADDR2
 
                 for features in features_to_test {
                     let mut encoded_buf = bytes::BytesMut::new();
@@ -150,7 +150,7 @@ fn test_specific_entity_addr_sample() {
     // Try encoding back
     let mut encoded_buf = bytes::BytesMut::new();
     entity_addr
-        .encode(&mut encoded_buf, 1u64 << 59)
+        .encode(&mut encoded_buf, CEPH_FEATURE_MSG_ADDR2)
         .expect("Failed to encode");
     let encoded_bytes = encoded_buf.to_vec();
 
