@@ -843,6 +843,42 @@ pub struct Connection {
     recv_task: Option<JoinHandle<()>>,
 }
 
+/// Snapshot of runtime connection state for diagnostics and debugging.
+///
+/// Obtained via [`Connection::diagnostics`]. All fields reflect the state at
+/// the moment the snapshot is taken; they are not updated live.
+#[derive(Debug, Clone)]
+pub struct ConnectionDiagnostics {
+    /// Current state-machine phase
+    pub state_kind: crate::state_machine::StateKind,
+    /// Whether frames are encrypted (secure mode)
+    pub encryption_enabled: bool,
+    /// Active compression algorithm, or `None` if compression is not in use
+    pub compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
+    /// Outgoing sequence number (number of messages sent so far)
+    pub out_seq: u64,
+    /// Incoming sequence number (last acknowledged from peer)
+    pub in_seq: u64,
+    /// Number of sent messages awaiting acknowledgment (for reconnect replay)
+    pub sent_messages_pending: usize,
+    /// Client cookie generated at connection creation
+    pub client_cookie: u64,
+    /// Server cookie assigned by the peer (0 if session not yet established)
+    pub server_cookie: u64,
+    /// Global sequence number (monotonically increasing across reconnections)
+    pub global_seq: u64,
+    /// Connection sequence number (incremented on each reconnect attempt)
+    pub connect_seq: u64,
+    /// Global ID assigned by the monitor during CephX authentication (0 if not authenticated)
+    pub global_id: u64,
+    /// Timestamp of the most recent keepalive acknowledgment received
+    pub last_keepalive_ack: Option<std::time::Instant>,
+    /// Whether the connection policy is lossy (no reconnection support)
+    pub is_lossy: bool,
+    /// Whether a transparent reconnect is possible (non-lossy + server cookie present)
+    pub can_reconnect: bool,
+}
+
 impl Connection {
     /// Convert a SocketAddr to an EntityAddr in sockaddr_storage format
     ///
@@ -2150,6 +2186,39 @@ impl Connection {
         tracing::debug!("Connection closed, all pending messages discarded");
     }
 
+    /// Snapshot of runtime connection state for diagnostics and debugging.
+    ///
+    /// The returned [`ConnectionDiagnostics`] is a point-in-time copy; it is
+    /// not updated as the connection state evolves.
+    pub fn diagnostics(&self) -> ConnectionDiagnostics {
+        ConnectionDiagnostics {
+            state_kind: self.state.current_state_kind(),
+            encryption_enabled: self.state.state_machine.has_encryption(),
+            compression_algorithm: self
+                .state
+                .state_machine
+                .compression_ctx()
+                .map(|c| c.algorithm()),
+            out_seq: self.state.out_seq,
+            in_seq: self.state.in_seq,
+            sent_messages_pending: self.state.session.sent_messages.len(),
+            client_cookie: self.state.session.client_cookie,
+            server_cookie: self.state.session.server_cookie,
+            global_seq: self.state.session.global_seq,
+            connect_seq: self.state.session.connect_seq,
+            global_id: self.state.state_machine.global_id(),
+            last_keepalive_ack: self.state.state_machine.last_keepalive_ack(),
+            is_lossy: self.state.session.is_lossy,
+            can_reconnect: self.state.can_reconnect(),
+        }
+    }
+
+    /// Current throttle statistics, or `None` if no throttle is configured.
+    pub async fn throttle_stats(&self) -> Option<crate::throttle::ThrottleStats> {
+        let t = self.throttle.as_ref()?;
+        Some(t.stats().await)
+    }
+
     /// Mark connection as down (for reconnection)
     ///
     /// This matches Ceph's `mark_down()` behavior:
@@ -2178,6 +2247,49 @@ impl Connection {
 mod tests {
     use super::*;
     use crate::message::MessagePriority;
+    use crate::state_machine::StateMachine;
+
+    /// Create a minimal Connection for unit tests using a loopback TCP socket pair.
+    async fn make_test_connection() -> Connection {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let sm = StateMachine::new_client(crate::ConnectionConfig::with_no_auth());
+        let state = ConnectionState::new(stream, sm);
+        Connection {
+            state,
+            server_addr: addr,
+            target_entity_addr: None,
+            config: crate::ConnectionConfig::with_no_auth(),
+            throttle: None,
+            recv_task: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_diagnostics_initial_state() {
+        let conn = make_test_connection().await;
+        let diag = conn.diagnostics();
+
+        assert_eq!(diag.out_seq, 0);
+        assert_eq!(diag.in_seq, 0);
+        assert_eq!(diag.sent_messages_pending, 0);
+        assert_eq!(diag.global_id, 0);
+        assert_eq!(diag.global_seq, 0);
+        assert_eq!(diag.connect_seq, 0);
+        assert_eq!(diag.server_cookie, 0);
+        assert!(!diag.encryption_enabled);
+        assert!(diag.compression_algorithm.is_none());
+        assert!(!diag.can_reconnect); // no server_cookie yet
+        assert!(diag.last_keepalive_ack.is_none());
+        assert!(!diag.is_lossy);
+    }
+
+    #[tokio::test]
+    async fn test_throttle_stats_none_without_config() {
+        let conn = make_test_connection().await;
+        assert!(conn.throttle_stats().await.is_none());
+    }
 
     #[test]
     fn test_priority_queue_ordering() {

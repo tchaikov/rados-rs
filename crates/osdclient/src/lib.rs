@@ -31,7 +31,7 @@ pub use error::OSDClientError;
 pub use ioctx::IoCtx;
 pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use operation::{BuiltOp, OpBuilder};
-pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, UuidD};
+pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, PoolSnapInfo, UuidD};
 pub use types::{
     OSDOp, ObjectId, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult, SparseExtent,
     SparseReadResult, StatResult, StripedPgId, WriteResult,

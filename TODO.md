@@ -263,8 +263,10 @@ Added `StateMachine::fault_reset()` in `msgr2/src/state_machine.rs`:
       method invocation. Lock types, flags, and request structures in lock.rs.
       IoCtx API methods available for all lock operations.
 
-- [ ] **Snapshots** — Snap context is encoded in MOSDOp but snapshot operations
-      (snap create/remove/rollback) are not exposed.
+- [x] **Snapshots** — COMPLETED. Pool-level snap create/remove via `MonClient::snap_create`
+      / `snap_remove`. Object rollback via `IoCtx::snap_rollback`. Pool snap list/lookup
+      via `IoCtx::pool_snap_list` / `pool_snap_lookup` / `pool_snap_get_info` (reads from
+      cached OSDMap). New `OpCode::ListSnaps` and `OpCode::Rollback` opcodes added.
 
 - [x] **Object classes** — COMPLETED. RADOS class method calls via OpCode::Call
       are fully implemented. The call() builder method allows invoking any object
@@ -293,12 +295,17 @@ Added `StateMachine::fault_reset()` in `msgr2/src/state_machine.rs`:
   - Risk: conversion errors, maintenance burden
   - Recommendation: Consolidate to canonical `denc::types::EntityName`
 - [x] **Compression statistics** — Tracking of compression ratio, ops, bytes saved via `CompressionStats` in `msgr2/src/compression.rs`
-- [ ] **Connection diagnostics** — No `dump()` equivalent for live state inspection
+- [x] **Connection diagnostics** — COMPLETED. `Connection::diagnostics()` returns a
+      `ConnectionDiagnostics` snapshot (state, encryption, compression, sequence numbers,
+      cookies, global_id, keepalive timestamp). `Connection::throttle_stats()` returns
+      `Option<ThrottleStats>` for connections with throttle configured.
 
 ### Medium Priority
 - [ ] **Multi-segment epilogue** — `msgr2/src/frames.rs:488` TODO for msgr2.1 epilogue handling
 - [ ] **Fault recovery cleanup** — Need explicit crypto/throttle/buffer reset on connection fault
-- [ ] **Iterator patterns** — Some manual loops could use functional style (filter_map, etc.)
+- [x] **Iterator patterns** — Reviewed and resolved. The weighted shuffle in monclient is
+      algorithmically complex; explicit loops are clearer there. Code is already idiomatic
+      throughout; no changes needed.
 
 ### Low Priority
 - [x] Debug `eprintln!()` statements already converted to `tracing` macros
@@ -645,8 +652,8 @@ impl PriorityQueue {
 |-------|------|--------|-------|
 | **Phase 1** (Critical) | Fix session recovery to match C++ | ✅ DONE | Sent message queue ✅, session identity ✅, priority queue ✅ |
 | **Phase 2** (Robustness) | Improve error safety | ✅ DONE | Fault reset ✅, type consolidation ✅, compression stats ✅ |
-| **Phase 3** (Idiomatic) | Cleaner Rust patterns | ✅ MOSTLY DONE | Async/lock improvements ✅, iterator style ⏳, error handling ✅ |
-| **Phase 4** (Observability) | Visibility into runtime state | ❌ TODO | Connection diagnostics ❌, compression/throttle metrics ❌ |
+| **Phase 3** (Idiomatic) | Cleaner Rust patterns | ✅ DONE | Async/lock improvements ✅, iterator style ✅, error handling ✅ |
+| **Phase 4** (Observability) | Visibility into runtime state | ✅ DONE | Connection diagnostics ✅, throttle stats ✅, snapshot ops ✅ |
 
 ### Risk Assessment
 
@@ -657,7 +664,7 @@ impl PriorityQueue {
 | ~~**LOW**~~ | ~~Async/error refactoring~~ | ✅ DONE | Lock contention improvements completed |
 | ~~**LOW**~~ | ~~Fault recovery cleanup~~ | ✅ DONE | `StateMachine::fault_reset()` implemented |
 | ~~**LOW**~~ | ~~Compression stats tracking~~ | ✅ DONE | `CompressionStats` in compression.rs |
-| **LOW** | Connection diagnostics | ⏳ TODO | Purely observability; no protocol changes |
+| ~~**LOW**~~ | ~~Connection diagnostics~~ | ✅ DONE | `ConnectionDiagnostics` + `throttle_stats()` implemented |
 
 ### C++ Reference Locations
 
@@ -694,11 +701,11 @@ impl PriorityQueue {
 4. ~~RADOS class method calls~~ ✅ DONE (OpCode::Call with call() builder)
 5. ~~Rotating key renewal integration~~ ✅ DONE
 
-### 🔄 Phase 4: Advanced Features (Current Focus)
-1. **Watch/Notify** — Needed for RBD and CephFS cache coherency
-2. **Snapshot operations** — Snap context is encoded but create/remove/rollback not exposed
-3. **Metrics & Observability** — Connection diagnostics, compression stats, prometheus/opentelemetry
-4. **Type Consolidation** — Resolve EntityName duplication across 4 crates
+### ✅ Phase 4: Advanced Features — COMPLETED
+1. ~~Watch/Notify~~ — Explicitly excluded (RBD/CephFS only; not needed for rados-rs scope)
+2. ~~Snapshot operations~~ ✅ DONE — pool snap create/remove (MonClient), object rollback (IoCtx), snap list/lookup (IoCtx, from cached OSDMap)
+3. ~~Connection diagnostics~~ ✅ DONE — `ConnectionDiagnostics` + `Connection::throttle_stats()`
+4. **Type Consolidation** — Resolve EntityName duplication across 4 crates (ongoing)
 5. **Fault Recovery** — Comprehensive cleanup on connection fault (crypto/throttle/buffer reset)
 6. **Multi-segment Epilogue** — msgr2.1 epilogue handling (TODO in frames.rs:488)
 

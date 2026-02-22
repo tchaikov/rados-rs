@@ -324,6 +324,13 @@ impl Denc for OSDOp {
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
             }
+            OpData::Snap { snapid } => {
+                // ceph_osd_op.snap.snapid (u64) + 20 bytes padding = 28 bytes
+                buf.put_u64_le(*snapid);
+                buf.put_u64_le(0);
+                buf.put_u64_le(0);
+                buf.put_u32_le(0);
+            }
             OpData::None => {
                 // Empty union - 28 bytes of zeros
                 buf.put_u64_le(0);
@@ -390,8 +397,14 @@ impl Denc for OSDOp {
                     cmp_mode,
                 }
             }
+            OpCode::Rollback => {
+                // snap.snapid (u64) + 20 bytes padding = 28 bytes
+                let snapid = buf.get_u64_le();
+                buf.advance(20);
+                OpData::Snap { snapid }
+            }
             _ => {
-                // Other operations - skip 28 bytes
+                // Other operations (including ListSnaps) - skip 28 bytes
                 buf.advance(28);
                 OpData::None
             }

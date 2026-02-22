@@ -558,6 +558,74 @@ impl IoCtx {
             Err(OSDClientError::Other("No op result".into()))
         }
     }
+
+    // ---- Pool-level snapshot operations ----
+
+    /// List all pool-level snapshots, ordered by snap_id.
+    pub async fn pool_snap_list(&self) -> Result<Vec<crate::osdmap::PoolSnapInfo>> {
+        let osdmap = self.client.get_osdmap().await?;
+        let pool = osdmap
+            .get_pool(self.pool_id)
+            .ok_or(OSDClientError::PoolNotFound(self.pool_id))?;
+        Ok(pool.snaps.values().cloned().collect())
+    }
+
+    /// Resolve a snapshot name to its snap_id.
+    ///
+    /// Returns an error if no snapshot with the given name exists in this pool.
+    pub async fn pool_snap_lookup(&self, name: &str) -> Result<u64> {
+        let osdmap = self.client.get_osdmap().await?;
+        let pool = osdmap
+            .get_pool(self.pool_id)
+            .ok_or(OSDClientError::PoolNotFound(self.pool_id))?;
+        pool.snaps
+            .values()
+            .find(|s| s.name == name)
+            .map(|s| s.snapid)
+            .ok_or_else(|| {
+                OSDClientError::Other(format!(
+                    "snapshot '{}' not found in pool {}",
+                    name, self.pool_id
+                ))
+            })
+    }
+
+    /// Resolve a snap_id to its [`PoolSnapInfo`](crate::osdmap::PoolSnapInfo).
+    ///
+    /// Returns an error if the snap_id does not exist in this pool.
+    pub async fn pool_snap_get_info(&self, snap_id: u64) -> Result<crate::osdmap::PoolSnapInfo> {
+        let osdmap = self.client.get_osdmap().await?;
+        let pool = osdmap
+            .get_pool(self.pool_id)
+            .ok_or(OSDClientError::PoolNotFound(self.pool_id))?;
+        pool.snaps.get(&snap_id).cloned().ok_or_else(|| {
+            OSDClientError::Other(format!(
+                "snap_id {} not found in pool {}",
+                snap_id, self.pool_id
+            ))
+        })
+    }
+
+    /// Roll back an object to a pool snapshot (equivalent to `rados_ioctx_snap_rollback`).
+    ///
+    /// # Arguments
+    /// * `oid` - Object name
+    /// * `snap_id` - Snapshot ID to roll back to
+    pub async fn snap_rollback(&self, oid: impl Into<String>, snap_id: u64) -> Result<()> {
+        use crate::operation::OpBuilder;
+
+        let oid_str = oid.into();
+        debug!(
+            "Rolling back object '{}' in pool {} to snap_id {}",
+            oid_str, self.pool_id, snap_id
+        );
+
+        let op = OpBuilder::new().rollback(snap_id).build();
+        self.client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+        Ok(())
+    }
 }
 
 impl Clone for IoCtx {

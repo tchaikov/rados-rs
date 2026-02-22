@@ -201,6 +201,23 @@ impl OpBuilder {
         self
     }
 
+    /// Add a list_snaps operation (enumerate clones/snapshots of an object)
+    pub fn list_snaps(mut self) -> Self {
+        self.ops.push(crate::types::OSDOp::list_snaps());
+        self.flags |= OsdOpFlags::READ;
+        self
+    }
+
+    /// Add a rollback operation (roll object HEAD back to a prior snapshot)
+    ///
+    /// # Arguments
+    /// * `snap_id` - Snapshot ID to roll back to
+    pub fn rollback(mut self, snap_id: u64) -> Self {
+        self.ops.push(crate::types::OSDOp::rollback(snap_id));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
     /// Add custom flags
     pub fn flags(mut self, flags: OsdOpFlags) -> Self {
         self.flags |= flags;

@@ -538,6 +538,10 @@ pub enum OpCode {
     Call = osd_op!(RMW, CLS, 1),
     /// PG list operation: __CEPH_OSD_OP(RD, PG, 1) = PGLS
     Pgls = osd_op!(RD, PG, 1),
+    /// List object snapshots/clones: __CEPH_OSD_OP(RD, DATA, 10)
+    ListSnaps = osd_op!(RD, DATA, 10),
+    /// Roll back object HEAD to a prior snapshot: __CEPH_OSD_OP(WR, DATA, 14)
+    Rollback = osd_op!(WR, DATA, 14),
 }
 
 impl OpCode {
@@ -562,6 +566,8 @@ impl OpCode {
             0x1303 => Some(OpCode::ListXattrs),  // RD | ATTR | 3
             0x3501 => Some(OpCode::Call),        // RMW | CLS | 1
             0x1501 => Some(OpCode::Pgls),        // RD | PG | 1
+            0x120A => Some(OpCode::ListSnaps),   // RD | DATA | 10
+            0x220E => Some(OpCode::Rollback),    // WR | DATA | 14
             _ => None,
         }
     }
@@ -611,6 +617,8 @@ pub enum OpData {
         method_len: u32,
         indata_len: u32,
     },
+    /// Snapshot rollback target (`ceph_osd_op.snap.snapid`)
+    Snap { snapid: u64 },
     /// Operations with no specific data
     None,
 }
@@ -959,6 +967,29 @@ impl OSDOp {
                 cmp_op: 0,
                 cmp_mode: 0,
             },
+            indata: Bytes::new(),
+        }
+    }
+
+    /// List snapshots/clones of an object (LIST_SNAPS)
+    pub fn list_snaps() -> Self {
+        Self {
+            op: OpCode::ListSnaps,
+            flags: 0,
+            op_data: OpData::None,
+            indata: Bytes::new(),
+        }
+    }
+
+    /// Roll back object HEAD to a prior pool snapshot (ROLLBACK)
+    ///
+    /// # Arguments
+    /// * `snap_id` - Snapshot ID to roll back to
+    pub fn rollback(snap_id: u64) -> Self {
+        Self {
+            op: OpCode::Rollback,
+            flags: 0,
+            op_data: OpData::Snap { snapid: snap_id },
             indata: Bytes::new(),
         }
     }

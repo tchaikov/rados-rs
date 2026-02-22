@@ -9,7 +9,6 @@ use bytes::{Buf, Bytes, BytesMut};
 use denc::UuidD;
 use std::collections::HashMap;
 
-
 // Message type constants (add to msgr2::message)
 pub const CEPH_MSG_MON_SUBSCRIBE: u16 = 0x000f;
 pub const CEPH_MSG_MON_SUBSCRIBE_ACK: u16 = 0x0010;
@@ -82,7 +81,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonSubscribe decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MMonSubscribe decode failed".into()))
     }
 }
 
@@ -126,7 +126,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribeAck {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonSubscribeAck decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MMonSubscribeAck decode failed".into()))
     }
 }
 
@@ -173,7 +174,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersion {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonGetVersion decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MMonGetVersion decode failed".into()))
     }
 }
 
@@ -222,7 +224,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonGetVersionReply {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonGetVersionReply decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MMonGetVersionReply decode failed".into()))
     }
 }
 
@@ -265,7 +268,8 @@ impl msgr2::ceph_message::CephMessagePayload for MMonMap {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MMonMap decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MMonMap decode failed".into()))
     }
 }
 
@@ -308,7 +312,8 @@ impl msgr2::ceph_message::CephMessagePayload for MConfig {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MConfig decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MConfig decode failed".into()))
     }
 }
 
@@ -691,6 +696,45 @@ impl MPoolOp {
             op: POOL_OP_CREATE,
             snapid: 0,
             crush_rule: crush_rule.unwrap_or(0),
+        }
+    }
+
+    /// Create a pool snapshot creation message
+    ///
+    /// # Arguments
+    /// * `fsid` - Cluster FSID
+    /// * `pool` - Pool ID to snapshot
+    /// * `name` - Snapshot name
+    /// * `version` - Current OSDMap epoch (used by paxos versioning)
+    pub fn create_snap(fsid: [u8; 16], pool: u32, name: String, version: u64) -> Self {
+        Self {
+            paxos: PaxosFields::with_version(version),
+            fsid: UuidD::from_bytes(fsid),
+            pool,
+            name,
+            op: POOL_OP_CREATE_SNAP,
+            snapid: 0,
+            crush_rule: 0,
+        }
+    }
+
+    /// Create a pool snapshot deletion message
+    ///
+    /// # Arguments
+    /// * `fsid` - Cluster FSID
+    /// * `pool` - Pool ID
+    /// * `snapid` - Snapshot ID to delete
+    /// * `name` - Snapshot name
+    /// * `version` - Current OSDMap epoch (used by paxos versioning)
+    pub fn delete_snap(fsid: [u8; 16], pool: u32, snapid: u64, name: String, version: u64) -> Self {
+        Self {
+            paxos: PaxosFields::with_version(version),
+            fsid: UuidD::from_bytes(fsid),
+            pool,
+            name,
+            op: POOL_OP_DELETE_SNAP,
+            snapid,
+            crush_rule: 0,
         }
     }
 
@@ -1095,7 +1139,8 @@ impl msgr2::ceph_message::CephMessagePayload for MAuthReply {
     ) -> std::result::Result<Self, msgr2::Error> {
         use denc::Denc;
         let mut data = front;
-        Self::decode(&mut data, 0).map_err(|_| msgr2::Error::Deserialization("MAuthReply decode failed".into()))
+        Self::decode(&mut data, 0)
+            .map_err(|_| msgr2::Error::Deserialization("MAuthReply decode failed".into()))
     }
 }
 

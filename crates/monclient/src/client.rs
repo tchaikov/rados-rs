@@ -1560,6 +1560,48 @@ impl MonClient {
         Ok(result)
     }
 
+    /// Create a pool-level snapshot.
+    ///
+    /// # Arguments
+    /// * `pool_id` - Pool ID to snapshot
+    /// * `name` - Snapshot name
+    ///
+    /// # Returns
+    /// `Ok(())` on success, error otherwise.
+    pub async fn snap_create(&self, pool_id: u32, name: &str) -> Result<()> {
+        let fsid = self.get_fsid().await;
+        let msg = MPoolOp::create_snap(fsid.bytes, pool_id, name.to_string(), 0);
+        let result = self.send_poolop(name.to_string(), msg).await?;
+        if result.is_success() {
+            Ok(())
+        } else {
+            Err(MonClientError::Other(format!(
+                "snap_create failed with code {}",
+                result.reply_code
+            )))
+        }
+    }
+
+    /// Remove a pool-level snapshot by name.
+    ///
+    /// # Arguments
+    /// * `pool_id` - Pool ID
+    /// * `name` - Snapshot name to remove
+    pub async fn snap_remove(&self, pool_id: u32, name: &str) -> Result<()> {
+        let fsid = self.get_fsid().await;
+        // snap_id = 0 here; the monitor resolves it from the name
+        let msg = MPoolOp::delete_snap(fsid.bytes, pool_id, 0, name.to_string(), 0);
+        let result = self.send_poolop(name.to_string(), msg).await?;
+        if result.is_success() {
+            Ok(())
+        } else {
+            Err(MonClientError::Other(format!(
+                "snap_remove failed with code {}",
+                result.reply_code
+            )))
+        }
+    }
+
     /// Check if connected to a monitor
     pub async fn is_connected(&self) -> bool {
         let state = self.state.read().await;
