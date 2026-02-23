@@ -1,6 +1,6 @@
 //! CephX protocol structures and constants
 
-use crate::error::{CephXError, Result};
+use crate::error::Result;
 use crate::types::{CephXTicketBlob, CryptoKey};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Denc, RadosError};
@@ -453,84 +453,43 @@ impl CephXReply {
 
     pub fn encode(&self) -> Result<Bytes> {
         let mut buf = BytesMut::new();
-        self.status
-            .encode(&mut buf, 0)
-            .map_err(|e| CephXError::EncodingError(format!("Failed to encode status: {}", e)))?;
-        (self.tickets.len() as u32)
-            .encode(&mut buf, 0)
-            .map_err(|e| {
-                CephXError::EncodingError(format!("Failed to encode tickets length: {}", e))
-            })?;
+        self.status.encode(&mut buf, 0)?;
+        (self.tickets.len() as u32).encode(&mut buf, 0)?;
 
         for ticket in &self.tickets {
             let mut ticket_buf = BytesMut::new();
-            ticket
-                .encode(&mut ticket_buf, 0)
-                .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            (ticket_buf.len() as u32).encode(&mut buf, 0).map_err(|e| {
-                CephXError::EncodingError(format!("Failed to encode ticket length: {}", e))
-            })?;
-            buf.extend_from_slice(&ticket_buf);
+            ticket.encode(&mut ticket_buf, 0)?;
+            ticket_buf.freeze().encode(&mut buf, 0)?;
         }
 
         match &self.session_key {
-            Some(key) => {
-                key.encode(&mut buf, 0)
-                    .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            }
-            None => {
-                0u32.encode(&mut buf, 0).map_err(|e| {
-                    CephXError::EncodingError(format!("Failed to encode empty session key: {}", e))
-                })?;
-            }
+            Some(key) => key.encode(&mut buf, 0)?,
+            None => 0u32.encode(&mut buf, 0)?,
         }
 
         Ok(buf.freeze())
     }
 
     pub fn decode(mut data: &[u8]) -> Result<Self> {
-        let status = i32::decode(&mut data, 0)
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to decode status: {}", e)))?;
-        let tickets_len = u32::decode(&mut data, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode tickets_len: {}", e))
-        })? as usize;
+        let status = i32::decode(&mut data, 0)?;
+        let tickets_len = u32::decode(&mut data, 0)? as usize;
 
         let mut tickets = Vec::with_capacity(tickets_len);
         for _ in 0..tickets_len {
-            let ticket_len = u32::decode(&mut data, 0).map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode ticket length: {}", e))
-            })? as usize;
-
-            if data.remaining() < ticket_len {
-                return Err(CephXError::ProtocolError("Insufficient ticket data".into()));
-            }
-
-            let mut ticket_data = vec![0u8; ticket_len];
-            data.copy_to_slice(&mut ticket_data);
-            let mut ticket_buf = Bytes::copy_from_slice(&ticket_data);
-            let ticket = CephXTicketBlob::decode(&mut ticket_buf, 0)
-                .map_err(|e| CephXError::EncodingError(e.to_string()))?;
+            let ticket_bytes = Bytes::decode(&mut data, 0)?;
+            let ticket = CephXTicketBlob::decode(&mut ticket_bytes.as_ref(), 0)?;
             tickets.push(ticket);
         }
 
         let session_key = if data.remaining() >= 4 {
             let mut key_data = Bytes::copy_from_slice(data);
-            let key = CryptoKey::decode(&mut key_data, 0)
-                .map_err(|e| CephXError::EncodingError(e.to_string()))?;
-            if !key.is_empty() {
-                Some(key)
-            } else {
-                None
-            }
+            let key = CryptoKey::decode(&mut key_data, 0)?;
+            if !key.is_empty() { Some(key) } else { None }
         } else {
             None
         };
 
-        Ok(Self {
-            status,
-            tickets,
-            session_key,
-        })
+        Ok(Self { status, tickets, session_key })
     }
 
     pub fn is_success(&self) -> bool {
