@@ -502,50 +502,24 @@ impl CephXReply {
 ///
 /// This is the first part of the authorizer sent to a service (OSD, MDS, etc.)
 /// Contains the service ticket obtained from the monitor
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXAuthorizeA {
+    struct_v: u8,
     pub global_id: u64,
     pub service_id: u32,
     pub ticket_blob: CephXTicketBlob,
 }
 
 impl CephXAuthorizeA {
+    const STRUCT_V: u8 = 1;
+
     pub fn new(global_id: u64, service_id: u32, ticket_blob: CephXTicketBlob) -> Self {
         Self {
+            struct_v: Self::STRUCT_V,
             global_id,
             service_id,
             ticket_blob,
         }
-    }
-}
-
-impl Denc for CephXAuthorizeA {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // struct_v = 1
-        1u8.encode(buf, 0)?;
-        // global_id
-        self.global_id.encode(buf, 0)?;
-        // service_id
-        self.service_id.encode(buf, 0)?;
-        // ticket_blob (includes struct_v, secret_id, blob)
-        self.ticket_blob.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let global_id = u64::decode(buf, 0)?;
-        let service_id = u32::decode(buf, 0)?;
-        let ticket_blob = CephXTicketBlob::decode(buf, features)?;
-        Ok(Self {
-            global_id,
-            service_id,
-            ticket_blob,
-        })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(1 + 8 + 4 + self.ticket_blob.encoded_size(features)?)
     }
 }
 
