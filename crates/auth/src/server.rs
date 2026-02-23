@@ -121,7 +121,7 @@ impl CephXServerHandler {
         debug!("Server: Generated challenge: {}", server_challenge);
 
         // Build response: CephXServerChallenge
-        let challenge = CephXServerChallenge { server_challenge };
+        let challenge = CephXServerChallenge::new(server_challenge);
 
         let mut response = BytesMut::new();
         challenge.encode(&mut response, 0)?;

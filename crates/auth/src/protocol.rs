@@ -348,37 +348,20 @@ impl Denc for CephXAuthenticate {
 /// - `uint64_t server_challenge` - Random challenge from server
 ///
 /// This is the initial challenge sent by server to client to start CephX authentication.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXServerChallenge {
+    struct_v: u8,
     pub server_challenge: u64,
 }
 
-impl Denc for CephXServerChallenge {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.server_challenge.encode(buf, 0)?;
-        Ok(())
-    }
+impl CephXServerChallenge {
+    const STRUCT_V: u8 = 1;
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        // Read and validate struct_v
-        let struct_v = u8::decode(buf, 0)?;
-        if struct_v != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported CephXServerChallenge version: {}",
-                struct_v
-            )));
+    pub fn new(server_challenge: u64) -> Self {
+        Self {
+            struct_v: Self::STRUCT_V,
+            server_challenge,
         }
-        // Read server challenge
-        let server_challenge = u64::decode(buf, 0)?;
-        Ok(Self { server_challenge })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
     }
 }
 
@@ -823,20 +806,14 @@ mod tests {
 
     #[test]
     fn test_cephx_server_challenge_encode_decode() {
-        let challenge = CephXServerChallenge {
-            server_challenge: 0xfedcba9876543210,
-        };
+        let challenge = CephXServerChallenge::new(0xfedcba9876543210);
 
         let mut buf = BytesMut::new();
         challenge.encode(&mut buf, 0).unwrap();
 
-        // The encode() doesn't add struct_v, but decode() expects it
-        // So manually add struct_v for the roundtrip test
-        let mut full_buf = BytesMut::new();
-        1u8.encode(&mut full_buf, 0).unwrap(); // struct_v
-        full_buf.extend_from_slice(&buf);
+        assert_eq!(buf.len(), 9); // struct_v (1) + server_challenge (8)
 
-        let mut read_buf = full_buf.freeze();
+        let mut read_buf = buf.freeze();
         let decoded = CephXServerChallenge::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.server_challenge, 0xfedcba9876543210);
         assert_eq!(read_buf.remaining(), 0);
