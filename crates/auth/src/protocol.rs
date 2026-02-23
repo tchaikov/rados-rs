@@ -395,7 +395,7 @@ pub struct CephXChallengeBlob {
 }
 
 /// CephX request structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXRequest {
     pub request_type: u16,
     pub keys: Vec<u32>,
@@ -417,49 +417,6 @@ impl CephXRequest {
 
     pub fn get_principal_session_key() -> Self {
         Self::new(CEPHX_GET_PRINCIPAL_SESSION_KEY)
-    }
-}
-
-impl Denc for CephXRequest {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        self.request_type.encode(buf, features)?;
-        (self.keys.len() as u32).encode(buf, features)?;
-
-        for &key in &self.keys {
-            key.encode(buf, features)?;
-        }
-
-        (if self.other_keys { 1u8 } else { 0u8 }).encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let request_type = u16::decode(buf, features)?;
-        let keys_len = u32::decode(buf, features)? as usize;
-
-        if buf.remaining() < keys_len * 4 + 1 {
-            return Err(RadosError::InvalidData("Insufficient key data".into()));
-        }
-
-        let mut keys = Vec::with_capacity(keys_len);
-        for _ in 0..keys_len {
-            let key = u32::decode(buf, features)?;
-            keys.push(key);
-        }
-
-        let other_keys_byte = u8::decode(buf, features)?;
-        let other_keys = other_keys_byte != 0;
-
-        Ok(Self {
-            request_type,
-            keys,
-            other_keys,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // request_type (2) + keys_len (4) + keys (4 * len) + other_keys (1)
-        Some(2 + 4 + (self.keys.len() * 4) + 1)
     }
 }
 
