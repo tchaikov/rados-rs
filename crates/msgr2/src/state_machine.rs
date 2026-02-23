@@ -865,7 +865,7 @@ impl State for CompressionConnecting {
 
                     // Store compression algorithm
                     let compression_algorithm = if is_compress {
-                        crate::compression::CompressionAlgorithm::from_u32(method)
+                        crate::compression::CompressionAlgorithm::try_from(method)
                             .unwrap_or(crate::compression::CompressionAlgorithm::None)
                     } else {
                         crate::compression::CompressionAlgorithm::None

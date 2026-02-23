@@ -598,32 +598,20 @@ impl Denc for CephXAuthorizeB {
 /// Corresponds to C++ `struct ceph_x_authorize_reply` in auth_x_protocol.h
 ///
 /// Sent by the service back to the client after validating the authorizer
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct CephXAuthorizeReply {
+    struct_v: u8,
     pub nonce_plus_one: u64,
 }
 
-impl Denc for CephXAuthorizeReply {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        // struct_v = 1
-        1u8.encode(buf, 0)?;
-        // nonce_plus_one
-        self.nonce_plus_one.encode(buf, 0)?;
-        Ok(())
-    }
+impl CephXAuthorizeReply {
+    const STRUCT_V: u8 = 1;
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let nonce_plus_one = u64::decode(buf, 0)?;
-        Ok(Self { nonce_plus_one })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(1 + 8) // struct_v + nonce_plus_one
+    pub fn new(nonce_plus_one: u64) -> Self {
+        Self {
+            struct_v: Self::STRUCT_V,
+            nonce_plus_one,
+        }
     }
 }
 
@@ -1021,9 +1009,7 @@ mod tests {
 
     #[test]
     fn test_cephx_authorize_reply_encode_decode() {
-        let reply = CephXAuthorizeReply {
-            nonce_plus_one: 98765,
-        };
+        let reply = CephXAuthorizeReply::new(98765);
 
         let mut buf = BytesMut::new();
         reply.encode(&mut buf, 0).unwrap();

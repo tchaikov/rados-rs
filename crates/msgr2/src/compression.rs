@@ -10,7 +10,7 @@ use bytes::Bytes;
 use std::cell::Cell;
 
 /// Compression algorithm identifiers (from Ceph's Compressor.h)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
 #[repr(u32)]
 pub enum CompressionAlgorithm {
     None = 0,
@@ -18,23 +18,6 @@ pub enum CompressionAlgorithm {
     Zlib = 2,
     Zstd = 3,
     Lz4 = 4,
-}
-
-impl CompressionAlgorithm {
-    pub fn from_u32(value: u32) -> Option<Self> {
-        match value {
-            0 => Some(Self::None),
-            1 => Some(Self::Snappy),
-            2 => Some(Self::Zlib),
-            3 => Some(Self::Zstd),
-            4 => Some(Self::Lz4),
-            _ => None,
-        }
-    }
-
-    pub fn as_u32(self) -> u32 {
-        self as u32
-    }
 }
 
 /// Trait for compression implementations
