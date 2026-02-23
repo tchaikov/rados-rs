@@ -6,11 +6,7 @@ use crate::types::{BucketAlgorithm, BucketData, CrushBucket};
 use denc::constants::crush::{FIXED_POINT_MASK, LN_LOOKUP_OFFSET};
 
 /// Select an item from a bucket using the appropriate algorithm
-pub fn bucket_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
-    if bucket.size == 0 {
-        return None;
-    }
-
+pub fn bucket_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     match bucket.alg {
         BucketAlgorithm::Straw2 => bucket_straw2_choose(bucket, x, r),
         BucketAlgorithm::Uniform => bucket_uniform_choose(bucket, x, r),
@@ -86,10 +82,10 @@ fn generate_exponential_distribution(_hash_type: u32, x: u32, y: i32, z: u32, we
 /// Straw2 bucket selection (modern, optimal algorithm)
 /// Each item draws a straw based on exponential distribution
 /// Item with longest straw (highest draw value) wins
-fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
+fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     let weights = match &bucket.data {
         BucketData::Straw2 { item_weights } => item_weights,
-        _ => return None,
+        _ => unreachable!("bucket_straw2_choose called on non-Straw2 bucket"),
     };
 
     tracing::trace!(
@@ -136,27 +132,27 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         bucket.items[high]
     );
 
-    Some(bucket.items[high])
+    bucket.items[high]
 }
 
 /// Uniform bucket selection (O(1), simple permutation)
 /// All items have equal weight
-fn bucket_uniform_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
+fn bucket_uniform_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     // Simplified uniform selection using hash
     let hash = crush_hash32_2(x, r);
     let index = (hash % bucket.size) as usize;
-    Some(bucket.items[index])
+    bucket.items[index]
 }
 
 /// List bucket selection (legacy)
 /// Items in a linked list with arbitrary weights
-fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
+fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     let (item_weights, sum_weights) = match &bucket.data {
         BucketData::List {
             item_weights,
             sum_weights,
         } => (item_weights, sum_weights),
-        _ => return None,
+        _ => unreachable!("bucket_list_choose called on non-List bucket"),
     };
 
     // Iterate from end to beginning
@@ -167,20 +163,20 @@ fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         w >>= 16;
 
         if w < item_weights[i] as u64 {
-            return Some(bucket.items[i]);
+            return bucket.items[i];
         }
     }
 
     // Fallback to first item
-    Some(bucket.items[0])
+    bucket.items[0]
 }
 
 /// Tree bucket selection (legacy, O(log n))
 /// Binary tree structure with node weights
-fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
+fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     let node_weights = match &bucket.data {
         BucketData::Tree { node_weights, .. } => node_weights,
-        _ => return None,
+        _ => unreachable!("bucket_tree_choose called on non-Tree bucket"),
     };
 
     let mut n = bucket.size as usize;
@@ -194,16 +190,8 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         let wr = (w >> 16) as u64;
 
         // Get weights for left and right subtrees
-        let left_weight = if left < node_weights.len() {
-            node_weights[left] as u64
-        } else {
-            0
-        };
-        let right_weight = if right < node_weights.len() {
-            node_weights[right] as u64
-        } else {
-            0
-        };
+        let left_weight = node_weights[left] as u64;
+        let right_weight = node_weights[right] as u64;
 
         // Weighted random selection
         if wl * (left_weight + right_weight) < wr * left_weight {
@@ -213,31 +201,28 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
         }
     }
 
-    if n > 0 && (n >> 1) < bucket.items.len() {
-        Some(bucket.items[n >> 1])
-    } else {
-        Some(bucket.items[0])
-    }
+    bucket.items[n >> 1]
 }
 
 /// Straw bucket selection (legacy, deprecated)
 /// Each item gets a straw with random length
-fn bucket_straw_choose(bucket: &CrushBucket, x: u32, r: u32) -> Option<i32> {
+fn bucket_straw_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     let (_item_weights, straws) = match &bucket.data {
         BucketData::Straw {
             item_weights,
             straws,
         } => (item_weights, straws),
-        _ => return None,
+        _ => unreachable!("bucket_straw_choose called on non-Straw bucket"),
     };
 
-    (0..bucket.size as usize)
+    let i = (0..bucket.size as usize)
         .max_by_key(|&i| {
             let mut draw = crush_hash32_3(x, bucket.items[i] as u32, r) as u64;
             draw &= 0xffff;
             draw.wrapping_mul(straws[i] as u64)
         })
-        .map(|i| bucket.items[i])
+        .unwrap(); // size > 0 guaranteed by decode validation
+    bucket.items[i]
 }
 
 #[cfg(test)]
@@ -261,18 +246,15 @@ mod tests {
         };
 
         // Should return a valid item
-        let result = bucket_straw2_choose(&bucket, 123, 0);
-        assert!(result.is_some());
-        let item = result.unwrap();
+        let item = bucket_straw2_choose(&bucket, 123, 0);
         assert!((0..=2).contains(&item));
 
         // Same input should give same output (deterministic)
-        let result2 = bucket_straw2_choose(&bucket, 123, 0);
-        assert_eq!(result, result2);
+        let item2 = bucket_straw2_choose(&bucket, 123, 0);
+        assert_eq!(item, item2);
 
         // Different input should potentially give different output
-        let result3 = bucket_straw2_choose(&bucket, 456, 0);
-        assert!(result3.is_some());
+        let _item3 = bucket_straw2_choose(&bucket, 456, 0);
     }
 
     #[test]
@@ -290,9 +272,7 @@ mod tests {
             },
         };
 
-        let result = bucket_uniform_choose(&bucket, 123, 0);
-        assert!(result.is_some());
-        let item = result.unwrap();
+        let item = bucket_uniform_choose(&bucket, 123, 0);
         assert!((0..=2).contains(&item));
     }
 
@@ -312,7 +292,7 @@ mod tests {
         };
 
         let result = bucket_choose(&bucket, 123, 0);
-        assert!(result.is_some());
+        assert!(result == 0 || result == 1);
     }
 
     #[test]

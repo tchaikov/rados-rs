@@ -192,17 +192,105 @@ impl CrushMap {
         // Skip remaining data (choose args, MSR tunables, etc.)
         // These are optional and not yet implemented
 
+        // Post-decode validation
+        validate_crush_map(&map)?;
+
         Ok(map)
     }
 }
 
+/// Post-decode validation of the CRUSH map.
+///
+/// Validates structural invariants so the mapper can trust the data at runtime:
+/// - Bucket index consistency: bucket at index i has id == -1 - i
+/// - Item references: each item in a bucket is a valid device or bucket
+/// - TAKE rule args: each TAKE step references a valid bucket or device
+fn validate_crush_map(map: &CrushMap) -> Result<()> {
+    // Validate bucket index consistency and item references
+    for (i, slot) in map.buckets.iter().enumerate() {
+        let bucket = match slot {
+            Some(b) => b,
+            None => continue,
+        };
+
+        let expected_id = -1 - i as i32;
+        if bucket.id != expected_id {
+            return Err(CrushError::DecodeError(format!(
+                "Bucket at index {} has id {}, expected {}",
+                i, bucket.id, expected_id
+            )));
+        }
+
+        for &item in &bucket.items {
+            if item >= 0 {
+                // Device: must be within max_devices
+                if item >= map.max_devices {
+                    return Err(CrushError::DecodeError(format!(
+                        "Bucket {} references device {}, but max_devices is {}",
+                        bucket.id, item, map.max_devices
+                    )));
+                }
+            } else {
+                // Bucket reference: target must exist
+                let target_idx = (-1 - item) as usize;
+                if target_idx >= map.buckets.len() || map.buckets[target_idx].is_none() {
+                    return Err(CrushError::DecodeError(format!(
+                        "Bucket {} references non-existent bucket {}",
+                        bucket.id, item
+                    )));
+                }
+            }
+        }
+    }
+
+    // Validate TAKE rule args
+    for rule in map.rules.iter().flatten() {
+        for step in &rule.steps {
+            if step.op == RuleOp::Take {
+                let item = step.arg1;
+                if item >= 0 {
+                    if item >= map.max_devices {
+                        return Err(CrushError::DecodeError(format!(
+                            "Rule {} TAKE references device {}, but max_devices is {}",
+                            rule.rule_id, item, map.max_devices
+                        )));
+                    }
+                } else {
+                    let idx = (-1 - item) as usize;
+                    if idx >= map.buckets.len() || map.buckets[idx].is_none() {
+                        return Err(CrushError::DecodeError(format!(
+                            "Rule {} TAKE references non-existent bucket {}",
+                            rule.rule_id, item
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     let id: i32 = decode(data)?;
+    if id >= 0 {
+        return Err(CrushError::DecodeError(format!(
+            "Bucket ID must be negative, got {}",
+            id
+        )));
+    }
+
     let bucket_type: u16 = decode(data)?;
     let alg_byte: u8 = decode(data)?;
     let hash: u8 = decode(data)?;
     let weight: u32 = decode(data)?;
     let size: u32 = decode(data)?;
+
+    if size == 0 {
+        return Err(CrushError::DecodeError(
+            "Bucket size must be non-zero".into(),
+        ));
+    }
 
     // Verify alg matches
     if alg_byte as u32 != alg {
@@ -223,7 +311,8 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     // Read items using Denc
     let items: Vec<i32> = decode_vec(data, size as usize)?;
 
-    let algorithm = BucketAlgorithm::try_from(alg_byte)?;
+    let algorithm = BucketAlgorithm::try_from(alg_byte)
+        .map_err(|_| CrushError::InvalidBucketAlgorithm(alg_byte))?;
 
     // Decode algorithm-specific data
     let bucket_data = match algorithm {
@@ -296,7 +385,7 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
         let arg1: i32 = decode(data)?;
         let arg2: i32 = decode(data)?;
 
-        let rule_op = RuleOp::try_from(op)?;
+        let rule_op = RuleOp::try_from(op).map_err(|_| CrushError::InvalidRuleOp(op))?;
         steps.push(CrushRuleStep {
             op: rule_op,
             arg1,
@@ -306,7 +395,8 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
 
     Ok(CrushRule {
         rule_id: rule_id as u32,
-        rule_type: RuleType::from(rule_type),
+        rule_type: RuleType::try_from(rule_type)
+            .map_err(|_| CrushError::InvalidRuleType(rule_type))?,
         steps,
     })
 }

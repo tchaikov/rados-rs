@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
+use num_enum::TryFromPrimitive;
+
 /// CRUSH bucket selection algorithms
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum BucketAlgorithm {
     Uniform = 1,
@@ -11,23 +13,8 @@ pub enum BucketAlgorithm {
     Straw2 = 5,
 }
 
-impl TryFrom<u8> for BucketAlgorithm {
-    type Error = crate::error::CrushError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            1 => Ok(BucketAlgorithm::Uniform),
-            2 => Ok(BucketAlgorithm::List),
-            3 => Ok(BucketAlgorithm::Tree),
-            4 => Ok(BucketAlgorithm::Straw),
-            5 => Ok(BucketAlgorithm::Straw2),
-            _ => Err(crate::error::CrushError::InvalidBucketAlgorithm(value)),
-        }
-    }
-}
-
 /// CRUSH rule types
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u8)]
 pub enum RuleType {
     Replicated = 1,
@@ -36,20 +23,8 @@ pub enum RuleType {
     MsrIndep = 5,
 }
 
-impl From<u8> for RuleType {
-    fn from(value: u8) -> Self {
-        match value {
-            1 => RuleType::Replicated,
-            3 => RuleType::Erasure,
-            4 => RuleType::MsrFirstN,
-            5 => RuleType::MsrIndep,
-            _ => RuleType::Replicated, // Default to replicated
-        }
-    }
-}
-
 /// CRUSH rule operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, TryFromPrimitive)]
 #[repr(u32)]
 pub enum RuleOp {
     Noop = 0,
@@ -68,32 +43,6 @@ pub enum RuleOp {
     SetMsrDescents = 14,
     SetMsrCollisionTries = 15,
     ChooseMsr = 16,
-}
-
-impl TryFrom<u32> for RuleOp {
-    type Error = crate::error::CrushError;
-
-    fn try_from(value: u32) -> Result<Self, Self::Error> {
-        match value {
-            0 => Ok(RuleOp::Noop),
-            1 => Ok(RuleOp::Take),
-            2 => Ok(RuleOp::ChooseFirstN),
-            3 => Ok(RuleOp::ChooseIndep),
-            4 => Ok(RuleOp::Emit),
-            6 => Ok(RuleOp::ChooseLeafFirstN),
-            7 => Ok(RuleOp::ChooseLeafIndep),
-            8 => Ok(RuleOp::SetChooseTries),
-            9 => Ok(RuleOp::SetChooseLeafTries),
-            10 => Ok(RuleOp::SetChooseLocalTries),
-            11 => Ok(RuleOp::SetChooseLocalFallbackTries),
-            12 => Ok(RuleOp::SetChooseLeafVaryR),
-            13 => Ok(RuleOp::SetChooseLeafStable),
-            14 => Ok(RuleOp::SetMsrDescents),
-            15 => Ok(RuleOp::SetMsrCollisionTries),
-            16 => Ok(RuleOp::ChooseMsr),
-            _ => Err(crate::error::CrushError::InvalidRuleOp(value)),
-        }
-    }
 }
 
 /// A single step in a CRUSH rule

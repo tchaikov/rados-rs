@@ -1,6 +1,11 @@
 [workspace]
 members = ["crates/denc", "crates/denc-macros", "crates/dencoder", "crates/msgr2", "crates/auth", "crates/monclient", "crates/crush", "crates/osdclient", "crates/rados", "crates/cephconfig"]
-resolver = "2"
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
 
 [workspace.dependencies]
 bytes = { version = "1.5", features = ["serde"] }
@@ -18,3 +23,4 @@ hmac = "0.12"
 sha2 = "0.10"
 futures = "0.3"
 bitflags = "2.4"
+num_enum = "0.7"

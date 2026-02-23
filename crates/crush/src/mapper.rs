@@ -359,13 +359,7 @@ fn crush_choose_firstn(
             // Inner loop for descending through bucket hierarchy
             loop {
                 // Select an item from the current bucket
-                let item = match bucket_choose(current_bucket, x, r_prime) {
-                    Some(item) => item,
-                    None => {
-                        tracing::debug!("bucket_choose returned None for r_prime={}", r_prime);
-                        continue 'tries;
-                    }
-                };
+                let item = bucket_choose(current_bucket, x, r_prime);
 
                 tracing::debug!(
                     "Selected item {} from bucket {} (rep={}, try={})",
@@ -535,13 +529,7 @@ fn crush_choose_indep(
 
             loop {
                 // Select an item from the current bucket
-                let candidate = match bucket_choose(current_bucket, x, r) {
-                    Some(candidate) => candidate,
-                    None => {
-                        tracing::debug!("bucket_choose returned None for r={}", r);
-                        break;
-                    }
-                };
+                let candidate = bucket_choose(current_bucket, x, r);
 
                 tracing::debug!(
                     "Selected item {} from bucket {} (rep={}, try={})",
@@ -725,13 +713,7 @@ fn crush_choose_msr(
             let hash = crush_hash32_2(x + r, bucket_id as u32);
 
             // Select item from bucket using hash
-            let item = match bucket_choose(bucket, hash, r) {
-                Some(item) => item,
-                None => {
-                    tracing::debug!("bucket_choose returned None for hash={}", hash);
-                    continue 'retry;
-                }
-            };
+            let item = bucket_choose(bucket, hash, r);
 
             // Check if already chosen (collision)
             if chosen_items.contains(&item) {

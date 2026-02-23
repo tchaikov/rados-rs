@@ -20,6 +20,9 @@ pub enum CrushError {
     #[error("Invalid rule step operation: {0}")]
     InvalidRuleOp(u32),
 
+    #[error("Invalid rule type: {0}")]
+    InvalidRuleType(u8),
+
     #[error("Decode error: {0}")]
     DecodeError(String),
 
