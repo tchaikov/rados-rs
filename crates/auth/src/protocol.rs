@@ -101,16 +101,10 @@ impl Denc for ServiceTicketInfo {
         self.encrypted_service_ticket.encode(buf, features)?;
         self.ticket_enc.encode(buf, 0)?;
 
-        // Encode ticket_blob with outer length prefix
-        // First encode to a temp buffer to get the length
+        // Encode ticket_blob with outer length prefix (C++ encode(bufferlist, bl) pattern)
         let mut temp_buf = bytes::BytesMut::new();
         self.ticket_blob.encode(&mut temp_buf, features)?;
-
-        // Write the length prefix
-        (temp_buf.len() as u32).encode(buf, 0)?;
-
-        // Write the encoded ticket_blob
-        buf.put_slice(&temp_buf);
+        temp_buf.freeze().encode(buf, 0)?;
 
         Ok(())
     }
@@ -120,24 +114,9 @@ impl Denc for ServiceTicketInfo {
         let encrypted_service_ticket = EncryptedServiceTicket::decode(buf, features)?;
         let ticket_enc = u8::decode(buf, 0)?;
 
-        // Read outer length prefix for ticket_blob
-        let ticket_blob_len = u32::decode(buf, 0)? as usize;
-
-        // Read the ticket_blob data into a temporary buffer
-        if buf.remaining() < ticket_blob_len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient data for ticket blob: need {}, have {}",
-                ticket_blob_len,
-                buf.remaining()
-            )));
-        }
-
-        let mut ticket_blob_data = vec![0u8; ticket_blob_len];
-        buf.copy_to_slice(&mut ticket_blob_data);
-        let mut ticket_blob_buf = &ticket_blob_data[..];
-
-        // Now decode CephXTicketBlob from the sized buffer
-        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_buf, features)?;
+        // Decode outer length-prefixed bytes, then decode CephXTicketBlob within them
+        let ticket_blob_bytes = Bytes::decode(buf, 0)?;
+        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes.as_ref(), features)?;
 
         Ok(Self {
             service_id,
@@ -152,7 +131,7 @@ impl Denc for ServiceTicketInfo {
             4 + // service_id
             self.encrypted_service_ticket.encoded_size(features)? +
             1 + // ticket_enc
-            4 + // ticket_blob_len (outer length prefix)
+            4 + // outer length prefix
             self.ticket_blob.encoded_size(features)?,
         )
     }
