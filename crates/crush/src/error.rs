@@ -31,6 +31,9 @@ pub enum CrushError {
 
     #[error("Invalid weight: {0}")]
     InvalidWeight(u32),
+
+    #[error(transparent)]
+    Denc(#[from] denc::RadosError),
 }
 
 pub type Result<T> = std::result::Result<T, CrushError>;
