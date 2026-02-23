@@ -178,7 +178,7 @@ impl MOSDOpReply {
 /// during recovery, backfill, or when the OSD is overloaded.
 ///
 /// Reference: ~/dev/ceph/src/messages/MOSDBackoff.h
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::Denc)]
 pub struct MOSDBackoff {
     /// Placement group ID
     pub pgid: StripedPgId,
@@ -606,29 +606,11 @@ impl CephMessagePayload for MOSDBackoff {
         Self::VERSION
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
 
         let mut buf = BytesMut::new();
-
-        // 1. pgid (spg_t)
-        self.pgid.encode(&mut buf, 0)?;
-
-        // 2. map_epoch (epoch_t = u32)
-        self.map_epoch.encode(&mut buf, 0)?;
-
-        // 3. op (uint8_t)
-        self.op.encode(&mut buf, 0)?;
-
-        // 4. id (uint64_t)
-        self.id.encode(&mut buf, 0)?;
-
-        // 5. begin (hobject_t)
-        self.begin.encode(&mut buf, 0)?;
-
-        // 6. end (hobject_t)
-        self.end.encode(&mut buf, 0)?;
-
+        Denc::encode(self, &mut buf, features)?;
         Ok(buf.freeze())
     }
 
@@ -641,33 +623,7 @@ impl CephMessagePayload for MOSDBackoff {
         use denc::Denc;
 
         let mut cursor = front;
-
-        // 1. pgid (spg_t)
-        let pgid = StripedPgId::decode(&mut cursor, 0)?;
-
-        // 2. map_epoch (epoch_t = u32)
-        let map_epoch = u32::decode(&mut cursor, 0)?;
-
-        // 3. op (uint8_t)
-        let op = u8::decode(&mut cursor, 0)?;
-
-        // 4. id (uint64_t)
-        let id = u64::decode(&mut cursor, 0)?;
-
-        // 5. begin (hobject_t)
-        let begin = denc::HObject::decode(&mut cursor, 0)?;
-
-        // 6. end (hobject_t)
-        let end = denc::HObject::decode(&mut cursor, 0)?;
-
-        Ok(Self {
-            pgid,
-            map_epoch,
-            op,
-            id,
-            begin,
-            end,
-        })
+        Ok(Self::decode(&mut cursor, 0)?)
     }
 }
 
