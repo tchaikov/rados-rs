@@ -650,8 +650,8 @@ impl TicketHandler {
 
         let now = SystemTime::now();
         self.expires = Some(now + validity);
-        // Renew after half the validity period
-        self.renew_after = Some(now + validity / 2);
+        // Renew at 75% of validity period (matches Linux kernel auth_x.c:215)
+        self.renew_after = Some(now + validity - validity / 4);
     }
 
     pub fn need_key(&self) -> bool {
