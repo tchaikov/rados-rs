@@ -8,6 +8,11 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::Semaphore;
 
+/// Default maximum concurrent operations (matches Ceph objecter_inflight_ops)
+pub const DEFAULT_MAX_OPS: usize = 1024;
+/// Default maximum bytes in-flight (matches Ceph objecter_inflight_op_bytes: 100 MB)
+pub const DEFAULT_MAX_BYTES: usize = 100 * 1024 * 1024;
+
 /// Operation throttle
 ///
 /// Limits both the number of concurrent operations and the total bytes in-flight.
@@ -59,9 +64,6 @@ impl Throttle {
     /// - objecter_inflight_ops: 1024
     /// - objecter_inflight_op_bytes: 100 MB
     pub fn default_limits() -> Self {
-        const DEFAULT_MAX_OPS: usize = 1024;
-        const DEFAULT_MAX_BYTES: usize = 100 * 1024 * 1024; // 100 MB
-
         Self::new(DEFAULT_MAX_OPS, DEFAULT_MAX_BYTES)
     }
 

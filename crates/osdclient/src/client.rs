@@ -24,7 +24,7 @@ use crate::types::{
 };
 
 /// Configuration for OSD client
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OSDClientConfig {
     /// Entity name (e.g., "client.admin")
     pub entity_name: String,
@@ -37,6 +37,23 @@ pub struct OSDClientConfig {
     /// In Ceph C++, this is typically 0, with uniqueness provided by the global_id
     /// in the entity_name instead.
     pub client_inc: u32,
+    /// Maximum in-flight operations (default: 1024, matches objecter_inflight_ops)
+    pub max_inflight_ops: usize,
+    /// Maximum in-flight bytes (default: 100MB, matches objecter_inflight_op_bytes)
+    pub max_inflight_bytes: usize,
+}
+
+impl Default for OSDClientConfig {
+    fn default() -> Self {
+        Self {
+            entity_name: String::new(),
+            keyring_path: None,
+            tracker_config: TrackerConfig::default(),
+            client_inc: 0,
+            max_inflight_ops: crate::throttle::DEFAULT_MAX_OPS,
+            max_inflight_bytes: crate::throttle::DEFAULT_MAX_BYTES,
+        }
+    }
 }
 
 /// Main OSD client for performing object operations
@@ -80,8 +97,11 @@ impl OSDClient {
         // Create watch channel for OSDMap distribution
         let (osdmap_tx_watch, osdmap_rx_watch) = watch::channel(None);
 
-        // Create throttle with default limits (1024 ops, 100MB)
-        let throttle = Arc::new(Throttle::default_limits());
+        // Create throttle with configured limits
+        let throttle = Arc::new(Throttle::new(
+            config.max_inflight_ops,
+            config.max_inflight_bytes,
+        ));
         info!(
             "OSDClient throttle: max_ops={}, max_bytes={}",
             throttle.max_ops(),
