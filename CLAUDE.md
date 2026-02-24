@@ -129,7 +129,7 @@ Your auto memory is at: `/home/kefu/.claude/projects/-home-kefu-dev-rados-rs/mem
 
 Check existing memories before starting work:
 ```bash
-ls ~/.claude/projects/-home-kefu-dev-rados-rs/memory/
+ls /home/kefu/.claude/projects/-home-kefu-dev-rados-rs/memory/
 ```
 
 Example memory entry:
@@ -150,26 +150,26 @@ handles the JSON format requirement for corpus compatibility.
 ## Local Resources
 
 ### Ceph Source Code
-- **Location**: `~/dev/ceph`
-- **Build directory**: `~/dev/ceph/build`
+- **Location**: `/home/kefu/dev/ceph`
+- **Build directory**: `/home/kefu/dev/ceph/build`
 
 ### Linux Source Code
-- **Location**: `~/dev/linux`
+- **Location**: `/home/kefu/dev/linux`
 
 ### Protocol Implementation
 Msgr2 protocol implemented in:
-- `~/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`
-- `~/dev/ceph/src/crimson/net/FrameAssemblerV2.{cc,h}`
-- `~/dev/ceph/src/msg/async/ProtocolV2.{cc,h}`
-- `~/dev/ceph/src/msg/async/frames_v2.{cc,h}`
+- `/home/kefu/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`
+- `/home/kefu/dev/ceph/src/crimson/net/FrameAssemblerV2.{cc,h}`
+- `/home/kefu/dev/ceph/src/msg/async/ProtocolV2.{cc,h}`
+- `/home/kefu/dev/ceph/src/msg/async/frames_v2.{cc,h}`
 
 ### Documentation
-- **Msgr2 protocol**: `~/dev/ceph/doc/dev/msgr2.rst`
-- **Denc encoding**: `~/dev/ceph/src/include/denc.h`
-- **OSDMap**: `~/dev/ceph/src/osd/OSDMap.{h,cc}`
+- **Msgr2 protocol**: `/home/kefu/dev/ceph/doc/dev/msgr2.rst`
+- **Denc encoding**: `/home/kefu/dev/ceph/src/include/denc.h`
+- **OSDMap**: `/home/kefu/dev/ceph/src/osd/OSDMap.{h,cc}`
 
 ### Test Data (Corpus)
-- **Location**: `~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/`
+- **Location**: `/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/`
 - Binary-encoded Ceph types for testing
 
 ---
@@ -185,18 +185,15 @@ Msgr2 protocol implemented in:
 3. **Run unit tests**: `cargo test --workspace --lib`
 4. **Run integration tests** (with cluster running):
    ```bash
-   export PATH="$HOME/dev/ceph/build/bin:$PATH"
-   export CEPH_LIB="$HOME/dev/ceph/build/lib"
-   export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
-   export CEPH_CONF="$HOME/dev/ceph/build/ceph.conf"
+   # NOTE: Use absolute paths — $HOME expansion does not work in all environments
 
    # Denc corpus test
-   cargo test -p denc --tests -- --ignored --nocapture
+   CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p denc --tests -- --ignored --nocapture
 
    # Integration tests
-   cargo test -p monclient --tests -- --ignored --nocapture
-   cargo test -p msgr2 --tests -- --ignored --nocapture
-   cargo test -p osdclient --tests -- --ignored --nocapture
+   CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p monclient --tests -- --ignored --nocapture
+   CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p msgr2 --tests -- --ignored --nocapture
+   CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p osdclient --tests -- --ignored --nocapture
    ```
 
 5. **If ALL tests pass** → Commit immediately with descriptive message
@@ -225,13 +222,13 @@ git commit -m "Descriptive message
 
 ### Starting the Cluster
 ```bash
-cd ~/dev/ceph/build
+cd /home/kefu/dev/ceph/build
 ../src/vstart.sh -d --without-dashboard
 ```
 
 ### Stopping the Cluster
 ```bash
-cd ~/dev/ceph/build
+cd /home/kefu/dev/ceph/build
 ../src/stop.sh
 ```
 
@@ -575,9 +572,9 @@ When reviewing code, investigate if you see:
 3. Check if it's a structural difference → Fix `Denc` implementation
 4. Use ceph-dencoder to inspect:
    ```bash
-   cd ~/dev/ceph/build
+   cd /home/kefu/dev/ceph/build
    env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
-       CEPH_LIB=$HOME/dev/ceph/build/lib \
+       CEPH_LIB=/home/kefu/dev/ceph/build/lib \
        bin/ceph-dencoder type <TYPE> \
        import <CORPUS_FILE> decode dump_json
    ```
@@ -616,16 +613,16 @@ impl Serialize for UTime {
 
 **Solution**:
 ```bash
-export PATH="$HOME/dev/ceph/build/bin:$PATH"
-export CEPH_LIB="$HOME/dev/ceph/build/lib"
+export PATH="/home/kefu/dev/ceph/build/bin:$PATH"
+export CEPH_LIB="/home/kefu/dev/ceph/build/lib"
 export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
 ```
 
 **Problem**: Integration tests can't connect to cluster
 
 **Solution**:
-1. Check cluster is running: `cd ~/dev/ceph/build && ../src/vstart.sh -d --without-dashboard`
-2. Verify CEPH_CONF is set: `export CEPH_CONF="$HOME/dev/ceph/build/ceph.conf"`
+1. Check cluster is running: `cd /home/kefu/dev/ceph/build && ../src/vstart.sh -d --without-dashboard`
+2. Verify CEPH_CONF is set: `export CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf"`
 3. Check cluster status: `bin/ceph -s`
 
 ### Type Consolidation Issues
@@ -648,13 +645,13 @@ export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
 Use `ceph-dencoder` to analyze and verify encoded data:
 
 ```bash
-cd ~/dev/ceph/build
+cd /home/kefu/dev/ceph/build
 
 # Decode and display a type from corpus
 env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
-    CEPH_LIB=$HOME/dev/ceph/build/lib \
+    CEPH_LIB=/home/kefu/dev/ceph/build/lib \
     bin/ceph-dencoder type pg_pool_t \
-    import ~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_pool_t/453c7bee75dca4766602cee267caa589 \
+    import /home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/pg_pool_t/453c7bee75dca4766602cee267caa589 \
     decode dump_json
 ```
 
@@ -662,22 +659,17 @@ env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 \
 
 ```bash
 # Unit tests (no cluster required)
-cargo test --workspace --lib
+/home/kefu/.cargo/bin/cargo test --workspace --lib
 
 # Integration tests (requires running cluster)
-export CEPH_CONF=/home/kefu/dev/ceph/build/ceph.conf
-export PATH="$HOME/dev/ceph/build/bin:$PATH"
-export CEPH_LIB="$HOME/dev/ceph/build/lib"
-export ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0"
-
-# Run all integration tests
-cargo test -p denc --tests -- --ignored --nocapture
-cargo test -p monclient --tests -- --ignored --nocapture
-cargo test -p msgr2 --tests -- --ignored --nocapture
-cargo test -p osdclient --tests -- --ignored --nocapture
+# NOTE: Use absolute paths — $HOME expansion does not work in all environments
+CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p denc --tests -- --ignored --nocapture
+CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p monclient --tests -- --ignored --nocapture
+CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p msgr2 --tests -- --ignored --nocapture
+CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p osdclient --tests -- --ignored --nocapture
 
 # Or run specific package
-cargo test -p <package> --tests -- --ignored --nocapture
+CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p <package> --tests -- --ignored --nocapture
 ```
 
 ### Development Tools
@@ -803,24 +795,24 @@ Before committing any code, verify:
 
 | Task | Command |
 |------|---------|
-| Start cluster | `cd ~/dev/ceph/build && ../src/vstart.sh -d --without-dashboard` |
-| Stop cluster | `cd ~/dev/ceph/build && ../src/stop.sh` |
-| Decode corpus | `cd ~/dev/ceph/build && env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 CEPH_LIB=$HOME/dev/ceph/build/lib bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json` |
-| Unit tests | `cargo test --workspace --lib` |
-| Integration tests | `PATH="$HOME/dev/ceph/build/bin:$PATH" CEPH_LIB="$HOME/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="$HOME/dev/ceph/build/ceph.conf" cargo test -p <PACKAGE> --tests -- --ignored` |
-| Format code | `cargo fmt` |
-| Lint code | `cargo clippy --all-targets --all-features` |
-| Check syntax | `cargo check --workspace` |
+| Start cluster | `cd /home/kefu/dev/ceph/build && ../src/vstart.sh -d --without-dashboard` |
+| Stop cluster | `cd /home/kefu/dev/ceph/build && ../src/stop.sh` |
+| Decode corpus | `cd /home/kefu/dev/ceph/build && env ASAN_OPTIONS=detect_odr_violation=0,detect_leaks=0 CEPH_LIB=/home/kefu/dev/ceph/build/lib bin/ceph-dencoder type <TYPE> import <FILE> decode dump_json` |
+| Unit tests | `/home/kefu/.cargo/bin/cargo test --workspace --lib` |
+| Integration tests | `CEPH_LIB="/home/kefu/dev/ceph/build/lib" ASAN_OPTIONS="detect_odr_violation=0,detect_leaks=0" CEPH_CONF="/home/kefu/dev/ceph/build/ceph.conf" /home/kefu/.cargo/bin/cargo test -p <PACKAGE> --tests -- --ignored` |
+| Format code | `/home/kefu/.cargo/bin/cargo fmt` |
+| Lint code | `/home/kefu/.cargo/bin/cargo clippy --all-targets --all-features` |
+| Check syntax | `/home/kefu/.cargo/bin/cargo check --workspace` |
 
 ### File Locations
 
 | Resource | Path |
 |----------|------|
 | Cluster config | `/home/kefu/dev/ceph/build/ceph.conf` |
-| Ceph source | `~/dev/ceph` |
-| Ceph build | `~/dev/ceph/build` |
-| Corpus data | `~/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/` |
-| Auto memory | `~/.claude/projects/-home-kefu-dev-rados-rs/memory/` |
+| Ceph source | `/home/kefu/dev/ceph` |
+| Ceph build | `/home/kefu/dev/ceph/build` |
+| Corpus data | `/home/kefu/dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/` |
+| Auto memory | `/home/kefu/.claude/projects/-home-kefu-dev-rados-rs/memory/` |
 
 ### Common Patterns
 
