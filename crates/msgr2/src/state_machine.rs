@@ -19,8 +19,9 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Fram
     // Use msgr2_frame_assumed features for frame encoding
     // msgr2_frame_assumed = MSG_ADDR2 | SERVER_NAUTILUS
     use denc::features::CephFeatures;
-    const MSGR2_FRAME_ASSUMED: u64 =
-        CephFeatures::MASK_MSG_ADDR2.union(CephFeatures::MASK_SERVER_NAUTILUS).bits();
+    const MSGR2_FRAME_ASSUMED: u64 = CephFeatures::MASK_MSG_ADDR2
+        .union(CephFeatures::MASK_SERVER_NAUTILUS)
+        .bits();
 
     let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED);
     Frame {

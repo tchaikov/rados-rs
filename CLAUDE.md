@@ -153,6 +153,9 @@ handles the JSON format requirement for corpus compatibility.
 - **Location**: `~/dev/ceph`
 - **Build directory**: `~/dev/ceph/build`
 
+### Linux Source Code
+- **Location**: `~/dev/linux`
+
 ### Protocol Implementation
 Msgr2 protocol implemented in:
 - `~/dev/ceph/src/crimson/net/ProtocolV2.{cc,h}`

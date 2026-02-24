@@ -49,7 +49,9 @@ impl Denc for LockRequest {
     }
 
     fn decode<B: Buf>(_buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        Err(RadosError::Protocol("LockRequest decode is not supported".into()))
+        Err(RadosError::Protocol(
+            "LockRequest decode is not supported".into(),
+        ))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

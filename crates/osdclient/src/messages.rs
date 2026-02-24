@@ -802,8 +802,12 @@ mod tests {
         );
 
         // Encode with SERVER_SQUID features (v9 format)
-        let msg = CephMessage::from_payload(&mosdop, CephFeatures::MASK_SERVER_SQUID.bits(), CrcFlags::ALL)
-            .unwrap();
+        let msg = CephMessage::from_payload(
+            &mosdop,
+            CephFeatures::MASK_SERVER_SQUID.bits(),
+            CrcFlags::ALL,
+        )
+        .unwrap();
 
         // Verify message version is 9
         let version = msg.header.version;

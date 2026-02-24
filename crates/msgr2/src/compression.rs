@@ -10,7 +10,9 @@ use bytes::Bytes;
 use std::cell::Cell;
 
 /// Compression algorithm identifiers (from Ceph's Compressor.h)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
 #[repr(u32)]
 pub enum CompressionAlgorithm {
     None = 0,

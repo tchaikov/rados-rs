@@ -28,8 +28,8 @@ macro_rules! define_ceph_feature {
 // All features, sorted by bit number.
 // `define_ceph_feature!(bit, incarnation, NAME)` — arguments match C++
 // `DEFINE_CEPH_FEATURE(bit, incarnation_index, NAME)` in ceph_features.h.
-define_ceph_feature!(2,  CEPH_FEATURE_INCARNATION_3, SERVER_NAUTILUS);
-define_ceph_feature!(9,  CEPH_FEATURE_INCARNATION_1, PGID64);
+define_ceph_feature!(2, CEPH_FEATURE_INCARNATION_3, SERVER_NAUTILUS);
+define_ceph_feature!(9, CEPH_FEATURE_INCARNATION_1, PGID64);
 define_ceph_feature!(11, CEPH_FEATURE_INCARNATION_1, PGPOOL3);
 define_ceph_feature!(13, CEPH_FEATURE_INCARNATION_1, OSDENC);
 define_ceph_feature!(15, CEPH_FEATURE_INCARNATION_1, MONENC);

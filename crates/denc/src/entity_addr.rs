@@ -655,7 +655,8 @@ mod tests {
         Denc::encode(&addr, &mut buf, CephFeatures::MSG_ADDR2.bits()).unwrap();
 
         // Decode
-        let decoded = <EntityAddr as Denc>::decode(&mut buf, CephFeatures::MSG_ADDR2.bits()).unwrap();
+        let decoded =
+            <EntityAddr as Denc>::decode(&mut buf, CephFeatures::MSG_ADDR2.bits()).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Msgr2);
         assert_eq!(decoded.nonce, 0xABCDEF01);
         assert_eq!(decoded.sockaddr_data, vec![10, 20, 30, 40, 50]);

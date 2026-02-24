@@ -3,8 +3,8 @@
 use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};
 use denc::{
-    features::CephFeatures,
-    Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode,
+    features::CephFeatures, Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version,
+    VersionedEncode,
 };
 
 /// PG count statistics for an OSD
@@ -531,7 +531,6 @@ impl Denc for PoolStat {
     const FEATURE_DEPENDENT: bool = true;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-
         if (features & CephFeatures::OSDENC.bits()) == 0 {
             // Legacy encoding without ENCODE_START - version 4 only has stats + 2 i64
             buf.put_u8(4); // Version byte
@@ -546,7 +545,6 @@ impl Denc for PoolStat {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-
         if (features & CephFeatures::OSDENC.bits()) == 0 {
             // Legacy decoding
             let version = buf.get_u8();
@@ -558,7 +556,6 @@ impl Denc for PoolStat {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-
         let stats_size = self.stats.encoded_size(features)?;
         let store_stats_size = self.store_stats.encoded_size(features)?;
         let content_size = stats_size + 16 + 4 + 4 + store_stats_size + 4; // stats + 2*i64 + 2*i32 + store_stats + i32
@@ -627,7 +624,6 @@ impl VersionedEncode for ObjectstorePerfStat {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-
         if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             // Version 2: encode as u64 nanoseconds
             buf.put_u64_le(self.os_commit_latency_ns);
@@ -648,7 +644,6 @@ impl VersionedEncode for ObjectstorePerfStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-
         if version == 2 || (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
             // Version 2: decode from u64 nanoseconds
             let os_commit_latency_ns = buf.get_u64_le();
@@ -1245,7 +1240,6 @@ mod tests {
 
     #[test]
     fn test_pool_stat_roundtrip() {
-
         let original = PoolStat {
             stats: ObjectStatCollection {
                 sum: ObjectStatSum {
@@ -1268,7 +1262,9 @@ mod tests {
 
         // Test with features (modern encoding)
         let mut buf = BytesMut::new();
-        original.encode(&mut buf, CephFeatures::OSDENC.bits()).unwrap();
+        original
+            .encode(&mut buf, CephFeatures::OSDENC.bits())
+            .unwrap();
 
         let decoded = PoolStat::decode(&mut buf, CephFeatures::OSDENC.bits()).unwrap();
         assert_eq!(decoded, original);
@@ -1327,7 +1323,6 @@ mod tests {
 
     #[test]
     fn test_objectstore_perf_stat_roundtrip_v2() {
-
         let original = ObjectstorePerfStat {
             os_commit_latency_ns: 5_000_000, // 5ms in ns
             os_apply_latency_ns: 3_000_000,  // 3ms in ns
@@ -1339,7 +1334,8 @@ mod tests {
             .encode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits())
             .unwrap();
 
-        let decoded = ObjectstorePerfStat::decode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits()).unwrap();
+        let decoded =
+            ObjectstorePerfStat::decode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits()).unwrap();
         assert_eq!(decoded, original);
     }
 

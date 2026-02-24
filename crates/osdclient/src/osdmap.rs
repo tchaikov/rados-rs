@@ -1,9 +1,9 @@
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
 use denc::{
-    features::CephFeatures,
-    mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
-    EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
+    features::CephFeatures, mark_feature_dependent_encoding, mark_simple_encoding,
+    mark_versioned_encoding, Denc, EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError,
+    VersionedEncode,
 };
 use libc;
 use serde::Serialize;

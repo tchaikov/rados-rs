@@ -3,7 +3,7 @@
 //! The MonMap contains information about all monitors in the cluster.
 
 use crate::error::{MonClientError, Result};
-use denc::{EntityAddr, EntityAddrvec, EntityAddrType};
+use denc::{EntityAddr, EntityAddrType, EntityAddrvec};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;

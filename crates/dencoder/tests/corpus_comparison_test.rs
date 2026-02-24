@@ -776,7 +776,11 @@ fn test_corpus_comparison() {
         // Level 2: Types depending on Level 1
         ("entity_addr_t", Some(CephFeatures::MSG_ADDR2.bits()), false),
         ("pool_snap_info_t", None, false),
-        ("osd_xinfo_t", Some(CephFeatures::MASK_SERVER_OCTOPUS.bits()), false),
+        (
+            "osd_xinfo_t",
+            Some(CephFeatures::MASK_SERVER_OCTOPUS.bits()),
+            false,
+        ),
         // Level 3: Complex types
         ("pg_merge_meta_t", None, false),
         ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields

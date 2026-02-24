@@ -467,12 +467,20 @@ impl CephXReply {
         let session_key = if data.remaining() >= 4 {
             let mut key_data = Bytes::copy_from_slice(data);
             let key = CryptoKey::decode(&mut key_data, 0)?;
-            if !key.is_empty() { Some(key) } else { None }
+            if !key.is_empty() {
+                Some(key)
+            } else {
+                None
+            }
         } else {
             None
         };
 
-        Ok(Self { status, tickets, session_key })
+        Ok(Self {
+            status,
+            tickets,
+            session_key,
+        })
     }
 
     pub fn is_success(&self) -> bool {
