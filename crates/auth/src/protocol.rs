@@ -601,20 +601,72 @@ impl Denc for CephXAuthorizeB {
 /// CephX Authorize Reply structure
 /// Corresponds to C++ `struct ceph_x_authorize_reply` in auth_x_protocol.h
 ///
-/// Sent by the service back to the client after validating the authorizer
-#[derive(Debug, Clone, denc::Denc)]
+/// Sent by the service back to the client after validating the authorizer.
+/// struct_v >= 2 includes connection_secret for SECURE mode.
+#[derive(Debug, Clone)]
 pub struct CephXAuthorizeReply {
-    struct_v: u8,
     pub nonce_plus_one: u64,
+    pub connection_secret: Option<Bytes>,
 }
 
 impl CephXAuthorizeReply {
-    const STRUCT_V: u8 = 1;
-
     pub fn new(nonce_plus_one: u64) -> Self {
         Self {
-            struct_v: Self::STRUCT_V,
             nonce_plus_one,
+            connection_secret: None,
+        }
+    }
+
+    pub fn with_connection_secret(nonce_plus_one: u64, connection_secret: Bytes) -> Self {
+        Self {
+            nonce_plus_one,
+            connection_secret: Some(connection_secret),
+        }
+    }
+}
+
+impl Denc for CephXAuthorizeReply {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        if self.connection_secret.is_some() {
+            2u8.encode(buf, 0)?;
+        } else {
+            1u8.encode(buf, 0)?;
+        }
+        self.nonce_plus_one.encode(buf, 0)?;
+        if let Some(ref secret) = self.connection_secret {
+            secret.encode(buf, 0)?;
+        }
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        let struct_v = u8::decode(buf, 0)?;
+        let nonce_plus_one = u64::decode(buf, 0)?;
+        let connection_secret = if struct_v >= 2 {
+            let secret = Bytes::decode(buf, 0)?;
+            if secret.is_empty() {
+                None
+            } else {
+                Some(secret)
+            }
+        } else {
+            None
+        };
+        Ok(Self {
+            nonce_plus_one,
+            connection_secret,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        let base = 1 + 8; // struct_v + nonce_plus_one
+        match &self.connection_secret {
+            Some(secret) => Some(base + 4 + secret.len()), // + length prefix + data
+            None => Some(base),
         }
     }
 }
@@ -1017,6 +1069,25 @@ mod tests {
         let mut read_buf = buf.freeze();
         let decoded = CephXAuthorizeReply::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.nonce_plus_one, 98765);
+        assert!(decoded.connection_secret.is_none());
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authorize_reply_with_connection_secret() {
+        let secret = Bytes::from(vec![0xaa; 32]);
+        let reply = CephXAuthorizeReply::with_connection_secret(12345, secret.clone());
+
+        let mut buf = BytesMut::new();
+        reply.encode(&mut buf, 0).unwrap();
+
+        // struct_v (1) + nonce_plus_one (8) + len prefix (4) + secret (32) = 45
+        assert_eq!(buf.len(), 45);
+
+        let mut read_buf = buf.freeze();
+        let decoded = CephXAuthorizeReply::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.nonce_plus_one, 12345);
+        assert_eq!(decoded.connection_secret.unwrap(), secret);
         assert_eq!(read_buf.remaining(), 0);
     }
 }
