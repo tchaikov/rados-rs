@@ -1,8 +1,8 @@
 // CRUSH map decoding implementation
 // Reference: ~/dev/ceph/src/crush/CrushWrapper.cc (encode/decode functions)
 
-use bytes::{Buf, Bytes};
-use denc::Denc;
+use bytes::{Buf, BufMut, Bytes};
+use denc::{Denc, RadosError};
 use std::collections::HashMap;
 
 use crate::error::{CrushError, Result};
@@ -239,12 +239,9 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             BucketData::Uniform { item_weight }
         }
         BucketAlgorithm::List => {
-            let mut item_weights = Vec::with_capacity(size as usize);
-            let mut sum_weights = Vec::with_capacity(size as usize);
-            for _ in 0..size {
-                item_weights.push(u32::decode(data, 0)?);
-                sum_weights.push(u32::decode(data, 0)?);
-            }
+            let (item_weights, sum_weights) = decode_n::<(u32, u32)>(data, size as usize)?
+                .into_iter()
+                .unzip();
             BucketData::List {
                 item_weights,
                 sum_weights,
@@ -259,12 +256,9 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             }
         }
         BucketAlgorithm::Straw => {
-            let mut item_weights = Vec::with_capacity(size as usize);
-            let mut straws = Vec::with_capacity(size as usize);
-            for _ in 0..size {
-                item_weights.push(u32::decode(data, 0)?);
-                straws.push(u32::decode(data, 0)?);
-            }
+            let (item_weights, straws) = decode_n::<(u32, u32)>(data, size as usize)?
+                .into_iter()
+                .unzip();
             BucketData::Straw {
                 item_weights,
                 straws,
@@ -288,6 +282,36 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     })
 }
 
+impl Denc for CrushRuleStep {
+    fn encode<B: BufMut>(
+        &self,
+        buf: &mut B,
+        _features: u64,
+    ) -> std::result::Result<(), RadosError> {
+        (self.op as u32).encode(buf, 0)?;
+        self.arg1.encode(buf, 0)?;
+        self.arg2.encode(buf, 0)?;
+        Ok(())
+    }
+
+    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
+        let op = u32::decode(buf, 0)?;
+        let arg1 = i32::decode(buf, 0)?;
+        let arg2 = i32::decode(buf, 0)?;
+        let rule_op = RuleOp::try_from(op)
+            .map_err(|_| RadosError::Protocol(format!("Invalid rule op: {}", op)))?;
+        Ok(CrushRuleStep {
+            op: rule_op,
+            arg1,
+            arg2,
+        })
+    }
+
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        Some(12) // u32 + i32 + i32
+    }
+}
+
 fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
     let len = u32::decode(data, 0)?;
 
@@ -297,19 +321,7 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
     let _min_size = u8::decode(data, 0)?;
     let _max_size = u8::decode(data, 0)?;
 
-    let mut steps = Vec::with_capacity(len as usize);
-    for _ in 0..len {
-        let op = u32::decode(data, 0)?;
-        let arg1 = i32::decode(data, 0)?;
-        let arg2 = i32::decode(data, 0)?;
-
-        let rule_op = RuleOp::try_from(op).map_err(|_| CrushError::InvalidRuleOp(op))?;
-        steps.push(CrushRuleStep {
-            op: rule_op,
-            arg1,
-            arg2,
-        });
-    }
+    let steps: Vec<CrushRuleStep> = decode_n(data, len as usize)?;
 
     Ok(CrushRule {
         rule_id: rule_id as u32,
