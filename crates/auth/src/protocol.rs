@@ -576,14 +576,14 @@ impl Denc for CephXAuthorizeB {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
+        let struct_v = u8::decode(buf, 0)?;
         let nonce = u64::decode(buf, 0)?;
-        let have_challenge_byte = u8::decode(buf, 0)?;
-        let have_challenge = have_challenge_byte != 0;
-        let server_challenge_plus_one = if have_challenge {
-            u64::decode(buf, 0)?
+        let (have_challenge, server_challenge_plus_one) = if struct_v >= 2 {
+            let hc = u8::decode(buf, 0)? != 0;
+            let sc = u64::decode(buf, 0)?;
+            (hc, sc)
         } else {
-            0
+            (false, 0)
         };
         Ok(Self {
             nonce,
@@ -593,9 +593,8 @@ impl Denc for CephXAuthorizeB {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        let base_size = 1 + 8 + 1; // struct_v + nonce + have_challenge
-        let challenge_size = if self.have_challenge { 8 } else { 0 };
-        Some(base_size + challenge_size)
+        // encode always writes struct_v=2 with all fields
+        Some(1 + 8 + 1 + 8) // struct_v + nonce + have_challenge + server_challenge_plus_one
     }
 }
 
@@ -983,7 +982,7 @@ mod tests {
         let decoded = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.nonce, 54321);
         assert!(!decoded.have_challenge);
-        // decode() only reads server_challenge_plus_one if have_challenge is true
+        // decode reads all fields since struct_v=2; server_challenge_plus_one is 0
         assert_eq!(decoded.server_challenge_plus_one, 0);
     }
 
