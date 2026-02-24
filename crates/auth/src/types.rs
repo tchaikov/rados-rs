@@ -113,20 +113,17 @@ impl CryptoKey {
         // Extract the AES key from the secret
         // Session keys from CephXServiceTicket contain just the raw 16-byte key,
         // while client keys contain 12-byte header + 16-byte key
-        const CRYPTO_KEY_HEADER_SIZE: usize = std::mem::size_of::<u16>()  // crypto_type
-            + std::mem::size_of::<u32>()  // created.sec
-            + std::mem::size_of::<u32>()  // created.nsec
-            + std::mem::size_of::<u16>(); // secret_length
+        use crate::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
 
         let secret_bytes = self.get_secret();
 
-        let key_bytes = if secret_bytes.len() == 16 {
+        let key_bytes = if secret_bytes.len() == AES_KEY_LEN {
             // Raw 16-byte AES key (e.g., session key from CephXServiceTicket)
             secret_bytes
-        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + 16 {
+        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
             // Skip the 12-byte header to get to the actual key material
             let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-            &secret_bytes[actual_key_start..actual_key_start + 16]
+            &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN]
         } else {
             return Err(CephXError::CryptographicError(format!(
                 "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
@@ -168,20 +165,17 @@ impl CryptoKey {
         }
 
         // Extract the AES key from the secret
-        const CRYPTO_KEY_HEADER_SIZE: usize = std::mem::size_of::<u16>()  // crypto_type
-            + std::mem::size_of::<u32>()  // created.sec
-            + std::mem::size_of::<u32>()  // created.nsec
-            + std::mem::size_of::<u16>(); // secret_length
+        use crate::protocol::{AES_BLOCK_LEN, AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
 
         let secret_bytes = self.get_secret();
 
-        let key_bytes = if secret_bytes.len() == 16 {
+        let key_bytes = if secret_bytes.len() == AES_KEY_LEN {
             // Raw 16-byte AES key (e.g., session key from CephXServiceTicket)
             secret_bytes
-        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + 16 {
+        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
             // Skip the 12-byte header to get to the actual key material
             let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-            &secret_bytes[actual_key_start..actual_key_start + 16]
+            &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN]
         } else {
             return Err(CephXError::CryptographicError(format!(
                 "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
@@ -196,9 +190,8 @@ impl CryptoKey {
         type Aes128CbcEnc = Encryptor<Aes128>;
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
-        // Calculate padded length (must be multiple of 16)
-        let block_size = 16;
-        let padded_len = ((plaintext.len() / block_size) + 1) * block_size;
+        // Calculate padded length (must be multiple of AES block size)
+        let padded_len = ((plaintext.len() / AES_BLOCK_LEN) + 1) * AES_BLOCK_LEN;
         let mut buffer = vec![0u8; padded_len];
         buffer[..plaintext.len()].copy_from_slice(plaintext);
 

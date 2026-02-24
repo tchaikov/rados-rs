@@ -11,6 +11,20 @@ pub const CEPHX_GET_AUTH_SESSION_KEY: u16 = 0x0100;
 pub const CEPHX_GET_PRINCIPAL_SESSION_KEY: u16 = 0x0200;
 pub const CEPHX_GET_ROTATING_KEY: u16 = 0x0400;
 
+/// AES-128 key length in bytes
+pub const AES_KEY_LEN: usize = 16;
+/// AES block size in bytes
+pub const AES_BLOCK_LEN: usize = 16;
+/// Size of the CryptoKey header: u16 type + u32 created.sec + u32 created.nsec + u16 secret_len
+pub const CRYPTO_KEY_HEADER_SIZE: usize = std::mem::size_of::<u16>()
+    + std::mem::size_of::<u32>()
+    + std::mem::size_of::<u32>()
+    + std::mem::size_of::<u16>();
+/// Maximum number of extra tickets to decode
+pub const MAX_EXTRA_TICKETS: usize = 16;
+/// Maximum connection_secret length in bytes
+pub const MAX_CONNECTION_SECRET_LEN: usize = 256;
+
 /// CephX service ticket request structure
 ///
 /// Corresponds to C++ `struct CephXServiceTicketRequest` in `/src/auth/cephx/CephxProtocol.h`

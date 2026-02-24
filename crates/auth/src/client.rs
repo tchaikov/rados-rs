@@ -247,23 +247,20 @@ impl CephXClientHandler {
         //   - secret_length: u16 (2 bytes)
         // The actual AES key starts after this 12-byte header
         // Ceph uses the first 16 bytes of the ACTUAL KEY DATA (after the header) as the AES key
-        const CRYPTO_KEY_HEADER_SIZE: usize = std::mem::size_of::<u16>()  // crypto_type
-            + std::mem::size_of::<u32>()  // created.sec
-            + std::mem::size_of::<u32>()  // created.nsec
-            + std::mem::size_of::<u16>(); // secret_length
+        use crate::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
         let secret_bytes = secret_key.get_secret();
 
-        if secret_bytes.len() < CRYPTO_KEY_HEADER_SIZE + 16 {
+        if secret_bytes.len() < CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
             return Err(CephXError::CryptographicError(format!(
                 "Secret key too short: {} bytes, need at least {}",
                 secret_bytes.len(),
-                CRYPTO_KEY_HEADER_SIZE + 16
+                CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN
             )));
         }
 
         // Skip the header to get to the actual key material
         let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-        let key_bytes = &secret_bytes[actual_key_start..actual_key_start + 16];
+        let key_bytes = &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN];
 
         debug!(
             "Step 5: AES key (first 16 bytes of secret): {}",
@@ -282,7 +279,7 @@ impl CephXClientHandler {
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
         // Allocate buffer with room for padding
-        let mut buffer = vec![0u8; plaintext.len() + 16];
+        let mut buffer = vec![0u8; plaintext.len() + crate::protocol::AES_BLOCK_LEN];
         buffer[..plaintext.len()].copy_from_slice(&plaintext);
 
         let ciphertext = cipher
@@ -432,7 +429,8 @@ impl CephXClientHandler {
         let num = u32::decode(buf, 0)?;
         debug!("Decoding {} extra tickets", num);
 
-        let mut result = Vec::with_capacity(num.min(16) as usize);
+        let mut result =
+            Vec::with_capacity(num.min(crate::protocol::MAX_EXTRA_TICKETS as u32) as usize);
 
         for i in 0..num {
             match self.try_decode_single_ticket(buf, auth_session_key) {
@@ -1081,12 +1079,12 @@ impl CephXClientHandler {
         let secret_bytes = session_key.get_secret();
 
         // Session keys from tickets are typically raw 16-byte keys
-        let key_bytes = if secret_bytes.len() == 16 {
+        let key_bytes = if secret_bytes.len() == crate::protocol::AES_KEY_LEN {
             secret_bytes.as_ref()
         } else if secret_bytes.len() >= 28 {
             // Has header, skip to actual key
-            const CRYPTO_KEY_HEADER_SIZE: usize = 12;
-            &secret_bytes[CRYPTO_KEY_HEADER_SIZE..CRYPTO_KEY_HEADER_SIZE + 16]
+            &secret_bytes[crate::protocol::CRYPTO_KEY_HEADER_SIZE
+                ..crate::protocol::CRYPTO_KEY_HEADER_SIZE + crate::protocol::AES_KEY_LEN]
         } else {
             return Err(CephXError::CryptographicError(format!(
                 "Invalid session key length: {}",
@@ -1106,7 +1104,7 @@ impl CephXClientHandler {
         type Aes128CbcEnc = Encryptor<Aes128>;
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
-        let mut buffer = vec![0u8; envelope_buf.len() + 16];
+        let mut buffer = vec![0u8; envelope_buf.len() + crate::protocol::AES_BLOCK_LEN];
         buffer[..envelope_buf.len()].copy_from_slice(&envelope_buf);
 
         let ciphertext = cipher

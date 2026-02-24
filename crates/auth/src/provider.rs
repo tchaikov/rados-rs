@@ -458,14 +458,14 @@ impl AuthProvider for ServiceAuthProvider {
                                     enc_struct_v, magic
                                 );
 
-                                // Validate magic number (CEPHX_ENC_MAGIC = 0xff009cad8826aa55)
-                                const CEPHX_ENC_MAGIC: u64 = 0xff009cad8826aa55;
-                                if magic != CEPHX_ENC_MAGIC {
+                                // Validate magic number
+                                use crate::protocol::AUTH_ENC_MAGIC;
+                                if magic != AUTH_ENC_MAGIC {
                                     debug!("ERROR: Invalid encryption magic! Expected 0x{:016x}, got 0x{:016x}",
-                                        CEPHX_ENC_MAGIC, magic);
+                                        AUTH_ENC_MAGIC, magic);
                                     return Err(CephXError::ProtocolError(
                                         format!("Invalid encryption magic in AUTH_DONE: expected 0x{:016x}, got 0x{:016x}",
-                                            CEPHX_ENC_MAGIC, magic)
+                                            AUTH_ENC_MAGIC, magic)
                                     ));
                                 }
 
@@ -503,7 +503,8 @@ impl AuthProvider for ServiceAuthProvider {
                                         );
 
                                         if con_secret_len > 0
-                                            && con_secret_len <= 256
+                                            && con_secret_len
+                                                <= crate::protocol::MAX_CONNECTION_SECRET_LEN
                                             && dec_buf.remaining() >= con_secret_len
                                         {
                                             let connection_secret_bytes =
