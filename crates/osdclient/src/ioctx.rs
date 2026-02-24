@@ -11,6 +11,9 @@ use crate::client::OSDClient;
 use crate::error::{OSDClientError, Result};
 use crate::types::{ReadResult, SparseReadResult, StatResult, WriteResult};
 
+/// Maximum entries per PGLS request for object listing pagination
+const MAX_ENTRIES_PER_REQUEST: usize = 100;
+
 /// I/O Context for a specific pool
 ///
 /// IoCtx provides an interface for performing object operations within a specific
@@ -290,7 +293,6 @@ impl IoCtx {
 
         let mut all_objects = Vec::new();
         let mut cursor = None;
-        const MAX_ENTRIES_PER_REQUEST: usize = 100;
 
         loop {
             let (objects, next_cursor) = self.list_objects(cursor, MAX_ENTRIES_PER_REQUEST).await?;
