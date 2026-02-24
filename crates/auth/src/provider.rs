@@ -385,182 +385,52 @@ impl AuthProvider for ServiceAuthProvider {
                 .unwrap_or(0)
         );
 
-        // For SECURE mode (con_mode >= 1), extract connection_secret from AUTH_DONE payload
-        // For authorizer-based auth (OSDs), AUTH_DONE contains encrypted CephXAuthorizeReply
-        // The reply contains: struct_v (u8) + nonce_plus_one (u64) + connection_secret (u32 len + bytes)
+        // Extract connection_secret from AUTH_DONE payload using CephXEncryptedEnvelope
         let connection_secret = if con_mode >= 1 && !payload.is_empty() {
-            debug!(
-                "Extracting connection_secret from AUTH_DONE payload (con_mode={})",
-                con_mode
-            );
-
-            // Decrypt the AUTH_DONE payload using the service's session key
-            // The payload is encrypted with the session key we got from the ticket
             if let Some(ref sess_key) = session_key {
-                use bytes::Buf;
                 use denc::Denc;
+
                 let mut buf = payload.clone();
+                let encrypted_data = Bytes::decode(&mut buf, 0).map_err(|e| {
+                    CephXError::ProtocolError(format!("Failed to decode encrypted data: {}", e))
+                })?;
 
-                // Read encrypted length
-                let encrypted_len = u32::decode(&mut buf, 0).map_err(|e| {
-                    CephXError::ProtocolError(format!("Failed to decode encrypted_len: {}", e))
-                })? as usize;
-                if buf.remaining() >= encrypted_len {
-                    let encrypted_data = buf.copy_to_bytes(encrypted_len);
-
-                    debug!("Decrypting AUTH_DONE: encrypted_len={}", encrypted_len);
-
-                    // Decrypt using the session key (AES-CBC with fixed IV)
-                    match crate::client::CephXClientHandler::decrypt_with_key(
-                        sess_key,
-                        &encrypted_data,
-                    ) {
-                        Ok(decrypted) => {
-                            debug!(
-                                "Successfully decrypted AUTH_DONE: {} bytes",
-                                decrypted.len()
-                            );
-                            debug!(
-                                "Decrypted hex (first 64 bytes): {}",
-                                decrypted
-                                    .iter()
-                                    .take(64)
-                                    .map(|b| format!("{:02x}", b))
-                                    .collect::<Vec<_>>()
-                                    .join("")
-                            );
-
-                            // The decrypted data contains:
-                            // 1. ceph_x_encrypt_header (9 bytes):
-                            //    - struct_v (u8)
-                            //    - magic (u64 LE)
-                            // 2. CephXAuthorizeReply:
-                            //    - struct_v (u8)
-                            //    - nonce_plus_one (u64 LE)
-                            //    - connection_secret (u32 len + bytes) if struct_v >= 2
-
-                            let mut dec_buf = bytes::Bytes::from(decrypted);
-
-                            if dec_buf.remaining() < 9 {
-                                debug!("Decrypted data too short for encryption header");
-                                None
-                            } else {
-                                // Skip encryption header (struct_v + magic)
-                                let enc_struct_v = dec_buf.get_u8();
-                                let magic = u64::decode(&mut dec_buf, 0).map_err(|e| {
-                                    CephXError::ProtocolError(format!(
-                                        "Failed to decode magic: {}",
-                                        e
-                                    ))
-                                })?;
+                match crate::client::CephXClientHandler::decrypt_with_key(sess_key, &encrypted_data)
+                {
+                    Ok(decrypted) => {
+                        let mut dec_buf = bytes::Bytes::from(decrypted);
+                        match crate::protocol::CephXEncryptedEnvelope::<
+                            crate::protocol::CephXAuthorizeReply,
+                        >::decode(&mut dec_buf, 0)
+                        {
+                            Ok(envelope) => {
                                 debug!(
-                                    "Encryption header: struct_v={}, magic=0x{:016x}",
-                                    enc_struct_v, magic
+                                    "CephXAuthorizeReply: nonce_plus_one=0x{:016x}",
+                                    envelope.payload.nonce_plus_one
                                 );
-
-                                // Validate magic number
-                                use crate::protocol::AUTH_ENC_MAGIC;
-                                if magic != AUTH_ENC_MAGIC {
-                                    debug!("ERROR: Invalid encryption magic! Expected 0x{:016x}, got 0x{:016x}",
-                                        AUTH_ENC_MAGIC, magic);
-                                    return Err(CephXError::ProtocolError(
-                                        format!("Invalid encryption magic in AUTH_DONE: expected 0x{:016x}, got 0x{:016x}",
-                                            AUTH_ENC_MAGIC, magic)
-                                    ));
+                                if let Some(ref secret) = envelope.payload.connection_secret {
+                                    debug!("Extracted connection_secret: {} bytes", secret.len());
                                 }
-
-                                // Now parse the actual CephXAuthorizeReply
-                                if dec_buf.remaining() < 9 {
-                                    // struct_v (1) + nonce_plus_one (8)
-                                    debug!("Not enough bytes for CephXAuthorizeReply");
-                                    None
-                                } else {
-                                    let struct_v = dec_buf.get_u8();
-                                    let nonce_plus_one =
-                                        u64::decode(&mut dec_buf, 0).map_err(|e| {
-                                            CephXError::ProtocolError(format!(
-                                                "Failed to decode nonce_plus_one: {}",
-                                                e
-                                            ))
-                                        })?;
-
-                                    debug!("CephXAuthorizeReply: struct_v={}, nonce_plus_one=0x{:016x}", struct_v, nonce_plus_one);
-
-                                    // Try to extract connection_secret even if struct_v < 2
-                                    // Some servers might still include it
-                                    if dec_buf.remaining() >= 4 {
-                                        let con_secret_len =
-                                            u32::decode(&mut dec_buf, 0).map_err(|e| {
-                                                CephXError::ProtocolError(format!(
-                                                    "Failed to decode con_secret_len: {}",
-                                                    e
-                                                ))
-                                            })?
-                                                as usize;
-                                        debug!(
-                                            "connection_secret length: {} (struct_v={})",
-                                            con_secret_len, struct_v
-                                        );
-
-                                        if con_secret_len > 0
-                                            && con_secret_len
-                                                <= crate::protocol::MAX_CONNECTION_SECRET_LEN
-                                            && dec_buf.remaining() >= con_secret_len
-                                        {
-                                            let connection_secret_bytes =
-                                                dec_buf.copy_to_bytes(con_secret_len);
-                                            debug!(
-                                                "Extracted connection_secret: {} bytes",
-                                                connection_secret_bytes.len()
-                                            );
-                                            debug!(
-                                                "Connection_secret hex: {}",
-                                                connection_secret_bytes
-                                                    .iter()
-                                                    .take(64)
-                                                    .map(|b| format!("{:02x}", b))
-                                                    .collect::<Vec<_>>()
-                                                    .join("")
-                                            );
-
-                                            Some(connection_secret_bytes)
-                                        } else {
-                                            debug!("connection_secret length invalid or not enough data: len={}, remaining={}", con_secret_len, dec_buf.remaining());
-                                            None
-                                        }
-                                    } else {
-                                        debug!("No connection_secret (struct_v={}, not enough remaining bytes)", struct_v);
-                                        None
-                                    }
-                                }
+                                envelope.payload.connection_secret
+                            }
+                            Err(e) => {
+                                debug!("Failed to decode CephXAuthorizeReply: {:?}", e);
+                                None
                             }
                         }
-                        Err(e) => {
-                            debug!("Failed to decrypt AUTH_DONE: {:?}", e);
-                            None
-                        }
                     }
-                } else {
-                    debug!("AUTH_DONE payload too short for encrypted data");
-                    None
+                    Err(e) => {
+                        debug!("Failed to decrypt AUTH_DONE: {:?}", e);
+                        None
+                    }
                 }
             } else {
                 debug!("No session key available to decrypt AUTH_DONE");
                 None
             }
         } else {
-            debug!(
-                "Skipping connection_secret extraction (con_mode={}, payload empty={})",
-                con_mode,
-                payload.is_empty()
-            );
             None
         };
-
-        debug!(
-            "Returning connection_secret: {} bytes",
-            connection_secret.as_ref().map(|c| c.len()).unwrap_or(0)
-        );
 
         // Return the session key so AUTH_SIGNATURE can be computed
         // Also return connection_secret for SECURE mode
