@@ -3,7 +3,7 @@
 use crate::error::{CephXError, Result};
 use crate::keyring::Keyring;
 use crate::protocol::{
-    AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge,
+    AuthMode, CephXAuthenticate, CephXRequestHeader, CephXServerChallenge, AES_KEY_LEN,
     CEPHX_GET_AUTH_SESSION_KEY,
 };
 use crate::types::{
@@ -16,6 +16,11 @@ use rand::RngCore;
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tracing::{debug, info, warn};
+
+/// Default initial global_id for new clients
+const DEFAULT_INITIAL_GLOBAL_ID: u64 = 1000;
+/// Default service ticket TTL in seconds (1 hour)
+const DEFAULT_SERVICE_TICKET_TTL_SECS: u64 = 3600;
 
 /// Server-side authentication handler for CephX protocol
 ///
@@ -31,6 +36,8 @@ pub struct CephXServerHandler {
     next_global_id: u64,
     /// Service secrets for generating tickets
     service_secrets: HashMap<u32, CryptoKey>,
+    /// Ticket time-to-live
+    ticket_ttl: Duration,
 }
 
 impl CephXServerHandler {
@@ -39,9 +46,15 @@ impl CephXServerHandler {
         Self {
             keyring,
             server_challenge: None,
-            next_global_id: 1000, // Start from 1000 like Ceph does
+            next_global_id: DEFAULT_INITIAL_GLOBAL_ID,
             service_secrets: HashMap::new(),
+            ticket_ttl: Duration::from_secs(DEFAULT_SERVICE_TICKET_TTL_SECS),
         }
+    }
+
+    /// Set the ticket time-to-live for generated service tickets
+    pub fn set_ticket_ttl(&mut self, ttl: Duration) {
+        self.ticket_ttl = ttl;
     }
 
     /// Add a service secret for generating tickets
@@ -84,14 +97,7 @@ impl CephXServerHandler {
         debug!("Server: Client entity name: {}", entity_name);
 
         // 3. Parse global_id
-        if buf.len() < 8 {
-            return Err(CephXError::ProtocolError(
-                "Missing global_id in auth request".to_string(),
-            ));
-        }
-        let client_global_id = u64::from_le_bytes([
-            buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7],
-        ]);
+        let client_global_id = u64::decode(&mut buf, 0)?;
 
         debug!("Server: Client requested global_id: {}", client_global_id);
 
@@ -183,22 +189,14 @@ impl CephXServerHandler {
         let key_bytes = authenticate.key.to_le_bytes();
         let decrypted = client_secret.decrypt(&key_bytes)?;
 
-        if decrypted.len() < 8 {
+        if decrypted.len() < std::mem::size_of::<u64>() {
             return Err(CephXError::AuthenticationFailed(
                 "Invalid challenge response".to_string(),
             ));
         }
 
-        let client_response = u64::from_le_bytes([
-            decrypted[0],
-            decrypted[1],
-            decrypted[2],
-            decrypted[3],
-            decrypted[4],
-            decrypted[5],
-            decrypted[6],
-            decrypted[7],
-        ]);
+        let mut decrypted_buf = decrypted.as_ref();
+        let client_response = u64::decode(&mut decrypted_buf, 0)?;
 
         if client_response != expected_response {
             warn!(
@@ -216,7 +214,7 @@ impl CephXServerHandler {
         );
 
         // 5. Generate session key
-        let mut session_key_bytes = vec![0u8; 16]; // AES-128
+        let mut session_key_bytes = vec![0u8; AES_KEY_LEN];
         rand::thread_rng().fill_bytes(&mut session_key_bytes);
         let session_key = CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(session_key_bytes));
 
@@ -254,14 +252,14 @@ impl CephXServerHandler {
         })?;
 
         let valid_from = now.as_secs();
-        let valid_until = valid_from + 3600; // Valid for 1 hour
+        let valid_until = valid_from + self.ticket_ttl.as_secs();
 
         // Generate tickets for each service we have secrets for
         for (&service_id, service_secret) in &self.service_secrets {
             debug!("Server: Generating ticket for service_id: {}", service_id);
 
             // Generate service session key
-            let mut service_key_bytes = vec![0u8; 16];
+            let mut service_key_bytes = vec![0u8; AES_KEY_LEN];
             rand::thread_rng().fill_bytes(&mut service_key_bytes);
             let service_key =
                 CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(service_key_bytes));
@@ -330,7 +328,7 @@ mod tests {
     fn test_server_handler_creation() {
         let keyring = Keyring::new();
         let handler = CephXServerHandler::new(keyring);
-        assert_eq!(handler.next_global_id, 1000);
+        assert_eq!(handler.next_global_id, DEFAULT_INITIAL_GLOBAL_ID);
     }
 
     #[test]
@@ -341,7 +339,7 @@ mod tests {
         let id1 = handler.allocate_global_id();
         let id2 = handler.allocate_global_id();
 
-        assert_eq!(id1, 1000);
-        assert_eq!(id2, 1001);
+        assert_eq!(id1, DEFAULT_INITIAL_GLOBAL_ID);
+        assert_eq!(id2, DEFAULT_INITIAL_GLOBAL_ID + 1);
     }
 }
