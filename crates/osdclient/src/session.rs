@@ -27,6 +27,15 @@ use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
 use msgr2::message::MessagePriority;
 use msgr2::MapSender;
 
+/// Send channel buffer size (messages)
+const SEND_CHANNEL_BUFFER_SIZE: usize = 100;
+/// Maximum redirect loop count before failing an operation
+const MAX_REDIRECTS: u32 = 10;
+/// Maximum retry attempts per operation
+const DEFAULT_MAX_ATTEMPTS: i32 = 10;
+/// Default keepalive interval for OSD connections (seconds)
+const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
+
 /// Connection state for OSD session
 ///
 /// Following Ceph pattern for explicit connection state tracking.
@@ -162,8 +171,7 @@ impl OSDSession {
         client: std::sync::Weak<crate::client::OSDClient>,
     ) -> Self {
         // Create channel for outgoing messages (like Linux kernel's out_queue)
-        // Buffer size of 100 messages should be plenty
-        let (send_tx, _) = mpsc::channel(100);
+        let (send_tx, _) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
 
         // Get tracker from client if available
         let tracker = client.upgrade().map(|c| Arc::clone(&c.tracker));
@@ -281,7 +289,7 @@ impl OSDSession {
         );
 
         // Create new channel for this connection
-        let (send_tx, send_rx) = mpsc::channel(100);
+        let (send_tx, send_rx) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
         self.send_tx = send_tx;
 
         // Spawn I/O task that owns the connection
@@ -338,9 +346,9 @@ impl OSDSession {
         let osdmap_tx = ctx.osdmap_tx.clone();
         let client = ctx.client.clone();
 
-        // Keepalive every 10 seconds, matching Ceph's default (no timeout check for OSDs)
+        // Keepalive matching Ceph's default (no timeout check for OSDs)
         let keepalive = Some(KeepaliveConfig {
-            interval: std::time::Duration::from_secs(10),
+            interval: std::time::Duration::from_secs(DEFAULT_KEEPALIVE_INTERVAL_SECS),
             timeout: None,
         });
 
@@ -615,7 +623,7 @@ impl OSDSession {
                         vec![self.osd_id],
                     ),
                     should_resend: false,
-                    max_attempts: 10,
+                    max_attempts: DEFAULT_MAX_ATTEMPTS,
                     // Store priority for retries (set in message header, not MOSDOp payload)
                     priority,
                     // Capture current session incarnation
@@ -705,7 +713,6 @@ impl OSDSession {
             // Reference: ~/dev/ceph/src/osdc/Objecter.cc:3734
             if let Some(redirect) = &reply.redirect {
                 // Check for redirect loop
-                const MAX_REDIRECTS: u32 = 10;
                 if pending_op.redirect_count >= MAX_REDIRECTS {
                     error!(
                         "Operation tid {} exceeded maximum redirects ({}), failing",
