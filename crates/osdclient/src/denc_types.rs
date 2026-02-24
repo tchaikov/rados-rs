@@ -253,16 +253,22 @@ denc::impl_denc_for_versioned!(RequestRedirect);
 
 // ============= OSDOp (ceph_osd_op) =============
 
+use crate::messages::{CEPH_OSD_OP_SIZE, CEPH_OSD_OP_UNION_SIZE};
+
+// Compile-time verification matching rados.h static_assert
+const _: () = assert!(CEPH_OSD_OP_UNION_SIZE == 28);
+const _: () = assert!(CEPH_OSD_OP_SIZE == 38);
+
 /// Denc implementation for OSDOp
 ///
-/// This implements encoding/decoding for the 38-byte ceph_osd_op structure:
+/// This implements encoding/decoding for the CEPH_OSD_OP_SIZE-byte ceph_osd_op structure:
 /// - op (u16) - 2 bytes
 /// - flags (u32) - 4 bytes
-/// - union (28 bytes) - OpData variant based on op
+/// - union (CEPH_OSD_OP_UNION_SIZE bytes) - OpData variant based on op
 /// - payload_len (u32) - 4 bytes
 ///
 /// Note: The actual payload data (indata) is stored separately in the message
-/// data section and is not part of this 38-byte structure.
+/// data section and is not part of this structure.
 impl Denc for OSDOp {
     const USES_VERSIONING: bool = false;
 
@@ -273,7 +279,7 @@ impl Denc for OSDOp {
         // 2. flags (u32)
         buf.put_u32_le(self.flags);
 
-        // 3. Union (28 bytes) - OpData variant based on op
+        // 3. Union (CEPH_OSD_OP_UNION_SIZE bytes) - OpData variant based on op
         match &self.op_data {
             OpData::Extent {
                 offset,
@@ -285,7 +291,7 @@ impl Denc for OSDOp {
                 buf.put_u64_le(*length);
                 buf.put_u64_le(*truncate_size);
                 buf.put_u32_le(*truncate_seq);
-                // 8 + 8 + 8 + 4 = 28 bytes ✓
+                // 8 + 8 + 8 + 4 = CEPH_OSD_OP_UNION_SIZE ✓
             }
             OpData::Pgls {
                 max_entries,
@@ -293,7 +299,7 @@ impl Denc for OSDOp {
             } => {
                 buf.put_u64_le(*max_entries);
                 buf.put_u32_le(*start_epoch);
-                // Pad to 28 bytes: 8 + 4 = 12, need 16 more
+                // Pad to CEPH_OSD_OP_UNION_SIZE: 8 + 4 = 12, need 16 more
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
             }
@@ -307,7 +313,7 @@ impl Denc for OSDOp {
                 buf.put_u32_le(*value_len);
                 buf.put_u8(*cmp_op);
                 buf.put_u8(*cmp_mode);
-                // Pad to 28 bytes: 4 + 4 + 1 + 1 = 10, need 18 more
+                // Pad to CEPH_OSD_OP_UNION_SIZE: 4 + 4 + 1 + 1 = 10, need 18 more
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
                 buf.put_u16_le(0);
@@ -320,19 +326,19 @@ impl Denc for OSDOp {
                 buf.put_u32_le(*class_len);
                 buf.put_u32_le(*method_len);
                 buf.put_u32_le(*indata_len);
-                // Pad to 28 bytes: 4 + 4 + 4 = 12, need 16 more
+                // Pad to CEPH_OSD_OP_UNION_SIZE: 4 + 4 + 4 = 12, need 16 more
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
             }
             OpData::Snap { snapid } => {
-                // ceph_osd_op.snap.snapid (u64) + 20 bytes padding = 28 bytes
+                // ceph_osd_op.snap.snapid (u64) + 20 bytes padding = CEPH_OSD_OP_UNION_SIZE
                 buf.put_u64_le(*snapid);
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
                 buf.put_u32_le(0);
             }
             OpData::None => {
-                // Empty union - 28 bytes of zeros
+                // Empty union - CEPH_OSD_OP_UNION_SIZE bytes of zeros
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
@@ -356,7 +362,7 @@ impl Denc for OSDOp {
         // 2. flags (u32)
         let flags = buf.get_u32_le();
 
-        // 3. Union (28 bytes) - decode based on op
+        // 3. Union (CEPH_OSD_OP_UNION_SIZE bytes) - decode based on op
         let op_data = match op {
             OpCode::Read | OpCode::Write | OpCode::WriteFull | OpCode::Truncate | OpCode::Stat => {
                 // Extent-based operations
@@ -398,14 +404,14 @@ impl Denc for OSDOp {
                 }
             }
             OpCode::Rollback => {
-                // snap.snapid (u64) + 20 bytes padding = 28 bytes
+                // snap.snapid (u64) + 20 bytes padding = CEPH_OSD_OP_UNION_SIZE
                 let snapid = buf.get_u64_le();
                 buf.advance(20);
                 OpData::Snap { snapid }
             }
             _ => {
-                // Other operations (including ListSnaps) - skip 28 bytes
-                buf.advance(28);
+                // Other operations (including ListSnaps) - skip CEPH_OSD_OP_UNION_SIZE bytes
+                buf.advance(CEPH_OSD_OP_UNION_SIZE);
                 OpData::None
             }
         };
@@ -426,12 +432,11 @@ impl Denc for OSDOp {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // Fixed size: 38 bytes
-        // op (2) + flags (4) + union (28) + payload_len (4) = 38
+        // Fixed size: CEPH_OSD_OP_SIZE bytes
         Some(
             std::mem::size_of::<u16>() // op
                 + std::mem::size_of::<u32>() // flags
-                + 28 // union (fixed size regardless of variant)
+                + CEPH_OSD_OP_UNION_SIZE // union (fixed size regardless of variant)
                 + std::mem::size_of::<u32>(), // payload_len
         )
     }
@@ -796,7 +801,7 @@ mod tests {
             op_data: OpData::None,
             indata: Bytes::new(),
         };
-        assert_eq!(op.encoded_size(0), Some(38)); // 2 (op) + 4 (flags) + 28 (union) + 4 (payload_len)
+        assert_eq!(op.encoded_size(0), Some(CEPH_OSD_OP_SIZE));
     }
 
     #[test]
