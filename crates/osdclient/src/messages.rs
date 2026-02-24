@@ -33,6 +33,21 @@ pub const CEPH_MSG_PRIO_DEFAULT: i32 = 127;
 pub const CEPH_MSG_PRIO_HIGH: i32 = 196;
 pub const CEPH_MSG_PRIO_HIGHEST: i32 = 255;
 
+/// Size of the ceph_osd_op union field (largest variant: extent = 3×u64 + u32)
+pub const CEPH_OSD_OP_UNION_SIZE: usize =
+    3 * std::mem::size_of::<u64>() + std::mem::size_of::<u32>();
+/// Size of ceph_osd_op on the wire: op(u16) + flags(u32) + union + payload_len(u32)
+/// Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
+pub const CEPH_OSD_OP_SIZE: usize = std::mem::size_of::<u16>()
+    + std::mem::size_of::<u32>()
+    + CEPH_OSD_OP_UNION_SIZE
+    + std::mem::size_of::<u32>();
+/// Size of BlkinTraceInfo on the wire: 3 × u64
+const BLKIN_TRACE_INFO_SIZE: usize = std::mem::size_of::<crate::types::BlkinTraceInfo>();
+/// Sentinel value meaning "calculate hash from object name"
+/// Reference: linux/net/ceph/osd_client.c encode_request_partial()
+const HASH_CALCULATE_FROM_NAME: i64 = -1;
+
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
 pub struct MOSDOp {
@@ -157,6 +172,8 @@ pub struct MOSDOpReply {
 impl MOSDOpReply {
     /// Message version (from MOSDOpReply.h HEAD_VERSION)
     pub const VERSION: u16 = 8;
+    /// Compatibility version (from MOSDOpReply.h COMPAT_VERSION)
+    pub const COMPAT_VERSION: u16 = 2;
 
     /// Convert to OpResult
     pub fn to_op_result(self) -> OpResult {
@@ -303,7 +320,7 @@ impl CephMessagePayload for MOSDOp {
             pool_id: self.object.pool,
             key: self.object.key.clone(),
             namespace: self.object.namespace.clone(),
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         };
 
         let before_len = buf.len();
@@ -331,7 +348,7 @@ impl CephMessagePayload for MOSDOp {
 
             // Debug logging for PGLS operations
 
-            // Encode ceph_osd_op structure (38 bytes) using Denc
+            // Encode ceph_osd_op structure (CEPH_OSD_OP_SIZE bytes) using Denc
             let op_start = buf.len();
             op.encode(&mut buf, 0)?;
 
@@ -342,10 +359,10 @@ impl CephMessagePayload for MOSDOp {
         }
 
         // Debug: Check operation bytes are still intact before continuing
-        let first_op_start = buf.len() - (38 * self.ops.len());
+        let first_op_start = buf.len() - (CEPH_OSD_OP_SIZE * self.ops.len());
 
         if !self.ops.is_empty() {
-            let _op_check: String = buf[first_op_start..first_op_start + 38]
+            let _op_check: String = buf[first_op_start..first_op_start + CEPH_OSD_OP_SIZE]
                 .iter()
                 .map(|b| format!("{:02x}", b))
                 .collect();
@@ -488,10 +505,11 @@ impl CephMessagePayload for MOSDOpReply {
         // Parse osd_op structures to get payload lengths
         let mut payload_lens = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
-            if cursor.remaining() < 38 {
+            if cursor.remaining() < CEPH_OSD_OP_SIZE {
                 return Err(msgr2::Error::Deserialization(format!(
-                    "Incomplete osd_op {}: need 38 bytes, have {}",
+                    "Incomplete osd_op {}: need {} bytes, have {}",
                     i,
+                    CEPH_OSD_OP_SIZE,
                     cursor.remaining()
                 )));
             }
@@ -548,7 +566,7 @@ impl CephMessagePayload for MOSDOpReply {
         // The trace is used for distributed tracing (Zipkin/Jaeger)
         // These fields could be exposed in the future for observability/debugging
         // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
-        if cursor.remaining() >= 24 {
+        if cursor.remaining() >= BLKIN_TRACE_INFO_SIZE {
             let _trace = crate::types::BlkinTraceInfo::decode(&mut cursor, 0)?;
         }
 
