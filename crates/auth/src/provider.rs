@@ -368,7 +368,9 @@ impl AuthProvider for ServiceAuthProvider {
             let stype = self
                 .service_id
                 .map(EntityType::from_bits_retain)
-                .unwrap_or(EntityType::OSD);
+                .ok_or_else(|| {
+                    CephXError::ProtocolError("No service_id set in ServiceAuthProvider".into())
+                })?;
             session
                 .ticket_handlers
                 .get(&stype)

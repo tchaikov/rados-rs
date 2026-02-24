@@ -174,7 +174,9 @@ impl CephXServerHandler {
 
         // 4. Verify client's challenge response
         // Client should have encrypted: server_challenge + 1
-        let expected_response = self.server_challenge.unwrap_or(0) + 1;
+        let expected_response = self.server_challenge.ok_or_else(|| {
+            CephXError::ProtocolError("Server challenge not set before authenticate".to_string())
+        })? + 1;
 
         // Decrypt client's response using client's secret
         // The encrypted response is in the 'key' field
@@ -247,9 +249,9 @@ impl CephXServerHandler {
         let mut tickets = Vec::new();
 
         // Get current time for ticket validity
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or(Duration::from_secs(0));
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
+            CephXError::ProtocolError(format!("System clock before UNIX epoch: {}", e))
+        })?;
 
         let valid_from = now.as_secs();
         let valid_until = valid_from + 3600; // Valid for 1 hour
