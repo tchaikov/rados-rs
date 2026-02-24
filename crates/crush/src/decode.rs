@@ -76,16 +76,10 @@ impl CrushMap {
             map.rules.push(Some(rule));
         }
 
-        // Decode name maps
-        if data.remaining() >= 4 {
-            map.type_names = HashMap::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
-            map.names = HashMap::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
-            map.rule_names = HashMap::decode(data, 0)?;
-        }
+        // Decode name maps (always present — no version guard)
+        map.type_names = HashMap::decode(data, 0)?;
+        map.names = HashMap::decode(data, 0)?;
+        map.rule_names = HashMap::decode(data, 0)?;
 
         // Decode tunables (optional fields)
         if data.remaining() >= 4 {
@@ -114,14 +108,10 @@ impl CrushMap {
             map.chooseleaf_stable = u8::decode(data, 0)?;
         }
 
-        // Decode device classes (Luminous+)
-        if data.remaining() >= 4 {
+        // Decode device classes (Luminous+) — one atomic optional section
+        if data.remaining() > 0 {
             map.class_map = HashMap::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
             map.class_name = HashMap::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
             map.class_bucket = HashMap::decode(data, 0)?;
         }
 
