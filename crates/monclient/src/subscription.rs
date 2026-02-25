@@ -9,6 +9,9 @@ use std::time::Instant;
 /// Subscription flag: unsubscribe after receiving one update
 pub const CEPH_SUBSCRIBE_ONETIME: u8 = 1;
 
+/// Subscription renewal is scheduled at this fraction of the ack interval
+const SUBSCRIPTION_RENEWAL_RATIO: f64 = 0.5;
+
 /// Subscription manager
 ///
 /// Tracks which maps we want to subscribe to and manages the subscription lifecycle.
@@ -72,7 +75,9 @@ impl MonSub {
     pub fn acked(&mut self, interval_secs: u32) {
         if let Some(renew_sent) = self.renew_sent {
             // Schedule renewal for half the interval
-            let interval = std::time::Duration::from_secs(interval_secs as u64 / 2);
+            let interval = std::time::Duration::from_secs(
+                (interval_secs as f64 * SUBSCRIPTION_RENEWAL_RATIO) as u64,
+            );
             self.renew_after = Some(renew_sent + interval);
             self.renew_sent = None;
         }
