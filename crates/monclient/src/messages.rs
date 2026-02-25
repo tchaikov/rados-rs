@@ -328,8 +328,10 @@ pub struct MOSDMap {
 }
 
 impl MOSDMap {
-    /// Message version
-    const VERSION: u16 = 1;
+    /// Message version (from MOSDMap.h HEAD_VERSION)
+    const VERSION: u16 = 4;
+    /// Compatibility version (from MOSDMap.h COMPAT_VERSION)
+    const COMPAT_VERSION: u16 = 3;
 
     /// Get the first (oldest) epoch in this message
     pub fn get_first(&self) -> u32 {
