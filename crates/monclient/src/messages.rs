@@ -664,6 +664,11 @@ impl MPoolOp {
     /// Message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
     const VERSION: u16 = 4;
 
+    /// Obsolete auid field, always encoded as 0 (removed in Ceph v12)
+    const OLD_AUID_OBSOLETE: u64 = 0;
+    /// Padding byte for v3→v4 encoding compatibility
+    const V3_V4_PAD: u8 = 0;
+
     /// Create a new pool operation message
     pub fn new(fsid: [u8; 16], pool: u32, name: String, op: u32, version: u64) -> Self {
         Self {
@@ -787,7 +792,7 @@ impl PaxosServiceMessage for MPoolOp {
         self.op.encode(buf, 0)?;
 
         // Encode old_auid (obsolete, always 0)
-        0u64.encode(buf, 0)?;
+        Self::OLD_AUID_OBSOLETE.encode(buf, 0)?;
 
         // Encode snapid
         self.snapid.encode(buf, 0)?;
@@ -796,7 +801,7 @@ impl PaxosServiceMessage for MPoolOp {
         self.name.encode(buf, 0)?;
 
         // Encode pad (for v3->v4 encoding change)
-        0u8.encode(buf, 0)?;
+        Self::V3_V4_PAD.encode(buf, 0)?;
 
         // Encode crush_rule
         self.crush_rule.encode(buf, 0)?;
