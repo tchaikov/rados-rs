@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Milliseconds per second for timestamp conversions
+const MS_PER_SEC: u64 = 1000;
+
 /// Monitor map
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MonMap {
@@ -248,12 +251,12 @@ impl MonMap {
             fsid,
             epoch: denc::Epoch::new(self.epoch),
             last_changed: UTime {
-                sec: (self.modified / 1000) as u32,
-                nsec: ((self.modified % 1000) * 1_000_000) as u32,
+                sec: (self.modified / MS_PER_SEC) as u32,
+                nsec: ((self.modified % MS_PER_SEC) * 1_000_000) as u32,
             },
             created: UTime {
-                sec: (self.created / 1000) as u32,
-                nsec: ((self.created % 1000) * 1_000_000) as u32,
+                sec: (self.created / MS_PER_SEC) as u32,
+                nsec: ((self.created % MS_PER_SEC) * 1_000_000) as u32,
             },
             persistent_features: denc::MonFeature::default(),
             optional_features: denc::MonFeature::default(),
@@ -275,9 +278,9 @@ impl MonMap {
         let fsid = uuid::Uuid::from_bytes(denc_monmap.fsid);
 
         // Convert UTime to Unix timestamp (milliseconds)
-        let created =
-            (denc_monmap.created.sec as u64) * 1000 + (denc_monmap.created.nsec as u64) / 1_000_000;
-        let modified = (denc_monmap.last_changed.sec as u64) * 1000
+        let created = (denc_monmap.created.sec as u64) * MS_PER_SEC
+            + (denc_monmap.created.nsec as u64) / 1_000_000;
+        let modified = (denc_monmap.last_changed.sec as u64) * MS_PER_SEC
             + (denc_monmap.last_changed.nsec as u64) / 1_000_000;
 
         // Convert mon_info to monitors (addrs are already denc::EntityAddrvec)
