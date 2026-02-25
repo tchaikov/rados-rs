@@ -14,6 +14,9 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
+/// Send channel capacity for connection messages
+const CONNECTION_SEND_CHANNEL_CAPACITY: usize = 256;
+
 /// Parameters for creating a monitor connection
 #[derive(Clone)]
 pub struct MonConnectionParams {
@@ -153,7 +156,8 @@ impl MonConnection {
         }
 
         // Create bounded send channel (256 slots — monitors are low-rate senders)
-        let (send_tx, send_rx) = mpsc::channel::<msgr2::message::Message>(256);
+        let (send_tx, send_rx) =
+            mpsc::channel::<msgr2::message::Message>(CONNECTION_SEND_CHANNEL_CAPACITY);
 
         let osdmap_tx_for_task = params.osdmap_tx.clone();
         let mon_msg_tx_for_task = params.mon_msg_tx.clone();

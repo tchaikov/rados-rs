@@ -25,6 +25,11 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+/// Broadcast channel capacity for map events (MOSDMap, MConfig, etc.)
+const MAP_EVENT_BROADCAST_CAPACITY: usize = 100;
+/// Message channel capacity for monitor messages
+const MON_MESSAGE_CHANNEL_CAPACITY: usize = 256;
+
 /// Monitor client configuration
 #[derive(Debug, Clone)]
 pub struct MonClientConfig {
@@ -315,10 +320,10 @@ impl MonClient {
         info!("Initial monmap has {} monitors", monmap.size());
 
         // Create event broadcaster
-        let (map_events, _) = broadcast::channel(100);
+        let (map_events, _) = broadcast::channel(MAP_EVENT_BROADCAST_CAPACITY);
 
         // Create channel for monitor messages (256 slots — monitors are low-rate senders)
-        let (mon_msg_tx, mut mon_msg_rx) = mpsc::channel(256);
+        let (mon_msg_tx, mut mon_msg_rx) = mpsc::channel(MON_MESSAGE_CHANNEL_CAPACITY);
 
         let state = MonClientState {
             monmap,
