@@ -1090,8 +1090,8 @@ pub struct MAuthReply {
     pub protocol: u32,
     pub result: i32,
     pub global_id: u64,
-    pub auth_payload: Bytes,
     pub result_msg: String,
+    pub auth_payload: Bytes,
 }
 
 impl MAuthReply {
