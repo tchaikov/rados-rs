@@ -39,7 +39,7 @@
 
 pub mod client;
 pub(crate) mod connection;
-pub(crate) mod defaults;
+pub mod defaults;
 pub mod dns_srv;
 pub mod error;
 pub mod messages;
