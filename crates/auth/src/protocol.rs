@@ -6,6 +6,11 @@ use bytes::{Buf, BufMut, Bytes, BytesMut};
 use denc::{Denc, RadosError};
 use serde::Serialize;
 
+/// Authentication protocol identifiers (from ceph_fs.h)
+pub const CEPH_AUTH_UNKNOWN: u32 = 0x0;
+pub const CEPH_AUTH_NONE: u32 = 0x1;
+pub const CEPH_AUTH_CEPHX: u32 = 0x2;
+
 /// CephX request types
 pub const CEPHX_GET_AUTH_SESSION_KEY: u16 = 0x0100;
 pub const CEPHX_GET_PRINCIPAL_SESSION_KEY: u16 = 0x0200;
