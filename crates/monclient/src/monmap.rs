@@ -10,6 +10,8 @@ use uuid::Uuid;
 
 /// Milliseconds per second for timestamp conversions
 const MS_PER_SEC: u64 = 1000;
+/// Nanoseconds per millisecond for timestamp conversions
+const NSEC_PER_MSEC: u64 = 1_000_000;
 
 /// Monitor map
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -252,11 +254,11 @@ impl MonMap {
             epoch: denc::Epoch::new(self.epoch),
             last_changed: UTime {
                 sec: (self.modified / MS_PER_SEC) as u32,
-                nsec: ((self.modified % MS_PER_SEC) * 1_000_000) as u32,
+                nsec: ((self.modified % MS_PER_SEC) * NSEC_PER_MSEC) as u32,
             },
             created: UTime {
                 sec: (self.created / MS_PER_SEC) as u32,
-                nsec: ((self.created % MS_PER_SEC) * 1_000_000) as u32,
+                nsec: ((self.created % MS_PER_SEC) * NSEC_PER_MSEC) as u32,
             },
             persistent_features: denc::MonFeature::default(),
             optional_features: denc::MonFeature::default(),
@@ -279,9 +281,9 @@ impl MonMap {
 
         // Convert UTime to Unix timestamp (milliseconds)
         let created = (denc_monmap.created.sec as u64) * MS_PER_SEC
-            + (denc_monmap.created.nsec as u64) / 1_000_000;
+            + (denc_monmap.created.nsec as u64) / NSEC_PER_MSEC;
         let modified = (denc_monmap.last_changed.sec as u64) * MS_PER_SEC
-            + (denc_monmap.last_changed.nsec as u64) / 1_000_000;
+            + (denc_monmap.last_changed.nsec as u64) / NSEC_PER_MSEC;
 
         // Convert mon_info to monitors (addrs are already denc::EntityAddrvec)
         let mut monitors = Vec::new();

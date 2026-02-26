@@ -401,13 +401,13 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
         }
 
         // Decode cluster_osdmap_trim_lower_bound and newest_map (version >= 2)
-        let cluster_osdmap_trim_lower_bound = if data.remaining() >= 4 {
+        let cluster_osdmap_trim_lower_bound = if data.remaining() >= std::mem::size_of::<u32>() {
             u32::decode(&mut data, 0)?
         } else {
             0
         };
 
-        let newest_map = if data.remaining() >= 4 {
+        let newest_map = if data.remaining() >= std::mem::size_of::<u32>() {
             u32::decode(&mut data, 0)?
         } else {
             0
