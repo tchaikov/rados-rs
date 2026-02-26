@@ -21,3 +21,15 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Default timeout for keepalive ACK responses
 /// Set to 0 to disable keepalive timeout checking
 pub const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Default connection timeout for establishing a monitor session
+pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Backoff multiplier applied to hunt_interval after each failed hunt
+pub const HUNT_INTERVAL_BACKOFF: f64 = 1.5;
+
+/// Minimum multiplier for hunt interval backoff
+pub const HUNT_INTERVAL_MIN_MULTIPLE: f64 = 1.0;
+
+/// Maximum multiplier for hunt interval backoff
+pub const HUNT_INTERVAL_MAX_MULTIPLE: f64 = 10.0;

@@ -95,16 +95,16 @@ impl Default for MonClientConfig {
             entity_name: String::new(), // Must be provided by caller
             mon_addrs: Vec::new(),
             keyring_path: String::new(), // Must be provided by caller
-            connect_timeout: Duration::from_secs(30),
+            connect_timeout: defaults::CONNECT_TIMEOUT,
             command_timeout: defaults::COMMAND_TIMEOUT,
             hunt_interval: defaults::HUNT_INTERVAL,
             hunt_parallel: defaults::HUNT_PARALLEL,
             keepalive_interval: defaults::KEEPALIVE_INTERVAL,
             keepalive_timeout: defaults::KEEPALIVE_TIMEOUT,
             tick_interval: None, // Defaults to hunt_interval
-            hunt_interval_backoff: 1.5,
-            hunt_interval_min_multiple: 1.0,
-            hunt_interval_max_multiple: 10.0,
+            hunt_interval_backoff: defaults::HUNT_INTERVAL_BACKOFF,
+            hunt_interval_min_multiple: defaults::HUNT_INTERVAL_MIN_MULTIPLE,
+            hunt_interval_max_multiple: defaults::HUNT_INTERVAL_MAX_MULTIPLE,
             dns_srv_name: crate::dns_srv::DEFAULT_MON_DNS_SRV_NAME.to_string(),
         }
     }
@@ -1801,7 +1801,7 @@ impl MonClient {
 
         // Wait for that version via event channel
         let mut events = self.subscribe_events();
-        let timeout_duration = Duration::from_secs(30);
+        let timeout_duration = self.command_timeout().await;
 
         loop {
             tokio::select! {
