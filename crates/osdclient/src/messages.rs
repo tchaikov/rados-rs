@@ -46,7 +46,7 @@ pub const CEPH_OSD_OP_SIZE: usize = std::mem::size_of::<u16>()
 const BLKIN_TRACE_INFO_SIZE: usize = std::mem::size_of::<crate::types::BlkinTraceInfo>();
 /// Sentinel value meaning "calculate hash from object name"
 /// Reference: linux/net/ceph/osd_client.c encode_request_partial()
-const HASH_CALCULATE_FROM_NAME: i64 = -1;
+pub(crate) const HASH_CALCULATE_FROM_NAME: i64 = -1;
 
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
@@ -323,20 +323,7 @@ impl CephMessagePayload for MOSDOp {
             hash: HASH_CALCULATE_FROM_NAME,
         };
 
-        let before_len = buf.len();
         locator.encode(&mut buf, 0)?;
-        let after_len = buf.len();
-        let encoded_bytes = after_len - before_len;
-
-        if encoded_bytes < 50 {
-            let start = before_len;
-            let locator_bytes: Vec<u8> = buf[start..after_len].to_vec();
-            let _hex_str: String = locator_bytes
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("");
-        }
 
         // 10. object name (object_t)
         self.object.oid.encode(&mut buf, 0)?;
@@ -345,27 +332,7 @@ impl CephMessagePayload for MOSDOp {
         (self.ops.len() as u16).encode(&mut buf, 0)?;
         for op in &self.ops {
             use denc::Denc;
-
-            // Debug logging for PGLS operations
-
-            // Encode ceph_osd_op structure (CEPH_OSD_OP_SIZE bytes) using Denc
-            let op_start = buf.len();
             op.encode(&mut buf, 0)?;
-
-            // Debug: print hex dump of this operation
-            let op_end = buf.len();
-            let op_bytes = &buf[op_start..op_end];
-            let _hex_str: String = op_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-        }
-
-        // Debug: Check operation bytes are still intact before continuing
-        let first_op_start = buf.len() - (CEPH_OSD_OP_SIZE * self.ops.len());
-
-        if !self.ops.is_empty() {
-            let _op_check: String = buf[first_op_start..first_op_start + CEPH_OSD_OP_SIZE]
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect();
         }
 
         // 12. snapid

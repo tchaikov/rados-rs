@@ -14,7 +14,7 @@ use denc::{Denc, VersionedEncode};
 
 use crate::backoff::BackoffEntry;
 use crate::error::{OSDClientError, Result};
-use crate::messages::MOSDOp;
+use crate::messages::{MOSDOp, HASH_CALCULATE_FROM_NAME};
 use crate::session::OSDSession;
 use crate::throttle::Throttle;
 use crate::tracker::{Tracker, TrackerConfig};
@@ -422,7 +422,7 @@ impl OSDClient {
             pool_id: pool,
             key: String::new(),
             namespace: String::new(),
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         };
 
         // Get CRUSH map
