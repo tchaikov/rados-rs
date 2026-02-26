@@ -7,6 +7,22 @@ use denc::{
     VersionedEncode,
 };
 
+/// Wire size of ObjectStatSum at version 20: 36 × i64 + 4 × i32
+const OBJECT_STAT_SUM_ENCODED_SIZE: usize =
+    36 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
+
+/// Wire size of ObjectStatSum at version 14 (minimum supported):
+/// 30 × i64 + 4 × i32 (excludes v16-v20 fields)
+const OBJECT_STAT_SUM_V14_MIN_SIZE: usize =
+    30 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
+
+/// Number of u32 fields in OsdStatInterfaces (1 + 3×6 + 1 = 21 fields for
+/// last_update, back_{pingtime,min,max}[3], back_last, front_{pingtime,min,max}[3], front_last)
+const OSD_STAT_INTERFACES_NUM_FIELDS: usize = 21;
+
+/// Wire size of OsdStatInterfaces: 21 × u32
+const OSD_STAT_INTERFACES_SIZE: usize = OSD_STAT_INTERFACES_NUM_FIELDS * std::mem::size_of::<u32>();
+
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
 #[derive(Debug, Clone, PartialEq, Eq, Default, denc::Denc)]
@@ -138,11 +154,11 @@ impl VersionedEncode for ObjectStatSum {
         _features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Encode all 38 fields in order
-        // 36 i64 fields + 4 i32 fields = 36*8 + 4*4 = 288 + 16 = 304 bytes
-        if buf.remaining_mut() < 304 {
+        // Encode all 38 fields in order (36 × i64 + 4 × i32)
+        if buf.remaining_mut() < OBJECT_STAT_SUM_ENCODED_SIZE {
             return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for ObjectStatSum: need 304, have {}",
+                "Insufficient buffer space for ObjectStatSum: need {}, have {}",
+                OBJECT_STAT_SUM_ENCODED_SIZE,
                 buf.remaining_mut()
             )));
         }
@@ -204,13 +220,12 @@ impl VersionedEncode for ObjectStatSum {
             )));
         }
 
-        // Base fields for version 14: 28 i64 + 4 i32 + 2 i64 = 30 i64 + 4 i32 = 256 bytes
-        let min_bytes = 256;
-        if buf.remaining() < min_bytes {
+        // Base fields for version 14: 30 × i64 + 4 × i32 (excludes v16-v20 fields)
+        if buf.remaining() < OBJECT_STAT_SUM_V14_MIN_SIZE {
             return Err(RadosError::Protocol(format!(
                 "Insufficient bytes for ObjectStatSum v{}: need at least {}, have {}",
                 version,
-                min_bytes,
+                OBJECT_STAT_SUM_V14_MIN_SIZE,
                 buf.remaining()
             )));
         }
@@ -334,7 +349,7 @@ impl Denc for ObjectStatSum {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(6 + 304) // 6 bytes for ENCODE_START header + 304 bytes for content
+        Some(6 + OBJECT_STAT_SUM_ENCODED_SIZE) // 6 bytes for ENCODE_START header + content
     }
 }
 
@@ -713,10 +728,10 @@ impl OsdStatInterfaces {
 
 impl Denc for OsdStatInterfaces {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // 21 u32 fields = 84 bytes
-        if buf.remaining_mut() < 84 {
+        if buf.remaining_mut() < OSD_STAT_INTERFACES_SIZE {
             return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for OsdStatInterfaces: need 84, have {}",
+                "Insufficient buffer space for OsdStatInterfaces: need {}, have {}",
+                OSD_STAT_INTERFACES_SIZE,
                 buf.remaining_mut()
             )));
         }
@@ -747,9 +762,10 @@ impl Denc for OsdStatInterfaces {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 84 {
+        if buf.remaining() < OSD_STAT_INTERFACES_SIZE {
             return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for OsdStatInterfaces: need 84, have {}",
+                "Insufficient bytes for OsdStatInterfaces: need {}, have {}",
+                OSD_STAT_INTERFACES_SIZE,
                 buf.remaining()
             )));
         }
@@ -796,12 +812,12 @@ impl Denc for OsdStatInterfaces {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(84) // 21 * u32
+        Some(OSD_STAT_INTERFACES_SIZE)
     }
 }
 
 impl FixedSize for OsdStatInterfaces {
-    const SIZE: usize = 84;
+    const SIZE: usize = OSD_STAT_INTERFACES_SIZE;
 }
 
 /// OSD statistics
