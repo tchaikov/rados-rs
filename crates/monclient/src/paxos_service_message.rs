@@ -11,7 +11,7 @@ use bytes::{Bytes, BytesMut};
 ///
 /// These fields are encoded at the beginning of every PaxosServiceMessage
 /// payload using the paxos_encode() method in C++.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PaxosFields {
     /// Version number for the paxos service
     pub version: u64,
@@ -19,6 +19,12 @@ pub struct PaxosFields {
     pub deprecated_session_mon: i16,
     /// Deprecated session monitor transaction ID (always 0)
     pub deprecated_session_mon_tid: u64,
+}
+
+impl Default for PaxosFields {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PaxosFields {
@@ -64,9 +70,9 @@ impl PaxosFields {
         })
     }
 
-    /// Size of encoded paxos fields in bytes
+    /// Size of encoded paxos fields in bytes: version(u64) + deprecated_session_mon(i16) + deprecated_session_mon_tid(u64)
     pub const fn encoded_size() -> usize {
-        18 // 8 + 2 + 8
+        std::mem::size_of::<u64>() + std::mem::size_of::<i16>() + std::mem::size_of::<u64>()
     }
 }
 
