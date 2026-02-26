@@ -663,6 +663,8 @@ pub struct MPoolOp {
 impl MPoolOp {
     /// Message version (HEAD_VERSION = 4, COMPAT_VERSION = 2)
     const VERSION: u16 = 4;
+    /// Compatibility version (from MPoolOp.h)
+    const COMPAT_VERSION: u16 = 2;
 
     /// Obsolete auid field, always encoded as 0 (removed in Ceph v12)
     const OLD_AUID_OBSOLETE: u64 = 0;
