@@ -155,7 +155,7 @@ impl MonConnection {
             tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
         }
 
-        // Create bounded send channel (256 slots — monitors are low-rate senders)
+        // Create bounded send channel (monitors are low-rate senders)
         let (send_tx, send_rx) =
             mpsc::channel::<msgr2::message::Message>(CONNECTION_SEND_CHANNEL_CAPACITY);
 

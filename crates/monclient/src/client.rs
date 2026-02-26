@@ -1766,7 +1766,7 @@ impl MonClient {
             state
                 .map_waiters
                 .entry(what.to_string())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(MapWaiter { tx });
         }
 

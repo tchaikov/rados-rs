@@ -461,21 +461,12 @@ impl PaxosServiceMessage for MMonCommand {
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         use denc::Denc;
 
-        // Encode fsid (UUID) using Denc
-        tracing::debug!(
-            "MMonCommand::encode_message: fsid={}, bytes={:02x?}",
-            self.fsid,
-            self.fsid.bytes
-        );
         self.fsid.encode(buf, 0)?;
-        tracing::debug!("MMonCommand::encode: fsid={}", self.fsid);
 
-        // Encode command array using Denc
         (self.cmd.len() as u32).encode(buf, 0)?;
         for s in &self.cmd {
             s.encode(buf, 0)?;
         }
-        tracing::debug!("MMonCommand::encode: cmd={:?}", self.cmd);
 
         Ok(())
     }
@@ -587,30 +578,12 @@ impl PaxosServiceMessage for MMonCommandAck {
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         use denc::Denc;
 
-        tracing::debug!(
-            "MMonCommandAck::decode: data.len()={}, first 32 bytes: {:02x?}",
-            data.len(),
-            &data[..data.len().min(32)]
-        );
-
-        // Decode r (errorcode32_t)
         let r = i32::decode(data, 0)?;
-
-        tracing::debug!("Decoded r={}, remaining={}", r, data.remaining());
-
-        // Decode rs string using Denc
         let rs = String::decode(data, 0)?;
 
-        // Decode cmd array using Denc
         let cmd_count = u32::decode(data, 0)? as usize;
-        tracing::debug!("cmd_count={}, remaining={}", cmd_count, data.remaining());
-
         let cmd = (0..cmd_count)
-            .map(|i| {
-                String::decode(data, 0).map_err(|e| {
-                    MonClientError::DecodingError(format!("Failed to decode cmd[{}]: {}", i, e))
-                })
-            })
+            .map(|_| String::decode(data, 0).map_err(MonClientError::from))
             .collect::<Result<Vec<_>>>()?;
 
         Ok(Self { paxos, r, rs, cmd })
