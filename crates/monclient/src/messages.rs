@@ -9,12 +9,12 @@ use bytes::{Buf, Bytes, BytesMut};
 use denc::UuidD;
 use std::collections::HashMap;
 
-// Message type constants (add to msgr2::message)
+// Message type constants
 pub const CEPH_MSG_MON_SUBSCRIBE: u16 = 0x000f;
 pub const CEPH_MSG_MON_SUBSCRIBE_ACK: u16 = 0x0010;
-pub const CEPH_MSG_OSD_MAP: u16 = 0x0029;
-pub const CEPH_MSG_MON_GET_VERSION: u16 = 19;
-pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 20;
+pub const CEPH_MSG_OSD_MAP: u16 = msgr2::message::CEPH_MSG_OSD_MAP;
+pub const CEPH_MSG_MON_GET_VERSION: u16 = 0x0013;
+pub const CEPH_MSG_MON_GET_VERSION_REPLY: u16 = 0x0014;
 
 // Pool operation constants
 pub const POOL_OP_CREATE: u32 = 0x01;
