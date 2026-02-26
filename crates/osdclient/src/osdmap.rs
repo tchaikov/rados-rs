@@ -374,6 +374,12 @@ impl VersionedEncode for BloomHitSetParams {
 denc::impl_denc_for_versioned!(BloomHitSetParams);
 
 /// HitSet parameter types - using dedicated types for each variant
+/// Type discriminants match C++ HitSet::Params::TYPE_* constants
+const HITSET_TYPE_NONE: u8 = 0;
+const HITSET_TYPE_EXPLICIT_HASH: u8 = 1;
+const HITSET_TYPE_EXPLICIT_OBJECT: u8 = 2;
+const HITSET_TYPE_BLOOM: u8 = 3;
+
 #[derive(Debug, Clone, Default)]
 pub enum HitSetParams {
     #[default]
@@ -440,18 +446,18 @@ impl VersionedEncode for HitSetParams {
 
         match self {
             HitSetParams::None => {
-                buf.put_u8(0); // TYPE_NONE
+                buf.put_u8(HITSET_TYPE_NONE);
             }
             HitSetParams::ExplicitHash(params) => {
-                buf.put_u8(1); // TYPE_EXPLICIT_HASH
+                buf.put_u8(HITSET_TYPE_EXPLICIT_HASH);
                 params.encode_versioned(buf, features)?;
             }
             HitSetParams::ExplicitObject(params) => {
-                buf.put_u8(2); // TYPE_EXPLICIT_OBJECT
+                buf.put_u8(HITSET_TYPE_EXPLICIT_OBJECT);
                 params.encode_versioned(buf, features)?;
             }
             HitSetParams::Bloom(params) => {
-                buf.put_u8(3); // TYPE_BLOOM
+                buf.put_u8(HITSET_TYPE_BLOOM);
                 params.encode_versioned(buf, features)?;
             }
         }
@@ -474,16 +480,16 @@ impl VersionedEncode for HitSetParams {
         let hit_set_type = buf.get_u8();
 
         match hit_set_type {
-            0 => Ok(HitSetParams::None),
-            1 => {
+            HITSET_TYPE_NONE => Ok(HitSetParams::None),
+            HITSET_TYPE_EXPLICIT_HASH => {
                 let params = ExplicitHashHitSetParams::decode_versioned(buf, features)?;
                 Ok(HitSetParams::ExplicitHash(params))
             }
-            2 => {
+            HITSET_TYPE_EXPLICIT_OBJECT => {
                 let params = ExplicitObjectHitSetParams::decode_versioned(buf, features)?;
                 Ok(HitSetParams::ExplicitObject(params))
             }
-            3 => {
+            HITSET_TYPE_BLOOM => {
                 let params = BloomHitSetParams::decode_versioned(buf, features)?;
                 Ok(HitSetParams::Bloom(params))
             }
@@ -1597,9 +1603,6 @@ impl VersionedEncode for PgPool {
 
         // Version 32+ fields
         if version >= 32 {
-            if buf.remaining() >= 2 {
-                let _peek_bytes: Vec<u8> = buf.chunk()[..buf.remaining().min(10)].to_vec();
-            }
             pool.nonprimary_shards = ShardIdSet::decode(buf, features)?;
         }
 
