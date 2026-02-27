@@ -388,6 +388,10 @@ impl CephMessagePayload for MOSDOpReply {
         Self::VERSION
     }
 
+    fn msg_compat_version(_features: u64) -> u16 {
+        Self::COMPAT_VERSION
+    }
+
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         // MOSDOpReply encoding not implemented yet - this is typically only needed on the server side
         Err(msgr2::Error::Serialization)

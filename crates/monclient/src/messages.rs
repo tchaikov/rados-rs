@@ -35,6 +35,8 @@ pub struct MMonSubscribe {
 impl MMonSubscribe {
     /// Message version
     const VERSION: u16 = 3;
+    /// Compatibility version (from MMonSubscribe.h COMPAT_VERSION)
+    const COMPAT_VERSION: u16 = 1;
 
     pub fn new() -> Self {
         Self {
@@ -64,6 +66,10 @@ impl msgr2::ceph_message::CephMessagePayload for MMonSubscribe {
 
     fn msg_version(_features: u64) -> u16 {
         Self::VERSION
+    }
+
+    fn msg_compat_version(_features: u64) -> u16 {
+        Self::COMPAT_VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -362,6 +368,10 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
 
     fn msg_version(_features: u64) -> u16 {
         Self::VERSION
+    }
+
+    fn msg_compat_version(_features: u64) -> u16 {
+        Self::COMPAT_VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
@@ -830,6 +840,10 @@ impl msgr2::ceph_message::CephMessagePayload for MPoolOp {
 
     fn msg_version(_features: u64) -> u16 {
         Self::VERSION
+    }
+
+    fn msg_compat_version(_features: u64) -> u16 {
+        Self::COMPAT_VERSION
     }
 
     fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
