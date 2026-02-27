@@ -282,32 +282,16 @@ impl VersionedEncode for MonInfo {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        // Minimum supported version check (Nautilus v14+)
+        crate::check_min_version!(version, 6, "MonInfo", "Nautilus v14+");
+
+        // All fields are present in v6+ (which we now require)
         let name = <String as Denc>::decode(buf, features)?;
         let public_addrs = <EntityAddrvec as Denc>::decode(buf, features)?;
-
-        let priority = if version >= 2 {
-            <u16 as Denc>::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let weight = if version >= 4 {
-            <u16 as Denc>::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let crush_loc = if version >= 5 {
-            <BTreeMap<String, String> as Denc>::decode(buf, features)?
-        } else {
-            BTreeMap::new()
-        };
-
-        let time_added = if version >= 6 {
-            <UTime as Denc>::decode(buf, features)?
-        } else {
-            UTime::default()
-        };
+        let priority = <u16 as Denc>::decode(buf, features)?;
+        let weight = <u16 as Denc>::decode(buf, features)?;
+        let crush_loc = <BTreeMap<String, String> as Denc>::decode(buf, features)?;
+        let time_added = <UTime as Denc>::decode(buf, features)?;
 
         Ok(MonInfo {
             name,
@@ -319,36 +303,16 @@ impl VersionedEncode for MonInfo {
         })
     }
 
-    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
-        let mut size = 0;
-
-        // name (string)
-        size += self.name.encoded_size(features)?;
-
-        // public_addrs (entity_addrvec_t)
-        size += self.public_addrs.encoded_size(features)?;
-
-        // priority (v2+, u16)
-        if version >= 2 {
-            size += 2;
-        }
-
-        // weight (v4+, u16)
-        if version >= 4 {
-            size += 2;
-        }
-
-        // crush_loc (v5+, map)
-        if version >= 5 {
-            size += self.crush_loc.encoded_size(features)?;
-        }
-
-        // time_added (v6+, UTime)
-        if version >= 6 {
-            size += self.time_added.encoded_size(features)?;
-        }
-
-        Some(size)
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        // All fields are always encoded (v6+)
+        Some(
+            self.name.encoded_size(features)?
+                + self.public_addrs.encoded_size(features)?
+                + 2  // priority (u16)
+                + 2  // weight (u16)
+                + self.crush_loc.encoded_size(features)?
+                + self.time_added.encoded_size(features)?,
+        )
     }
 }
 
@@ -496,6 +460,9 @@ impl VersionedEncode for MonMap {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        // Minimum supported version check (Nautilus v14+)
+        crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
+
         // Decode fsid (raw 16 bytes)
         if buf.remaining() < 16 {
             return Err(RadosError::Protocol(
@@ -508,66 +475,19 @@ impl VersionedEncode for MonMap {
         // Decode epoch
         let epoch = <Epoch as Denc>::decode(buf, features)?;
 
-        // For v1, decode vector<entity_inst_t> and build mon_addr
-        // For v2-v5, decode legacy mon_addr map
-        let mut legacy_mon_addr: BTreeMap<String, crate::entity_addr::EntityAddr> = BTreeMap::new();
-
-        if version == 1 {
-            // v1: decode vector<entity_inst_t>
-            // This legacy format is rarely encountered in modern Ceph deployments
-            // and requires special handling of entity_inst_t structures
-            return Err(RadosError::Protocol(
-                "MonMap decoding version 1 not supported (legacy format)".to_string(),
-            ));
-        } else if version < 6 {
-            // v2-v5: decode map<string, entity_addr_t>
-            legacy_mon_addr =
-                <BTreeMap<String, crate::entity_addr::EntityAddr> as Denc>::decode(buf, features)?;
-        }
-
         // Decode timestamps
         let last_changed = <UTime as Denc>::decode(buf, features)?;
         let created = <UTime as Denc>::decode(buf, features)?;
 
-        // Decode features (v4+)
-        let (persistent_features, optional_features) = if version >= 4 {
-            (
-                <MonFeature as Denc>::decode(buf, features)?,
-                <MonFeature as Denc>::decode(buf, features)?,
-            )
-        } else {
-            (MonFeature::default(), MonFeature::default())
-        };
+        // Decode features (v6+ always present)
+        let persistent_features = <MonFeature as Denc>::decode(buf, features)?;
+        let optional_features = <MonFeature as Denc>::decode(buf, features)?;
 
-        // Decode mon_info (v5+) or build from legacy
-        let mon_info = if version < 5 {
-            // Build mon_info from legacy_mon_addr
-            let mut info_map = BTreeMap::new();
-            for (name, addr) in legacy_mon_addr {
-                let mon = MonInfo {
-                    name: name.clone(),
-                    public_addrs: {
-                        let mut addrvec = crate::entity_addr::EntityAddrvec::new();
-                        addrvec.addrs.push(addr);
-                        addrvec
-                    },
-                    ..Default::default()
-                };
-                info_map.insert(name, mon);
-            }
-            info_map
-        } else {
-            <BTreeMap<String, MonInfo> as Denc>::decode(buf, features)?
-        };
+        // Decode mon_info (v6+ always uses modern format)
+        let mon_info = <BTreeMap<String, MonInfo> as Denc>::decode(buf, features)?;
 
-        // Decode ranks (v6+) or calculate from mon_info
-        let ranks = if version < 6 {
-            // Would need to call calc_legacy_ranks()
-            // For now, just extract names from mon_info
-            mon_info.keys().cloned().collect()
-        } else {
-            <Vec<String> as Denc>::decode(buf, features)?
-        };
+        // Decode ranks (v6+)
+        let ranks = <Vec<String> as Denc>::decode(buf, features)?;
 
         // Decode min_mon_release (v7+)
         let min_mon_release = if version >= 7 {

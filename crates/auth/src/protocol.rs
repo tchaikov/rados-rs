@@ -329,14 +329,15 @@ impl Denc for CephXAuthenticate {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
         let struct_v = u8::decode(buf, features)?;
+
+        // Minimum supported version check (Luminous v12+)
+        denc::check_min_version!(struct_v, 2, "CephXAuthenticate", "Luminous v12+");
+
         let client_challenge = u64::decode(buf, features)?;
         let key = u64::decode(buf, features)?;
         let old_ticket = CephXTicketBlob::decode(buf, features)?;
-        let other_keys = if struct_v >= 2 {
-            u32::decode(buf, 0)?
-        } else {
-            0
-        };
+        // Always decode other_keys (v2+)
+        let other_keys = u32::decode(buf, 0)?;
 
         Ok(Self {
             struct_v,

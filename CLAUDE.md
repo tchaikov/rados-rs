@@ -42,10 +42,15 @@ A Rust implementation of librados for Ceph cluster communication.
 ### Goal
 Implement Ceph type encoding/decoding and librados functionality in Rust.
 
+**Minimum Ceph Version**: Nautilus (v14, March 2019)
+
+rados-rs requires Ceph Nautilus or later. Pre-Nautilus support has been removed to simplify the codebase. See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version information.
+
 ### Key Technologies
 - **Ceph Protocol**: msgr2 (messenger v2) for network communication
 - **Encoding**: Denc trait for efficient serialization/deserialization
 - **Authentication**: CephX authentication protocol
+- **Version Checking**: `check_min_version!` macro for consistent version validation
 
 ### Project Structure
 ```
@@ -534,6 +539,40 @@ pub use denc::UTime;  // Re-export, no duplication
 
 **Rationale**: Duplicate type definitions lead to incompatibilities and confusion. Always consolidate to a single canonical definition.
 
+### ❌ Missing Version Checks in Versioned Types
+
+```rust
+// BAD: No version check, silently accepts old versions
+fn decode_content<B: Buf>(
+    buf: &mut B,
+    features: u64,
+    version: u8,
+    _compat_version: u8,
+) -> Result<Self, RadosError> {
+    // Directly decode fields without checking version
+    let field1 = u32::decode(buf, 0)?;
+    let field2 = String::decode(buf, 0)?;
+    Ok(Self { field1, field2 })
+}
+
+// GOOD: Use check_min_version! macro
+fn decode_content<B: Buf>(
+    buf: &mut B,
+    features: u64,
+    version: u8,
+    _compat_version: u8,
+) -> Result<Self, RadosError> {
+    // Reject unsupported versions with clear error message
+    crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
+
+    let field1 = u32::decode(buf, 0)?;
+    let field2 = String::decode(buf, 0)?;
+    Ok(Self { field1, field2 })
+}
+```
+
+**Rationale**: Version checks ensure we only decode formats we support, preventing subtle bugs from missing fields or incorrect defaults. The `check_min_version!` macro provides consistent error messages.
+
 ---
 
 ## Code Review Checklist
@@ -548,6 +587,7 @@ When reviewing code, investigate if you see:
 6. ❌ Custom `.map_err()` for every field in `decode()`
 7. ❌ Duplicate type definitions across crates
 8. ❌ Verbose C-style field names when simpler names would work
+9. ❌ Missing version checks in versioned types (use `check_min_version!`)
 
 **Action**: Refactor to use Denc trait or consolidate into reusable structures.
 
@@ -775,6 +815,7 @@ Before committing any code, verify:
 ✅ Consolidate duplicate types with re-exports
 ✅ Add custom Serialize for JSON compatibility
 ✅ Record learnings in auto memory
+✅ Use `check_min_version!` macro for version validation
 
 ### DON'T:
 ❌ Use manual primitives (`get_u*_le`, `put_u*_le`) outside `impl Denc`
@@ -786,6 +827,7 @@ Before committing any code, verify:
 ❌ Start from scratch - always fix existing code
 ❌ Tolerate test failures
 ❌ Commit without running tests
+❌ Decode old versions without version checks
 
 ---
 

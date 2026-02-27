@@ -200,42 +200,26 @@ impl VersionedEncode for HObject {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Version 1: added key field
-        // Version 2: added max field
-        // Version 4: added nspace and pool fields
+        // Minimum supported version check (Nautilus v14+)
+        crate::check_min_version!(version, 4, "HObject", "Nautilus v14+");
 
-        let key = if version >= 1 {
-            <String as Denc>::decode(buf, features)?
-        } else {
-            String::new()
-        };
-
+        // All fields are present in v4+ (which we now require)
+        let key = <String as Denc>::decode(buf, features)?;
         let oid = <String as Denc>::decode(buf, features)?;
         let snapid = <u64 as Denc>::decode(buf, features)?;
         let hash = <u32 as Denc>::decode(buf, features)?;
+        let max = <bool as Denc>::decode(buf, features)?;
+        let nspace = <String as Denc>::decode(buf, features)?;
+        let mut pool = <i64 as Denc>::decode(buf, features)?;
 
-        let max = if version >= 2 {
-            <bool as Denc>::decode(buf, features)?
-        } else {
-            false
-        };
+        // Compatibility fix for hammer (see hobject.cc)
+        if pool == -1 && snapid == 0 && hash == 0 && !max && oid.is_empty() {
+            pool = i64::MIN;
+        }
 
-        let (nspace, pool) = if version >= 4 {
-            let ns = <String as Denc>::decode(buf, features)?;
-            let mut p = <i64 as Denc>::decode(buf, features)?;
-
-            // Compatibility fix for hammer (see hobject.cc)
-            if p == -1 && snapid == 0 && hash == 0 && !max && oid.is_empty() {
-                p = i64::MIN;
-            }
-
-            // Convert i64 to u64 (wire format uses i64, internal representation uses u64)
-            // Note: Negative values are reinterpreted as large u64 values
-            (ns, p as u64)
-        } else {
-            // Default to u64::MAX (equivalent to -1 in i64)
-            (String::new(), u64::MAX)
-        };
+        // Convert i64 to u64 (wire format uses i64, internal representation uses u64)
+        // Note: Negative values are reinterpreted as large u64 values
+        let pool = pool as u64;
 
         Ok(Self {
             key,

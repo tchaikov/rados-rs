@@ -368,14 +368,14 @@ impl Denc for AuthTicket {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
         let struct_v = u8::decode(buf, features)?;
+
+        // Minimum supported version check (Nautilus v14+)
+        denc::check_min_version!(struct_v, 2, "AuthTicket", "Nautilus v14+");
+
         let name = EntityName::decode(buf, features)?;
         let global_id = u64::decode(buf, features)?;
-        // Decode old_auid if struct_v >= 2
-        let old_auid = if struct_v >= 2 {
-            u64::decode(buf, features)?
-        } else {
-            u64::MAX
-        };
+        // Always decode old_auid (v2+)
+        let old_auid = u64::decode(buf, features)?;
         let created = SystemTime::decode(buf, features)?;
         let expires = SystemTime::decode(buf, features)?;
         let caps = AuthCapsInfo::decode(buf, features)?;

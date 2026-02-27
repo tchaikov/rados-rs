@@ -182,6 +182,13 @@ impl denc::FixedSize for PgId {
 /// Implement VersionedEncode for ObjectLocator
 /// Matches C++ object_locator_t encoding from ~/dev/ceph/src/osd/osd_types.cc
 /// Uses version 6, compat 3 (or 6 if hash != -1), includes pool, preferred, key, nspace, and hash
+///
+/// ## Version Support
+/// - **Encoding**: v6 (current)
+/// - **Decoding**: v5+ (Nautilus v14+)
+/// - **Minimum Ceph**: Nautilus (v14)
+///
+/// Versions < 5 are not supported and will return an error.
 impl VersionedEncode for ObjectLocator {
     fn encoding_version(&self, _features: u64) -> u8 {
         6 // Match C++ - version 6 includes pool, preferred, key, nspace, hash
@@ -229,31 +236,21 @@ impl VersionedEncode for ObjectLocator {
         struct_v: u8,
         _compat_version: u8,
     ) -> std::result::Result<Self, RadosError> {
-        // Decode pool and preferred fields (format changed in v2)
-        let pool_id = if struct_v < 2 {
-            // Old format: int32_t pool, int16_t preferred
-            let op = i32::decode(buf, features)?;
-            let _pref = i16::decode(buf, features)?;
-            op as u64
-        } else {
-            // New format: int64_t pool, int32_t preferred
-            // Note: Ceph wire format uses i64, but we convert to u64 internally
-            let pool = i64::decode(buf, features)?;
-            let _preferred = i32::decode(buf, features)?;
-            pool as u64
-        };
+        // Minimum supported version check (Nautilus v14+)
+        denc::check_min_version!(struct_v, 5, "ObjectLocator", "Nautilus v14+");
+
+        // Decode pool and preferred fields (v2+ format: i64 pool, i32 preferred)
+        let pool = i64::decode(buf, features)?;
+        let _preferred = i32::decode(buf, features)?;
+        let pool_id = pool as u64;
 
         // Decode key (present in all versions)
         let key = String::decode(buf, features)?;
 
-        // Decode namespace (added in v5)
-        let namespace = if struct_v >= 5 {
-            String::decode(buf, features)?
-        } else {
-            String::new()
-        };
+        // Decode namespace (v5+, always present since we require v5+)
+        let namespace = String::decode(buf, features)?;
 
-        // Decode hash (added in v6)
+        // Decode hash (added in v6, keep conditional for post-Nautilus compatibility)
         let hash = if struct_v >= 6 {
             i64::decode(buf, features)?
         } else {

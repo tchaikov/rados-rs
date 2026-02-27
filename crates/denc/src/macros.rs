@@ -1,5 +1,40 @@
 //! Macros for reducing code duplication in encoding/decoding
 
+/// Check minimum supported version for decoding
+///
+/// This macro enforces minimum version requirements for types that no longer
+/// support pre-Nautilus (v14) Ceph versions. It provides a consistent error
+/// message format across all types.
+///
+/// # Examples
+///
+/// ```ignore
+/// use denc::check_min_version;
+///
+/// fn decode_content<B: Buf>(
+///     buf: &mut B,
+///     features: u64,
+///     version: u8,
+///     _compat_version: u8,
+/// ) -> Result<Self, RadosError> {
+///     // Reject versions < 5 (Nautilus v14+)
+///     check_min_version!(version, 5, "ObjectLocator", "Nautilus v14");
+///
+///     // Continue with decoding...
+/// }
+/// ```
+#[macro_export]
+macro_rules! check_min_version {
+    ($version:expr, $min:expr, $type_name:expr, $ceph_release:expr) => {
+        if $version < $min {
+            return Err($crate::RadosError::Protocol(format!(
+                "{} version {} not supported (requires Ceph {}, minimum version {})",
+                $type_name, $version, $ceph_release, $min
+            )));
+        }
+    };
+}
+
 /// Decode a field conditionally based on version
 ///
 /// This macro reduces the repetitive pattern of:
