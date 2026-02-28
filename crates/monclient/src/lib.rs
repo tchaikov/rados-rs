@@ -7,15 +7,17 @@
 //! # Example
 //!
 //! ```no_run
-//! use monclient::{MonClient, MonClientConfig};
+//! use monclient::{AuthConfig, MonClient, MonClientConfig};
 //! use std::time::Duration;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
+//!     // Create auth config from ceph.conf
+//!     let auth = AuthConfig::from_ceph_conf("/etc/ceph/ceph.conf")?;
+//!
 //!     let config = MonClientConfig {
-//!         entity_name: "client.admin".to_string(),
 //!         mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
-//!         keyring_path: "/etc/ceph/ceph.client.admin.keyring".to_string(),
+//!         auth: Some(auth),
 //!         connect_timeout: Duration::from_secs(30),
 //!         command_timeout: Duration::from_secs(60),
 //!         hunt_interval: Duration::from_secs(3),
@@ -37,6 +39,7 @@
 //! }
 //! ```
 
+pub mod auth_config;
 pub mod client;
 pub(crate) mod connection;
 pub mod defaults;
@@ -49,6 +52,7 @@ pub(crate) mod subscription;
 pub mod types;
 pub(crate) mod wait_helper;
 
+pub use auth_config::AuthConfig;
 pub use client::{MonClient, MonClientConfig, PoolOpResult};
 pub use dns_srv::{resolve_mon_addrs_via_dns_srv, DEFAULT_MON_DNS_SRV_NAME};
 pub use error::{MonClientError, Result};

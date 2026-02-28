@@ -142,12 +142,15 @@ async fn main() -> Result<()> {
     // Create map channel for routing MOSDMap messages
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
+    // Create auth config from keyring
+    let auth = monclient::AuthConfig::from_keyring(cli.name.clone(), &keyring_path)
+        .context("Failed to create auth config")?;
+
     // Create MonClient with map channel
     // When mon_addrs is empty, MonClient will automatically try DNS SRV discovery
     let mon_config = monclient::MonClientConfig {
-        entity_name: cli.name.clone(),
         mon_addrs,
-        keyring_path: keyring_path.clone(),
+        auth: Some(auth),
         dns_srv_name,
         ..Default::default()
     };
@@ -178,8 +181,6 @@ async fn main() -> Result<()> {
         .as_secs() as u32;
 
     let osd_config = osdclient::OSDClientConfig {
-        entity_name: cli.name.clone(),
-        keyring_path: Some(keyring_path.clone()),
         client_inc,
         ..Default::default()
     };

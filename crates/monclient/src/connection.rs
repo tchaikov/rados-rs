@@ -24,10 +24,8 @@ pub struct MonConnectionParams {
     pub addr: SocketAddr,
     /// Monitor rank
     pub rank: usize,
-    /// Entity name (e.g., "client.admin")
-    pub entity_name: String,
-    /// Path to keyring file
-    pub keyring_path: Option<String>,
+    /// Optional authentication provider (CephX, None, etc.)
+    pub auth_provider: Option<auth::MonitorAuthProvider>,
     /// Keepalive policy
     pub keepalive_policy: KeepalivePolicy,
     /// Channel for routing MOSDMap messages to OSDClient
@@ -102,21 +100,10 @@ impl MonConnection {
         );
 
         // Create connection config with authentication
-        let config = if let Some(keyring) = params.keyring_path {
-            // Load keyring and create auth provider
-            let mut mon_auth =
-                auth::MonitorAuthProvider::new(&params.entity_name).map_err(|e| {
-                    MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
-                })?;
-            mon_auth
-                .set_secret_key_from_keyring(&keyring)
-                .map_err(|e| {
-                    MonClientError::MessageError(msgr2::error::Error::Auth(e.to_string()))
-                })?;
-
-            ConnectionConfig::with_auth_provider(Box::new(mon_auth))
+        let config = if let Some(auth_provider) = params.auth_provider {
+            ConnectionConfig::with_auth_provider(Box::new(auth_provider))
         } else {
-            // No keyring, use no authentication
+            // No auth provider, use no authentication
             ConnectionConfig::with_no_auth()
         };
 

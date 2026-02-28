@@ -228,6 +228,8 @@ pub struct BannerConnecting {
     pub supported_auth_methods: Vec<crate::AuthMethod>,
     pub auth_provider: Option<Box<dyn auth::AuthProvider>>,
     pub service_id: u32,
+    pub entity_name: denc::EntityName,
+    pub global_id: u64,
 }
 
 impl std::fmt::Debug for BannerConnecting {
@@ -261,6 +263,8 @@ impl State for BannerConnecting {
             self.supported_auth_methods.clone(),
             self.auth_provider.clone(),
             self.service_id,
+            self.entity_name.clone(),
+            self.global_id,
         ))))
     }
 }
@@ -272,6 +276,8 @@ pub struct HelloConnecting {
     supported_auth_methods: Vec<crate::AuthMethod>,
     auth_provider: Option<Box<dyn auth::AuthProvider>>,
     service_id: u32,
+    entity_name: denc::EntityName,
+    global_id: u64,
 }
 
 impl std::fmt::Debug for HelloConnecting {
@@ -294,6 +300,8 @@ impl HelloConnecting {
         supported_auth_methods: Vec<crate::AuthMethod>,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
         service_id: u32,
+        entity_name: denc::EntityName,
+        global_id: u64,
     ) -> Self {
         Self {
             hello_sent: false,
@@ -301,6 +309,8 @@ impl HelloConnecting {
             supported_auth_methods,
             auth_provider,
             service_id,
+            entity_name,
+            global_id,
         }
     }
 }
@@ -333,6 +343,8 @@ impl State for HelloConnecting {
                     self.supported_auth_methods.clone(),
                     self.auth_provider.clone(),
                     self.service_id,
+                    self.entity_name.clone(),
+                    self.global_id,
                 ))))
             }
             _ => Err(Error::protocol_error(&format!(
@@ -359,6 +371,8 @@ impl State for HelloConnecting {
                     self.supported_auth_methods.clone(),
                     self.auth_provider.clone(),
                     self.service_id,
+                    self.entity_name.clone(),
+                    self.global_id,
                 )),
             })
         } else {
@@ -378,6 +392,10 @@ pub struct AuthConnecting {
     tried_methods: Vec<crate::AuthMethod>,
     /// Service ID for service-based auth (OSD=4, MDS=2, MGR=16, MON=0)
     service_id: u32,
+    /// Entity name for AUTH_NONE payload
+    entity_name: denc::EntityName,
+    /// Global ID from monitor authentication (for AUTH_NONE authorizers)
+    global_id: u64,
 }
 
 impl std::fmt::Debug for AuthConnecting {
@@ -411,6 +429,8 @@ impl AuthConnecting {
         supported_auth_methods: Vec<crate::AuthMethod>,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
         service_id: u32,
+        entity_name: denc::EntityName,
+        global_id: u64,
     ) -> Self {
         // Determine the preferred auth method (first in the list)
         let preferred_auth_method = supported_auth_methods
@@ -419,10 +439,11 @@ impl AuthConnecting {
             .unwrap_or(crate::AuthMethod::None);
 
         tracing::debug!(
-            "AuthConnecting::new with auth method {:?}, has_provider={}, service_id={}",
+            "AuthConnecting::new with auth method {:?}, has_provider={}, service_id={}, global_id={}",
             preferred_auth_method,
             auth_provider.is_some(),
-            service_id
+            service_id,
+            global_id
         );
         tracing::info!(
             "Starting auth with method={:?}, supported_methods={:?}",
@@ -437,6 +458,8 @@ impl AuthConnecting {
             supported_auth_methods,
             tried_methods: Vec::new(),
             service_id,
+            entity_name,
+            global_id,
         }
     }
 
@@ -570,6 +593,8 @@ impl State for AuthConnecting {
                     supported_auth_methods: self.supported_auth_methods.clone(),
                     tried_methods: Vec::new(),
                     service_id: self.service_id,
+                    entity_name: self.entity_name.clone(),
+                    global_id: self.global_id,
                 };
 
                 new_state.tried_methods = new_tried;
@@ -738,27 +763,26 @@ impl State for AuthConnecting {
 
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
-                tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
-                // For AuthMethod::None, we still need to send entity_name and global_id
-                // Reference: AuthNoneAuthorizer::build_authorizer() in src/auth/none/AuthNoneProtocol.h
-                // Format: struct_v (u8=1) + entity_name (entity_type u8 + num u64) + global_id (u64)
-                use denc::Denc;
-                let mut payload = bytes::BytesMut::new();
-
-                // struct_v = 1
-                1u8.encode(&mut payload, 0)?;
-
-                // entity_name - encode manually as packed format (entity_type u8 + num u64)
-                // Use CLIENT type (0x08) with num=0 for now
-                // TODO: Pass actual entity_name through ConnectionConfig
-                const CEPH_ENTITY_TYPE_CLIENT: u8 = 0x08;
-                CEPH_ENTITY_TYPE_CLIENT.encode(&mut payload, 0)?;
-                0u64.encode(&mut payload, 0)?; // entity num
-
-                // global_id = 0 for initial request
-                0u64.encode(&mut payload, 0)?;
-
-                (crate::AuthMethod::None.into(), payload.freeze())
+                // AUTH_NONE payload format:
+                // - Monitor connections (service_id=0): mode (u8 = 10) + entity_name + global_id
+                // - Service connections (service_id!=0): struct_v (u8 = 1) + entity_name + global_id
+                if self.service_id != 0 && self.global_id != 0 {
+                    tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None authorizer (service_id={}, global_id={})", self.service_id, self.global_id);
+                    // Build authorizer for service connections: struct_v=1 + entity_name + global_id
+                    let mut buf = bytes::BytesMut::new();
+                    1u8.encode(&mut buf, 0)?; // struct_v = AUTH_MODE_AUTHORIZER
+                    self.entity_name.encode(&mut buf, 0)?;
+                    self.global_id.encode(&mut buf, 0)?;
+                    (crate::AuthMethod::None.into(), buf.freeze())
+                } else {
+                    tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None for monitor (mode=10, entity={}, global_id=0)", self.entity_name);
+                    // Build payload for monitor connections: mode=10 (AUTH_MODE_MON) + entity_name + global_id=0
+                    let mut buf = bytes::BytesMut::new();
+                    10u8.encode(&mut buf, 0)?; // AUTH_MODE_MON
+                    self.entity_name.encode(&mut buf, 0)?;
+                    0u64.encode(&mut buf, 0)?; // global_id starts at 0, monitor assigns it
+                    (crate::AuthMethod::None.into(), buf.freeze())
+                }
             }
             crate::AuthMethod::Cephx => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::Cephx");
@@ -1970,6 +1994,8 @@ impl StateMachine {
                 supported_auth_methods,
                 auth_provider,
                 service_id,
+                entity_name: config.entity_name.clone(),
+                global_id: config.global_id,
             }),
             is_client: true,
             frame_decryptor: None,

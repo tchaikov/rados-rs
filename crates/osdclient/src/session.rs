@@ -95,6 +95,8 @@ pub struct OSDSession {
     #[allow(dead_code)]
     client_inc: u32,
     auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    /// Global ID from monitor authentication (for AUTH_NONE authorizers)
+    global_id: u64,
     /// Per-PG backoff tracker using efficient data structures
     backoff_tracker: Arc<RwLock<BackoffTracker>>,
     /// Channel for routing MOSDMap messages to OSDClient
@@ -167,6 +169,7 @@ impl OSDSession {
         entity_name: String,
         client_inc: u32,
         auth_provider: Option<Box<dyn auth::AuthProvider>>,
+        global_id: u64,
         osdmap_tx: MapSender<MOSDMap>,
         client: std::sync::Weak<crate::client::OSDClient>,
     ) -> Self {
@@ -184,6 +187,7 @@ impl OSDSession {
             entity_name,
             client_inc,
             auth_provider,
+            global_id,
             backoff_tracker: Arc::new(RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
@@ -249,12 +253,14 @@ impl OSDSession {
             self.osd_id, addr, entity_addr.nonce
         );
 
-        // Create connection config with authentication provider
-        let config = if let Some(auth_provider) = &self.auth_provider {
+        // Create connection config with authentication provider and global_id
+        let mut config = if let Some(auth_provider) = &self.auth_provider {
             msgr2::ConnectionConfig::with_auth_provider_and_service(auth_provider.clone_box(), 4)
         } else {
             msgr2::ConnectionConfig::with_no_auth()
         };
+        config.service_id = 4; // OSDs are service_id=4
+        config.global_id = self.global_id;
 
         // Connect using msgr2
         let mut connection =
@@ -1055,6 +1061,7 @@ mod tests {
             "client.test".to_string(),
             0,
             None,
+            0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
         );
@@ -1070,6 +1077,7 @@ mod tests {
             "client.test".to_string(),
             0,
             None,
+            0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
         );

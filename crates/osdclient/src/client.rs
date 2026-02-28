@@ -26,10 +26,6 @@ use crate::types::{
 /// Configuration for OSD client
 #[derive(Debug, Clone)]
 pub struct OSDClientConfig {
-    /// Entity name (e.g., "client.admin")
-    pub entity_name: String,
-    /// Path to keyring file for authentication
-    pub keyring_path: Option<String>,
     /// Operation timeout configuration
     pub tracker_config: TrackerConfig,
     /// Client incarnation number
@@ -46,8 +42,6 @@ pub struct OSDClientConfig {
 impl Default for OSDClientConfig {
     fn default() -> Self {
         Self {
-            entity_name: String::new(),
-            keyring_path: None,
             tracker_config: TrackerConfig::default(),
             client_inc: 0,
             max_inflight_ops: crate::throttle::DEFAULT_MAX_OPS,
@@ -64,6 +58,8 @@ pub struct OSDClient {
     pub(crate) tracker: Arc<Tracker>,
     /// Request throttle to prevent resource exhaustion
     throttle: Arc<Throttle>,
+    /// Entity name (e.g., "client.admin") from MonClient auth config
+    entity_name: String,
     /// Global ID from monitor authentication (used in entity_name for request IDs)
     global_id: u64,
     /// Cluster FSID for OSDMap validation
@@ -88,10 +84,11 @@ impl OSDClient {
         osdmap_tx: MapSender<MOSDMap>,
         mut osdmap_rx: MapReceiver<MOSDMap>,
     ) -> Result<Arc<Self>> {
-        info!("Creating OSDClient for {}", config.entity_name);
-
-        // Get global_id from MonClient (assigned during authentication)
+        // Get entity_name and global_id from MonClient
+        let entity_name = mon_client.get_entity_name_string();
         let global_id = mon_client.get_global_id().await;
+
+        info!("Creating OSDClient for entity_name={}", entity_name);
         info!("OSDClient using global_id {} from monitor", global_id);
 
         // Create watch channel for OSDMap distribution
@@ -150,6 +147,7 @@ impl OSDClient {
                 sessions: Arc::new(RwLock::new(HashMap::new())),
                 tracker,
                 throttle,
+                entity_name: entity_name.clone(),
                 global_id,
                 fsid,
                 osdmap_tx: osdmap_tx_watch,
@@ -311,9 +309,10 @@ impl OSDClient {
 
         let mut session = OSDSession::new(
             osd_id,
-            self.config.entity_name.clone(),
+            self.entity_name.clone(),
             self.config.client_inc,
             auth_provider,
+            self.global_id,
             self.map_tx.clone(),
             self.self_weak.clone(),
         );
@@ -631,11 +630,7 @@ impl OSDClient {
             object.clone(),
             StripedPgId::from_pg(object.pool, 0), // Will be set in loop
             ops.clone(),
-            crate::types::RequestId::new(
-                &self.config.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
+            crate::types::RequestId::new(&self.entity_name, 0, self.config.client_inc as i32),
             self.global_id,
         );
 
@@ -653,11 +648,8 @@ impl OSDClient {
 
             // Build request ID with fresh TID
             let tid = session.next_tid();
-            msg.reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
+            msg.reqid =
+                crate::types::RequestId::new(&self.entity_name, tid, self.config.client_inc as i32);
 
             // Submit operation (priority is set in message header)
             let result_rx = session.submit_op(msg.clone(), priority).await?;
@@ -1054,11 +1046,8 @@ impl OSDClient {
 
             // Build request ID
             let tid = session.next_tid();
-            let reqid = crate::types::RequestId::new(
-                &self.config.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
+            let reqid =
+                crate::types::RequestId::new(&self.entity_name, tid, self.config.client_inc as i32);
 
             // Build message
             let flags = MOSDOp::calculate_flags(&ops);

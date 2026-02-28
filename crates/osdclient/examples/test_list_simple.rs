@@ -24,10 +24,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
+    let auth = monclient::AuthConfig::from_keyring(
+        "client.admin".to_string(),
+        "/home/kefu/dev/ceph/build/keyring",
+    )?;
+
     let mon_config = monclient::MonClientConfig {
-        entity_name: "client.admin".to_string(),
         mon_addrs: vec!["v2:192.168.1.43:40239".to_string()],
-        keyring_path: "/home/kefu/dev/ceph/build/keyring".to_string(),
+        auth: Some(auth),
         ..Default::default()
     };
 
@@ -47,11 +51,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 3. Create OSD client
     println!("3️⃣  Creating OSD client...");
-    let osd_config = osdclient::OSDClientConfig {
-        entity_name: "client.admin".to_string(),
-        keyring_path: Some("/home/kefu/dev/ceph/build/keyring".to_string()),
-        ..Default::default()
-    };
+    let osd_config = osdclient::OSDClientConfig::default();
 
     // Get FSID
     let fsid = mon_client.get_fsid().await;

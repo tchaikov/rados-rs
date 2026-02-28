@@ -197,6 +197,16 @@ pub struct ConnectionConfig {
     /// - 16: MGR
     pub service_id: u32,
 
+    /// Entity name for authentication (e.g., "client.admin")
+    /// Used in AUTH_NONE payload to identify the client to the monitor.
+    /// Defaults to EntityName::client("admin").
+    pub entity_name: denc::EntityName,
+
+    /// Global ID assigned by monitor during authentication
+    /// Used for AUTH_NONE authorizers when connecting to services (OSDs)
+    /// Set to 0 for initial monitor connections
+    pub global_id: u64,
+
     /// Optional throttle configuration for this connection
     /// If None, no throttling is applied (default, matches Ceph client behavior)
     /// If Some, throttles message sending/receiving according to the config
@@ -216,7 +226,9 @@ impl Default for ConnectionConfig {
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
             auth_provider: None,
-            service_id: 0,         // Default to monitor
+            service_id: 0, // Default to monitor
+            entity_name: denc::EntityName::client("admin"),
+            global_id: 0,          // Will be set after monitor authentication
             throttle_config: None, // No throttle by default (matches Ceph client)
         }
     }

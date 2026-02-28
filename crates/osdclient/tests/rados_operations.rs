@@ -78,10 +78,13 @@ async fn create_osd_client(
 ) -> Result<(Arc<osdclient::OSDClient>, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
+    // Create auth config
+    let auth =
+        monclient::AuthConfig::from_keyring(config.entity_name.clone(), &config.keyring_path)?;
+
     let mon_config = monclient::MonClientConfig {
-        entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
-        keyring_path: config.keyring_path.clone(),
+        auth: Some(auth),
         ..Default::default()
     };
 
@@ -110,8 +113,6 @@ async fn create_osd_client(
         .as_secs() as u32;
 
     let osd_config = osdclient::OSDClientConfig {
-        entity_name: config.entity_name.clone(),
-        keyring_path: Some(config.keyring_path.clone()),
         client_inc,
         ..Default::default()
     };

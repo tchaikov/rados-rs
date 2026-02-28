@@ -33,14 +33,12 @@ const MON_MESSAGE_CHANNEL_CAPACITY: usize = 256;
 /// Monitor client configuration
 #[derive(Debug, Clone)]
 pub struct MonClientConfig {
-    /// Entity name (e.g., "client.admin")
-    pub entity_name: String,
-
     /// Initial monitor addresses
     pub mon_addrs: Vec<String>,
 
-    /// Path to keyring file
-    pub keyring_path: String,
+    /// Authentication configuration
+    /// If None, will attempt to auto-detect from /etc/ceph/ceph.conf
+    pub auth: Option<crate::auth_config::AuthConfig>,
 
     /// Connection timeout
     pub connect_timeout: Duration,
@@ -92,9 +90,8 @@ pub struct MonClientConfig {
 impl Default for MonClientConfig {
     fn default() -> Self {
         Self {
-            entity_name: String::new(), // Must be provided by caller
             mon_addrs: Vec::new(),
-            keyring_path: String::new(), // Must be provided by caller
+            auth: None, // Will auto-detect from /etc/ceph/ceph.conf
             connect_timeout: defaults::CONNECT_TIMEOUT,
             command_timeout: defaults::COMMAND_TIMEOUT,
             hunt_interval: defaults::HUNT_INTERVAL,
@@ -299,9 +296,12 @@ impl MonClient {
         config: MonClientConfig,
         osdmap_tx: Option<MapSender<MOSDMap>>,
     ) -> std::result::Result<Arc<Self>, MonClientError> {
-        // Parse entity name
-        let entity_name: EntityName = config
-            .entity_name
+        // Get auth config (use default if not provided, which tries /etc/ceph/ceph.conf)
+        let auth_config = config.auth.clone().unwrap_or_default();
+
+        // Parse entity name from auth config
+        let entity_name: EntityName = auth_config
+            .entity_name()
             .parse()
             .map_err(|e| MonClientError::Other(format!("Invalid entity name: {}", e)))?;
 
@@ -671,12 +671,9 @@ impl MonClient {
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
 
-        // Get keyring path from config
-        let keyring_path = if self.config.keyring_path.is_empty() {
-            None
-        } else {
-            Some(self.config.keyring_path.clone())
-        };
+        // Get auth config to extract provider
+        let auth_config = self.config.auth.clone().unwrap_or_default();
+        let auth_provider = auth_config.clone_provider();
 
         // Create keepalive policy from config
         let keepalive_policy = if runtime_config.mon_client_ping_interval.as_secs() > 0 {
@@ -693,8 +690,7 @@ impl MonClient {
             MonConnection::connect(MonConnectionParams {
                 addr: socket_addr,
                 rank,
-                entity_name: self.config.entity_name.clone(),
-                keyring_path,
+                auth_provider,
                 keepalive_policy,
                 osdmap_tx: self.osdmap_tx.clone(),
                 mon_msg_tx: self.mon_msg_tx.clone(),
@@ -1689,6 +1685,14 @@ impl MonClient {
         state.global_id
     }
 
+    /// Get the entity name string (e.g., "client.admin")
+    ///
+    /// Returns the entity name configured for this MonClient.
+    /// This is useful for service clients that need to use the same entity name.
+    pub fn get_entity_name_string(&self) -> String {
+        self.entity_name.to_string()
+    }
+
     /// Get a ServiceAuthProvider for connecting to OSDs/MDSs/MGRs
     ///
     /// This creates an authorizer-based auth provider using the service tickets
@@ -1858,9 +1862,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_create_client() {
+        let auth = crate::auth_config::AuthConfig::no_auth("client.test".to_string());
         let config = MonClientConfig {
-            entity_name: "client.test".to_string(),
             mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
+            auth: Some(auth),
             ..Default::default()
         };
 
@@ -1870,9 +1875,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_subscription() {
+        let auth = crate::auth_config::AuthConfig::no_auth("client.test".to_string());
         let config = MonClientConfig {
-            entity_name: "client.test".to_string(),
             mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
+            auth: Some(auth),
             ..Default::default()
         };
 

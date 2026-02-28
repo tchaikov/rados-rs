@@ -68,11 +68,17 @@ impl TestConfig {
 async fn create_mon_client(
     config: &TestConfig,
 ) -> Result<Arc<monclient::MonClient>, Box<dyn std::error::Error>> {
+    // Create auth config
+    let auth = if let Some(ref keyring) = config.keyring_path {
+        monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring)?
+    } else {
+        monclient::AuthConfig::no_auth(config.entity_name.clone())
+    };
+
     // Create MonClient
     let mon_config = monclient::MonClientConfig {
-        entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
-        keyring_path: config.keyring_path.clone().unwrap_or_default(),
+        auth: Some(auth),
         ..Default::default()
     };
 

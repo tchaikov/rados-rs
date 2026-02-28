@@ -112,10 +112,17 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
 
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
+    // Create auth config
+    let auth = if let Some(ref keyring) = config.keyring_path {
+        monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring)
+            .expect("Failed to create auth config")
+    } else {
+        monclient::AuthConfig::no_auth(config.entity_name.clone())
+    };
+
     let mon_config = monclient::MonClientConfig {
-        entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
-        keyring_path: config.keyring_path.clone().unwrap_or_default(),
+        auth: Some(auth),
         ..Default::default()
     };
 
@@ -142,10 +149,7 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Create OSDClient BEFORE subscribing to osdmap
-    let osd_config = osdclient::OSDClientConfig {
-        entity_name: config.entity_name.clone(),
-        ..Default::default()
-    };
+    let osd_config = osdclient::OSDClientConfig::default();
 
     let fsid = mon_client.get_fsid().await;
     let osd_client = osdclient::OSDClient::new(

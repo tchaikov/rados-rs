@@ -36,6 +36,9 @@ pub enum MonClientError {
     #[error("Not initialized")]
     NotInitialized,
 
+    #[error("Configuration error: {0}")]
+    ConfigError(String),
+
     #[error("Shutting down")]
     ShuttingDown,
 
