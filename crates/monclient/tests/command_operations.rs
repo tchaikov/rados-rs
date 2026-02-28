@@ -38,8 +38,12 @@ impl TestConfig {
         // Get monitor addresses
         let mon_addrs = ceph_config.mon_addrs()?;
 
-        // Get keyring path only if auth is required
-        let keyring_path = if ceph_config.is_auth_required() {
+        // Get required auth methods for client connections
+        let auth_methods = ceph_config.get_auth_client_required();
+
+        // Get keyring path only if CephX is in the supported methods
+        const CEPH_AUTH_CEPHX: u32 = 0x2;
+        let keyring_path = if auth_methods.contains(&CEPH_AUTH_CEPHX) {
             Some(
                 std::env::var("CEPH_KEYRING")
                     .or_else(|_| ceph_config.keyring())

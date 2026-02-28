@@ -408,20 +408,112 @@ impl CephConfig {
             .to_string()
     }
 
-    /// Check if CephX authentication is required
+    /// Parse authentication methods from a configuration value
     ///
-    /// Returns `true` if auth is required (cephx or cephx,none), `false` if auth is "none".
-    /// Checks "auth cluster required" and "auth client required" settings.
-    /// Defaults to `true` (auth required) if not specified.
-    pub fn is_auth_required(&self) -> bool {
-        // Check auth_cluster_required first, then auth_client_required
-        let auth_setting = self
-            .get_with_fallback(&["global"], "auth cluster required")
-            .or_else(|| self.get_with_fallback(&["global", "client"], "auth client required"))
+    /// Parses comma-separated auth method names (e.g., "cephx", "none", "cephx,none")
+    /// into a list of auth method constants. Returns empty vec if parsing fails.
+    ///
+    /// # Arguments
+    /// * `methods_str` - Comma-separated string like "cephx,none" or "none"
+    ///
+    /// # Returns
+    /// Vector of auth method values (CEPH_AUTH_NONE=1, CEPH_AUTH_CEPHX=2, etc.)
+    fn parse_auth_methods(methods_str: &str) -> Vec<u32> {
+        methods_str
+            .split(',')
+            .filter_map(|s| {
+                match s.trim().to_lowercase().as_str() {
+                    "none" => Some(0x1),  // CEPH_AUTH_NONE
+                    "cephx" => Some(0x2), // CEPH_AUTH_CEPHX
+                    "gss" => Some(0x4),   // CEPH_AUTH_GSS
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    /// Get required authentication methods for clients
+    ///
+    /// Checks "auth_supported" first (if set, applies to all connections),
+    /// otherwise checks "auth_client_required". Returns list of supported
+    /// auth method constants (CEPH_AUTH_NONE=1, CEPH_AUTH_CEPHX=2, etc.).
+    ///
+    /// Defaults to [CEPH_AUTH_CEPHX] if not specified.
+    ///
+    /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
+    pub fn get_auth_client_required(&self) -> Vec<u32> {
+        // Check auth_supported first (applies to all if set)
+        if let Some(auth_supported) = self.get("global", "auth_supported") {
+            let methods = Self::parse_auth_methods(auth_supported);
+            if !methods.is_empty() {
+                return methods;
+            }
+        }
+
+        // Otherwise check auth_client_required
+        let auth_client = self
+            .get_with_fallback(&["global", "client"], "auth client required")
             .unwrap_or("cephx");
 
-        // Auth is NOT required only if explicitly set to "none"
-        auth_setting.to_lowercase() != "none"
+        let methods = Self::parse_auth_methods(auth_client);
+        if !methods.is_empty() {
+            methods
+        } else {
+            // Default to cephx if parsing failed or empty
+            vec![0x2] // CEPH_AUTH_CEPHX
+        }
+    }
+
+    /// Get required authentication methods for cluster-internal connections
+    ///
+    /// Checks "auth_supported" first (if set, applies to all connections),
+    /// otherwise checks "auth_cluster_required".
+    ///
+    /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
+    pub fn get_auth_cluster_required(&self) -> Vec<u32> {
+        if let Some(auth_supported) = self.get("global", "auth_supported") {
+            let methods = Self::parse_auth_methods(auth_supported);
+            if !methods.is_empty() {
+                return methods;
+            }
+        }
+
+        let auth_cluster = self
+            .get("global", "auth cluster required")
+            .unwrap_or("cephx");
+
+        let methods = Self::parse_auth_methods(auth_cluster);
+        if !methods.is_empty() {
+            methods
+        } else {
+            vec![0x2] // CEPH_AUTH_CEPHX
+        }
+    }
+
+    /// Get required authentication methods for service connections (OSD, MDS, MGR to MON)
+    ///
+    /// Checks "auth_supported" first (if set, applies to all connections),
+    /// otherwise checks "auth_service_required".
+    ///
+    /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
+    pub fn get_auth_service_required(&self) -> Vec<u32> {
+        if let Some(auth_supported) = self.get("global", "auth_supported") {
+            let methods = Self::parse_auth_methods(auth_supported);
+            if !methods.is_empty() {
+                return methods;
+            }
+        }
+
+        let auth_service = self
+            .get("global", "auth service required")
+            .unwrap_or("cephx");
+
+        let methods = Self::parse_auth_methods(auth_service);
+        if !methods.is_empty() {
+            methods
+        } else {
+            vec![0x2] // CEPH_AUTH_CEPHX
+        }
     }
 
     /// Get the DNS SRV service name for monitor discovery
