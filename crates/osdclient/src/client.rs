@@ -372,10 +372,7 @@ impl OSDClient {
 
     /// Get OSD address from OSDMap
     async fn get_osd_address(&self, osd_id: i32) -> Result<denc::EntityAddr> {
-        let osdmap = self
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
+        let osdmap = self.get_osdmap().await?;
 
         // Check if OSD exists
         if osd_id < 0 || osd_id as usize >= osdmap.osd_addrs_client.len() {
@@ -404,11 +401,7 @@ impl OSDClient {
 
     /// Map an object to OSDs using CRUSH
     async fn object_to_osds(&self, pool: u64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
-        // Get current OSDMap from MonClient
-        let osdmap = self
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
+        let osdmap = self.get_osdmap().await?;
 
         // Find pool info
         let pool_info = osdmap
@@ -616,10 +609,7 @@ impl OSDClient {
         );
 
         // Get OSDMap epoch from OSDClient's own osdmap (not from MonClient)
-        let osdmap = self
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
+        let osdmap = self.get_osdmap().await?;
 
         // Build initial message
         let flags = MOSDOp::calculate_flags(&ops);
@@ -681,6 +671,28 @@ impl OSDClient {
         }
     }
 
+    /// Check an OpResult for errors and return the first op's outdata
+    ///
+    /// Validates both the overall result code and the per-op return code,
+    /// returning the outdata from the first operation on success.
+    fn check_op_result(result: &crate::types::OpResult, op_name: &str) -> Result<()> {
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: format!("{} failed", op_name),
+            });
+        }
+        if let Some(op) = result.ops.first() {
+            if op.return_code != 0 {
+                return Err(OSDClientError::OSDError {
+                    code: op.return_code,
+                    message: format!("{} failed", op_name),
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Read data from an object
     pub async fn read(&self, pool: u64, oid: &str, offset: u64, len: u64) -> Result<ReadResult> {
         debug!(
@@ -693,29 +705,16 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        // Check overall result code
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Read operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Read")?;
 
-        // Extract read data
-        if result.ops.is_empty() {
-            return Err(OSDClientError::Internal("No operation results".into()));
-        }
-
-        let read_op = &result.ops[0];
-        if read_op.return_code != 0 {
-            return Err(OSDClientError::OSDError {
-                code: read_op.return_code,
-                message: "Read operation failed".into(),
-            });
-        }
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
 
         Ok(ReadResult {
-            data: read_op.outdata.clone(),
+            data: outdata,
             version: result.version,
         })
     }
@@ -742,26 +741,7 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        // Check overall result code
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Sparse read operation failed".into(),
-            });
-        }
-
-        // Extract sparse read data
-        if result.ops.is_empty() {
-            return Err(OSDClientError::Internal("No operation results".into()));
-        }
-
-        let read_op = &result.ops[0];
-        if read_op.return_code != 0 {
-            return Err(OSDClientError::OSDError {
-                code: read_op.return_code,
-                message: "Sparse read operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Sparse read")?;
 
         // Parse sparse read result from outdata
         // The outdata contains:
@@ -770,7 +750,13 @@ impl OSDClient {
         use crate::types::{SparseExtent, SparseReadResult};
         use denc::denc::Denc;
 
-        if read_op.outdata.is_empty() {
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
+
+        if outdata.is_empty() {
             return Ok(SparseReadResult {
                 extents: vec![],
                 data: bytes::Bytes::new(),
@@ -778,7 +764,7 @@ impl OSDClient {
             });
         }
 
-        let mut buf = read_op.outdata.clone();
+        let mut buf = outdata;
 
         // Decode extent map directly as Vec<SparseExtent>
         let extents = Vec::<SparseExtent>::decode(&mut buf, 0)
@@ -823,12 +809,7 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Write operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Write")?;
 
         Ok(WriteResult {
             version: result.version,
@@ -849,12 +830,7 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Write operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Write")?;
 
         Ok(WriteResult {
             version: result.version,
@@ -869,30 +845,12 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        // Check overall result code first
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Stat operation failed".into(),
-            });
-        }
-
-        // Extract stat data
-        if result.ops.is_empty() {
-            return Err(OSDClientError::Internal("No operation results".into()));
-        }
-
-        let stat_op = &result.ops[0];
-        if stat_op.return_code != 0 {
-            return Err(OSDClientError::OSDError {
-                code: stat_op.return_code,
-                message: "Stat operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Stat")?;
 
         // Parse stat data from outdata using OsdStatData's Denc implementation
         use denc::Denc;
-        let stat_data = crate::denc_types::OsdStatData::decode(&mut &stat_op.outdata[..], 0)
+        let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
+        let stat_data = crate::denc_types::OsdStatData::decode(&mut &outdata[..], 0)
             .map_err(|e| OSDClientError::Decoding(format!("Failed to decode stat data: {}", e)))?;
 
         Ok(StatResult {
@@ -909,13 +867,7 @@ impl OSDClient {
             .execute_op(pool, oid, ops, None, crate::messages::CEPH_MSG_PRIO_DEFAULT)
             .await?;
 
-        // Check overall result code
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "Delete operation failed".into(),
-            });
-        }
+        Self::check_op_result(&result, "Delete")?;
 
         Ok(())
     }
@@ -956,10 +908,7 @@ impl OSDClient {
         };
 
         // Get OSDMap to look up pool info and pg_num
-        let osdmap = self
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
+        let osdmap = self.get_osdmap().await?;
 
         // Find pool info
         let pool_info = osdmap
@@ -1180,11 +1129,7 @@ impl OSDClient {
     pub async fn list_pools(&self) -> Result<Vec<crate::types::PoolInfo>> {
         debug!("Listing pools");
 
-        // Get OSDMap from monitor
-        let osdmap = self
-            .get_osdmap()
-            .await
-            .map_err(|e| OSDClientError::Connection(format!("Failed to get OSDMap: {}", e)))?;
+        let osdmap = self.get_osdmap().await?;
 
         // Extract pool information from OSDMap
         let mut pools = Vec::new();
@@ -1198,6 +1143,40 @@ impl OSDClient {
         }
 
         Ok(pools)
+    }
+
+    /// Handle pool operation result: request OSDMap update if needed
+    ///
+    /// After a successful pool create/delete, the OSDMap epoch advances.
+    /// This ensures we receive the updated map.
+    async fn handle_pool_op_result(&self, result: &monclient::PoolOpResult) -> Result<()> {
+        if !result.is_success() {
+            return Err(OSDClientError::Other(format!(
+                "Pool operation failed with code {}",
+                result.reply_code
+            )));
+        }
+
+        let target_epoch = result.epoch;
+        let current_epoch = self
+            .osdmap_rx
+            .borrow()
+            .as_ref()
+            .map(|m| m.epoch.as_u32())
+            .unwrap_or(0);
+
+        if target_epoch > current_epoch {
+            debug!(
+                "Requesting OSDMap update from epoch {} to {}",
+                current_epoch, target_epoch
+            );
+            self.mon_client
+                .subscribe("osdmap", current_epoch as u64, 0)
+                .await
+                .ok();
+        }
+
+        Ok(())
     }
 
     /// Create a new pool
@@ -1239,30 +1218,7 @@ impl OSDClient {
 
         if result.is_success() {
             debug!("Pool created successfully: {}", pool_name);
-
-            // Request OSDMap update for the target epoch
-            // Pool operations modify the OSDMap, so we need to ensure we receive the update
-            let target_epoch = result.epoch;
-            let current_epoch = self
-                .osdmap_rx
-                .borrow()
-                .as_ref()
-                .map(|m| m.epoch.as_u32())
-                .unwrap_or(0);
-
-            if target_epoch > current_epoch {
-                debug!(
-                    "Requesting OSDMap update from epoch {} to {}",
-                    current_epoch, target_epoch
-                );
-                // Re-subscribe to request missing epochs
-                self.mon_client
-                    .subscribe("osdmap", current_epoch as u64, 0)
-                    .await
-                    .ok(); // Ignore subscription errors - updates will arrive eventually
-            }
-
-            Ok(())
+            self.handle_pool_op_result(&result).await
         } else {
             Err(OSDClientError::Other(format!(
                 "Pool operation failed with code {}",
@@ -1337,30 +1293,7 @@ impl OSDClient {
 
         if result.is_success() {
             debug!("Pool deleted successfully: {}", pool_name);
-
-            // Request OSDMap update for the target epoch
-            // Pool operations modify the OSDMap, so we need to ensure we receive the update
-            let target_epoch = result.epoch;
-            let current_epoch = self
-                .osdmap_rx
-                .borrow()
-                .as_ref()
-                .map(|m| m.epoch.as_u32())
-                .unwrap_or(0);
-
-            if target_epoch > current_epoch {
-                debug!(
-                    "Requesting OSDMap update from epoch {} to {}",
-                    current_epoch, target_epoch
-                );
-                // Re-subscribe to request missing epochs
-                self.mon_client
-                    .subscribe("osdmap", current_epoch as u64, 0)
-                    .await
-                    .ok(); // Ignore subscription errors - updates will arrive eventually
-            }
-
-            Ok(())
+            self.handle_pool_op_result(&result).await
         } else {
             Err(OSDClientError::Other(format!(
                 "Pool operation failed with code {}",
@@ -1506,10 +1439,8 @@ impl OSDClient {
                 "OSD {} address changed in epoch {} (session: {:?}, map: {:?}), closing session",
                 osd_id, new_epoch, session_sockaddr, map_addrvec
             );
-            true
-        } else {
-            false
         }
+        !map_has_match
     }
 
     /// Drain all pending operations from a session that is about to be closed.
