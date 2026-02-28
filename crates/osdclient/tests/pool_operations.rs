@@ -29,7 +29,7 @@ use tracing::info;
 /// Helper to get test configuration from environment and ceph.conf
 struct TestConfig {
     mon_addrs: Vec<String>,
-    keyring_path: String,
+    keyring_path: Option<String>,
     entity_name: String,
 }
 
@@ -49,10 +49,20 @@ impl TestConfig {
         // Get monitor addresses
         let mon_addrs = ceph_config.mon_addrs()?;
 
-        // Get keyring path
-        let keyring_path = std::env::var("CEPH_KEYRING")
-            .or_else(|_| ceph_config.keyring())
-            .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+        // Check auth methods from ceph.conf
+        let auth_methods = ceph_config.get_auth_client_required();
+
+        // Get keyring path only if CephX is in the supported methods
+        const CEPH_AUTH_CEPHX: u32 = 0x2;
+        let keyring_path = if auth_methods.contains(&CEPH_AUTH_CEPHX) {
+            Some(
+                std::env::var("CEPH_KEYRING")
+                    .or_else(|_| ceph_config.keyring())
+                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string()),
+            )
+        } else {
+            None
+        };
 
         // Get entity name
         let entity_name = ceph_config.entity_name();
@@ -71,9 +81,12 @@ async fn create_osd_client(
 ) -> Result<(Arc<osdclient::OSDClient>, Arc<monclient::MonClient>), Box<dyn std::error::Error>> {
     let (osdmap_tx, osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
-    // Create auth config
-    let auth =
-        monclient::AuthConfig::from_keyring(config.entity_name.clone(), &config.keyring_path)?;
+    // Create auth config based on whether keyring is available
+    let auth = if let Some(keyring_path) = &config.keyring_path {
+        monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring_path)?
+    } else {
+        monclient::AuthConfig::no_auth(config.entity_name.clone())
+    };
 
     let mon_config = monclient::MonClientConfig {
         mon_addrs: config.mon_addrs.clone(),
@@ -89,9 +102,12 @@ async fn create_osd_client(
     info!("✓ Connected to monitor");
 
     // Wait for authentication to fully complete with all service tickets
-    mon_client
-        .wait_for_auth(std::time::Duration::from_secs(5))
-        .await?;
+    // Skip this for AUTH_NONE since there are no service tickets
+    if config.keyring_path.is_some() {
+        mon_client
+            .wait_for_auth(std::time::Duration::from_secs(5))
+            .await?;
+    }
 
     // Wait for MonMap to arrive - use event-driven wait
     mon_client
