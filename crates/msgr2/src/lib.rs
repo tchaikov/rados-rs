@@ -129,28 +129,38 @@ pub mod auth_mode {
     pub const AUTH_MODE_MON_MAX: u8 = 19;
 }
 
-/// Monitor authentication request payload (auth_mode=10)
+/// AUTH_NONE request payload for the AUTH_REQUEST frame.
 ///
-/// This structure represents the AUTH_REQUEST payload for initial
-/// authentication to monitors. The monitor decodes these fields and
-/// assigns a global_id if the client sends 0.
+/// This structure encodes the payload for AUTH_NONE authentication, used for
+/// both monitor and service (OSD/MDS/MGR) connections. The auth_mode byte
+/// determines which type of connection is being authenticated:
+///
+/// - **Monitor connections** (auth_mode=10): Initial authentication where the
+///   monitor assigns a global_id. Reference: `Monitor::handle_auth_request()`
+///   in `src/mon/Monitor.cc`.
+///
+/// - **Service connections** (auth_mode=1): Authorizer-based authentication
+///   where the service validates the entity_name and global_id without
+///   requiring a secret. Reference: `AuthNoneAuthorizer::build_authorizer()`
+///   in `src/auth/none/AuthNoneProtocol.h`.
 ///
 /// Wire format: auth_mode (u8) + entity_name + global_id (u64)
-///
-/// Reference: Monitor::handle_auth_request() in src/mon/Monitor.cc
 #[derive(Debug, Clone)]
-pub struct MonAuthRequest {
-    /// Authentication mode (must be AUTH_MODE_MON = 10)
+pub struct AuthNonePayload {
+    /// Authentication mode (AUTH_MODE_MON=10 or AUTH_MODE_AUTHORIZER=1)
     pub auth_mode: u8,
     /// Client's entity name (e.g., "client.admin")
     pub entity_name: denc::EntityName,
-    /// Client's global_id (0 for initial request, monitor assigns it)
+    /// Client's global_id (0 for initial monitor request; assigned value for services)
     pub global_id: u64,
 }
 
-impl MonAuthRequest {
-    /// Create a new monitor authentication request
-    pub fn new(entity_name: denc::EntityName, global_id: u64) -> Self {
+impl AuthNonePayload {
+    /// Create a monitor authentication request (auth_mode=10).
+    ///
+    /// Used for initial authentication to monitors. The monitor assigns a
+    /// global_id when the client sends 0.
+    pub fn for_monitor(entity_name: denc::EntityName, global_id: u64) -> Self {
         Self {
             auth_mode: auth_mode::AUTH_MODE_MON,
             entity_name,
@@ -158,39 +168,11 @@ impl MonAuthRequest {
         }
     }
 
-    /// Encode into bytes for AUTH_REQUEST payload
-    pub fn encode(&self) -> Result<bytes::Bytes> {
-        let mut buf = bytes::BytesMut::new();
-        use denc::Denc;
-        self.auth_mode.encode(&mut buf, 0)?;
-        self.entity_name.encode(&mut buf, 0)?;
-        self.global_id.encode(&mut buf, 0)?;
-        Ok(buf.freeze())
-    }
-}
-
-/// Service connection authorizer for AUTH_NONE (auth_mode=1)
-///
-/// This structure represents the AUTH_REQUEST payload for service
-/// connections (OSDs, MDS, MGR) using AUTH_NONE method. The service
-/// validates the entity_name and global_id but doesn't require a secret.
-///
-/// Wire format: auth_mode (u8) + entity_name + global_id (u64)
-///
-/// Reference: AuthNoneAuthorizer::build_authorizer() in src/auth/none/AuthNoneProtocol.h
-#[derive(Debug, Clone)]
-pub struct AuthNoneAuthorizer {
-    /// Authentication mode (must be AUTH_MODE_AUTHORIZER = 1)
-    pub auth_mode: u8,
-    /// Client's entity name (e.g., "client.admin")
-    pub entity_name: denc::EntityName,
-    /// Client's global_id (assigned by monitor during initial auth)
-    pub global_id: u64,
-}
-
-impl AuthNoneAuthorizer {
-    /// Create a new AUTH_NONE authorizer
-    pub fn new(entity_name: denc::EntityName, global_id: u64) -> Self {
+    /// Create a service connection authorizer (auth_mode=1).
+    ///
+    /// Used for OSD/MDS/MGR connections. The global_id should be the value
+    /// assigned by the monitor during initial authentication.
+    pub fn for_service(entity_name: denc::EntityName, global_id: u64) -> Self {
         Self {
             auth_mode: auth_mode::AUTH_MODE_AUTHORIZER,
             entity_name,

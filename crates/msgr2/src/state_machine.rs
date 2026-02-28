@@ -617,17 +617,11 @@ impl State for AuthConnecting {
                                 .join("")
                         );
 
-                        // Call auth provider to handle the response
-                        // For multi-round auth, handle_auth_response processes the challenge
-                        // and we need to send another request
-                        let _result = provider
-                            .handle_auth_response(payload.clone(), 0, 0)
-                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
-
-                        // Build the next auth payload (challenge response)
-                        let auth_payload = provider
-                            .build_auth_payload(0, self.service_id)
-                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                        // Process the challenge and build the response
+                        let _result =
+                            provider.handle_auth_response(payload.clone(), 0, 0)?;
+                        let auth_payload =
+                            provider.build_auth_payload(0, self.service_id)?;
 
                         // For AuthRequestMore, we only send the auth_payload
                         let auth_frame = AuthRequestMoreFrame::new(auth_payload);
@@ -665,15 +659,9 @@ impl State for AuthConnecting {
                     );
 
                     let mut payload = segment.clone();
-                    let global_id = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode global_id: {:?}", e))
-                    })?;
-                    let con_mode = u32::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode con_mode: {:?}", e))
-                    })?;
-                    let auth_payload = Bytes::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode auth_payload: {:?}", e))
-                    })?;
+                    let global_id = u64::decode(&mut payload, 0)?;
+                    let con_mode = u32::decode(&mut payload, 0)?;
+                    let auth_payload = Bytes::decode(&mut payload, 0)?;
 
                     tracing::debug!("Decoded from AUTH_DONE frame:");
                     tracing::debug!("  global_id: {}", global_id);
@@ -686,15 +674,12 @@ impl State for AuthConnecting {
                         con_mode
                     );
 
-                    // For AuthMethod::None, we don't need session key/connection secret
-                    // but we STILL need to go through AUTH_CONNECTING_SIGN to send AUTH_SIGNATURE
+                    // Both auth paths transition to AUTH_CONNECTING_SIGN.
+                    // Reference: ProtocolV2::handle_auth_done() always transitions to AUTH_CONNECTING_SIGN
                     if self.auth_method == crate::AuthMethod::None {
                         tracing::debug!(
                             "AuthMethod::None - no session key/connection secret, will send empty signature"
                         );
-
-                        // For AuthMethod::None, send AUTH_SIGNATURE with empty signature (sha256 of empty data)
-                        // Reference: ProtocolV2::handle_auth_done() always transitions to AUTH_CONNECTING_SIGN
                         Ok(StateResult::Transition(Box::new(
                             AuthConnectingSign::new_with_encryption(
                                 con_mode,
@@ -715,9 +700,8 @@ impl State for AuthConnecting {
                             .as_mut()
                             .ok_or_else(|| Error::protocol_error("No auth provider available"))?;
 
-                        let (session_key, connection_secret) = provider
-                            .handle_auth_response(auth_payload, global_id, con_mode)
-                            .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                        let (session_key, connection_secret) =
+                            provider.handle_auth_response(auth_payload, global_id, con_mode)?;
 
                         tracing::debug!("Extracted from AUTH_DONE - session_key: {:?} bytes, connection_secret: {:?} bytes",
                             session_key.as_ref().map(|k| k.len()),
@@ -763,32 +747,30 @@ impl State for AuthConnecting {
 
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
-                // AUTH_NONE uses different payload formats:
-                // - Monitor connections: MonAuthRequest (auth_mode=10)
-                // - Service connections: AuthNoneAuthorizer (auth_mode=1)
-                if self.service_id != 0 && self.global_id != 0 {
-                    // Service connection (OSD/MDS/MGR) - use authorizer format
+                // AUTH_NONE uses different payload formats depending on connection target:
+                // - Service connections (OSD/MDS/MGR): auth_mode=1 (authorizer)
+                // - Monitor connections: auth_mode=10 (mon auth)
+                let is_service_connection = self.service_id != 0 && self.global_id != 0;
+                let auth_none = if is_service_connection {
                     tracing::debug!(
-                        "Sending AUTH_REQUEST with AuthNoneAuthorizer (service_id={}, global_id={})",
+                        "Sending AUTH_REQUEST for service (service_id={}, global_id={})",
                         self.service_id, self.global_id
                     );
-                    let authorizer =
-                        crate::AuthNoneAuthorizer::new(self.entity_name.clone(), self.global_id);
-                    let payload = authorizer.encode()?;
-                    (crate::AuthMethod::None.into(), payload)
+                    crate::AuthNonePayload::for_service(
+                        self.entity_name.clone(),
+                        self.global_id,
+                    )
                 } else {
-                    // Monitor connection - use MonAuthRequest format
                     tracing::debug!(
-                        "Sending AUTH_REQUEST with MonAuthRequest (entity={}, global_id=0)",
+                        "Sending AUTH_REQUEST for monitor (entity={}, global_id=0)",
                         self.entity_name
                     );
-                    let request = crate::MonAuthRequest::new(
+                    crate::AuthNonePayload::for_monitor(
                         self.entity_name.clone(),
-                        0, // global_id starts at 0, monitor assigns it
-                    );
-                    let payload = request.encode()?;
-                    (crate::AuthMethod::None.into(), payload)
-                }
+                        0, // monitor assigns global_id
+                    )
+                };
+                (crate::AuthMethod::None.into(), auth_none.encode()?)
             }
             crate::AuthMethod::Cephx => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::Cephx");
