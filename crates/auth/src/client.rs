@@ -239,28 +239,8 @@ impl CephXClientHandler {
             hex::encode(&plaintext)
         );
 
-        // Prepare AES key and IV
-        // IMPORTANT: CryptoKey has a header before the actual key:
-        //   - crypto_type: u16 (2 bytes)
-        //   - created.sec: u32 (4 bytes)
-        //   - created.nsec: u32 (4 bytes)
-        //   - secret_length: u16 (2 bytes)
-        // The actual AES key starts after this 12-byte header
-        // Ceph uses the first 16 bytes of the ACTUAL KEY DATA (after the header) as the AES key
-        use crate::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
-        let secret_bytes = secret_key.get_secret();
-
-        if secret_bytes.len() < CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
-            return Err(CephXError::CryptographicError(format!(
-                "Secret key too short: {} bytes, need at least {}",
-                secret_bytes.len(),
-                CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN
-            )));
-        }
-
-        // Skip the header to get to the actual key material
-        let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-        let key_bytes = &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN];
+        // Extract AES key from secret
+        let key_bytes = secret_key.aes_key_bytes()?;
 
         debug!(
             "Step 5: AES key (first 16 bytes of secret): {}",
@@ -271,7 +251,6 @@ impl CephXClientHandler {
             hex::encode(crate::protocol::CEPH_AES_IV)
         );
 
-        // Use Ceph's IV
         use crate::protocol::CEPH_AES_IV;
 
         // Encrypt with AES-128-CBC using Pkcs7 padding
@@ -363,9 +342,7 @@ impl CephXClientHandler {
                     "AUTH_REPLY_MORE too short".into(),
                 ));
             }
-            let payload_len = u32::decode(&mut response, 0).map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode payload_len: {}", e))
-            })? as usize;
+            let payload_len = u32::decode(&mut response, 0)? as usize;
             debug!(
                 "AUTH_REPLY_MORE: length_prefix={}, remaining={} bytes",
                 payload_len,
@@ -867,9 +844,7 @@ impl CephXClientHandler {
         }
 
         // Decode length-prefixed encrypted data using Denc
-        let encrypted_data = Bytes::decode(&mut encrypted_payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to decode encrypted data: {}", e))
-        })?;
+        let encrypted_data = Bytes::decode(&mut encrypted_payload, 0)?;
         trace!("encrypted_len: {}", encrypted_data.len());
 
         // Decrypt using session key
@@ -877,10 +852,7 @@ impl CephXClientHandler {
         let mut dec_buf = Bytes::from(decrypted);
 
         // Decode the encrypted envelope containing CephXAuthorizeReply
-        let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)
-            .map_err(|e| {
-                CephXError::ProtocolError(format!("Failed to decode authorize reply: {}", e))
-            })?;
+        let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)?;
 
         let server_challenge = envelope.payload.nonce_plus_one;
         debug!("Extracted server_challenge: 0x{:016x}", server_challenge);
@@ -1025,9 +997,7 @@ impl CephXClientHandler {
 
         // Encode authorize_a
         let mut authorizer_buf = BytesMut::new();
-        authorize_a.encode(&mut authorizer_buf, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to encode CephXAuthorizeA: {:?}", e))
-        })?;
+        authorize_a.encode(&mut authorizer_buf, 0)?;
 
         trace!(
             "nonce: 0x{:016x}, base_bl length: {}",
@@ -1076,28 +1046,10 @@ impl CephXClientHandler {
         );
 
         // Extract AES key from session key
-        let secret_bytes = session_key.get_secret();
+        let key_bytes = session_key.aes_key_bytes()?;
 
-        // Session keys from tickets are typically raw 16-byte keys
-        let key_bytes = if secret_bytes.len() == crate::protocol::AES_KEY_LEN {
-            secret_bytes.as_ref()
-        } else if secret_bytes.len() >= 28 {
-            // Has header, skip to actual key
-            &secret_bytes[crate::protocol::CRYPTO_KEY_HEADER_SIZE
-                ..crate::protocol::CRYPTO_KEY_HEADER_SIZE + crate::protocol::AES_KEY_LEN]
-        } else {
-            return Err(CephXError::CryptographicError(format!(
-                "Invalid session key length: {}",
-                secret_bytes.len()
-            )));
-        };
+        debug!("Using AES key (first 16 bytes): {}", hex::encode(key_bytes));
 
-        debug!(
-            "Using AES key (first 16 bytes): {}",
-            hex::encode(&key_bytes[..16])
-        );
-
-        // Use Ceph's IV
         use crate::protocol::CEPH_AES_IV;
 
         // Encrypt with AES-128-CBC
@@ -1118,11 +1070,7 @@ impl CephXClientHandler {
 
         // Add length prefix
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
-        (ciphertext.len() as u32)
-            .encode(&mut result, 0)
-            .map_err(|e| {
-                CephXError::EncodingError(format!("Failed to encode ciphertext length: {}", e))
-            })?;
+        (ciphertext.len() as u32).encode(&mut result, 0)?;
         result.extend_from_slice(ciphertext);
 
         debug!("Encrypted result: {} bytes total", result.len());
@@ -1176,9 +1124,7 @@ impl CephXClientHandler {
         let header = crate::protocol::CephXRequestHeader {
             request_type: crate::protocol::CEPHX_GET_PRINCIPAL_SESSION_KEY,
         };
-        header.encode(&mut payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to encode request header: {:?}", e))
-        })?;
+        header.encode(&mut payload, 0)?;
 
         // 2. Build and encode authorizer from AUTH ticket handler
         // The authorizer proves we have a valid AUTH ticket
@@ -1208,9 +1154,7 @@ impl CephXClientHandler {
 
         // 3. Encode service ticket request with needed keys
         let ticket_request = crate::protocol::CephXServiceTicketRequest::new(needed_keys.bits());
-        ticket_request.encode(&mut payload, 0).map_err(|e| {
-            CephXError::ProtocolError(format!("Failed to encode ticket request: {:?}", e))
-        })?;
+        ticket_request.encode(&mut payload, 0)?;
 
         debug!(
             "Built ticket renewal request: {} bytes (header + authorizer + ticket_request)",

@@ -171,11 +171,8 @@ pub struct ServiceTicketReply {
     pub tickets: Vec<ServiceTicketInfo>,
 }
 
-/// Authentication modes
-/// From src/auth/Auth.h
-// Auth modes for different Ceph services
-// Reference: ~/dev/ceph/src/auth/Auth.h
 /// Authentication mode for different Ceph services
+/// From src/auth/Auth.h
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     /// No authentication

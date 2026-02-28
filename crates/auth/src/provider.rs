@@ -164,12 +164,7 @@ impl AuthProvider for MonitorAuthProvider {
         let mut peek = payload.clone();
         if peek.len() >= 2 {
             // Read first u16 to check if it's the request_type
-            let first_u16 = u16::decode(&mut peek, 0).map_err(|e| {
-                crate::error::CephXError::ProtocolError(format!(
-                    "Failed to decode first_u16: {}",
-                    e
-                ))
-            })?;
+            let first_u16 = u16::decode(&mut peek, 0)?;
 
             if first_u16 == crate::protocol::CEPHX_GET_AUTH_SESSION_KEY {
                 // This is AUTH_DONE - handle final authentication
@@ -331,10 +326,6 @@ impl AuthProvider for ServiceAuthProvider {
                         "Successfully extracted server_challenge: 0x{:016x}",
                         server_challenge
                     );
-                    debug!(
-                        "Successfully extracted server_challenge: 0x{:016x}",
-                        server_challenge
-                    );
 
                     // Store the challenge for the next authorizer
                     self.server_challenge = Some(server_challenge);
@@ -393,9 +384,7 @@ impl AuthProvider for ServiceAuthProvider {
                 use denc::Denc;
 
                 let mut buf = payload.clone();
-                let encrypted_data = Bytes::decode(&mut buf, 0).map_err(|e| {
-                    CephXError::ProtocolError(format!("Failed to decode encrypted data: {}", e))
-                })?;
+                let encrypted_data = Bytes::decode(&mut buf, 0)?;
 
                 match crate::client::CephXClientHandler::decrypt_with_key(sess_key, &encrypted_data)
                 {

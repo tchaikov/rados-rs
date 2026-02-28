@@ -306,9 +306,7 @@ impl CephXServerHandler {
         let mut response = BytesMut::new();
 
         // 1. global_id
-        global_id
-            .encode(&mut response, 0)
-            .map_err(|e| CephXError::EncodingError(format!("Failed to encode global_id: {}", e)))?;
+        global_id.encode(&mut response, 0)?;
 
         // 2. connection_mode
         response.put_u8(connection_mode);

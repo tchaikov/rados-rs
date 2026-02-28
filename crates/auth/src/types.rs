@@ -84,6 +84,27 @@ impl CryptoKey {
         self.secret.is_empty()
     }
 
+    /// Extract the raw 16-byte AES key from the secret.
+    ///
+    /// Session keys are raw 16-byte keys. Client keys from keyring files
+    /// contain a 12-byte header (u16 type + u32 sec + u32 nsec + u16 len)
+    /// followed by the 16-byte key.
+    pub fn aes_key_bytes(&self) -> Result<&[u8]> {
+        use crate::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
+
+        let secret_bytes = &self.secret;
+        if secret_bytes.len() == AES_KEY_LEN {
+            Ok(secret_bytes)
+        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
+            Ok(&secret_bytes[CRYPTO_KEY_HEADER_SIZE..CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN])
+        } else {
+            Err(CephXError::CryptographicError(format!(
+                "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
+                secret_bytes.len()
+            )))
+        }
+    }
+
     pub fn sign(&self, message: &[u8]) -> Result<Bytes> {
         let mut mac = HmacSha256::new_from_slice(&self.secret)
             .map_err(|e| CephXError::CryptographicError(format!("HMAC key error: {}", e)))?;
@@ -110,37 +131,14 @@ impl CryptoKey {
             )));
         }
 
-        // Extract the AES key from the secret
-        // Session keys from CephXServiceTicket contain just the raw 16-byte key,
-        // while client keys contain 12-byte header + 16-byte key
-        use crate::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
+        let key_bytes = self.aes_key_bytes()?;
 
-        let secret_bytes = self.get_secret();
-
-        let key_bytes = if secret_bytes.len() == AES_KEY_LEN {
-            // Raw 16-byte AES key (e.g., session key from CephXServiceTicket)
-            secret_bytes
-        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
-            // Skip the 12-byte header to get to the actual key material
-            let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-            &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN]
-        } else {
-            return Err(CephXError::CryptographicError(format!(
-                "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
-                secret_bytes.len()
-            )));
-        };
-
-        // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
         use crate::protocol::CEPH_AES_IV;
 
-        // Decrypt with AES-128-CBC using Pkcs7 padding
         type Aes128CbcDec = Decryptor<Aes128>;
         let cipher = Aes128CbcDec::new(key_bytes.into(), CEPH_AES_IV.into());
 
-        // Allocate buffer for decryption
         let mut buffer = ciphertext.to_vec();
-
         let plaintext = cipher
             .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer)
             .map_err(|e| {
@@ -164,29 +162,10 @@ impl CryptoKey {
             )));
         }
 
-        // Extract the AES key from the secret
-        use crate::protocol::{AES_BLOCK_LEN, AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
+        let key_bytes = self.aes_key_bytes()?;
 
-        let secret_bytes = self.get_secret();
+        use crate::protocol::{AES_BLOCK_LEN, CEPH_AES_IV};
 
-        let key_bytes = if secret_bytes.len() == AES_KEY_LEN {
-            // Raw 16-byte AES key (e.g., session key from CephXServiceTicket)
-            secret_bytes
-        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
-            // Skip the 12-byte header to get to the actual key material
-            let actual_key_start = CRYPTO_KEY_HEADER_SIZE;
-            &secret_bytes[actual_key_start..actual_key_start + AES_KEY_LEN]
-        } else {
-            return Err(CephXError::CryptographicError(format!(
-                "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
-                secret_bytes.len()
-            )));
-        };
-
-        // Use Ceph's IV: "cephsageyudagreg" (16 bytes)
-        use crate::protocol::CEPH_AES_IV;
-
-        // Encrypt with AES-128-CBC using Pkcs7 padding
         type Aes128CbcEnc = Encryptor<Aes128>;
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
@@ -220,13 +199,6 @@ impl Denc for CryptoKey {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 10 {
-            // u16 + 8 (SystemTime) + u16 minimum
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CryptoKey".to_string(),
-            ));
-        }
-
         let crypto_type = u16::decode(buf, 0)?;
 
         // Decode created time using SystemTime's Denc implementation
@@ -427,27 +399,14 @@ impl CephXServiceTicketInfo {
 
 impl Denc for CephXServiceTicketInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode struct version
-        buf.put_u8(1);
-
-        // Encode ticket
+        1u8.encode(buf, 0)?;
         self.ticket.encode(buf, features)?;
-
-        // Encode session_key
         self.session_key.encode(buf, features)?;
-
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for CephXServiceTicketInfo".to_string(),
-            ));
-        }
-
-        let _struct_v = buf.get_u8();
-
+        let _struct_v = u8::decode(buf, 0)?;
         let ticket = AuthTicket::decode(buf, features)?;
         let session_key = CryptoKey::decode(buf, features)?;
 
@@ -476,34 +435,17 @@ pub struct AuthCapsInfo {
 
 impl Denc for AuthCapsInfo {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode struct version
-        buf.put_u8(1);
-
-        // Encode caps as a map
+        1u8.encode(buf, 0)?;
         (self.caps.len() as u32).encode(buf, 0)?;
         for (key, value) in &self.caps {
             key.encode(buf, features)?;
             value.encode(buf, features)?;
         }
-
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for AuthCapsInfo".to_string(),
-            ));
-        }
-
-        let _struct_v = buf.get_u8();
-
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for caps count".to_string(),
-            ));
-        }
-
+        let _struct_v = u8::decode(buf, 0)?;
         let count = u32::decode(buf, 0)?;
         let mut caps = HashMap::new();
 
@@ -576,12 +518,6 @@ impl Denc for CephXAuthenticator {
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        if buf.remaining() < 44 {
-            return Err(RadosError::Protocol(
-                "Insufficient authenticator data".to_string(),
-            ));
-        }
-
         let client_challenge = u64::decode(buf, 0)?;
         let server_challenge = u64::decode(buf, 0)?;
         let global_id = u64::decode(buf, 0)?;
@@ -727,9 +663,7 @@ impl CephXSession {
     pub fn sign_authenticator(&self, auth: &CephXAuthenticator) -> Result<Bytes> {
         use denc::Denc;
         let mut buf = BytesMut::new();
-        auth.encode(&mut buf, 0).map_err(|e| {
-            CephXError::EncodingError(format!("Failed to encode authenticator: {}", e))
-        })?;
+        auth.encode(&mut buf, 0)?;
         self.session_key.sign(&buf.freeze())
     }
 }
