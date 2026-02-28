@@ -661,36 +661,26 @@ impl State for AuthConnecting {
                         con_mode
                     );
 
-                    // For AuthMethod::None, we don't need to extract session_key and connection_secret
+                    // For AuthMethod::None, we don't need session key/connection secret
+                    // but we STILL need to go through AUTH_CONNECTING_SIGN to send AUTH_SIGNATURE
                     if self.auth_method == crate::AuthMethod::None {
                         tracing::debug!(
-                            "AuthMethod::None - no session key/connection secret needed"
+                            "AuthMethod::None - no session key/connection secret, will send empty signature"
                         );
 
-                        // For no-auth with CRC mode, skip directly to session connecting
-                        // For SECURE mode, we'd need signature exchange but that doesn't make sense with no-auth
-                        if con_mode == crate::ConnectionMode::Secure.into() {
-                            tracing::warn!(
-                                "SECURE mode with AuthMethod::None is unusual, skipping to session"
-                            );
-                        }
-
-                        // Go directly to SessionConnecting
-                        // The global_id and addresses will be set in apply_result()
+                        // For AuthMethod::None, send AUTH_SIGNATURE with empty signature (sha256 of empty data)
+                        // Reference: ProtocolV2::handle_auth_done() always transitions to AUTH_CONNECTING_SIGN
                         Ok(StateResult::Transition(Box::new(
-                            SessionConnecting::new_with_encryption(
+                            AuthConnectingSign::new_with_encryption(
                                 con_mode,
-                                None, // No session key for AuthMethod::None
-                                None, // No connection secret for AuthMethod::None
-                                None, // No expected server signature for AuthMethod::None
+                                None,         // No session key for AuthMethod::None
+                                None,         // No connection secret for AuthMethod::None
+                                Bytes::new(), // Empty signature for AuthMethod::None
+                                None,         // No expected server signature for AuthMethod::None
                                 global_id,
-                                denc::EntityAddr::default(), // Placeholder, will be set in apply_result
-                                denc::EntityAddr::default(), // Placeholder, will be set in apply_result
-                                rand::random(), // client_cookie - will be overridden in apply_result
-                                0,              // server_cookie - will be set in apply_result
-                                0,              // global_seq - will be set in apply_result
-                                0,              // connect_seq - will be set in apply_result
-                                0,              // in_seq - will be set in apply_result
+                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
+                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
+                                0, // Placeholder, will be replaced with actual peer_supported_features
                             ),
                         )))
                     } else {
@@ -1481,7 +1471,7 @@ impl State for SessionConnecting {
     }
 
     fn enter(&mut self) -> Result<StateResult> {
-        tracing::debug!("SessionConnecting::enter() called");
+        tracing::info!("SessionConnecting::enter() - Starting session establishment");
         tracing::debug!("  our_global_id={}", self.our_global_id);
         tracing::debug!("  connection_mode={}", self.connection_mode);
         tracing::debug!("  client_cookie={}", self.client_cookie);
@@ -1555,6 +1545,12 @@ impl State for SessionConnecting {
                 gid,
                 target_addr,
                 addrs,
+                self.client_cookie
+            );
+            tracing::info!(
+                "Sending CLIENT_IDENT frame: gid={}, global_seq={}, cookie={}",
+                gid,
+                self.global_seq,
                 self.client_cookie
             );
 
