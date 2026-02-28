@@ -408,6 +408,22 @@ impl CephConfig {
             .to_string()
     }
 
+    /// Check if CephX authentication is required
+    ///
+    /// Returns `true` if auth is required (cephx or cephx,none), `false` if auth is "none".
+    /// Checks "auth cluster required" and "auth client required" settings.
+    /// Defaults to `true` (auth required) if not specified.
+    pub fn is_auth_required(&self) -> bool {
+        // Check auth_cluster_required first, then auth_client_required
+        let auth_setting = self
+            .get_with_fallback(&["global"], "auth cluster required")
+            .or_else(|| self.get_with_fallback(&["global", "client"], "auth client required"))
+            .unwrap_or("cephx");
+
+        // Auth is NOT required only if explicitly set to "none"
+        auth_setting.to_lowercase() != "none"
+    }
+
     /// Get the DNS SRV service name for monitor discovery
     ///
     /// Returns the value of the `mon_dns_srv_name` configuration option,

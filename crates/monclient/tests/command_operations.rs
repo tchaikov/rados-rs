@@ -18,7 +18,7 @@ use tracing::info;
 /// Helper to get test configuration from environment and ceph.conf
 struct TestConfig {
     mon_addrs: Vec<String>,
-    keyring_path: String,
+    keyring_path: Option<String>,
     entity_name: String,
 }
 
@@ -38,10 +38,16 @@ impl TestConfig {
         // Get monitor addresses
         let mon_addrs = ceph_config.mon_addrs()?;
 
-        // Get keyring path
-        let keyring_path = std::env::var("CEPH_KEYRING")
-            .or_else(|_| ceph_config.keyring())
-            .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
+        // Get keyring path only if auth is required
+        let keyring_path = if ceph_config.is_auth_required() {
+            Some(
+                std::env::var("CEPH_KEYRING")
+                    .or_else(|_| ceph_config.keyring())
+                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string()),
+            )
+        } else {
+            None
+        };
 
         // Get entity name
         let entity_name = ceph_config.entity_name();
@@ -62,7 +68,7 @@ async fn create_mon_client(
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
-        keyring_path: config.keyring_path.clone(),
+        keyring_path: config.keyring_path.clone().unwrap_or_default(),
         ..Default::default()
     };
 
@@ -73,10 +79,12 @@ async fn create_mon_client(
 
     info!("✓ Connected to monitor");
 
-    // Wait for authentication to complete - use event-driven wait
-    mon_client
-        .wait_for_auth(std::time::Duration::from_secs(5))
-        .await?;
+    // Wait for authentication to complete if auth is required
+    if config.keyring_path.is_some() {
+        mon_client
+            .wait_for_auth(std::time::Duration::from_secs(5))
+            .await?;
+    }
 
     // Wait for MonMap to arrive - use event-driven wait
     mon_client

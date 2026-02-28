@@ -424,6 +424,11 @@ impl AuthConnecting {
             auth_provider.is_some(),
             service_id
         );
+        tracing::info!(
+            "Starting auth with method={:?}, supported_methods={:?}",
+            preferred_auth_method,
+            supported_auth_methods
+        );
 
         Self {
             auth_method: preferred_auth_method,
@@ -514,12 +519,12 @@ impl State for AuthConnecting {
                     allowed_methods,
                     allowed_modes
                 );
-                tracing::debug!(
-                    "Server rejected method {} (err={}), allowed_methods={:?}, allowed_modes={:?}",
+                tracing::info!(
+                    "Server rejected auth method {} (error code={}), allowed_methods={:?}, our_supported={:?}",
                     rejected_method,
                     result,
                     allowed_methods,
-                    allowed_modes
+                    self.supported_auth_methods
                 );
 
                 // Check retry limit
