@@ -618,10 +618,8 @@ impl State for AuthConnecting {
                         );
 
                         // Process the challenge and build the response
-                        let _result =
-                            provider.handle_auth_response(payload.clone(), 0, 0)?;
-                        let auth_payload =
-                            provider.build_auth_payload(0, self.service_id)?;
+                        let _result = provider.handle_auth_response(payload.clone(), 0, 0)?;
+                        let auth_payload = provider.build_auth_payload(0, self.service_id)?;
 
                         // For AuthRequestMore, we only send the auth_payload
                         let auth_frame = AuthRequestMoreFrame::new(auth_payload);
@@ -754,12 +752,10 @@ impl State for AuthConnecting {
                 let auth_none = if is_service_connection {
                     tracing::debug!(
                         "Sending AUTH_REQUEST for service (service_id={}, global_id={})",
-                        self.service_id, self.global_id
+                        self.service_id,
+                        self.global_id
                     );
-                    crate::AuthNonePayload::for_service(
-                        self.entity_name.clone(),
-                        self.global_id,
-                    )
+                    crate::AuthNonePayload::for_service(self.entity_name.clone(), self.global_id)
                 } else {
                     tracing::debug!(
                         "Sending AUTH_REQUEST for monitor (entity={}, global_id=0)",
@@ -876,12 +872,8 @@ impl State for CompressionConnecting {
                 // Parse COMPRESSION_DONE frame
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let is_compress = bool::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode is_compress: {:?}", e))
-                    })?;
-                    let method = u32::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode method: {:?}", e))
-                    })?;
+                    let is_compress = bool::decode(&mut payload, 0)?;
+                    let method = u32::decode(&mut payload, 0)?;
 
                     tracing::debug!(
                         "Received COMPRESSION_DONE - is_compress: {}, method: {}",
@@ -1045,9 +1037,6 @@ impl State for AuthConnectingSign {
                     tracing::debug!(
                         "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
-                    tracing::debug!(
-                        "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
-                    );
                     Ok(StateResult::Transition(Box::new(
                         CompressionConnecting::new_with_encryption(
                             self.connection_mode,
@@ -1059,7 +1048,6 @@ impl State for AuthConnectingSign {
                         ),
                     )))
                 } else {
-                    tracing::debug!("Peer does not support COMPRESSION, transitioning directly to SESSION_CONNECTING");
                     tracing::debug!("Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
                     Ok(StateResult::Transition(Box::new(
                         SessionConnecting::new_with_encryption(
