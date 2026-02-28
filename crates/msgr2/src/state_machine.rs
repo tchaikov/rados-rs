@@ -749,8 +749,26 @@ impl State for AuthConnecting {
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None (no authentication)");
-                // For no-auth, send empty payload
-                (crate::AuthMethod::None.into(), Bytes::new())
+                // For AuthMethod::None, we still need to send entity_name and global_id
+                // Reference: AuthNoneAuthorizer::build_authorizer() in src/auth/none/AuthNoneProtocol.h
+                // Format: struct_v (u8=1) + entity_name (entity_type u8 + num u64) + global_id (u64)
+                use denc::Denc;
+                let mut payload = bytes::BytesMut::new();
+
+                // struct_v = 1
+                1u8.encode(&mut payload, 0)?;
+
+                // entity_name - encode manually as packed format (entity_type u8 + num u64)
+                // Use CLIENT type (0x08) with num=0 for now
+                // TODO: Pass actual entity_name through ConnectionConfig
+                const CEPH_ENTITY_TYPE_CLIENT: u8 = 0x08;
+                CEPH_ENTITY_TYPE_CLIENT.encode(&mut payload, 0)?;
+                0u64.encode(&mut payload, 0)?; // entity num
+
+                // global_id = 0 for initial request
+                0u64.encode(&mut payload, 0)?;
+
+                (crate::AuthMethod::None.into(), payload.freeze())
             }
             crate::AuthMethod::Cephx => {
                 tracing::debug!("Sending AUTH_REQUEST with AuthMethod::Cephx");
