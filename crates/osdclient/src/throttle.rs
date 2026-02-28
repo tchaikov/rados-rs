@@ -63,6 +63,7 @@ impl Throttle {
     /// Matches Ceph defaults:
     /// - objecter_inflight_ops: 1024
     /// - objecter_inflight_op_bytes: 100 MB
+    #[allow(dead_code)]
     pub fn default_limits() -> Self {
         Self::new(DEFAULT_MAX_OPS, DEFAULT_MAX_BYTES)
     }
@@ -113,6 +114,7 @@ impl Throttle {
     /// Try to acquire budget without blocking
     ///
     /// Returns None if the budget is not available.
+    #[allow(dead_code)]
     pub fn try_acquire(&self, bytes: usize) -> Option<ThrottlePermit<'_>> {
         // Try to acquire operation slot
         let op_permit = self.ops_sem.try_acquire().ok()?;

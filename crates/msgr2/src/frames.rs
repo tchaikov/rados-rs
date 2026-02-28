@@ -1144,7 +1144,7 @@ mod tests {
         let middle = Bytes::from("middle payload");
         let data = Bytes::from("data payload");
 
-        let frame = MessageFrame::new(header.clone(), front.clone(), middle.clone(), data.clone());
+        let frame = MessageFrame::new(header, front.clone(), middle.clone(), data.clone());
 
         // Assemble with rev1 (multi-segment)
         let mut assembler = FrameAssembler::new(true);

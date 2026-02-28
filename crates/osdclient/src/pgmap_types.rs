@@ -8,23 +8,28 @@ use denc::{
 };
 
 /// Wire size of ObjectStatSum at version 20: 36 × i64 + 4 × i32
+#[allow(dead_code)]
 const OBJECT_STAT_SUM_ENCODED_SIZE: usize =
     36 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
 
 /// Wire size of ObjectStatSum at version 14 (minimum supported):
 /// 30 × i64 + 4 × i32 (excludes v16-v20 fields)
+#[allow(dead_code)]
 const OBJECT_STAT_SUM_V14_MIN_SIZE: usize =
     30 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
 
 /// Number of u32 fields in OsdStatInterfaces (1 + 3×6 + 1 = 21 fields for
 /// last_update, back_{pingtime,min,max}[3], back_last, front_{pingtime,min,max}[3], front_last)
+#[allow(dead_code)]
 const OSD_STAT_INTERFACES_NUM_FIELDS: usize = 21;
 
 /// Wire size of OsdStatInterfaces: 21 × u32
+#[allow(dead_code)]
 const OSD_STAT_INTERFACES_SIZE: usize = OSD_STAT_INTERFACES_NUM_FIELDS * std::mem::size_of::<u32>();
 
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, denc::Denc)]
 pub struct PgCount {
     /// Number of PGs for which this OSD is in the acting set
@@ -35,6 +40,7 @@ pub struct PgCount {
     pub primary: i32,
 }
 
+#[allow(dead_code)]
 impl PgCount {
     pub fn new() -> Self {
         Self::default()
@@ -47,6 +53,7 @@ impl FixedSize for PgCount {
 
 /// Filesystem statistics from the object store
 /// C++ definition: store_statfs_t in osd/osd_types.h
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc)]
 #[denc(version = 1, compat = 1)]
 pub struct StoreStatfs {
@@ -72,6 +79,7 @@ pub struct StoreStatfs {
     pub internal_metadata: i64,
 }
 
+#[allow(dead_code)]
 impl StoreStatfs {
     pub fn new() -> Self {
         Self::default()
@@ -85,6 +93,7 @@ impl StoreStatfs {
 /// Object statistics summary
 /// C++ definition: object_stat_sum_t in osd/osd_types.h
 /// Version 20, encodes 38 fields (34 i64 + 4 i32)
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ObjectStatSum {
     pub num_bytes: i64,
@@ -129,6 +138,7 @@ pub struct ObjectStatSum {
     pub num_objects_repaired: i64,
 }
 
+#[allow(dead_code)]
 impl ObjectStatSum {
     pub fn new() -> Self {
         Self::default()
@@ -357,10 +367,12 @@ impl Denc for ObjectStatSum {
 /// C++ definition: object_stat_collection_t in osd/osd_types.h
 /// Version 2, wraps ObjectStatSum
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct ObjectStatCollection {
     pub sum: ObjectStatSum,
 }
 
+#[allow(dead_code)]
 impl ObjectStatCollection {
     pub fn new() -> Self {
         Self::default()
@@ -439,6 +451,7 @@ impl Denc for ObjectStatCollection {
 /// C++ definition: pool_stat_t in osd/osd_types.h
 /// Version 7 (with features), feature-dependent
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct PoolStat {
     pub stats: ObjectStatCollection,
     pub store_stats: StoreStatfs,
@@ -449,6 +462,7 @@ pub struct PoolStat {
     pub num_store_stats: i32,
 }
 
+#[allow(dead_code)]
 impl PoolStat {
     pub fn new() -> Self {
         Self::default()
@@ -590,10 +604,12 @@ impl Denc for PoolStat {
 /// Version 1, wraps vector<int32_t>
 #[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc)]
 #[denc(version = 1, compat = 1)]
+#[allow(dead_code)]
 pub struct Pow2Hist {
     pub values: Vec<i32>,
 }
 
+#[allow(dead_code)]
 impl Pow2Hist {
     pub fn new() -> Self {
         Self::default()
@@ -604,6 +620,7 @@ impl Pow2Hist {
 /// C++ definition: objectstore_perf_stat_t in osd/osd_types.h
 /// Version 2, feature-dependent (OS_PERF_STAT_NS)
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct ObjectstorePerfStat {
     /// Commit latency in nanoseconds
     pub os_commit_latency_ns: u64,
@@ -611,6 +628,7 @@ pub struct ObjectstorePerfStat {
     pub os_apply_latency_ns: u64,
 }
 
+#[allow(dead_code)]
 impl ObjectstorePerfStat {
     pub fn new() -> Self {
         Self::default()
@@ -708,6 +726,7 @@ impl Denc for ObjectstorePerfStat {
 /// OSD heartbeat interface statistics
 /// C++ definition: osd_stat_t::Interfaces in osd/osd_types.h
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct OsdStatInterfaces {
     pub last_update: u32, // in seconds
     pub back_pingtime: [u32; 3],
@@ -720,6 +739,7 @@ pub struct OsdStatInterfaces {
     pub front_last: u32,
 }
 
+#[allow(dead_code)]
 impl OsdStatInterfaces {
     pub fn new() -> Self {
         Self::default()
@@ -824,6 +844,7 @@ impl FixedSize for OsdStatInterfaces {
 /// C++ definition: osd_stat_t in osd/osd_types.h
 /// Version 14, feature-dependent
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct OsdStat {
     pub statfs: StoreStatfs,
     pub hb_peers: Vec<i32>,
@@ -842,6 +863,7 @@ pub struct OsdStat {
     pub hb_pingtime: std::collections::BTreeMap<i32, OsdStatInterfaces>,
 }
 
+#[allow(dead_code)]
 impl OsdStat {
     pub fn new() -> Self {
         Self::default()
@@ -1501,11 +1523,13 @@ use crate::osdmap::ShardId;
 /// PG shard identifier (pg_shard_t in C++)
 /// Identifies a specific shard of a PG on a specific OSD
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[allow(dead_code)]
 pub struct PgShard {
     pub osd: i32,
     pub shard: ShardId,
 }
 
+#[allow(dead_code)]
 impl PgShard {
     /// NO_OSD constant
     pub const NO_OSD: i32 = 0x7fffffff;
@@ -1580,6 +1604,7 @@ impl Denc for PgShard {
 /// Interval set (interval_set<T> in C++)
 /// Represents a set of non-overlapping intervals
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub struct IntervalSet<T>
 where
     T: Ord,
@@ -1588,6 +1613,7 @@ where
     pub intervals: std::collections::BTreeMap<T, T>,
 }
 
+#[allow(dead_code)]
 impl<T> IntervalSet<T>
 where
     T: Ord,
@@ -1625,6 +1651,7 @@ where
 /// version 27+, last 3 at version 30+). Access them individually through
 /// `PgStat::encode_content` / `decode_content`.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[allow(dead_code)]
 pub struct PgScrubbingStatus {
     pub scheduled_at: UTime,
     pub duration_seconds: i32,
@@ -1642,6 +1669,7 @@ pub struct PgScrubbingStatus {
 /// Aggregate stats for a single placement group
 /// Version 30, compat 22
 #[derive(Debug, Clone, PartialEq, Default)]
+#[allow(dead_code)]
 pub struct PgStat {
     pub version: EVersion,
     pub reported_seq: Version,
@@ -1991,6 +2019,7 @@ impl Denc for PgStat {
 /// Aggregate statistics for all PGs in the cluster
 /// Version 5, compat 1
 #[derive(Debug, Clone, PartialEq, Default)]
+#[allow(dead_code)]
 pub struct PgMapDigest {
     pub num_pg: i64,
     pub num_pg_active: i64,
@@ -2161,6 +2190,7 @@ impl Denc for PgMapDigest {
 /// Version 8, compat 8
 #[derive(Debug, Clone, PartialEq, Default, denc::VersionedDenc)]
 #[denc(version = 8, compat = 8, feature_dependent)]
+#[allow(dead_code)]
 pub struct PgMap {
     pub version: Version,
     pub pg_stat: std::collections::BTreeMap<PgId, PgStat>,
