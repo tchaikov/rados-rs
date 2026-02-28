@@ -47,11 +47,8 @@ impl MonSub {
 
     /// Check if subscriptions need renewal
     pub fn need_renew(&self) -> bool {
-        if let Some(renew_after) = self.renew_after {
-            Instant::now() > renew_after
-        } else {
-            false
-        }
+        self.renew_after
+            .is_some_and(|renew_after| Instant::now() > renew_after)
     }
 
     /// Get the new subscriptions to send

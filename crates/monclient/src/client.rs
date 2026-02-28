@@ -107,24 +107,6 @@ impl Default for MonClientConfig {
     }
 }
 
-impl MonClientConfig {
-    fn mon_client_hunt_interval(&self) -> Duration {
-        self.hunt_interval
-    }
-
-    fn mon_client_ping_interval(&self) -> Duration {
-        self.keepalive_interval
-    }
-
-    fn mon_client_ping_timeout(&self) -> Duration {
-        self.keepalive_timeout
-    }
-
-    fn rados_mon_op_timeout(&self) -> Duration {
-        self.command_timeout
-    }
-}
-
 /// Monitor client
 #[derive(Clone)]
 pub struct MonClient {
@@ -183,10 +165,10 @@ cephconfig::runtime_config_options! {
 impl RuntimeMonClientConfig {
     fn from_config(config: &MonClientConfig) -> Self {
         Self {
-            mon_client_hunt_interval: config.mon_client_hunt_interval(),
-            mon_client_ping_interval: config.mon_client_ping_interval(),
-            mon_client_ping_timeout: config.mon_client_ping_timeout(),
-            rados_mon_op_timeout: config.rados_mon_op_timeout(),
+            mon_client_hunt_interval: config.hunt_interval,
+            mon_client_ping_interval: config.keepalive_interval,
+            mon_client_ping_timeout: config.keepalive_timeout,
+            rados_mon_op_timeout: config.command_timeout,
         }
     }
 }
@@ -499,34 +481,9 @@ impl MonClient {
         // Apply backoff delay if we recently tried hunting
         let delay = {
             let state = self.state.read().await;
-
-            if state.had_a_connection {
-                if let Some(last_attempt) = state.last_hunt_attempt {
-                    let elapsed = last_attempt.elapsed();
-                    let hunt_delay = state
-                        .runtime_config
-                        .mon_client_hunt_interval
-                        .mul_f64(state.reopen_interval_multiplier);
-
-                    if elapsed < hunt_delay {
-                        let remaining = hunt_delay - elapsed;
-                        debug!(
-                            "Applying hunting backoff: waiting {:?} (multiplier: {:.2})",
-                            remaining, state.reopen_interval_multiplier
-                        );
-                        Some(remaining)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
+            self.compute_hunt_backoff_delay(&state)
         };
 
-        // Sleep for backoff delay if needed
         if let Some(delay) = delay {
             tokio::time::sleep(delay).await;
         }
@@ -647,6 +604,33 @@ impl MonClient {
         }
 
         hunt_result
+    }
+
+    /// Compute the backoff delay before the next hunt attempt.
+    ///
+    /// Returns `Some(duration)` if we should wait before hunting again,
+    /// or `None` if we can hunt immediately.
+    fn compute_hunt_backoff_delay(&self, state: &MonClientState) -> Option<Duration> {
+        if !state.had_a_connection {
+            return None;
+        }
+        let last_attempt = state.last_hunt_attempt?;
+        let elapsed = last_attempt.elapsed();
+        let hunt_delay = state
+            .runtime_config
+            .mon_client_hunt_interval
+            .mul_f64(state.reopen_interval_multiplier);
+
+        if elapsed >= hunt_delay {
+            return None;
+        }
+
+        let remaining = hunt_delay - elapsed;
+        debug!(
+            "Applying hunting backoff: waiting {:?} (multiplier: {:.2})",
+            remaining, state.reopen_interval_multiplier
+        );
+        Some(remaining)
     }
 
     /// Connect to a specific monitor

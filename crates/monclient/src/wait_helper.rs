@@ -56,27 +56,15 @@ where
     CheckFn: Fn() -> CheckFut,
     CheckFut: Future<Output = Option<T>>,
 {
-    // Fast path: check if condition is already met
-    if let Some(value) = check_fn().await {
-        return Ok(value);
-    }
-
-    // Wait for notification with timeout, looping on spurious wakeups
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        // Check condition before waiting
         if let Some(value) = check_fn().await {
             return Ok(value);
         }
 
         tokio::select! {
-            _ = notify.notified() => {
-                // Loop to check condition again
-                continue;
-            }
-            _ = tokio::time::sleep_until(deadline) => {
-                return Err(timeout_error);
-            }
+            _ = notify.notified() => continue,
+            _ = tokio::time::sleep_until(deadline) => return Err(timeout_error),
         }
     }
 }

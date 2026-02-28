@@ -388,11 +388,9 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
         use denc::Denc;
 
         let mut data = front;
-        // Decode fsid using Denc (16 bytes)
         let fsid_denc = UuidD::decode(&mut data, 0)?;
         let fsid = fsid_denc.bytes;
 
-        // Decode incremental_maps (map<epoch_t, buffer::list>)
         let inc_count = u32::decode(&mut data, 0)? as usize;
         let mut incremental_maps = HashMap::new();
         for _ in 0..inc_count {
@@ -401,7 +399,6 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
             incremental_maps.insert(epoch, map_data);
         }
 
-        // Decode maps (map<epoch_t, buffer::list>)
         let maps_count = u32::decode(&mut data, 0)? as usize;
         let mut maps = HashMap::new();
         for _ in 0..maps_count {
@@ -410,7 +407,7 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
             maps.insert(epoch, map_data);
         }
 
-        // Decode cluster_osdmap_trim_lower_bound and newest_map (version >= 2)
+        // Optional fields (version >= 2)
         let cluster_osdmap_trim_lower_bound = if data.remaining() >= std::mem::size_of::<u32>() {
             u32::decode(&mut data, 0)?
         } else {
@@ -470,24 +467,17 @@ impl PaxosServiceMessage for MMonCommand {
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         use denc::Denc;
-
         self.fsid.encode(buf, 0)?;
-
         (self.cmd.len() as u32).encode(buf, 0)?;
         for s in &self.cmd {
             s.encode(buf, 0)?;
         }
-
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         use denc::Denc;
-
-        // Decode fsid (UUID) using Denc
         let fsid = UuidD::decode(data, 0)?;
-
-        // Decode command array using Denc
         let cmd_count = u32::decode(data, 0)? as usize;
         let cmd = (0..cmd_count)
             .map(|_| String::decode(data, 0).map_err(MonClientError::from))
@@ -497,7 +487,7 @@ impl PaxosServiceMessage for MMonCommand {
             paxos,
             fsid,
             cmd,
-            inbl: Bytes::new(), // Will be filled by CephMessagePayload::decode_payload
+            inbl: Bytes::new(), // Filled by CephMessagePayload::decode_payload
         })
     }
 }
@@ -569,28 +559,19 @@ impl PaxosServiceMessage for MMonCommandAck {
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         use denc::Denc;
-
-        // Encode r (errorcode32_t)
         self.r.encode(buf, 0)?;
-
-        // Encode rs string using Denc
         self.rs.encode(buf, 0)?;
-
-        // Encode cmd array using Denc
         (self.cmd.len() as u32).encode(buf, 0)?;
         for s in &self.cmd {
             s.encode(buf, 0)?;
         }
-
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         use denc::Denc;
-
         let r = i32::decode(data, 0)?;
         let rs = String::decode(data, 0)?;
-
         let cmd_count = u32::decode(data, 0)? as usize;
         let cmd = (0..cmd_count)
             .map(|_| String::decode(data, 0).map_err(MonClientError::from))
@@ -766,59 +747,26 @@ impl PaxosServiceMessage for MPoolOp {
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         use denc::Denc;
-
-        // Encode fsid (UUID) using Denc
         self.fsid.encode(buf, 0)?;
-
-        // Encode pool
         self.pool.encode(buf, 0)?;
-
-        // Encode op
         self.op.encode(buf, 0)?;
-
-        // Encode old_auid (obsolete, always 0)
         Self::OLD_AUID_OBSOLETE.encode(buf, 0)?;
-
-        // Encode snapid
         self.snapid.encode(buf, 0)?;
-
-        // Encode name using Denc
         self.name.encode(buf, 0)?;
-
-        // Encode pad (for v3->v4 encoding change)
         Self::V3_V4_PAD.encode(buf, 0)?;
-
-        // Encode crush_rule
         self.crush_rule.encode(buf, 0)?;
-
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         use denc::Denc;
-
-        // Decode fsid (UUID) using Denc
         let fsid = UuidD::decode(data, 0)?;
-
-        // Decode pool
         let pool = u32::decode(data, 0)?;
-
-        // Decode op
         let op = u32::decode(data, 0)?;
-
-        // Decode old_auid (obsolete)
-        let _old_auid = u64::decode(data, 0)?;
-
-        // Decode snapid
+        let _old_auid = u64::decode(data, 0)?; // obsolete field
         let snapid = u64::decode(data, 0)?;
-
-        // Decode name using Denc
         let name = String::decode(data, 0)?;
-
-        // Decode pad (for v3->v4 encoding change)
-        let _pad = u8::decode(data, 0)?;
-
-        // Decode crush_rule
+        let _pad = u8::decode(data, 0)?; // v3->v4 pad
         let crush_rule = i16::decode(data, 0)?;
 
         Ok(Self {
@@ -904,42 +852,24 @@ impl PaxosServiceMessage for MPoolOpReply {
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         use denc::Denc;
-
-        // Encode fsid (UUID) using Denc
         self.fsid.encode(buf, 0)?;
-
-        // Encode reply_code
         self.reply_code.encode(buf, 0)?;
-
-        // Encode epoch
         self.epoch.encode(buf, 0)?;
-
-        // Encode response_data (optional)
         if !self.response_data.is_empty() {
-            1u8.encode(buf, 0)?; // has_data = true
+            1u8.encode(buf, 0)?;
             self.response_data.encode(buf, 0)?;
         } else {
-            0u8.encode(buf, 0)?; // has_data = false
+            0u8.encode(buf, 0)?;
         }
-
         Ok(())
     }
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         use denc::Denc;
-
-        // Decode fsid (UUID) using Denc
         let fsid = UuidD::decode(data, 0)?;
-
-        // Decode reply_code
         let reply_code = u32::decode(data, 0)?;
-
-        // Decode epoch
         let epoch = u32::decode(data, 0)?;
-
-        // Decode response_data (optional)
         let has_data = u8::decode(data, 0)?;
-
         let response_data = if has_data != 0 {
             Bytes::decode(data, 0)?
         } else {
