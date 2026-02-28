@@ -30,7 +30,7 @@ use uuid::Uuid;
 /// Test configuration
 struct TestConfig {
     mon_addrs: Vec<String>,
-    keyring_path: String,
+    keyring_path: Option<String>,
     entity_name: String,
     pool: String,
 }
@@ -51,8 +51,16 @@ impl TestConfig {
         // Get monitor addresses (prefer v2)
         let mon_addrs = config.mon_addrs()?;
 
-        // Get keyring path from ceph.conf
-        let keyring_path = config.keyring()?;
+        // Get required auth methods for client connections
+        let auth_methods = config.get_auth_client_required();
+
+        // Get keyring path only if CephX is in the supported methods
+        const CEPH_AUTH_CEPHX: u32 = 0x2;
+        let keyring_path = if auth_methods.contains(&CEPH_AUTH_CEPHX) {
+            Some(config.keyring()?)
+        } else {
+            None
+        };
 
         // Get entity name (defaults to client.admin)
         let entity_name = config.entity_name();
@@ -107,7 +115,7 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
     let mon_config = monclient::MonClientConfig {
         entity_name: config.entity_name.clone(),
         mon_addrs: config.mon_addrs.clone(),
-        keyring_path: config.keyring_path.clone(),
+        keyring_path: config.keyring_path.clone().unwrap_or_default(),
         ..Default::default()
     };
 
@@ -121,12 +129,14 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
         .await
         .expect("Failed to initialize MonClient");
 
-    // Wait for authentication to fully complete with all service tickets
-    // This ensures OSD service tickets are available before creating OSDClient
-    mon_client
-        .wait_for_auth(std::time::Duration::from_secs(5))
-        .await
-        .expect("Failed to complete authentication");
+    // Wait for authentication to fully complete if auth is required
+    // For no-auth clusters, skip this step
+    if config.keyring_path.is_some() {
+        mon_client
+            .wait_for_auth(std::time::Duration::from_secs(5))
+            .await
+            .expect("Failed to complete authentication");
+    }
 
     // Wait a moment for MonMap to arrive (contains FSID)
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
