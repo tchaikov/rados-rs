@@ -763,25 +763,31 @@ impl State for AuthConnecting {
 
         let (method, auth_payload) = match self.auth_method {
             crate::AuthMethod::None => {
-                // AUTH_NONE payload format:
-                // - Monitor connections (service_id=0): mode (u8 = 10) + entity_name + global_id
-                // - Service connections (service_id!=0): struct_v (u8 = 1) + entity_name + global_id
+                // AUTH_NONE uses different payload formats:
+                // - Monitor connections: MonAuthRequest (auth_mode=10)
+                // - Service connections: AuthNoneAuthorizer (auth_mode=1)
                 if self.service_id != 0 && self.global_id != 0 {
-                    tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None authorizer (service_id={}, global_id={})", self.service_id, self.global_id);
-                    // Build authorizer for service connections: struct_v=1 + entity_name + global_id
-                    let mut buf = bytes::BytesMut::new();
-                    1u8.encode(&mut buf, 0)?; // struct_v = AUTH_MODE_AUTHORIZER
-                    self.entity_name.encode(&mut buf, 0)?;
-                    self.global_id.encode(&mut buf, 0)?;
-                    (crate::AuthMethod::None.into(), buf.freeze())
+                    // Service connection (OSD/MDS/MGR) - use authorizer format
+                    tracing::debug!(
+                        "Sending AUTH_REQUEST with AuthNoneAuthorizer (service_id={}, global_id={})",
+                        self.service_id, self.global_id
+                    );
+                    let authorizer =
+                        crate::AuthNoneAuthorizer::new(self.entity_name.clone(), self.global_id);
+                    let payload = authorizer.encode()?;
+                    (crate::AuthMethod::None.into(), payload)
                 } else {
-                    tracing::debug!("Sending AUTH_REQUEST with AuthMethod::None for monitor (mode=10, entity={}, global_id=0)", self.entity_name);
-                    // Build payload for monitor connections: mode=10 (AUTH_MODE_MON) + entity_name + global_id=0
-                    let mut buf = bytes::BytesMut::new();
-                    10u8.encode(&mut buf, 0)?; // AUTH_MODE_MON
-                    self.entity_name.encode(&mut buf, 0)?;
-                    0u64.encode(&mut buf, 0)?; // global_id starts at 0, monitor assigns it
-                    (crate::AuthMethod::None.into(), buf.freeze())
+                    // Monitor connection - use MonAuthRequest format
+                    tracing::debug!(
+                        "Sending AUTH_REQUEST with MonAuthRequest (entity={}, global_id=0)",
+                        self.entity_name
+                    );
+                    let request = crate::MonAuthRequest::new(
+                        self.entity_name.clone(),
+                        0, // global_id starts at 0, monitor assigns it
+                    );
+                    let payload = request.encode()?;
+                    (crate::AuthMethod::None.into(), payload)
                 }
             }
             crate::AuthMethod::Cephx => {
