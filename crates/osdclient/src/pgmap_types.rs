@@ -40,13 +40,6 @@ pub struct PgCount {
     pub primary: i32,
 }
 
-#[allow(dead_code)]
-impl PgCount {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 impl FixedSize for PgCount {
     const SIZE: usize = 12;
 }
@@ -81,10 +74,6 @@ pub struct StoreStatfs {
 
 #[allow(dead_code)]
 impl StoreStatfs {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
     }
@@ -140,10 +129,6 @@ pub struct ObjectStatSum {
 
 #[allow(dead_code)]
 impl ObjectStatSum {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
     }
@@ -374,10 +359,6 @@ pub struct ObjectStatCollection {
 
 #[allow(dead_code)]
 impl ObjectStatCollection {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_zero(&self) -> bool {
         self.sum.is_zero()
     }
@@ -464,10 +445,6 @@ pub struct PoolStat {
 
 #[allow(dead_code)]
 impl PoolStat {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn is_zero(&self) -> bool {
         self.stats.is_zero()
             && self.store_stats.is_zero()
@@ -609,13 +586,6 @@ pub struct Pow2Hist {
     pub values: Vec<i32>,
 }
 
-#[allow(dead_code)]
-impl Pow2Hist {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 /// Object store performance statistics
 /// C++ definition: objectstore_perf_stat_t in osd/osd_types.h
 /// Version 2, feature-dependent (OS_PERF_STAT_NS)
@@ -626,13 +596,6 @@ pub struct ObjectstorePerfStat {
     pub os_commit_latency_ns: u64,
     /// Apply latency in nanoseconds
     pub os_apply_latency_ns: u64,
-}
-
-#[allow(dead_code)]
-impl ObjectstorePerfStat {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl VersionedEncode for ObjectstorePerfStat {
@@ -737,13 +700,6 @@ pub struct OsdStatInterfaces {
     pub front_min: [u32; 3],
     pub front_max: [u32; 3],
     pub front_last: u32,
-}
-
-#[allow(dead_code)]
-impl OsdStatInterfaces {
-    pub fn new() -> Self {
-        Self::default()
-    }
 }
 
 impl Denc for OsdStatInterfaces {
@@ -864,12 +820,6 @@ pub struct OsdStat {
 }
 
 #[allow(dead_code)]
-impl OsdStat {
-    pub fn new() -> Self {
-        Self::default()
-    }
-}
-
 impl VersionedEncode for OsdStat {
     const FEATURE_DEPENDENT: bool = true;
 
@@ -1613,18 +1563,6 @@ where
     pub intervals: std::collections::BTreeMap<T, T>,
 }
 
-#[allow(dead_code)]
-impl<T> IntervalSet<T>
-where
-    T: Ord,
-{
-    pub fn new() -> Self {
-        IntervalSet {
-            intervals: std::collections::BTreeMap::new(),
-        }
-    }
-}
-
 impl<T> Denc for IntervalSet<T>
 where
     T: Denc + Ord,
@@ -2275,7 +2213,7 @@ mod pg_stat_support_tests {
 
     #[test]
     fn test_interval_set_empty() {
-        let interval_set = IntervalSet::<u64>::new();
+        let interval_set = IntervalSet::<u64>::default();
 
         let mut buf = BytesMut::new();
         interval_set.encode(&mut buf, 0).unwrap();

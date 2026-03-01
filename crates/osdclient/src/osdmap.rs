@@ -100,10 +100,6 @@ pub struct ShardIdSet {
 }
 
 impl ShardIdSet {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn insert(&mut self, shard_id: ShardId) {
         let id = shard_id.0;
         if id >= 0 {
@@ -1080,28 +1076,7 @@ impl VersionedEncode for PoolSnapInfo {
         None // Complex type - size computed by encoding
     }
 }
-// Manual Denc implementation for PoolSnapInfo (uses VersionedEncode)
-impl denc::Denc for PoolSnapInfo {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <PoolSnapInfo as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
-        }
-    }
-}
+denc::impl_denc_for_versioned!(PoolSnapInfo);
 
 /// Snapshot interval for removed snaps
 #[derive(Debug, Clone, Default, Serialize)]
@@ -1148,10 +1123,6 @@ impl PgPool {
     // Version constants from Ceph
     const VERSION_CURRENT: u8 = 32; // Latest
     const COMPAT_VERSION: u8 = 5;
-
-    pub fn new() -> Self {
-        Self::default()
-    }
 
     pub fn is_stretch_pool(&self) -> bool {
         // For now, assume no stretch pools (like the default case in Ceph)
@@ -1336,6 +1307,7 @@ impl VersionedEncode for PgPool {
         Ok(())
     }
 
+    #[allow(clippy::field_reassign_with_default)]
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
@@ -1350,9 +1322,9 @@ impl VersionedEncode for PgPool {
             )));
         }
 
-        let mut pool = PgPool::new();
+        let mut pool = PgPool::default();
 
-        // Basic fields (always present)
+        // Basic fields (always present -- version-conditional assignments follow)
         pool.pool_type = buf.get_u8();
         pool.size = buf.get_u8();
         pool.crush_rule = buf.get_u8();
@@ -1760,28 +1732,7 @@ impl VersionedEncode for PgMergeMeta {
         None // Complex type - size computed by encoding
     }
 }
-// Manual Denc implementation for PgMergeMeta (uses VersionedEncode)
-impl denc::Denc for PgMergeMeta {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <PgMergeMeta as VersionedEncode>::FEATURE_DEPENDENT;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut temp_buf = bytes::BytesMut::new();
-        if self.encode(&mut temp_buf, features).is_ok() {
-            Some(temp_buf.len())
-        } else {
-            None
-        }
-    }
-}
+denc::impl_denc_for_versioned!(PgMergeMeta);
 
 /// Snapshot interval set (snap_interval_set_t in C++)
 /// A set of snapshot intervals represented as a vector of SnapInterval

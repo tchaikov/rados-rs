@@ -21,6 +21,19 @@ use crate::backoff::BackoffTracker;
 use crate::error::{OSDClientError, Result};
 use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId, StripedPgId};
+
+/// Build an HObject from MOSDOp fields for backoff range checking
+fn hobj_from_op(op: &MOSDOp) -> denc::HObject {
+    denc::HObject {
+        key: op.object.key.clone(),
+        oid: op.object.oid.clone(),
+        snapid: op.snapid,
+        hash: op.object.hash,
+        max: false,
+        nspace: op.object.namespace.clone(),
+        pool: op.object.pool,
+    }
+}
 use monclient::MOSDMap;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
@@ -577,18 +590,8 @@ impl OSDSession {
     ) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
 
-        // Create HObject from operation for backoff checking
-        let hobj = denc::HObject {
-            key: op.object.key.clone(),
-            oid: op.object.oid.clone(),
-            snapid: op.snapid,
-            hash: op.object.hash,
-            max: false,
-            nspace: op.object.namespace.clone(),
-            pool: op.object.pool,
-        };
-
         // Check if operation is blocked by backoff
+        let hobj = hobj_from_op(&op);
         if self.is_blocked_by_backoff(&op.pgid, &hobj).await {
             return Err(OSDClientError::Backoff(format!(
                 "Operation blocked by OSD backoff: pgid={:?}, object={}",
@@ -733,7 +736,7 @@ impl OSDSession {
                     return None;
                 }
 
-                info!(
+                debug!(
                     "Got redirect reply for tid {} (redirect #{} of {}): pool={}, key={}, namespace={}, object={}",
                     tid,
                     pending_op.redirect_count + 1,
@@ -833,18 +836,8 @@ impl OSDSession {
                 continue;
             }
 
-            // Create hobject for this operation
-            let hobj = denc::HObject {
-                key: pending_op.op.object.key.clone(),
-                oid: pending_op.op.object.oid.clone(),
-                snapid: pending_op.op.snapid,
-                hash: pending_op.op.object.hash,
-                max: false,
-                nspace: pending_op.op.object.namespace.clone(),
-                pool: pending_op.op.object.pool,
-            };
-
             // Check if hobject is contained in [begin, end)
+            let hobj = hobj_from_op(&pending_op.op);
             // This matches Ceph's contained_by() logic
             if hobj >= *begin && hobj < *end {
                 debug!(
@@ -984,18 +977,8 @@ impl OSDSession {
         // This is critical: migrated operations get new incarnation from target session
         pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
 
-        // Create HObject for backoff checking
-        let hobj = denc::HObject {
-            key: pending_op.op.object.key.clone(),
-            oid: pending_op.op.object.oid.clone(),
-            snapid: pending_op.op.snapid,
-            hash: pending_op.op.object.hash,
-            max: false,
-            nspace: pending_op.op.object.namespace.clone(),
-            pool: pending_op.op.object.pool,
-        };
-
         // Check if operation is blocked by backoff
+        let hobj = hobj_from_op(&pending_op.op);
         if self.is_blocked_by_backoff(&pending_op.op.pgid, &hobj).await {
             // Cancel the operation with backoff error
             let _ = pending_op
@@ -1010,23 +993,12 @@ impl OSDSession {
             )));
         }
 
-        // Insert into pending operations
-        {
-            let mut pending = self.pending_ops.write().await;
-            pending.insert(tid, pending_op);
-        }
+        // Extract op and priority before inserting (avoids re-acquiring lock)
+        let op = pending_op.op.clone();
+        let priority = pending_op.priority;
 
-        // Get a reference to the op and priority for sending
-        let pending = self.pending_ops.read().await;
-        let (op, priority) = match pending.get(&tid) {
-            Some(p) => (p.op.clone(), p.priority),
-            None => {
-                return Err(OSDClientError::Internal(
-                    "Operation disappeared after insertion".into(),
-                ))
-            }
-        };
-        drop(pending);
+        // Insert into pending operations
+        self.pending_ops.write().await.insert(tid, pending_op);
 
         // Encode and send the operation using shared helper (priority preserved from original)
         let msg = Self::encode_operation(&op, tid, priority)?;

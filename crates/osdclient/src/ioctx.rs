@@ -298,9 +298,9 @@ impl IoCtx {
             let (objects, next_cursor) = self.list_objects(cursor, MAX_ENTRIES_PER_REQUEST).await?;
             all_objects.extend(objects);
 
-            match next_cursor {
-                Some(c) => cursor = Some(c),
-                None => break,
+            cursor = next_cursor;
+            if cursor.is_none() {
+                break;
             }
         }
 

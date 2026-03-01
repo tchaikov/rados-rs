@@ -54,11 +54,6 @@ impl BuiltOp {
         self.flags.contains(OsdOpFlags::WRITE)
     }
 
-    /// Get the operations
-    pub fn ops(&self) -> &[OSDOp] {
-        &self.ops
-    }
-
     /// Consume and return the operations
     pub fn into_ops(self) -> Vec<OSDOp> {
         self.ops

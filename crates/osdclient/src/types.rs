@@ -415,7 +415,7 @@ pub use crush::placement::ObjectLocator;
 ///
 /// Used in MOSDOpReply to indicate that the request should be redirected
 /// to a different object or pool.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct RequestRedirect {
     /// Authoritative redirect locator
     pub redirect_locator: ObjectLocator,
@@ -424,23 +424,9 @@ pub struct RequestRedirect {
 }
 
 impl RequestRedirect {
-    /// Create an empty redirect
-    pub fn new() -> Self {
-        Self {
-            redirect_locator: ObjectLocator::default(),
-            redirect_object: String::new(),
-        }
-    }
-
     /// Check if the redirect is empty
     pub fn is_empty(&self) -> bool {
         self.redirect_locator.is_empty() && self.redirect_object.is_empty()
-    }
-}
-
-impl Default for RequestRedirect {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

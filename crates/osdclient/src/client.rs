@@ -386,17 +386,14 @@ impl OSDClient {
         let addrvec = &osdmap.osd_addrs_client[osd_id as usize];
 
         // Find a v2 address (msgr2 protocol)
-        for addr in &addrvec.addrs {
-            if matches!(addr.addr_type, denc::EntityAddrType::Msgr2) {
-                // Return the full EntityAddr with nonce intact
-                return Ok(addr.clone());
-            }
-        }
-
-        Err(OSDClientError::Connection(format!(
-            "No msgr2 address found for OSD {}",
-            osd_id
-        )))
+        addrvec
+            .addrs
+            .iter()
+            .find(|addr| matches!(addr.addr_type, denc::EntityAddrType::Msgr2))
+            .cloned()
+            .ok_or_else(|| {
+                OSDClientError::Connection(format!("No msgr2 address found for OSD {}", osd_id))
+            })
     }
 
     /// Map an object to OSDs using CRUSH
@@ -456,7 +453,7 @@ impl OSDClient {
 
         // 1. Check pg_upmap (complete acting set override)
         if let Some(upmap_osds) = osdmap.pg_upmap.get(&pgid) {
-            info!(
+            debug!(
                 "Using pg_upmap override for PG {:?}: {:?}",
                 pgid, upmap_osds
             );
@@ -465,13 +462,13 @@ impl OSDClient {
 
         // 2. Check pg_temp (temporary override during recovery)
         if let Some(temp_osds) = osdmap.pg_temp.get(&pgid) {
-            info!("Using pg_temp override for PG {:?}: {:?}", pgid, temp_osds);
+            debug!("Using pg_temp override for PG {:?}: {:?}", pgid, temp_osds);
             osds = temp_osds.clone();
         }
 
         // 3. Check pg_upmap_items (fine-grained OSD replacements)
         if let Some(upmap_items) = osdmap.pg_upmap_items.get(&pgid) {
-            info!(
+            debug!(
                 "Applying pg_upmap_items to PG {:?}: {:?}",
                 pgid, upmap_items
             );
@@ -484,7 +481,7 @@ impl OSDClient {
 
         // 4. Check pg_upmap_primaries (primary OSD override)
         if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(&pgid) {
-            info!(
+            debug!(
                 "Using pg_upmap_primaries override for PG {:?}: primary={}",
                 pgid, primary_osd
             );
@@ -1605,7 +1602,7 @@ impl OSDClient {
             return Ok(());
         }
 
-        info!(
+        debug!(
             "Processing OSDMap epochs [{}..{}] > current epoch {}",
             mosdmap.get_first(),
             mosdmap.get_last(),
@@ -1631,7 +1628,7 @@ impl OSDClient {
                         && mosdmap.incremental_maps.contains_key(&e)
                     {
                         // Apply incremental
-                        info!("Applying incremental OSDMap for epoch {}", e);
+                        debug!("Applying incremental OSDMap for epoch {}", e);
                         let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
 
                         match crate::osdmap::OSDMapIncremental::decode_versioned(
@@ -1639,8 +1636,8 @@ impl OSDClient {
                             0,
                         ) {
                             Ok(inc_map) => {
-                                info!(
-                                    "✓ Decoded incremental: epoch={}, {} new pools, {} old pools",
+                                debug!(
+                                    "Decoded incremental: epoch={}, {} new pools, {} old pools",
                                     inc_map.epoch,
                                     inc_map.new_pools.len(),
                                     inc_map.old_pools.len()
@@ -1662,11 +1659,11 @@ impl OSDClient {
                         }
                     } else if mosdmap.maps.contains_key(&e) {
                         // Use full map
-                        info!("Using full OSDMap for epoch {}", e);
+                        debug!("Using full OSDMap for epoch {}", e);
                         let full_bl = mosdmap.maps.get(&e).unwrap();
                         match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                             Ok(full_map) => {
-                                info!("✓ Decoded full OSDMap: epoch={}", full_map.epoch);
+                                debug!("Decoded full OSDMap: epoch={}", full_map.epoch);
                                 working_map = Some(Arc::new(full_map));
                                 updated = true;
                             }
@@ -1683,10 +1680,10 @@ impl OSDClient {
                 // No current map, use latest full map
                 if let Some((&latest_epoch, full_bl)) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)
                 {
-                    info!("Using latest full OSDMap (epoch {})", latest_epoch);
+                    debug!("Using latest full OSDMap (epoch {})", latest_epoch);
                     match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
                         Ok(full_map) => {
-                            info!("✓ Initial OSDMap loaded: epoch={}", full_map.epoch);
+                            info!("Initial OSDMap loaded: epoch={}", full_map.epoch);
                             new_map = Some(Arc::new(full_map));
                             updated = true;
                         }

@@ -166,7 +166,7 @@ impl VersionedEncode for JaegerSpanContext {
         _version: u8,
     ) -> Result<(), RadosError> {
         // When Jaeger is not enabled, just encode is_valid flag
-        (if self.is_valid { 1u8 } else { 0u8 }).encode(buf, 0)?;
+        (self.is_valid as u8).encode(buf, 0)?;
         Ok(())
     }
 
@@ -182,8 +182,7 @@ impl VersionedEncode for JaegerSpanContext {
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        // Just is_valid flag
-        (if self.is_valid { 1u8 } else { 0u8 }).encoded_size(0)
+        Some(1) // is_valid flag (u8)
     }
 }
 
@@ -638,7 +637,7 @@ mod tests {
 
     #[test]
     fn test_request_redirect_empty() {
-        let redirect = RequestRedirect::new();
+        let redirect = RequestRedirect::default();
         let mut buf = BytesMut::new();
 
         redirect.encode(&mut buf, 0).unwrap();
