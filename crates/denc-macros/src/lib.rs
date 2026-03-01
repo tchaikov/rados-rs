@@ -23,6 +23,125 @@ struct DencAttrs {
     ceph_release: Option<syn::LitStr>,
 }
 
+impl DencAttrs {
+    fn new() -> Self {
+        Self {
+            krate: quote! { ::denc },
+            version: None,
+            compat: None,
+            feature_dependent: false,
+            struct_v: None,
+            min_struct_v: None,
+            strict_struct_v: false,
+            ceph_release: None,
+        }
+    }
+
+    fn parse_u8_expr(value: &syn::Expr, context: &str) -> Option<u8> {
+        if let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Int(i),
+            ..
+        }) = value
+        {
+            Some(i.base10_parse::<u8>().expect(context))
+        } else {
+            None
+        }
+    }
+
+    fn parse_litstr_expr(value: &syn::Expr) -> Option<syn::LitStr> {
+        if let syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Str(s),
+            ..
+        }) = value
+        {
+            Some(s.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Parse all items from `#[denc(...)]` attributes.
+    ///
+    /// Supports key-value pairs and bare flags:
+    /// - `crate = "path"`   — override the denc crate path
+    /// - `version = N`      — encoding version (required for `VersionedDenc`)
+    /// - `compat = N`       — compat version (defaults to `version`)
+    /// - `struct_v = N`     — fixed struct version for `StructVDenc`
+    /// - `min_struct_v = N` — minimum accepted decoded struct_v for `StructVDenc`
+    /// - `strict_struct_v`  — enforce decoded struct_v == struct_v
+    /// - `ceph_release = "..."` — release label for min-version checks
+    /// - `feature_dependent` — emit `FEATURE_DEPENDENT = true` in generated impls
+    fn parse(attrs: &[syn::Attribute]) -> Self {
+        let mut out = Self::new();
+
+        for attr in attrs {
+            if !attr.path().is_ident("denc") {
+                continue;
+            }
+            let Ok(metas) = attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+            ) else {
+                continue;
+            };
+            for meta in metas {
+                match meta {
+                    // Bare flag: `feature_dependent`
+                    syn::Meta::Path(path) if path.is_ident("feature_dependent") => {
+                        out.feature_dependent = true;
+                    }
+                    // Bare flag: `strict_struct_v`
+                    syn::Meta::Path(path) if path.is_ident("strict_struct_v") => {
+                        out.strict_struct_v = true;
+                    }
+                    // Key-value: `key = value`
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("crate") => {
+                        if let Some(s) = Self::parse_litstr_expr(&nv.value) {
+                            out.krate = s
+                                .parse()
+                                .expect("Invalid crate path in #[denc(crate = \"...\")]");
+                        }
+                    }
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("version") => {
+                        out.version =
+                            Self::parse_u8_expr(&nv.value, "Invalid version in #[denc(version = N)]");
+                    }
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("compat") => {
+                        out.compat =
+                            Self::parse_u8_expr(&nv.value, "Invalid compat in #[denc(compat = N)]");
+                    }
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("struct_v") => {
+                        out.struct_v = Self::parse_u8_expr(
+                            &nv.value,
+                            "Invalid struct_v in #[denc(struct_v = N)]",
+                        );
+                    }
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("min_struct_v") => {
+                        out.min_struct_v = Self::parse_u8_expr(
+                            &nv.value,
+                            "Invalid min_struct_v in #[denc(min_struct_v = N)]",
+                        );
+                    }
+                    syn::Meta::NameValue(nv) if nv.path.is_ident("ceph_release") => {
+                        out.ceph_release = Self::parse_litstr_expr(&nv.value);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        out
+    }
+
+    fn feature_dependent_const(&self) -> TokenStream2 {
+        if self.feature_dependent {
+            quote! { const FEATURE_DEPENDENT: bool = true; }
+        } else {
+            quote! {}
+        }
+    }
+}
+
 /// Shared codegen fragments for field-by-field Denc-style derives.
 struct FieldCodegen {
     encode_stmts: Vec<TokenStream2>,
@@ -31,35 +150,56 @@ struct FieldCodegen {
     where_clauses: Vec<TokenStream2>,
 }
 
-fn parse_u8_expr(value: &syn::Expr, context: &str) -> Option<u8> {
-    if let syn::Expr::Lit(syn::ExprLit {
-        lit: syn::Lit::Int(i),
-        ..
-    }) = value
+impl FieldCodegen {
+    fn from_denc_fields<'a, I>(fields: I, krate: &TokenStream2) -> Self
+    where
+        I: IntoIterator<Item = &'a syn::Field>,
     {
-        Some(i.base10_parse::<u8>().expect(context))
-    } else {
-        None
-    }
-}
+        let fields: Vec<_> = fields.into_iter().collect();
 
-fn parse_litstr_expr(value: &syn::Expr) -> Option<syn::LitStr> {
-    if let syn::Expr::Lit(syn::ExprLit {
-        lit: syn::Lit::Str(s),
-        ..
-    }) = value
-    {
-        Some(s.clone())
-    } else {
-        None
-    }
-}
+        let encode_stmts = fields
+            .iter()
+            .map(|f| {
+                let field_name = &f.ident;
+                let field_type = &f.ty;
+                quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
+            })
+            .collect();
 
-fn feature_dependent_const(enabled: bool) -> TokenStream2 {
-    if enabled {
-        quote! { const FEATURE_DEPENDENT: bool = true; }
-    } else {
-        quote! {}
+        let decode_fields = fields
+            .iter()
+            .map(|f| {
+                let field_name = &f.ident;
+                let field_type = &f.ty;
+                quote! {
+                    #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
+                }
+            })
+            .collect();
+
+        let size_stmts = fields
+            .iter()
+            .map(|f| {
+                let field_name = &f.ident;
+                let field_type = &f.ty;
+                quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
+            })
+            .collect();
+
+        let where_clauses = fields
+            .iter()
+            .map(|f| {
+                let field_type = &f.ty;
+                quote! { #field_type: #krate::Denc }
+            })
+            .collect();
+
+        Self {
+            encode_stmts,
+            decode_fields,
+            size_stmts,
+            where_clauses,
+        }
     }
 }
 
@@ -80,7 +220,7 @@ fn is_fixed_size_primitive_or_array(ty: &syn::Type) -> bool {
     }
 }
 
-fn named_fields<'a>(input: &'a DeriveInput, derive_name: &str) -> &'a syn::FieldsNamed {
+fn expect_named_fields<'a>(input: &'a DeriveInput, derive_name: &str) -> &'a syn::FieldsNamed {
     match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
             Fields::Named(fields) => fields,
@@ -90,141 +230,9 @@ fn named_fields<'a>(input: &'a DeriveInput, derive_name: &str) -> &'a syn::Field
     }
 }
 
-fn denc_field_codegen<'a, I>(fields: I, krate: &TokenStream2) -> FieldCodegen
-where
-    I: IntoIterator<Item = &'a syn::Field>,
-{
-    let fields: Vec<_> = fields.into_iter().collect();
-
-    let encode_stmts = fields
-        .iter()
-        .map(|f| {
-            let field_name = &f.ident;
-            let field_type = &f.ty;
-            quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
-        })
-        .collect();
-
-    let decode_fields = fields
-        .iter()
-        .map(|f| {
-            let field_name = &f.ident;
-            let field_type = &f.ty;
-            quote! {
-                #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
-            }
-        })
-        .collect();
-
-    let size_stmts = fields
-        .iter()
-        .map(|f| {
-            let field_name = &f.ident;
-            let field_type = &f.ty;
-            quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
-        })
-        .collect();
-
-    let where_clauses = fields
-        .iter()
-        .map(|f| {
-            let field_type = &f.ty;
-            quote! { #field_type: #krate::Denc }
-        })
-        .collect();
-
-    FieldCodegen {
-        encode_stmts,
-        decode_fields,
-        size_stmts,
-        where_clauses,
-    }
-}
-
-/// Parse all items from `#[denc(...)]` attributes.
-///
-/// Supports key-value pairs and bare flags:
-/// - `crate = "path"`   — override the denc crate path
-/// - `version = N`      — encoding version (required for `VersionedDenc`)
-/// - `compat = N`       — compat version (defaults to `version`)
-/// - `struct_v = N`     — fixed struct version for `StructVDenc`
-/// - `min_struct_v = N` — minimum accepted decoded struct_v for `StructVDenc`
-/// - `strict_struct_v`  — enforce decoded struct_v == struct_v
-/// - `ceph_release = "..."` — release label for min-version checks
-/// - `feature_dependent` — emit `FEATURE_DEPENDENT = true` in generated impls
-fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
-    let mut krate = quote! { ::denc };
-    let mut version = None;
-    let mut compat = None;
-    let mut feature_dependent = false;
-    let mut struct_v = None;
-    let mut min_struct_v = None;
-    let mut strict_struct_v = false;
-    let mut ceph_release = None;
-
-    for attr in attrs {
-        if !attr.path().is_ident("denc") {
-            continue;
-        }
-        let Ok(metas) = attr.parse_args_with(
-            syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
-        ) else {
-            continue;
-        };
-        for meta in metas {
-            match meta {
-                // Bare flag: `feature_dependent`
-                syn::Meta::Path(path) if path.is_ident("feature_dependent") => {
-                    feature_dependent = true;
-                }
-                // Bare flag: `strict_struct_v`
-                syn::Meta::Path(path) if path.is_ident("strict_struct_v") => {
-                    strict_struct_v = true;
-                }
-                // Key-value: `key = value`
-                syn::Meta::NameValue(nv) if nv.path.is_ident("crate") => {
-                    if let Some(s) = parse_litstr_expr(&nv.value) {
-                        krate = s
-                            .parse()
-                            .expect("Invalid crate path in #[denc(crate = \"...\")]");
-                    }
-                }
-                syn::Meta::NameValue(nv) if nv.path.is_ident("version") => {
-                    version = parse_u8_expr(&nv.value, "Invalid version in #[denc(version = N)]");
-                }
-                syn::Meta::NameValue(nv) if nv.path.is_ident("compat") => {
-                    compat = parse_u8_expr(&nv.value, "Invalid compat in #[denc(compat = N)]");
-                }
-                syn::Meta::NameValue(nv) if nv.path.is_ident("struct_v") => {
-                    struct_v = parse_u8_expr(&nv.value, "Invalid struct_v in #[denc(struct_v = N)]");
-                }
-                syn::Meta::NameValue(nv) if nv.path.is_ident("min_struct_v") => {
-                    min_struct_v =
-                        parse_u8_expr(&nv.value, "Invalid min_struct_v in #[denc(min_struct_v = N)]");
-                }
-                syn::Meta::NameValue(nv) if nv.path.is_ident("ceph_release") => {
-                    ceph_release = parse_litstr_expr(&nv.value);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    DencAttrs {
-        krate,
-        version,
-        compat,
-        feature_dependent,
-        struct_v,
-        min_struct_v,
-        strict_struct_v,
-        ceph_release,
-    }
-}
-
 /// Return just the crate path from `#[denc(crate = "...")]` (for existing derives).
 fn find_denc_crate(attrs: &[syn::Attribute]) -> TokenStream2 {
-    parse_denc_attrs(attrs).krate
+    DencAttrs::parse(attrs).krate
 }
 
 /// Derive macro for field-by-field Denc encoding/decoding.
@@ -259,8 +267,8 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
-    let fields = named_fields(&input, "Denc");
-    let codegen = denc_field_codegen(fields.named.iter(), &krate);
+    let fields = expect_named_fields(&input, "Denc");
+    let codegen = FieldCodegen::from_denc_fields(fields.named.iter(), &krate);
 
     let encode_stmts = &codegen.encode_stmts;
     let decode_fields = &codegen.decode_fields;
@@ -386,7 +394,7 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
-    let fields = named_fields(&input, "DencMut");
+    let fields = expect_named_fields(&input, "DencMut");
 
     let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
     let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
@@ -517,7 +525,7 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(VersionedDenc, attributes(denc))]
 pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let attrs = parse_denc_attrs(&input.attrs);
+    let attrs = DencAttrs::parse(&input.attrs);
     let krate = &attrs.krate;
     let name = &input.ident;
 
@@ -534,7 +542,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
     ) = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
             Fields::Named(fields) => {
-                let codegen = denc_field_codegen(fields.named.iter(), krate);
+                let codegen = FieldCodegen::from_denc_fields(fields.named.iter(), krate);
                 let decode_fields = codegen.decode_fields;
 
                 let decode_expr = quote! {
@@ -557,7 +565,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
     };
 
     // Emit `const FEATURE_DEPENDENT: bool = true;` only when the flag is set.
-    let feature_dependent_ve = feature_dependent_const(attrs.feature_dependent);
+    let feature_dependent_ve = attrs.feature_dependent_const();
     let feature_dependent_denc = feature_dependent_ve.clone();
 
     let expanded = quote! {
@@ -663,7 +671,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(StructVDenc, attributes(denc))]
 pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    let attrs = parse_denc_attrs(&input.attrs);
+    let attrs = DencAttrs::parse(&input.attrs);
     let krate = &attrs.krate;
     let name = &input.ident;
 
@@ -675,7 +683,7 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
         panic!("#[denc(strict_struct_v)] and #[denc(min_struct_v = N)] are mutually exclusive");
     }
 
-    let fields = named_fields(&input, "StructVDenc");
+    let fields = expect_named_fields(&input, "StructVDenc");
 
     let first_field = fields
         .named
@@ -701,7 +709,7 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
     }
 
     let body_fields: Vec<_> = fields.named.iter().skip(1).collect();
-    let codegen = denc_field_codegen(body_fields.iter().copied(), krate);
+    let codegen = FieldCodegen::from_denc_fields(body_fields.iter().copied(), krate);
     let encode_stmts = &codegen.encode_stmts;
     let decode_fields = &codegen.decode_fields;
     let size_stmts = &codegen.size_stmts;
@@ -720,7 +728,7 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
             }
         }
     } else if let Some(min_v) = attrs.min_struct_v {
-        if let Some(release) = attrs.ceph_release {
+        if let Some(release) = attrs.ceph_release.as_ref() {
             quote! { #krate::check_min_version!(struct_v, #min_v, stringify!(#name), #release); }
         } else {
             quote! {
@@ -739,7 +747,7 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let feature_dependent_denc = feature_dependent_const(attrs.feature_dependent);
+    let feature_dependent_denc = attrs.feature_dependent_const();
 
     let expanded = quote! {
         impl #krate::Denc for #name
