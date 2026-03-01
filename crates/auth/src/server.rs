@@ -10,7 +10,7 @@ use crate::types::{
     AuthCapsInfo, AuthTicket, CephXServiceTicketInfo, CephXTicketBlob, CryptoKey, EntityName,
     CEPH_CRYPTO_AES,
 };
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
 use std::collections::HashMap;
@@ -80,12 +80,8 @@ impl CephXServerHandler {
     pub fn handle_initial_request(&mut self, payload: &[u8]) -> Result<(EntityName, u64, Bytes)> {
         let mut buf = Bytes::copy_from_slice(payload);
 
-        // 1. Parse auth_mode (1 byte)
-        if buf.is_empty() {
-            return Err(CephXError::ProtocolError("Empty auth request".to_string()));
-        }
-        let auth_mode_byte = buf[0];
-        buf = buf.slice(1..);
+        // 1. Parse auth_mode
+        let auth_mode_byte = u8::decode(&mut buf, 0)?;
         let auth_mode = AuthMode::from_u8(auth_mode_byte).ok_or_else(|| {
             CephXError::ProtocolError(format!("Invalid auth mode: {}", auth_mode_byte))
         })?;
@@ -228,7 +224,7 @@ impl CephXServerHandler {
         let mut response = BytesMut::new();
 
         // Encrypt session key with client's secret
-        let encrypted_session_key = client_secret.encrypt(session_key.get_secret())?;
+        let encrypted_session_key = client_secret.encrypt(&session_key.secret)?;
         encrypted_session_key.encode(&mut response, 0)?;
 
         // Add service tickets
@@ -314,14 +310,13 @@ impl CephXServerHandler {
         connection_secret: &CryptoKey,
         service_tickets: Bytes,
     ) -> Result<Bytes> {
-        use denc::Denc;
         let mut response = BytesMut::new();
 
         // 1. global_id
         global_id.encode(&mut response, 0)?;
 
         // 2. connection_mode
-        response.put_u8(connection_mode);
+        connection_mode.encode(&mut response, 0)?;
 
         // 3. auth_payload consists of:
         //    - service_tickets (session key + tickets)
@@ -332,7 +327,7 @@ impl CephXServerHandler {
 
         // 4. Append connection_secret as a bufferlist (u32 len + encrypted data)
         //    Encrypt connection_secret with session_key
-        let encrypted_connection_secret = session_key.encrypt(connection_secret.get_secret())?;
+        let encrypted_connection_secret = session_key.encrypt(&connection_secret.secret)?;
         encrypted_connection_secret.encode(&mut response, 0)?;
 
         // 5. Append empty extra_tickets bufferlist (u32 len = 0)

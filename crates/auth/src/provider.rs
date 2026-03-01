@@ -6,6 +6,7 @@
 use crate::error::{CephXError, Result};
 use crate::types::EntityType;
 use bytes::Bytes;
+use denc::Denc;
 use std::fmt::Debug;
 
 /// Authentication provider trait
@@ -148,8 +149,6 @@ impl AuthProvider for MonitorAuthProvider {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use denc::Denc;
-
         // Lock the handler to handle auth response
         let mut handler = self
             .handler
@@ -277,23 +276,10 @@ impl AuthProvider for ServiceAuthProvider {
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
         use tracing::{debug, info};
-        debug!("ServiceAuthProvider::handle_auth_response called");
-        debug!("  payload length: {}", payload.len());
-        debug!("  global_id: {}", global_id);
-        debug!("  con_mode: {} (0=CRC, 1=SECURE)", con_mode);
         debug!(
-            "  payload hex (first 64 bytes): {}",
-            payload
-                .iter()
-                .take(64)
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
-        );
-
-        debug!(
-            "ServiceAuthProvider::handle_auth_response: payload={} bytes",
-            payload.len()
+            "ServiceAuthProvider::handle_auth_response: payload={} bytes, con_mode={}",
+            payload.len(),
+            con_mode
         );
 
         // For authorizer-based auth, the first AUTH_REPLY_MORE contains an encrypted
@@ -372,24 +358,18 @@ impl AuthProvider for ServiceAuthProvider {
 
         debug!(
             "Returning session_key: {} bytes",
-            session_key
-                .as_ref()
-                .map(|k| k.get_secret().len())
-                .unwrap_or(0)
+            session_key.as_ref().map(|k| k.secret.len()).unwrap_or(0)
         );
 
         // Extract connection_secret from AUTH_DONE payload using CephXEncryptedEnvelope
         let connection_secret = if con_mode >= 1 && !payload.is_empty() {
             if let Some(ref sess_key) = session_key {
-                use denc::Denc;
-
                 let mut buf = payload.clone();
                 let encrypted_data = Bytes::decode(&mut buf, 0)?;
 
-                match crate::client::CephXClientHandler::decrypt_with_key(sess_key, &encrypted_data)
-                {
+                match sess_key.decrypt(&encrypted_data) {
                     Ok(decrypted) => {
-                        let mut dec_buf = bytes::Bytes::from(decrypted);
+                        let mut dec_buf = decrypted;
                         match crate::protocol::CephXEncryptedEnvelope::<
                             crate::protocol::CephXAuthorizeReply,
                         >::decode(&mut dec_buf, 0)
@@ -426,7 +406,7 @@ impl AuthProvider for ServiceAuthProvider {
         // Return the session key so AUTH_SIGNATURE can be computed
         // Also return connection_secret for SECURE mode
         Ok((
-            session_key.map(|k| bytes::Bytes::copy_from_slice(k.get_secret())),
+            session_key.map(|k| bytes::Bytes::copy_from_slice(&k.secret)),
             connection_secret,
         ))
     }

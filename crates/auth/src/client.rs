@@ -6,7 +6,7 @@ use crate::protocol::{
     CEPHX_GET_AUTH_SESSION_KEY,
 };
 use crate::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName, EntityType};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
 use std::time::Duration;
@@ -83,7 +83,7 @@ impl CephXClientHandler {
             "Setting secret key for {}: {} bytes, first 16: {}",
             self.entity_name,
             key.len(),
-            hex::encode(&key.get_secret()[..16.min(key.len())])
+            hex::encode(&key.secret[..16.min(key.len())])
         );
         self.secret_key = Some(key);
     }
@@ -105,26 +105,11 @@ impl CephXClientHandler {
         );
 
         // Initial request contains: auth_mode + entity_name + global_id
-        // NO CephXRequestHeader, NO CephXAuthenticate
         let mut payload = BytesMut::new();
-
-        // 1. auth_mode (1 byte) - Authorizer for OSDs, Mon for monitors
-        payload.put_u8(self.auth_mode.as_u8());
-
-        // 2. entity_name (encoded string)
+        self.auth_mode.as_u8().encode(&mut payload, 0)?;
         self.entity_name.encode(&mut payload, 0)?;
-        let entity_name_len = self.entity_name.encoded_size(0).unwrap_or(0);
-
-        // 3. global_id (u64)
         global_id.encode(&mut payload, 0)?;
 
-        // 4. build_initial_request() is empty for CephX (no payload)
-
-        trace!(
-            "CephX initial request built, size: {} bytes (auth_mode=1, entity_name={}, global_id=8)",
-            payload.len(),
-            entity_name_len
-        );
         Ok(payload.freeze())
     }
 
@@ -141,17 +126,12 @@ impl CephXClientHandler {
             .as_ref()
             .ok_or_else(|| CephXError::AuthenticationFailed("No secret key set".into()))?;
 
-        debug!(
-            "Building CephX authenticate request with server_challenge: {:x}",
-            server_challenge
-        );
-
         // Generate client challenge
         let mut rng = rand::thread_rng();
         let client_challenge = rng.next_u64();
 
         debug!(
-            "Generated client_challenge: 0x{:016x}, server_challenge: 0x{:016x}",
+            "Building CephX authenticate: client_challenge=0x{:016x}, server_challenge=0x{:016x}",
             client_challenge, server_challenge
         );
 
@@ -176,18 +156,9 @@ impl CephXClientHandler {
 
         // Encode header + authenticate (NO auth_mode for second request)
         let mut payload = BytesMut::new();
-        let header_size = header.encoded_size(0).unwrap_or(0);
-        let auth_size = auth_request.encoded_size(0).unwrap_or(0);
-
         header.encode(&mut payload, 0)?;
         auth_request.encode(&mut payload, 0)?;
 
-        trace!(
-            "CephX authenticate request built, size: {} bytes (header={}, auth={})",
-            payload.len(),
-            header_size,
-            auth_size
-        );
         Ok(payload.freeze())
     }
 
@@ -201,121 +172,43 @@ impl CephXClientHandler {
         server_challenge: u64,
         client_challenge: u64,
     ) -> Result<u64> {
-        use crate::protocol::CephXChallengeBlob;
-        use aes::Aes128;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
-        use cbc::Encryptor;
+        use crate::protocol::{CephXChallengeBlob, CephXEncryptedEnvelope};
 
-        debug!("=== CephX Session Key Calculation Start ===");
         debug!(
-            "Input: server_challenge=0x{:016x}, client_challenge=0x{:016x}",
+            "Calculating session key: server_challenge=0x{:016x}, client_challenge=0x{:016x}",
             server_challenge, client_challenge
         );
-        debug!(
-            "Challenge bytes: server={:02x?}, client={:02x?}",
-            server_challenge.to_le_bytes(),
-            client_challenge.to_le_bytes()
-        );
 
-        // Create challenge blob
-        let challenge_blob = CephXChallengeBlob {
-            server_challenge,
-            client_challenge,
-        };
-
-        // Wrap in encrypted envelope and encode
-        use crate::protocol::CephXEncryptedEnvelope;
+        // Create challenge blob wrapped in encrypted envelope
         let envelope = CephXEncryptedEnvelope {
-            payload: challenge_blob,
+            payload: CephXChallengeBlob {
+                server_challenge,
+                client_challenge,
+            },
         };
 
         let mut bl = BytesMut::new();
         envelope.encode(&mut bl, 0)?;
-        let plaintext = bl.freeze();
 
-        debug!(
-            "Encoded challenge envelope ({} bytes): {}",
-            plaintext.len(),
-            hex::encode(&plaintext)
-        );
-
-        // Extract AES key from secret
-        let key_bytes = secret_key.aes_key_bytes()?;
-
-        debug!(
-            "Step 5: AES key (first 16 bytes of secret): {}",
-            hex::encode(key_bytes)
-        );
-        debug!(
-            "Step 6: AES IV: {}",
-            hex::encode(crate::protocol::CEPH_AES_IV)
-        );
-
-        use crate::protocol::CEPH_AES_IV;
-
-        // Encrypt with AES-128-CBC using Pkcs7 padding
-        type Aes128CbcEnc = Encryptor<Aes128>;
-        let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
-
-        // Allocate buffer with room for padding
-        let mut buffer = vec![0u8; plaintext.len() + crate::protocol::AES_BLOCK_LEN];
-        buffer[..plaintext.len()].copy_from_slice(&plaintext);
-
-        let ciphertext = cipher
-            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, plaintext.len())
-            .map_err(|e| {
-                CephXError::CryptographicError(format!("AES encryption failed: {:?}", e))
-            })?;
-
-        debug!(
-            "Step 7: Ciphertext after AES-CBC ({} bytes): {}",
-            ciphertext.len(),
-            hex::encode(ciphertext)
-        );
+        // Encrypt the envelope using the client's secret key
+        let ciphertext = secret_key.encrypt(&bl)?;
 
         // In C++, encode_encrypt() adds a u32 length prefix to the encrypted data
         // before XOR folding. We need to replicate this behavior.
-        // Use Denc to create length-prefixed buffer
-        let encrypted_bytes = Bytes::copy_from_slice(ciphertext);
         let mut folding_buffer = BytesMut::new();
-        encrypted_bytes.encode(&mut folding_buffer, 0)?;
-        let folding_data = folding_buffer.freeze();
-
-        debug!(
-            "Step 8: Buffer for XOR folding with length prefix ({} bytes): {}",
-            folding_data.len(),
-            hex::encode(&folding_data)
-        );
+        ciphertext.encode(&mut folding_buffer, 0)?;
+        let mut folding_data = folding_buffer.freeze();
 
         // XOR fold the entire buffer (length prefix + encrypted data) to get a 64-bit key
         // C++ only processes complete 8-byte chunks, ignoring any remaining bytes
-        debug!(
-            "Step 9: XOR folding {} bytes as little-endian u64 chunks:",
-            folding_data.len()
-        );
+        let num_complete_chunks = folding_data.len() / 8;
         let mut key = 0u64;
-        let mut buf = folding_data.clone();
-        let num_complete_chunks = buf.len() / 8;
 
-        for idx in 0..num_complete_chunks {
-            let chunk_val = u64::decode(&mut buf, 0)?;
-            debug!("  Chunk {}: 0x{:016x}", idx, chunk_val);
-            key ^= chunk_val;
-            debug!("  Running XOR result: 0x{:016x}", key);
+        for _ in 0..num_complete_chunks {
+            key ^= u64::decode(&mut folding_data, 0)?;
         }
 
-        let remaining_bytes = folding_data.len() % 8;
-        if remaining_bytes > 0 {
-            debug!(
-                "  Note: Ignoring last {} bytes (C++ only processes complete 8-byte chunks)",
-                remaining_bytes
-            );
-        }
-
-        debug!("=== Final Result ===");
         debug!("Calculated session key: 0x{:016x}", key);
-        debug!("======================");
-
         Ok(key)
     }
 
@@ -323,16 +216,9 @@ impl CephXClientHandler {
     pub fn handle_auth_response(&mut self, mut response: Bytes) -> Result<AuthResult> {
         if self.starting {
             // First response should be server challenge
-            debug!("Handling initial server challenge");
             debug!(
-                "AUTH_REPLY_MORE payload: {} bytes, hex: {}",
-                response.len(),
-                response
-                    .iter()
-                    .take(32)
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<Vec<_>>()
-                    .join("")
+                "Handling initial server challenge ({} bytes)",
+                response.len()
             );
 
             // AUTH_REPLY_MORE has a u32 length prefix before the actual CephXServerChallenge
@@ -400,8 +286,6 @@ impl CephXClientHandler {
         buf: &mut Bytes,
         auth_session_key: &CryptoKey,
     ) -> Result<Vec<DecodedServiceTicket>> {
-        use denc::Denc;
-
         let _version = u8::decode(buf, 0)?;
         let num = u32::decode(buf, 0)?;
         debug!("Decoding {} extra tickets", num);
@@ -446,8 +330,6 @@ impl CephXClientHandler {
         buf: &mut Bytes,
         auth_session_key: &CryptoKey,
     ) -> Result<DecodedServiceTicket> {
-        use denc::Denc;
-
         let service_type = EntityType::from_bits_retain(u32::decode(buf, 0)?);
         let encrypted_ticket = crate::protocol::EncryptedServiceTicket::decode(buf, 0)?;
         let (session_key, validity) =
@@ -483,8 +365,6 @@ impl CephXClientHandler {
         session_key: &CryptoKey,
     ) -> Result<Option<Bytes>> {
         use crate::protocol::CephXEncryptedEnvelope;
-        use bytes::Buf;
-        use denc::Denc;
 
         // Read outer bufferlist length
         let cbl_len = u32::decode(payload, 0)? as usize;
@@ -540,8 +420,6 @@ impl CephXClientHandler {
         payload: &mut Bytes,
         session_key: &CryptoKey,
     ) -> Result<Option<Bytes>> {
-        use bytes::Buf;
-
         if payload.remaining() == 0 {
             return Ok(None);
         }
@@ -587,34 +465,12 @@ impl CephXClientHandler {
 
         // Store all service tickets in the session
         if let Some(session) = &mut self.session {
-            debug!(
-                "Storing {} ticket handlers in session",
-                ticket_handlers.len()
-            );
             for (service_type, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
-                trace!(
-                    "Storing ticket for service {:?} (secret_id={})",
-                    service_type,
-                    secret_id
-                );
                 let handler = session.get_ticket_handler(service_type);
                 handler.update(session_key, secret_id, ticket_blob, validity);
                 debug!(
-                    "✓ Stored ticket for service {:?} (secret_id={}, have_key={}, expired={})",
-                    service_type,
-                    secret_id,
-                    handler.have_key,
-                    handler.is_expired()
-                );
-            }
-            // Log all available tickets
-            debug!("Available service tickets after storage:");
-            for (service_type, handler) in &session.ticket_handlers {
-                debug!(
-                    "  Service {:?}: have_key={}, expired={}",
-                    service_type,
-                    handler.have_key,
-                    handler.is_expired()
+                    "Stored ticket for service {:?} (secret_id={})",
+                    service_type, secret_id
                 );
             }
         } else {
@@ -633,23 +489,12 @@ impl CephXClientHandler {
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
         use crate::protocol::CephXResponseHeader;
-        use bytes::Buf;
-        use denc::Denc;
 
         debug!(
             "Handling AUTH_DONE: global_id={}, con_mode={}, payload={} bytes",
             global_id,
             con_mode,
             auth_payload.len()
-        );
-        debug!(
-            "AUTH_DONE payload hex (first 64 bytes): {}",
-            auth_payload
-                .iter()
-                .take(64)
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join("")
         );
 
         let secret_key = self
@@ -697,34 +542,17 @@ impl CephXClientHandler {
         }
 
         // Process all service tickets
-        let mut first_session_key_bytes: Option<Bytes> = None;
-        let mut ticket_handlers: Vec<(EntityType, CryptoKey, u64, CephXTicketBlob, Duration)> =
-            Vec::new();
+        let mut ticket_handlers: Vec<DecodedServiceTicket> = Vec::new();
 
-        for (i, ticket_info) in ticket_reply.tickets.iter().enumerate() {
-            debug!(
-                "Processing ticket {}/{}: service_id={}",
-                i + 1,
-                ticket_reply.tickets.len(),
-                ticket_info.service_id
-            );
-
+        for ticket_info in &ticket_reply.tickets {
             // Decrypt the encrypted service ticket to get session key and validity
             let (session_key, validity) =
                 self.decrypt_service_ticket(&ticket_info.encrypted_service_ticket, secret_key)?;
 
             debug!(
-                "Service {} session key type: {}, length: {}",
-                ticket_info.service_id,
-                session_key.get_type(),
-                session_key.len()
+                "Decoded ticket for service_id={}, validity={:?}",
+                ticket_info.service_id, validity
             );
-            debug!("Validity: {:?}", validity);
-
-            // Store the first ticket's session key for returning (this is the AUTH service)
-            if i == 0 {
-                first_session_key_bytes = Some(session_key.get_secret().clone());
-            }
 
             ticket_handlers.push((
                 EntityType::from_bits_retain(ticket_info.service_id),
@@ -735,18 +563,16 @@ impl CephXClientHandler {
             ));
         }
 
-        let session_key_bytes = first_session_key_bytes
-            .ok_or_else(|| CephXError::ProtocolError("No session key found in tickets".into()))?;
-
-        // Get the first ticket's session key for decrypting connection_secret
-        let first_ticket_session_key = ticket_handlers
+        // Extract first ticket's session key (AUTH service) for returning and decryption
+        let (_, first_session_key, _, _, _) = ticket_handlers
             .first()
-            .map(|(_, sk, _, _, _)| sk)
             .ok_or_else(|| CephXError::ProtocolError("No tickets available".into()))?;
+        let session_key_bytes = first_session_key.secret.clone();
+        let auth_session_key = first_session_key.clone();
 
         // Decode connection_secret blob (encrypted with session_key)
         let connection_secret_bytes =
-            self.decode_connection_secret(&mut auth_payload, first_ticket_session_key)?;
+            self.decode_connection_secret(&mut auth_payload, &auth_session_key)?;
 
         // Parse extra_tickets if any remain in the payload
         trace!(
@@ -762,32 +588,10 @@ impl CephXClientHandler {
                     let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
                     trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
 
-                    // Parse extra_tickets using ServiceTicketReply (same format as main tickets)
                     // Extra tickets are encrypted with the AUTH session key (from first ticket)
-                    let auth_session_key = ticket_handlers
-                        .first()
-                        .map(|(_, session_key, _, _, _)| session_key.clone())
-                        .ok_or_else(|| {
-                            CephXError::ProtocolError(
-                                "No AUTH ticket to decrypt extra tickets".into(),
-                            )
-                        })?;
-
-                    // Decode extra_tickets using the simpler non-versioned format
-                    // Format: u8 version, u32 num, for each: u32 service_id, u8 ticket_v, EncryptedServiceTicket, u8 enc, ticket_blob
                     match self.decode_extra_tickets(&mut extra_tickets_bl, &auth_session_key) {
                         Ok(extra_handlers) => {
-                            for (service_id, session_key, secret_id, ticket_blob, validity) in
-                                extra_handlers
-                            {
-                                ticket_handlers.push((
-                                    service_id,
-                                    session_key,
-                                    secret_id,
-                                    ticket_blob,
-                                    validity,
-                                ));
-                            }
+                            ticket_handlers.extend(extra_handlers);
                         }
                         Err(e) => {
                             debug!("Failed to decode extra_tickets: {:?}", e);
@@ -811,7 +615,6 @@ impl CephXClientHandler {
         mut encrypted_payload: Bytes,
     ) -> Result<u64> {
         use crate::protocol::{CephXAuthorizeReply, CephXEncryptedEnvelope};
-        use denc::Denc;
 
         debug!(
             "Decrypting authorize challenge for service {:?}",
@@ -848,8 +651,7 @@ impl CephXClientHandler {
         trace!("encrypted_len: {}", encrypted_data.len());
 
         // Decrypt using session key
-        let decrypted = Self::decrypt_with_key(&handler.session_key, &encrypted_data)?;
-        let mut dec_buf = Bytes::from(decrypted);
+        let mut dec_buf = handler.session_key.decrypt(&encrypted_data)?;
 
         // Decode the encrypted envelope containing CephXAuthorizeReply
         let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)?;
@@ -858,38 +660,6 @@ impl CephXClientHandler {
         debug!("Extracted server_challenge: 0x{:016x}", server_challenge);
 
         Ok(server_challenge)
-    }
-
-    /// Decrypt data using AES-128-CBC with the given key
-    /// Ceph uses a fixed IV: "cephsageyudagreg"
-    pub fn decrypt_with_key(key: &CryptoKey, ciphertext: &[u8]) -> Result<Vec<u8>> {
-        use crate::protocol::CEPH_AES_IV;
-        use aes::cipher::generic_array::GenericArray;
-        use aes::Aes128;
-        use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-        use cbc::Decryptor;
-
-        // Verify key length
-        if key.get_secret().len() != 16 {
-            return Err(CephXError::CryptographicError(format!(
-                "Invalid key length: expected 16, got {}",
-                key.get_secret().len()
-            )));
-        }
-
-        // Create decryptor with fixed IV - convert slices to GenericArray
-        type Aes128CbcDec = Decryptor<Aes128>;
-        let key_array = GenericArray::from_slice(key.get_secret());
-        let iv_array = GenericArray::from_slice(CEPH_AES_IV);
-        let cipher = Aes128CbcDec::new(key_array, iv_array);
-
-        // Decrypt (need to copy because decrypt_padded_mut modifies in place)
-        let mut buffer = ciphertext.to_vec();
-        let decrypted = cipher
-            .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer)
-            .map_err(|e| CephXError::DecryptionFailed(format!("CBC decryption failed: {:?}", e)))?;
-
-        Ok(decrypted.to_vec())
     }
 
     /// Build an authorizer for a service (OSD, MDS, etc.)
@@ -907,7 +677,6 @@ impl CephXClientHandler {
         server_challenge: Option<u64>,
     ) -> Result<Bytes> {
         use crate::protocol::{CephXAuthorizeA, CephXAuthorizeB};
-        use rand::RngCore;
 
         debug!(
             "Building authorizer for service_type={:?} (global_id={})",
@@ -922,26 +691,6 @@ impl CephXClientHandler {
 
         // Get global_id first (before mut borrow)
         let actual_global_id = session.global_id;
-
-        // Debug: log all available ticket handlers
-        debug!(
-            "build_authorizer: Requesting service_type={:?}, Session has {} ticket handlers",
-            service_type,
-            session.ticket_handlers.len()
-        );
-        for (stype, handler) in &session.ticket_handlers {
-            debug!(
-                "  Ticket handler for service {:?}: have_key={}, expired={}, ticket_blob={}",
-                stype,
-                handler.have_key,
-                handler.is_expired(),
-                if handler.ticket_blob.is_some() {
-                    "present"
-                } else {
-                    "absent"
-                }
-            );
-        }
 
         // Get or create ticket handler
         let handler = session.get_ticket_handler(service_type);
@@ -973,23 +722,16 @@ impl CephXClientHandler {
             actual_global_id,
             service_type,
             secret_id,
-            session_key.get_secret().len()
+            session_key.secret.len()
         );
 
         // Build CephXAuthorizeA
         let authorize_a = CephXAuthorizeA::new(actual_global_id, service_type.bits(), ticket_blob);
 
-        // Generate nonce
+        // Generate nonce and build CephXAuthorizeB
         let mut rng = rand::thread_rng();
         let nonce = rng.next_u64();
-        debug!("Generated nonce: 0x{:016x}", nonce);
-
-        // Build CephXAuthorizeB - include server challenge if provided
         let authorize_b = if let Some(challenge) = server_challenge {
-            debug!(
-                "Building authorizer with server_challenge: 0x{:016x}",
-                challenge
-            );
             CephXAuthorizeB::with_challenge(nonce, challenge)
         } else {
             CephXAuthorizeB::new(nonce)
@@ -1024,12 +766,6 @@ impl CephXClientHandler {
         authorize_b: &crate::protocol::CephXAuthorizeB,
     ) -> Result<Bytes> {
         use crate::protocol::CephXEncryptedEnvelope;
-        use aes::Aes128;
-        use cbc::cipher::{BlockEncryptMut, KeyIvInit};
-        use cbc::Encryptor;
-        use denc::Denc;
-
-        debug!("Encrypting CephXAuthorizeB");
 
         // Wrap authorize_b in encrypted envelope and encode
         let envelope = CephXEncryptedEnvelope {
@@ -1039,41 +775,15 @@ impl CephXClientHandler {
         let mut envelope_buf = BytesMut::new();
         envelope.encode(&mut envelope_buf, 0)?;
 
-        debug!(
-            "Encryption envelope ({} bytes): {}",
-            envelope_buf.len(),
-            hex::encode(&envelope_buf[..32.min(envelope_buf.len())])
-        );
+        // Encrypt with AES-128-CBC using session key
+        let ciphertext = session_key.encrypt(&envelope_buf)?;
 
-        // Extract AES key from session key
-        let key_bytes = session_key.aes_key_bytes()?;
-
-        debug!("Using AES key (first 16 bytes): {}", hex::encode(key_bytes));
-
-        use crate::protocol::CEPH_AES_IV;
-
-        // Encrypt with AES-128-CBC
-        type Aes128CbcEnc = Encryptor<Aes128>;
-        let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
-
-        let mut buffer = vec![0u8; envelope_buf.len() + crate::protocol::AES_BLOCK_LEN];
-        buffer[..envelope_buf.len()].copy_from_slice(&envelope_buf);
-
-        let ciphertext = cipher
-            .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(
-                &mut buffer,
-                envelope_buf.len(),
-            )
-            .map_err(|e| {
-                CephXError::CryptographicError(format!("AES encryption failed: {:?}", e))
-            })?;
-
-        // Add length prefix
+        // Add length prefix (wire format: u32 len + encrypted data)
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
         (ciphertext.len() as u32).encode(&mut result, 0)?;
-        result.extend_from_slice(ciphertext);
+        result.extend_from_slice(&ciphertext);
 
-        debug!("Encrypted result: {} bytes total", result.len());
+        debug!("Encrypted CephXAuthorizeB: {} bytes total", result.len());
         Ok(result.freeze())
     }
 
@@ -1303,13 +1013,13 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_with_key_invalid_ciphertext() {
+    fn test_crypto_key_decrypt_invalid_ciphertext() {
         let key =
             CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
                 .unwrap();
 
         // Too short ciphertext (less than AES block size)
-        let result = CephXClientHandler::decrypt_with_key(&key, &[1, 2, 3, 4]);
+        let result = key.decrypt(&[1, 2, 3, 4]);
         assert!(result.is_err());
     }
 
@@ -1345,12 +1055,12 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_with_key_empty_ciphertext() {
+    fn test_crypto_key_decrypt_empty_ciphertext() {
         let key =
             CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
                 .unwrap();
 
-        let result = CephXClientHandler::decrypt_with_key(&key, &[]);
+        let result = key.decrypt(&[]);
         assert!(result.is_err());
     }
 }

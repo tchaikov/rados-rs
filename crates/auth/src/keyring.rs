@@ -143,7 +143,7 @@ mod tests {
             .get_key("client.admin")
             .expect("admin key not found");
         // CryptoKey stores the full encoded structure (12-byte header + 16-byte key = 28 bytes)
-        assert_eq!(admin_key.get_secret().len(), 28);
+        assert_eq!(admin_key.secret.len(), 28);
 
         let admin_caps = keyring
             .get_caps("client.admin", "mon")

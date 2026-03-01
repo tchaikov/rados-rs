@@ -64,18 +64,6 @@ impl CryptoKey {
         Ok(Self::new(Bytes::from(secret_data)))
     }
 
-    pub fn get_secret(&self) -> &Bytes {
-        &self.secret
-    }
-
-    pub fn get_type(&self) -> u16 {
-        self.crypto_type
-    }
-
-    pub fn get_created(&self) -> SystemTime {
-        self.created
-    }
-
     pub fn len(&self) -> usize {
         self.secret.len()
     }
@@ -271,19 +259,15 @@ impl CephXTicketBlob {
             blob,
         }
     }
+}
 
-    pub fn empty() -> Self {
+impl Default for CephXTicketBlob {
+    fn default() -> Self {
         Self {
             struct_v: 1u8,
             secret_id: 0,
             blob: Bytes::new(),
         }
-    }
-}
-
-impl Default for CephXTicketBlob {
-    fn default() -> Self {
-        Self::empty()
     }
 }
 
@@ -591,20 +575,11 @@ impl TicketHandler {
     }
 
     pub fn need_key(&self) -> bool {
-        if !self.have_key {
-            return true;
-        }
-        if let Some(renew_after) = self.renew_after {
-            return SystemTime::now() >= renew_after;
-        }
-        false
+        !self.have_key || self.renew_after.is_some_and(|t| SystemTime::now() >= t)
     }
 
     pub fn is_expired(&self) -> bool {
-        if let Some(expires) = self.expires {
-            return SystemTime::now() >= expires;
-        }
-        true
+        self.expires.is_none_or(|t| SystemTime::now() >= t)
     }
 }
 
@@ -649,11 +624,9 @@ impl CephXSession {
 
     /// Check if we have a valid ticket for a service
     pub fn has_valid_ticket(&self, service_type: EntityType) -> bool {
-        if let Some(handler) = self.ticket_handlers.get(&service_type) {
-            handler.have_key && !handler.is_expired()
-        } else {
-            false
-        }
+        self.ticket_handlers
+            .get(&service_type)
+            .is_some_and(|h| h.have_key && !h.is_expired())
     }
 
     pub fn create_authenticator(&self, service_type: EntityType) -> CephXAuthenticator {
@@ -661,7 +634,6 @@ impl CephXSession {
     }
 
     pub fn sign_authenticator(&self, auth: &CephXAuthenticator) -> Result<Bytes> {
-        use denc::Denc;
         let mut buf = BytesMut::new();
         auth.encode(&mut buf, 0)?;
         self.session_key.sign(&buf.freeze())
