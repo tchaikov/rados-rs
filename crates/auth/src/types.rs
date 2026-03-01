@@ -2,10 +2,9 @@
 
 use crate::error::{CephXError, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use bytes::{Buf, BufMut, Bytes, BytesMut};
+use bytes::{Buf, BufMut, Bytes};
 use denc::{Denc, RadosError};
 use hmac::{Hmac, Mac};
-use rand::RngCore;
 use serde::Serialize;
 use sha2::Sha256;
 use std::collections::HashMap;
@@ -243,7 +242,8 @@ impl Serialize for CryptoKey {
 /// - `__u8 struct_v` - Structure version (currently 1)
 /// - `uint64_t secret_id` - Secret/rotating key ID
 /// - `buffer::list blob` - Encrypted ticket data
-#[derive(Debug, Clone, Serialize, denc::Denc)]
+#[derive(Debug, Clone, Serialize, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXTicketBlob {
     struct_v: u8,
     pub secret_id: u64,
@@ -274,7 +274,8 @@ impl Default for CephXTicketBlob {
 /// Authentication ticket containing authorization information
 ///
 /// Corresponds to C++ `AuthTicket` struct in `/src/auth/Auth.h`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Nautilus v14+")]
 pub struct AuthTicket {
     struct_v: u8,
     pub name: EntityName,
@@ -309,223 +310,50 @@ impl AuthTicket {
     }
 }
 
-impl Denc for AuthTicket {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        self.struct_v.encode(buf, features)?;
-        self.name.encode(buf, features)?;
-        self.global_id.encode(buf, features)?;
-        self.old_auid.encode(buf, features)?;
-        self.created.encode(buf, features)?;
-        self.expires.encode(buf, features)?;
-        self.caps.encode(buf, features)?;
-        self.flags.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let struct_v = u8::decode(buf, features)?;
-
-        // Minimum supported version check (Nautilus v14+)
-        denc::check_min_version!(struct_v, 2, "AuthTicket", "Nautilus v14+");
-
-        let name = EntityName::decode(buf, features)?;
-        let global_id = u64::decode(buf, features)?;
-        // Always decode old_auid (v2+)
-        let old_auid = u64::decode(buf, features)?;
-        let created = SystemTime::decode(buf, features)?;
-        let expires = SystemTime::decode(buf, features)?;
-        let caps = AuthCapsInfo::decode(buf, features)?;
-        let flags = u32::decode(buf, features)?;
-
-        Ok(Self {
-            struct_v,
-            name,
-            global_id,
-            old_auid,
-            created,
-            expires,
-            caps,
-            flags,
-        })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(
-            self.struct_v.encoded_size(features)?
-                + self.name.encoded_size(features)?
-                + self.global_id.encoded_size(features)?
-                + self.old_auid.encoded_size(features)?
-                + self.created.encoded_size(features)?
-                + self.expires.encoded_size(features)?
-                + self.caps.encoded_size(features)?
-                + self.flags.encoded_size(features)?,
-        )
-    }
-}
-
 /// Service ticket information containing authorization ticket and session key
 ///
 /// Corresponds to C++ `CephXServiceTicketInfo` struct in `/src/auth/cephx/CephxProtocol.h`
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXServiceTicketInfo {
+    struct_v: u8,
     pub ticket: AuthTicket,
     pub session_key: CryptoKey,
 }
 
 impl CephXServiceTicketInfo {
+    const STRUCT_V: u8 = 1;
+
     pub fn new(ticket: AuthTicket, session_key: CryptoKey) -> Self {
         Self {
+            struct_v: Self::STRUCT_V,
             ticket,
             session_key,
         }
-    }
-}
-
-impl Denc for CephXServiceTicketInfo {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        1u8.encode(buf, 0)?;
-        self.ticket.encode(buf, features)?;
-        self.session_key.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let ticket = AuthTicket::decode(buf, features)?;
-        let session_key = CryptoKey::decode(buf, features)?;
-
-        Ok(Self {
-            ticket,
-            session_key,
-        })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(
-            1 + // struct_v
-            self.ticket.encoded_size(features)? +
-            self.session_key.encoded_size(features)?,
-        )
     }
 }
 
 /// Authentication capabilities information
 ///
 /// Corresponds to C++ `AuthCapsInfo` struct in `/src/auth/Auth.h`
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct AuthCapsInfo {
+    #[serde(skip)]
+    struct_v: u8,
     pub caps: HashMap<String, String>,
 }
 
-impl Denc for AuthCapsInfo {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        1u8.encode(buf, 0)?;
-        (self.caps.len() as u32).encode(buf, 0)?;
-        for (key, value) in &self.caps {
-            key.encode(buf, features)?;
-            value.encode(buf, features)?;
-        }
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let _struct_v = u8::decode(buf, 0)?;
-        let count = u32::decode(buf, 0)?;
-        let mut caps = HashMap::new();
-
-        for _ in 0..count {
-            let key = String::decode(buf, features)?;
-            let value = String::decode(buf, features)?;
-            caps.insert(key, value);
-        }
-
-        Ok(Self { caps })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        let mut size = 1 + 4; // struct_v + count
-        for (key, value) in &self.caps {
-            size += key.encoded_size(features)?;
-            size += value.encoded_size(features)?;
-        }
-        Some(size)
-    }
+impl AuthCapsInfo {
+    const STRUCT_V: u8 = 1;
 }
 
-/// CephX authenticator for service requests
-#[derive(Debug, Clone)]
-pub struct CephXAuthenticator {
-    pub client_challenge: u64,
-    pub server_challenge: u64,
-    pub global_id: GlobalId,
-    pub service_id: u32,
-    pub timestamp: SystemTime,
-    pub nonce: u64,
-}
-
-impl CephXAuthenticator {
-    pub fn new(global_id: GlobalId, service_id: u32) -> Self {
-        let mut rng = rand::thread_rng();
+impl Default for AuthCapsInfo {
+    fn default() -> Self {
         Self {
-            client_challenge: rng.next_u64(),
-            server_challenge: 0,
-            global_id,
-            service_id,
-            timestamp: SystemTime::now(),
-            nonce: rng.next_u64(),
+            struct_v: Self::STRUCT_V,
+            caps: HashMap::new(),
         }
-    }
-}
-
-impl Denc for CephXAuthenticator {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        self.client_challenge.encode(buf, 0)?;
-        self.server_challenge.encode(buf, 0)?;
-        self.global_id.encode(buf, 0)?;
-        self.service_id.encode(buf, 0)?;
-
-        // Encode timestamp as u64 seconds + u32 nanoseconds (12 bytes)
-        let timestamp = self
-            .timestamp
-            .duration_since(UNIX_EPOCH)
-            .map_err(|e| RadosError::Protocol(format!("Time error: {}", e)))?;
-        timestamp.as_secs().encode(buf, 0)?;
-        timestamp.subsec_nanos().encode(buf, 0)?;
-
-        self.nonce.encode(buf, 0)?;
-
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let client_challenge = u64::decode(buf, 0)?;
-        let server_challenge = u64::decode(buf, 0)?;
-        let global_id = u64::decode(buf, 0)?;
-        let service_id = u32::decode(buf, 0)?;
-        let timestamp_secs = u64::decode(buf, 0)?;
-        let timestamp_nanos = u32::decode(buf, 0)?;
-        let nonce = u64::decode(buf, 0)?;
-
-        let timestamp = UNIX_EPOCH
-            + Duration::from_secs(timestamp_secs)
-            + Duration::from_nanos(timestamp_nanos as u64);
-
-        Ok(Self {
-            client_challenge,
-            server_challenge,
-            global_id,
-            service_id,
-            timestamp,
-            nonce,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8 + 8 + 8 + 4 + 8 + 4 + 8) // 44 bytes total
     }
 }
 
@@ -629,13 +457,4 @@ impl CephXSession {
             .is_some_and(|h| h.have_key && !h.is_expired())
     }
 
-    pub fn create_authenticator(&self, service_type: EntityType) -> CephXAuthenticator {
-        CephXAuthenticator::new(self.global_id, service_type.bits())
-    }
-
-    pub fn sign_authenticator(&self, auth: &CephXAuthenticator) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
-        auth.encode(&mut buf, 0)?;
-        self.session_key.sign(&buf.freeze())
-    }
 }

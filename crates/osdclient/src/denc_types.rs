@@ -8,12 +8,11 @@ use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
 
 use crate::types::{
-    JaegerSpanContext, OSDOp, ObjectLocator, OpCode, OpData, PackedEntityName, PgId,
-    RequestRedirect, StripedPgId,
+    OSDOp, ObjectLocator, OpCode, OpData, PackedEntityName, PgId, RequestRedirect, StripedPgId,
 };
 
 #[cfg(test)]
-use crate::types::BlkinTraceInfo;
+use crate::types::{BlkinTraceInfo, JaegerSpanContext};
 
 // PgId Denc implementation is now in the denc crate (osdmap.rs)
 // We just re-export and use it here
@@ -85,108 +84,13 @@ denc::impl_denc_for_versioned!(StripedPgId);
 ///
 /// This structure uses a special versioning scheme (DENC_START_OSD_REQID)
 /// that enforces version 2 and compat 2.
+#[derive(Debug, Clone, PartialEq, Eq, denc::VersionedDenc)]
+#[denc(version = 2, compat = 2)]
 pub struct OsdReqId {
     pub name: PackedEntityName,
     pub tid: u64,
     pub inc: i32,
 }
-
-impl VersionedEncode for OsdReqId {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        2
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        2
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // Encode entity_name_t
-        self.name.encode(buf, features)?;
-
-        // Encode tid (u64)
-        self.tid.encode(buf, 0)?;
-
-        // Encode inc (i32)
-        self.inc.encode(buf, 0)?;
-
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        // Decode entity_name_t
-        let name = PackedEntityName::decode(buf, features)?;
-
-        // Decode tid (u64)
-        let tid = u64::decode(buf, 0)?;
-
-        // Decode inc (i32)
-        let inc = i32::decode(buf, 0)?;
-
-        Ok(OsdReqId { name, tid, inc })
-    }
-
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        // entity_name + tid + inc
-        Some(
-            self.name.encoded_size(features)?
-                + self.tid.encoded_size(0)?
-                + self.inc.encoded_size(0)?,
-        )
-    }
-}
-
-denc::impl_denc_for_versioned!(OsdReqId);
-
-// ============= JaegerSpanContext (jspan_context) =============
-
-impl VersionedEncode for JaegerSpanContext {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // When Jaeger is not enabled, just encode is_valid flag
-        (self.is_valid as u8).encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        _features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        let is_valid = u8::decode(buf, 0)? != 0;
-
-        Ok(JaegerSpanContext { is_valid })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        Some(1) // is_valid flag (u8)
-    }
-}
-
-denc::impl_denc_for_versioned!(JaegerSpanContext);
 
 // ============= RequestRedirect (request_redirect_t) =============
 

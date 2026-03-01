@@ -13,6 +13,14 @@ struct DencAttrs {
     compat: Option<u8>,
     /// Whether to emit `const FEATURE_DEPENDENT: bool = true` (bare flag).
     feature_dependent: bool,
+    /// Fixed on-wire struct_v for `StructVDenc`.
+    struct_v: Option<u8>,
+    /// Minimum accepted decoded struct_v for `StructVDenc`.
+    min_struct_v: Option<u8>,
+    /// Enforce decoded struct_v == struct_v for `StructVDenc`.
+    strict_struct_v: bool,
+    /// Optional Ceph release label used in min-version errors.
+    ceph_release: Option<syn::LitStr>,
 }
 
 /// Parse all items from `#[denc(...)]` attributes.
@@ -21,12 +29,20 @@ struct DencAttrs {
 /// - `crate = "path"`   — override the denc crate path
 /// - `version = N`      — encoding version (required for `VersionedDenc`)
 /// - `compat = N`       — compat version (defaults to `version`)
+/// - `struct_v = N`     — fixed struct version for `StructVDenc`
+/// - `min_struct_v = N` — minimum accepted decoded struct_v for `StructVDenc`
+/// - `strict_struct_v`  — enforce decoded struct_v == struct_v
+/// - `ceph_release = "..."` — release label for min-version checks
 /// - `feature_dependent` — emit `FEATURE_DEPENDENT = true` in generated impls
 fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
     let mut krate = quote! { ::denc };
     let mut version = None;
     let mut compat = None;
     let mut feature_dependent = false;
+    let mut struct_v = None;
+    let mut min_struct_v = None;
+    let mut strict_struct_v = false;
+    let mut ceph_release = None;
 
     for attr in attrs {
         if !attr.path().is_ident("denc") {
@@ -42,6 +58,10 @@ fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
                 // Bare flag: `feature_dependent`
                 syn::Meta::Path(path) if path.is_ident("feature_dependent") => {
                     feature_dependent = true;
+                }
+                // Bare flag: `strict_struct_v`
+                syn::Meta::Path(path) if path.is_ident("strict_struct_v") => {
+                    strict_struct_v = true;
                 }
                 // Key-value: `key = value`
                 syn::Meta::NameValue(nv) if nv.path.is_ident("crate") => {
@@ -79,6 +99,39 @@ fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
                         );
                     }
                 }
+                syn::Meta::NameValue(nv) if nv.path.is_ident("struct_v") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(i),
+                        ..
+                    }) = nv.value
+                    {
+                        struct_v = Some(
+                            i.base10_parse::<u8>()
+                                .expect("Invalid struct_v in #[denc(struct_v = N)]"),
+                        );
+                    }
+                }
+                syn::Meta::NameValue(nv) if nv.path.is_ident("min_struct_v") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Int(i),
+                        ..
+                    }) = nv.value
+                    {
+                        min_struct_v = Some(
+                            i.base10_parse::<u8>()
+                                .expect("Invalid min_struct_v in #[denc(min_struct_v = N)]"),
+                        );
+                    }
+                }
+                syn::Meta::NameValue(nv) if nv.path.is_ident("ceph_release") => {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = nv.value
+                    {
+                        ceph_release = Some(s);
+                    }
+                }
                 _ => {}
             }
         }
@@ -89,6 +142,10 @@ fn parse_denc_attrs(attrs: &[syn::Attribute]) -> DencAttrs {
         version,
         compat,
         feature_dependent,
+        struct_v,
+        min_struct_v,
+        strict_struct_v,
+        ceph_release,
     }
 }
 
@@ -138,11 +195,12 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
         _ => panic!("Denc can only be derived for structs"),
     };
 
-    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
     let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
 
-    let encode_stmts = field_names.iter().map(|name| {
-        quote! { self.#name.encode(buf, features)?; }
+    let encode_stmts = fields.named.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
     });
 
     let decode_fields = fields.named.iter().map(|f| {
@@ -151,6 +209,12 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
         quote! {
             #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
         }
+    });
+
+    let size_stmts = fields.named.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
     });
 
     let where_clauses = field_types.iter().map(|ty| {
@@ -185,7 +249,7 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
 
             fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
                 let mut size: usize = 0;
-                #(size += self.#field_names.encoded_size(features)?;)*
+                #(#size_stmts)*
                 ::std::option::Option::Some(size)
             }
         }
@@ -432,37 +496,66 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
         .expect("#[denc(version = N)] is required when using #[derive(VersionedDenc)]");
     let compat = attrs.compat.unwrap_or(version);
 
-    let fields = match &input.data {
+    let (encode_stmts, decode_expr, size_stmts, where_clauses): (
+        Vec<TokenStream2>,
+        TokenStream2,
+        Vec<TokenStream2>,
+        Vec<TokenStream2>,
+    ) = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
-            Fields::Named(fields) => fields,
-            _ => panic!("VersionedDenc derive only supports named fields"),
+            Fields::Named(fields) => {
+                let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
+
+                let encode_stmts = fields
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let field_name = &f.ident;
+                        let field_type = &f.ty;
+                        quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
+                    })
+                    .collect();
+
+                let decode_fields: Vec<_> = fields
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let field_name = &f.ident;
+                        let field_type = &f.ty;
+                        quote! {
+                            #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
+                        }
+                    })
+                    .collect();
+
+                let decode_expr = quote! {
+                    Self {
+                        #(#decode_fields,)*
+                    }
+                };
+
+                let size_stmts = fields
+                    .named
+                    .iter()
+                    .map(|f| {
+                        let field_name = &f.ident;
+                        let field_type = &f.ty;
+                        quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
+                    })
+                    .collect();
+
+                let where_clauses = field_types
+                    .iter()
+                    .map(|ty| quote! { #ty: #krate::Denc })
+                    .collect();
+
+                (encode_stmts, decode_expr, size_stmts, where_clauses)
+            }
+            Fields::Unit => (Vec::new(), quote! { Self }, Vec::new(), Vec::new()),
+            _ => panic!("VersionedDenc derive only supports named or unit structs"),
         },
         _ => panic!("VersionedDenc can only be derived for structs"),
     };
-
-    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
-    let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
-
-    let encode_stmts = field_names.iter().map(|name| {
-        quote! { self.#name.encode(buf, features)?; }
-    });
-
-    let decode_fields = fields.named.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-        quote! {
-            #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
-        }
-    });
-
-    let size_stmts = field_names.iter().map(|name| {
-        quote! { size += self.#name.encoded_size(features)?; }
-    });
-
-    let where_clauses: Vec<_> = field_types
-        .iter()
-        .map(|ty| quote! { #ty: #krate::Denc })
-        .collect();
 
     // Emit `const FEATURE_DEPENDENT: bool = true;` only when the flag is set.
     let feature_dependent_ve = if attrs.feature_dependent {
@@ -478,6 +571,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
             #(#where_clauses,)*
         {
             #feature_dependent_ve
+            const MAX_DECODE_VERSION: u8 = #version;
 
             fn encoding_version(&self, _features: u64) -> u8 {
                 #version
@@ -512,9 +606,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
                         ),
                     ));
                 }
-                ::std::result::Result::Ok(Self {
-                    #(#decode_fields,)*
-                })
+                ::std::result::Result::Ok(#decode_expr)
             }
 
             fn encoded_size_content(
@@ -552,6 +644,181 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
 
             fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
                 <Self as #krate::VersionedEncode>::encoded_size_versioned(self, features)
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
+}
+
+/// Derive macro for struct_v-first encoding (no ENCODE_START wrapper).
+///
+/// This matches the common Ceph pattern:
+/// `encode(struct_v, bl); encode(field1, bl); ...`
+///
+/// Required:
+/// - `#[denc(struct_v = N)]`
+///
+/// Optional:
+/// - `#[denc(min_struct_v = M)]`
+/// - `#[denc(ceph_release = "...")]` (used with `min_struct_v`)
+/// - `#[denc(strict_struct_v)]` (mutually exclusive with `min_struct_v`)
+///
+/// The first struct field must be named `struct_v` and have type `u8`.
+#[proc_macro_derive(StructVDenc, attributes(denc))]
+pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    let attrs = parse_denc_attrs(&input.attrs);
+    let krate = &attrs.krate;
+    let name = &input.ident;
+
+    let struct_v_lit = attrs
+        .struct_v
+        .expect("#[denc(struct_v = N)] is required when using #[derive(StructVDenc)]");
+
+    if attrs.strict_struct_v && attrs.min_struct_v.is_some() {
+        panic!("#[denc(strict_struct_v)] and #[denc(min_struct_v = N)] are mutually exclusive");
+    }
+
+    let fields = match &input.data {
+        Data::Struct(data_struct) => match &data_struct.fields {
+            Fields::Named(fields) => fields,
+            _ => panic!("StructVDenc derive only supports named fields"),
+        },
+        _ => panic!("StructVDenc can only be derived for structs"),
+    };
+
+    let first_field = fields
+        .named
+        .iter()
+        .next()
+        .expect("StructVDenc requires at least one field");
+
+    let is_struct_v_name = first_field
+        .ident
+        .as_ref()
+        .map(|id| id == "struct_v")
+        .unwrap_or(false);
+    if !is_struct_v_name {
+        panic!("StructVDenc requires the first field to be named `struct_v`");
+    }
+
+    let is_u8 = match &first_field.ty {
+        syn::Type::Path(tp) => tp.qself.is_none() && tp.path.is_ident("u8"),
+        _ => false,
+    };
+    if !is_u8 {
+        panic!("StructVDenc requires `struct_v` to have type u8");
+    }
+
+    let body_fields: Vec<_> = fields.named.iter().skip(1).collect();
+    let body_field_types: Vec<_> = body_fields.iter().map(|f| &f.ty).collect();
+
+    let encode_stmts = body_fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
+    });
+
+    let decode_fields = body_fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! {
+            #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
+        }
+    });
+
+    let size_stmts = body_fields.iter().map(|f| {
+        let field_name = &f.ident;
+        let field_type = &f.ty;
+        quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
+    });
+
+    let where_clauses = body_field_types.iter().map(|ty| quote! { #ty: #krate::Denc });
+
+    let version_check = if attrs.strict_struct_v {
+        quote! {
+            if struct_v != #struct_v_lit {
+                return ::std::result::Result::Err(#krate::RadosError::Protocol(
+                    ::std::format!(
+                        concat!(stringify!(#name), " struct_v {} not supported (expected {})"),
+                        struct_v,
+                        #struct_v_lit,
+                    ),
+                ));
+            }
+        }
+    } else if let Some(min_v) = attrs.min_struct_v {
+        if let Some(release) = attrs.ceph_release {
+            quote! { #krate::check_min_version!(struct_v, #min_v, stringify!(#name), #release); }
+        } else {
+            quote! {
+                if struct_v < #min_v {
+                    return ::std::result::Result::Err(#krate::RadosError::Protocol(
+                        ::std::format!(
+                            concat!(stringify!(#name), " struct_v {} not supported (minimum {})"),
+                            struct_v,
+                            #min_v,
+                        ),
+                    ));
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
+
+    let feature_dependent_denc = if attrs.feature_dependent {
+        quote! { const FEATURE_DEPENDENT: bool = true; }
+    } else {
+        quote! {}
+    };
+
+    let expanded = quote! {
+        impl #krate::Denc for #name
+        where
+            #(#where_clauses,)*
+        {
+            #feature_dependent_denc
+
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<(), #krate::RadosError> {
+                if self.struct_v != (#struct_v_lit as u8) {
+                    return ::std::result::Result::Err(#krate::RadosError::Protocol(
+                        ::std::format!(
+                            concat!(stringify!(#name), " struct_v {} does not match encoder version {}"),
+                            self.struct_v,
+                            #struct_v_lit,
+                        ),
+                    ));
+                }
+                <u8 as #krate::Denc>::encode(&self.struct_v, buf, 0)?;
+                #(#encode_stmts)*
+                ::std::result::Result::Ok(())
+            }
+
+            fn decode<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+            ) -> ::std::result::Result<Self, #krate::RadosError>
+            where
+                Self: Sized,
+            {
+                let struct_v = <u8 as #krate::Denc>::decode(buf, features)?;
+                #version_check
+                ::std::result::Result::Ok(Self {
+                    struct_v,
+                    #(#decode_fields,)*
+                })
+            }
+
+            fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
+                let mut size: usize = <u8 as #krate::Denc>::encoded_size(&(#struct_v_lit as u8), 0)?;
+                #(#size_stmts)*
+                ::std::option::Option::Some(size)
             }
         }
     };

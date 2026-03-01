@@ -185,10 +185,10 @@ impl denc::FixedSize for PgId {
 ///
 /// ## Version Support
 /// - **Encoding**: v6 (current)
-/// - **Decoding**: v5+ (Nautilus v14+)
+/// - **Decoding**: v6+ (Nautilus v14+)
 /// - **Minimum Ceph**: Nautilus (v14)
 ///
-/// Versions < 5 are not supported and will return an error.
+/// Versions < 6 are not supported and will return an error.
 impl VersionedEncode for ObjectLocator {
     fn encoding_version(&self, _features: u64) -> u8 {
         6 // Match C++ - version 6 includes pool, preferred, key, nspace, hash
@@ -237,7 +237,7 @@ impl VersionedEncode for ObjectLocator {
         _compat_version: u8,
     ) -> std::result::Result<Self, RadosError> {
         // Minimum supported version check (Nautilus v14+)
-        denc::check_min_version!(struct_v, 5, "ObjectLocator", "Nautilus v14+");
+        denc::check_min_version!(struct_v, 6, "ObjectLocator", "Nautilus v14+");
 
         // Decode pool and preferred fields (v2+ format: i64 pool, i32 preferred)
         let pool = i64::decode(buf, features)?;
@@ -247,15 +247,9 @@ impl VersionedEncode for ObjectLocator {
         // Decode key (present in all versions)
         let key = String::decode(buf, features)?;
 
-        // Decode namespace (v5+, always present since we require v5+)
+        // Decode namespace and hash (always present in v6+, which we require)
         let namespace = String::decode(buf, features)?;
-
-        // Decode hash (added in v6, keep conditional for post-Nautilus compatibility)
-        let hash = if struct_v >= 6 {
-            i64::decode(buf, features)?
-        } else {
-            -1i64
-        };
+        let hash = i64::decode(buf, features)?;
 
         // Verify that nobody's corrupted the locator (hash == -1 OR key is empty)
         if hash != -1 && !key.is_empty() {

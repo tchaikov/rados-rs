@@ -231,143 +231,23 @@ fn format_utime_as_timestamp(utime: &UTime) -> String {
 // Generic BTreeMap encoding - matches Ceph's map encoding
 
 /// Explicit Hash HitSet parameters - no additional parameters needed
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct ExplicitHashHitSetParams;
 
-impl VersionedEncode for ExplicitHashHitSetParams {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // No parameters to encode
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        // No parameters to decode for ExplicitHash
-        Ok(ExplicitHashHitSetParams)
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        Some(0) // No content
-    }
-}
-
-denc::impl_denc_for_versioned!(ExplicitHashHitSetParams);
-
 /// Explicit Object HitSet parameters - no additional parameters needed
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct ExplicitObjectHitSetParams;
 
-impl VersionedEncode for ExplicitObjectHitSetParams {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // No parameters to encode
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        // No parameters to decode for ExplicitObject
-        Ok(ExplicitObjectHitSetParams)
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        Some(0) // No content
-    }
-}
-
-denc::impl_denc_for_versioned!(ExplicitObjectHitSetParams);
-
 /// BloomHitSet parameters - separate VersionedEncode implementation
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct BloomHitSetParams {
     pub fpp_micro: u32,
     pub target_size: u64,
     pub seed: u64,
 }
-
-impl VersionedEncode for BloomHitSetParams {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // Write directly to buf parameter
-        buf.put_u32_le(self.fpp_micro);
-        buf.put_u64_le(self.target_size);
-        buf.put_u64_le(self.seed);
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        _features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        if buf.remaining() < 20 {
-            // 4 + 8 + 8 = 20 buf
-            return Err(RadosError::Protocol(
-                "Insufficient buf for BloomHitSetParams".to_string(),
-            ));
-        }
-
-        let fpp_micro = buf.get_u32_le();
-        let target_size = buf.get_u64_le();
-        let seed = buf.get_u64_le();
-
-        Ok(BloomHitSetParams {
-            fpp_micro,
-            target_size,
-            seed,
-        })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        Some(4 + 8 + 8) // fpp_micro (u32) + target_size (u64) + seed (u64)
-    }
-}
-
-denc::impl_denc_for_versioned!(BloomHitSetParams);
 
 /// HitSet parameter types - using dedicated types for each variant
 /// Type discriminants match C++ HitSet::Params::TYPE_* constants
@@ -679,8 +559,10 @@ impl VersionedEncode for OsdXInfo {
 denc::impl_denc_for_versioned!(OsdXInfo);
 
 /// OSD information structure (osd_info_t in C++)
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct OsdInfo {
+    pub struct_v: u8,
     pub last_clean_begin: Epoch, // last interval that ended with a clean osd shutdown
     pub last_clean_end: Epoch,
     pub up_from: Epoch, // epoch osd marked up
@@ -689,51 +571,21 @@ pub struct OsdInfo {
     pub lost_at: Epoch, // last epoch we decided data was "lost"
 }
 
-// DencMut implementation for OsdInfo
-impl denc::Denc for OsdInfo {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 25 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for OsdInfo: need 25, have {}",
-                buf.remaining_mut()
-            )));
+impl OsdInfo {
+    const STRUCT_V: u8 = 1;
+}
+
+impl Default for OsdInfo {
+    fn default() -> Self {
+        Self {
+            struct_v: Self::STRUCT_V,
+            last_clean_begin: Epoch::default(),
+            last_clean_end: Epoch::default(),
+            up_from: Epoch::default(),
+            up_thru: Epoch::default(),
+            down_at: Epoch::default(),
+            lost_at: Epoch::default(),
         }
-        buf.put_u8(1); // struct_v = 1
-        buf.put_u32_le(self.last_clean_begin.as_u32());
-        buf.put_u32_le(self.last_clean_end.as_u32());
-        buf.put_u32_le(self.up_from.as_u32());
-        buf.put_u32_le(self.up_thru.as_u32());
-        buf.put_u32_le(self.down_at.as_u32());
-        buf.put_u32_le(self.lost_at.as_u32());
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 25 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for OsdInfo".to_string(),
-            ));
-        }
-        let _struct_v = buf.get_u8();
-        let last_clean_begin = buf.get_u32_le();
-        let last_clean_end = buf.get_u32_le();
-        let up_from = buf.get_u32_le();
-        let up_thru = buf.get_u32_le();
-        let down_at = buf.get_u32_le();
-        let lost_at = buf.get_u32_le();
-
-        Ok(OsdInfo {
-            last_clean_begin: denc::Epoch::new(last_clean_begin),
-            last_clean_end: denc::Epoch::new(last_clean_end),
-            up_from: denc::Epoch::new(up_from),
-            up_thru: denc::Epoch::new(up_thru),
-            down_at: denc::Epoch::new(down_at),
-            lost_at: denc::Epoch::new(lost_at),
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(25)
     }
 }
 
@@ -1079,40 +931,10 @@ impl VersionedEncode for PoolSnapInfo {
 denc::impl_denc_for_versioned!(PoolSnapInfo);
 
 /// Snapshot interval for removed snaps
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, denc::Denc)]
 pub struct SnapInterval {
     pub start: u64,
     pub len: u64,
-}
-
-// DencMut implementation for SnapInterval
-impl denc::Denc for SnapInterval {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 16 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for SnapInterval: need 16, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u64_le(self.start);
-        buf.put_u64_le(self.len);
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for SnapInterval".to_string(),
-            ));
-        }
-        let start = buf.get_u64_le();
-        let len = buf.get_u64_le();
-        Ok(SnapInterval { start, len })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(16)
-    }
 }
 
 impl denc::FixedSize for SnapInterval {
@@ -1736,25 +1558,9 @@ denc::impl_denc_for_versioned!(PgMergeMeta);
 
 /// Snapshot interval set (snap_interval_set_t in C++)
 /// A set of snapshot intervals represented as a vector of SnapInterval
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, denc::Denc)]
 pub struct SnapIntervalSet {
     pub intervals: Vec<SnapInterval>,
-}
-
-// DencMut implementation for SnapIntervalSet
-impl denc::Denc for SnapIntervalSet {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        <Vec<SnapInterval> as denc::Denc>::encode(&self.intervals, buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let intervals = <Vec<SnapInterval> as denc::Denc>::decode(buf, features)?;
-        Ok(SnapIntervalSet { intervals })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        <Vec<SnapInterval> as denc::Denc>::encoded_size(&self.intervals, features)
-    }
 }
 
 /// Ceph release type (ceph_release_t in C++)

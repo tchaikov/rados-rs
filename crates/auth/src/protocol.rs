@@ -39,7 +39,8 @@ pub const MAX_CONNECTION_SECRET_LEN: usize = 256;
 /// - `uint32_t keys` - Bitmask of service types (MON|OSD|MDS|MGR)
 ///
 /// This structure is used to request service tickets from the monitor.
-#[derive(Debug, Clone, denc::Denc)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXServiceTicketRequest {
     struct_v: u8,
     pub keys: u32,
@@ -65,7 +66,8 @@ impl CephXServiceTicketRequest {
 ///
 /// This structure is sent encrypted inside the AUTH_DONE response.
 /// It contains the session key and validity for a specific service.
-#[derive(Debug, Clone, denc::Denc)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXServiceTicket {
     struct_v: u8,
     pub session_key: CryptoKey,
@@ -165,7 +167,8 @@ impl Denc for ServiceTicketInfo {
 /// - `struct_v: u8` - Structure version (currently 1)
 /// - `num_tickets: u32` - Number of tickets in the list (implicit in Vec encoding)
 /// - `tickets: Vec<ServiceTicketInfo>` - List of service tickets
-#[derive(Debug, Clone, denc::Denc)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct ServiceTicketReply {
     pub struct_v: u8,
     pub tickets: Vec<ServiceTicketInfo>,
@@ -287,7 +290,8 @@ pub struct CephXResponseHeader {
 /// - `uint32_t other_keys` - Bitmask of other service keys to request
 ///
 /// This is sent by client in response to server's challenge.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, denc::StructVDenc)]
+#[denc(struct_v = 3, min_struct_v = 2, ceph_release = "Luminous v12+")]
 pub struct CephXAuthenticate {
     struct_v: u8,
     pub client_challenge: u64,
@@ -313,48 +317,6 @@ impl CephXAuthenticate {
         }
     }
 }
-impl Denc for CephXAuthenticate {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        self.struct_v.encode(buf, features)?;
-        self.client_challenge.encode(buf, features)?;
-        self.key.encode(buf, features)?;
-        self.old_ticket.encode(buf, features)?;
-        self.other_keys.encode(buf, features)?;
-
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let struct_v = u8::decode(buf, features)?;
-
-        // Minimum supported version check (Luminous v12+)
-        denc::check_min_version!(struct_v, 2, "CephXAuthenticate", "Luminous v12+");
-
-        let client_challenge = u64::decode(buf, features)?;
-        let key = u64::decode(buf, features)?;
-        let old_ticket = CephXTicketBlob::decode(buf, features)?;
-        // Always decode other_keys (v2+)
-        let other_keys = u32::decode(buf, 0)?;
-
-        Ok(Self {
-            struct_v,
-            client_challenge,
-            key,
-            old_ticket,
-            other_keys,
-        })
-    }
-
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        Some(
-            self.struct_v.encoded_size(features)?
-                + self.client_challenge.encoded_size(features)?
-                + self.key.encoded_size(features)?
-                + self.old_ticket.encoded_size(features)?
-                + self.other_keys.encoded_size(features)?,
-        )
-    }
-}
 
 /// CephX server challenge structure
 ///
@@ -365,7 +327,8 @@ impl Denc for CephXAuthenticate {
 /// - `uint64_t server_challenge` - Random challenge from server
 ///
 /// This is the initial challenge sent by server to client to start CephX authentication.
-#[derive(Debug, Clone, denc::Denc)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXServerChallenge {
     struct_v: u8,
     pub server_challenge: u64,
@@ -510,7 +473,8 @@ impl CephXReply {
 ///
 /// This is the first part of the authorizer sent to a service (OSD, MDS, etc.)
 /// Contains the service ticket obtained from the monitor
-#[derive(Debug, Clone, denc::Denc)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 1)]
 pub struct CephXAuthorizeA {
     struct_v: u8,
     pub global_id: u64,
@@ -536,16 +500,21 @@ impl CephXAuthorizeA {
 ///
 /// This is the second part of the authorizer (encrypted with session key)
 /// Contains a nonce and optionally a server challenge response
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, denc::StructVDenc)]
+#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Nautilus v14.2+")]
 pub struct CephXAuthorizeB {
+    struct_v: u8,
     pub nonce: u64,
     pub have_challenge: bool,
     pub server_challenge_plus_one: u64,
 }
 
 impl CephXAuthorizeB {
+    const STRUCT_V: u8 = 2;
+
     pub fn new(nonce: u64) -> Self {
         Self {
+            struct_v: Self::STRUCT_V,
             nonce,
             have_challenge: false,
             server_challenge_plus_one: 0,
@@ -554,50 +523,11 @@ impl CephXAuthorizeB {
 
     pub fn with_challenge(nonce: u64, server_challenge: u64) -> Self {
         Self {
+            struct_v: Self::STRUCT_V,
             nonce,
             have_challenge: true,
             server_challenge_plus_one: server_challenge.wrapping_add(1),
         }
-    }
-}
-
-impl Denc for CephXAuthorizeB {
-    fn encode<B: BufMut>(
-        &self,
-        buf: &mut B,
-        _features: u64,
-    ) -> std::result::Result<(), RadosError> {
-        // struct_v = 2 (per Linux kernel implementation)
-        2u8.encode(buf, 0)?;
-        // nonce
-        self.nonce.encode(buf, 0)?;
-        // have_challenge
-        (if self.have_challenge { 1u8 } else { 0u8 }).encode(buf, 0)?;
-        // server_challenge_plus_one (always encode, even if 0)
-        self.server_challenge_plus_one.encode(buf, 0)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> std::result::Result<Self, RadosError> {
-        let struct_v = u8::decode(buf, 0)?;
-        let nonce = u64::decode(buf, 0)?;
-        let (have_challenge, server_challenge_plus_one) = if struct_v >= 2 {
-            let hc = u8::decode(buf, 0)? != 0;
-            let sc = u64::decode(buf, 0)?;
-            (hc, sc)
-        } else {
-            (false, 0)
-        };
-        Ok(Self {
-            nonce,
-            have_challenge,
-            server_challenge_plus_one,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        // encode always writes struct_v=2 with all fields
-        Some(1 + 8 + 1 + 8) // struct_v + nonce + have_challenge + server_challenge_plus_one
     }
 }
 
@@ -1058,6 +988,19 @@ mod tests {
         assert!(decoded.have_challenge);
         assert_eq!(decoded.server_challenge_plus_one, 100000);
         assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authorize_b_rejects_pre_v2() {
+        let mut buf = BytesMut::new();
+        // Legacy layout: struct_v + nonce (no challenge fields for v1)
+        1u8.encode(&mut buf, 0).unwrap();
+        54321u64.encode(&mut buf, 0).unwrap();
+
+        let mut read_buf = buf.freeze();
+        let err = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("Nautilus v14.2+"));
     }
 
     #[test]

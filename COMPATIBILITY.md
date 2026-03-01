@@ -75,17 +75,16 @@ These types have no dependencies on other custom types:
 
 | Type | Rust Location | C++ Source | Own Min | Member Min | Effective Min | Ceph Release |
 |------|---------------|------------|---------|------------|---------------|--------------|
-| `AuthTicket` | `auth/src/types.rs:318` | `src/auth/Auth.h` | 1 | 1 | 1 | All versions |
-| `AuthCapsInfo` | `auth/src/types.rs:469` | `src/auth/Auth.h` | 1 | 1 | 1 | All versions |
-| `CephXServiceTicketInfo` | `auth/src/types.rs:410` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
-| `CephXAuthenticator` | `auth/src/types.rs:529` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
+| `AuthTicket` | `auth/src/types.rs:279` | `src/auth/Auth.h` | 2 | 1 | 2 | Nautilus (v14+) |
+| `AuthCapsInfo` | `auth/src/types.rs:341` | `src/auth/Auth.h` | 1 | 1 | 1 | All versions |
+| `CephXServiceTicketInfo` | `auth/src/types.rs:318` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
 | `CephXServerChallenge` | `auth/src/protocol.rs:361` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
 | `CephXAuthenticate` | `auth/src/protocol.rs:281` | `src/auth/cephx/CephxProtocol.h` | 2 | 1 | 2 | Luminous (v12) |
 | `CephXServiceTicketRequest` | `auth/src/protocol.rs:33` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
 | `CephXServiceTicket` | `auth/src/protocol.rs:57` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
-| `CephXAuthorizeA` | `auth/src/protocol.rs:510` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
-| `CephXAuthorizeB` | `auth/src/protocol.rs:536` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
-| `CephXAuthorizeReply` | `auth/src/protocol.rs:606` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
+| `CephXAuthorizeA` | `auth/src/protocol.rs:478` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
+| `CephXAuthorizeB` | `auth/src/protocol.rs:505` | `src/auth/cephx/CephxProtocol.h` | 2 | 1 | 2 | Nautilus (v14.2.0+) |
+| `CephXAuthorizeReply` | `auth/src/protocol.rs:540` | `src/auth/cephx/CephxProtocol.h` | 1 | 1 | 1 | All versions |
 | `StripedPgId` | `osdclient/src/denc_types.rs:21` | `src/osd/osd_types.h` | 1 | 1 | 1 | All versions |
 | `PackedEntityName` | `osdclient/src/types.rs` | `src/include/entity_name.h` | 1 | 1 | 1 | All versions |
 | `BlkinTraceInfo` | `osdclient/src/types.rs` | `src/include/blkin.h` | 1 | 1 | 1 | All versions |
@@ -94,6 +93,7 @@ These types have no dependencies on other custom types:
 **Notes**:
 - `CephXAuthenticate` version 2 added `other_keys` field (Luminous)
 - `CephXAuthorizeB` version 2 added challenge response fields
+  and is enforced in rados-rs (minimum `struct_v = 2`)
 - `CephXAuthorizeReply` version 2 added `connection_secret` for SECURE mode
 - `AuthTicket` version 2 added `old_auid` field
 
@@ -107,8 +107,8 @@ These types have no dependencies on other custom types:
 | `MonInfo` | `denc/src/monmap.rs:212` | `src/mon/MonMap.h` | 1 | 1 | 1 | All versions |
 | `MonMap` | `denc/src/monmap.rs:357` | `src/mon/MonMap.h` | 2 | 1 | 2 | Luminous (v12) |
 | `HObject` | `denc/src/hobject.rs:19` | `src/common/hobject.h` | 1 | 1 | 1 | All versions |
-| `ObjectLocator` | `crush/src/placement.rs:10` | `src/osd/osd_types.h` | 3 | 1 | 3 | Luminous (v12) |
-| `RequestRedirect` | `osdclient/src/denc_types.rs:192` | `src/osd/osd_types.h` | 1 | 3 | 3 | Luminous (v12) |
+| `ObjectLocator` | `crush/src/placement.rs:10` | `src/osd/osd_types.h` | 6 | 1 | 6 | Nautilus (v14) |
+| `RequestRedirect` | `osdclient/src/denc_types.rs:192` | `src/osd/osd_types.h` | 1 | 6 | 6 | Nautilus (v14) |
 | `OsdInfo` | `osdclient/src/osdmap.rs` | `src/osd/OSDMap.h` | 1 | 1 | 1 | All versions |
 | `OsdXInfo` | `osdclient/src/osdmap.rs` | `src/osd/OSDMap.h` | 4 | 1 | 4 | Nautilus (v14) |
 
@@ -116,9 +116,9 @@ These types have no dependencies on other custom types:
 - `MonMap` version 2 is minimum for legacy format; version 6+ for modern format
 - `MonMap` version 9 adds stretch mode fields (Squid, v19)
 - `MonInfo` version 6 adds `time_added` field (Nautilus)
-- `ObjectLocator` version 3 is minimum compat; version 6 adds hash field
+- `ObjectLocator` now requires version 6 (hash is always present)
 - `HObject` version 4 adds namespace and pool fields
-- `RequestRedirect` depends on `ObjectLocator` (version 3 minimum)
+- `RequestRedirect` depends on `ObjectLocator` (version 6 minimum)
 
 ### Level 4: Complex Structures (Depend on Levels 0-3)
 
@@ -163,8 +163,8 @@ These types have no dependencies on other custom types:
 - `MMonMap` depends on `MonMap` (version 2+)
 - `MOSDMap` depends on `OSDMap` (version 8+)
 - `MOSDOp` version 3 is minimum compat; version 8 for Reef, version 9 for Squid
-- `MOSDOp` depends on `ObjectLocator` (version 3+) and `StripedPgId`
-- `MOSDOpReply` depends on `RequestRedirect` (version 3+)
+- `MOSDOp` depends on `ObjectLocator` (version 6+) and `StripedPgId`
+- `MOSDOpReply` depends on `RequestRedirect` (version 6+)
 - `MPoolOp` is a PaxosServiceMessage with version 4 minimum
 
 ## Ceph Release Compatibility Matrix
@@ -180,7 +180,7 @@ These types have no dependencies on other custom types:
 | Reef | v18 | 2023 | **All types** | None |
 | Squid | v19 | 2024 | **All types** | None |
 
-**Recommendation**: rados-rs is fully compatible with **Ceph Nautilus (v14) and later**. Limited compatibility with Luminous/Mimic for basic operations.
+**Recommendation**: rados-rs is fully compatible with **Ceph Nautilus v14.2.0 and later**. Limited compatibility with older versions is not guaranteed.
 
 ## Version History Details
 
@@ -198,6 +198,7 @@ These types have no dependencies on other custom types:
 - `OsdXInfo` v4: Added last_purged_snaps_scrub field
 - `MPoolOp` v4: Updated encoding
 - **This is the effective minimum for full rados-rs compatibility**
+- `CephXAuthorizeB` v2 challenge fields landed in Nautilus v14.0.1 (project minimum remains v14.2.0)
 
 **Octopus (v15.0.0, 2020-03)**:
 - Minor updates, maintains v14 compatibility
@@ -301,7 +302,7 @@ When connecting to newer Ceph versions:
 
 ### Minimum Version Requirement
 
-As of 2025, rados-rs **requires Ceph Nautilus (v14) or later**. Support for pre-Nautilus versions has been removed to simplify the codebase and reduce maintenance burden.
+As of 2025, rados-rs **requires Ceph Nautilus v14.2.0 or later**. Support for older versions has been removed to simplify the codebase and reduce maintenance burden.
 
 **Rationale**:
 - Nautilus (v14) was released in March 2019 (6+ years old)
@@ -315,7 +316,7 @@ The following types have been simplified by removing pre-Nautilus conditional de
 
 | Type | Old Min Version | New Min Version | Lines Removed | Changes |
 |------|-----------------|-----------------|---------------|---------|
-| `ObjectLocator` | 2 | 5 | ~15 | Removed v2 (old pool format) and v5 (namespace) conditionals |
+| `ObjectLocator` | 2 | 6 | ~18 | Removed remaining pre-v6 fallback; now decodes namespace+hash unconditionally |
 | `HObject` | 1 | 4 | ~20 | Removed v1 (key), v2 (max), v4 (nspace/pool) conditionals |
 | `MonInfo` | 1 | 6 | ~30 | Removed v2 (priority), v4 (weight), v5 (crush_loc), v6 (time_added) conditionals |
 | `MonMap` | 2 | 6 | ~60 | Removed v1-v5 legacy format support and complex conversion logic |
@@ -392,7 +393,7 @@ fn decode_content<B: Buf>(
 When encountering unsupported versions, users receive clear error messages:
 
 ```
-ObjectLocator version 4 not supported (requires Ceph Nautilus v14+, minimum version 5)
+ObjectLocator version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
 HObject version 3 not supported (requires Ceph Nautilus v14+, minimum version 4)
 MonInfo version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
 MonMap version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
@@ -404,7 +405,6 @@ CephXAuthenticate version 1 not supported (requires Ceph Luminous v12+, minimum 
 
 The following version conditionals were **kept** for forward compatibility with post-Nautilus releases:
 
-- **ObjectLocator v6+**: Hash field (Nautilus+)
 - **MonMap v7+**: min_mon_release field (Octopus+)
 - **MonMap v8+**: removed_ranks, strategy, disallowed_leaders (Pacific+)
 - **MonMap v9+**: stretch mode fields (Squid+)
@@ -416,7 +416,7 @@ These conditionals are necessary for supporting newer Ceph versions and should b
 
 | Type | Previous Min | Current Min | Ceph Release | Status |
 |------|--------------|-------------|--------------|--------|
-| `ObjectLocator` | v2 | v5 | Nautilus v14+ | ✅ Simplified |
+| `ObjectLocator` | v2 | v6 | Nautilus v14+ | ✅ Simplified |
 | `HObject` | v1 | v4 | Nautilus v14+ | ✅ Simplified |
 | `MonInfo` | v1 | v6 | Nautilus v14+ | ✅ Simplified |
 | `MonMap` | v2 | v6 | Nautilus v14+ | ✅ Simplified |

@@ -367,6 +367,12 @@ impl FixedSize for SystemTime {
 pub trait VersionedEncode: Sized {
     /// Does encoding format depend on feature flags?
     const FEATURE_DEPENDENT: bool = false;
+    /// Maximum encoded version this decoder can handle.
+    ///
+    /// Ceph's `DECODE_START(v, ...)` validates `v >= struct_compat`.
+    /// For fixed-version types derived with `VersionedDenc`, this is set to `version`.
+    /// Manual implementations can override this when they have a known decoder cap.
+    const MAX_DECODE_VERSION: u8 = u8::MAX;
 
     /// Get the current version to encode with (may depend on features)
     fn encoding_version(&self, features: u64) -> u8;
@@ -437,6 +443,23 @@ pub trait VersionedEncode: Sized {
         let struct_compat = buf.get_u8();
         let struct_len = buf.get_u32_le() as usize;
 
+        if struct_v > Self::MAX_DECODE_VERSION {
+            return Err(RadosError::Protocol(format!(
+                "{} cannot decode struct version {} (max supported: {})",
+                std::any::type_name::<Self>(),
+                struct_v,
+                Self::MAX_DECODE_VERSION
+            )));
+        }
+        if struct_compat > struct_v {
+            return Err(RadosError::Protocol(format!(
+                "{} invalid version header: compat {} > version {}",
+                std::any::type_name::<Self>(),
+                struct_compat,
+                struct_v
+            )));
+        }
+
         if buf.remaining() < struct_len {
             return Err(RadosError::Protocol(format!(
                 "Insufficient bytes: need {}, have {}",
@@ -453,7 +476,8 @@ pub trait VersionedEncode: Sized {
 
         // DECODE_FINISH: consume any remaining bytes (forward compatibility)
         if content.remaining() > 0 {
-            // Skip remaining bytes for forward compatibility
+            let remaining = content.remaining();
+            content.advance(remaining);
         }
 
         Ok(result)
@@ -819,6 +843,48 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
 
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct TestVersionedType {
+        value: u8,
+    }
+
+    impl VersionedEncode for TestVersionedType {
+        const MAX_DECODE_VERSION: u8 = 2;
+
+        fn encoding_version(&self, _features: u64) -> u8 {
+            1
+        }
+
+        fn compat_version(&self, _features: u64) -> u8 {
+            1
+        }
+
+        fn encode_content<B: BufMut>(
+            &self,
+            buf: &mut B,
+            _features: u64,
+            _version: u8,
+        ) -> Result<(), RadosError> {
+            self.value.encode(buf, 0)
+        }
+
+        fn decode_content<B: Buf>(
+            buf: &mut B,
+            _features: u64,
+            _version: u8,
+            _compat_version: u8,
+        ) -> Result<Self, RadosError> {
+            let value = u8::decode(buf, 0)?;
+            Ok(Self { value })
+        }
+
+        fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+            Some(1)
+        }
+    }
+
+    crate::impl_denc_for_versioned!(TestVersionedType);
+
     #[test]
     fn test_primitive_roundtrip() {
         let mut buf = BytesMut::new();
@@ -1164,5 +1230,38 @@ mod tests {
         // Should match exactly at the limit
         assert_eq!(duration.as_secs(), u32::MAX as u64);
         assert_eq!(duration.subsec_nanos(), 999_999_999);
+    }
+
+    #[test]
+    fn test_decode_versioned_rejects_struct_v_above_max() {
+        let mut buf = BytesMut::new();
+        3u8.encode(&mut buf, 0).unwrap(); // struct_v
+        1u8.encode(&mut buf, 0).unwrap(); // struct_compat
+        1u32.encode(&mut buf, 0).unwrap(); // struct_len
+        0x2au8.encode(&mut buf, 0).unwrap(); // payload
+
+        let mut read_buf = buf.freeze();
+        let err = TestVersionedType::decode(&mut read_buf, 0).unwrap_err();
+        let err_msg = err.to_string();
+        assert!(err_msg.contains("cannot decode struct version 3"));
+    }
+
+    #[test]
+    fn test_decode_versioned_consumes_remaining_content() {
+        let mut buf = BytesMut::new();
+        1u8.encode(&mut buf, 0).unwrap(); // struct_v
+        1u8.encode(&mut buf, 0).unwrap(); // struct_compat
+        3u32.encode(&mut buf, 0).unwrap(); // struct_len
+        7u8.encode(&mut buf, 0).unwrap(); // decoded by TestVersionedType
+        0xaau8.encode(&mut buf, 0).unwrap(); // forward-compatible trailing byte
+        0xbbu8.encode(&mut buf, 0).unwrap(); // forward-compatible trailing byte
+        9u8.encode(&mut buf, 0).unwrap(); // next field in parent stream
+
+        let mut read_buf = buf.freeze();
+        let decoded = TestVersionedType::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(decoded.value, 7);
+
+        let next = u8::decode(&mut read_buf, 0).unwrap();
+        assert_eq!(next, 9);
     }
 }

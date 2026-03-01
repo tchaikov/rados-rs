@@ -434,7 +434,8 @@ impl RequestRedirect {
 ///
 /// Used for OpenTelemetry distributed tracing.
 /// When Jaeger is not enabled, this is just a flag indicating validity.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, denc::VersionedDenc)]
+#[denc(version = 1, compat = 1)]
 pub struct JaegerSpanContext {
     pub is_valid: bool,
     // Additional fields would go here if tracing is enabled
