@@ -25,6 +25,18 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+/// Decode a typed message payload from a raw msgr2 message.
+///
+/// This helper eliminates the repeated pattern of constructing a dummy CephMsgHeader
+/// just to call decode_payload on Denc-derived messages.
+fn decode_message<T: msgr2::ceph_message::CephMessagePayload>(
+    msg: &msgr2::message::Message,
+) -> std::result::Result<T, msgr2::Error> {
+    use msgr2::ceph_message::CephMsgHeader;
+    let header = CephMsgHeader::new(T::msg_type(), T::msg_version(0));
+    T::decode_payload(&header, &msg.front, &msg.middle, &msg.data)
+}
+
 /// Broadcast channel capacity for map events (MOSDMap, MConfig, etc.)
 const MAP_EVENT_BROADCAST_CAPACITY: usize = 100;
 /// Message channel capacity for monitor messages
@@ -687,7 +699,7 @@ impl MonClient {
 
         // Get global_id before taking lock (avoid holding lock during async call)
         let global_id = mon_con.global_id();
-        tracing::debug!("Retrieved global_id {} from MonConnection", global_id);
+        debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // Store as active connection (but check if we won the race)
         let mut state = self.state.write().await;
@@ -840,6 +852,43 @@ impl MonClient {
     async fn command_timeout(&self) -> Duration {
         let state = self.state.read().await;
         state.runtime_config.rados_mon_op_timeout
+    }
+
+    /// Send a CephMessage with a tid and wait for a response on the given oneshot receiver.
+    ///
+    /// This helper encapsulates the common send-and-wait-with-timeout pattern
+    /// shared by get_version, send_command, and send_poolop.
+    async fn send_and_wait<T>(
+        &self,
+        active_con: &MonConnection,
+        msg: &impl msgr2::ceph_message::CephMessagePayload,
+        tid: u64,
+        rx: oneshot::Receiver<T>,
+    ) -> Result<T> {
+        let ceph_msg = CephMessage::from_payload(msg, 0, CrcFlags::ALL)?;
+        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
+        message.header.set_tid(tid);
+
+        active_con.send_message(message).await?;
+
+        tokio::time::timeout(self.command_timeout().await, rx)
+            .await
+            .map_err(|_| MonClientError::Timeout)?
+            .map_err(|_| MonClientError::Other("Channel closed".into()))
+    }
+
+    /// Check that the client is initialized and connected, returning the active connection.
+    ///
+    /// This is the common preamble for request methods that need to send a message.
+    fn require_active_con(state: &MonClientState) -> Result<Arc<MonConnection>> {
+        if !state.initialized {
+            return Err(MonClientError::NotInitialized);
+        }
+        state
+            .active_con
+            .as_ref()
+            .cloned()
+            .ok_or(MonClientError::NotConnected)
     }
 
     /// Start background tick loop for periodic maintenance
@@ -1143,11 +1192,7 @@ impl MonClient {
         msg: msgr2::message::Message,
     ) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
-
-        // Decode MMonMap
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(MMonMap::msg_type(), MMonMap::msg_version(0));
-        let mmonmap = MMonMap::decode_payload(&header, &msg.front, &[], &[])?;
+        let mmonmap: MMonMap = decode_message(&msg)?;
         info!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
 
         // Decode the actual MonMap
@@ -1186,12 +1231,7 @@ impl MonClient {
         state: &Arc<RwLock<MonClientState>>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(
-            MMonSubscribeAck::msg_type(),
-            MMonSubscribeAck::msg_version(0),
-        );
-        let ack = MMonSubscribeAck::decode_payload(&header, &msg.front, &[], &[])?;
+        let ack: MMonSubscribeAck = decode_message(&msg)?;
         info!("Subscription acknowledged: interval={}", ack.interval);
 
         let mut state_guard = state.write().await;
@@ -1206,9 +1246,7 @@ impl MonClient {
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(MConfig::msg_type(), MConfig::msg_version(0));
-        let mconfig = MConfig::decode_payload(&header, &msg.front, &[], &[])?;
+        let mconfig: MConfig = decode_message(&msg)?;
         let has_receivers = map_events.receiver_count() > 0;
         let mut state_guard = state.write().await;
         state_guard.runtime_config.update_from_map(&mconfig.config);
@@ -1226,9 +1264,7 @@ impl MonClient {
         map_events: &broadcast::Sender<MapEvent>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(MOSDMap::msg_type(), MOSDMap::msg_version(0));
-        let osdmap = MOSDMap::decode_payload(&header, &msg.front, &[], &[])?;
+        let osdmap: MOSDMap = decode_message(&msg)?;
 
         let epoch = osdmap.get_last();
         debug!("Received OSDMap: epoch={}", epoch);
@@ -1255,13 +1291,7 @@ impl MonClient {
         state: &Arc<RwLock<MonClientState>>,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        // Decode the version reply message from the front payload
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(
-            MMonGetVersionReply::msg_type(),
-            MMonGetVersionReply::msg_version(0),
-        );
-        let reply = MMonGetVersionReply::decode_payload(&header, &msg.front, &[], &[])?;
+        let reply: MMonGetVersionReply = decode_message(&msg)?;
 
         // Get the transaction ID from the message payload (not header in this case)
         let tid = reply.tid;
@@ -1342,11 +1372,6 @@ impl MonClient {
             tid, reply.reply_code, reply.epoch
         );
 
-        info!(
-            "Pool op reply details: tid={}, reply_code={}, target epoch={}",
-            tid, reply.reply_code, reply.epoch
-        );
-
         // Find and complete the pending pool operation by matching tid
         let mut state_guard = state.write().await;
         if let Some(tracker) = state_guard.pool_ops.remove(&tid) {
@@ -1368,46 +1393,19 @@ impl MonClient {
     pub async fn get_version(&self, what: &str) -> Result<(u64, u64)> {
         let (tx, rx) = oneshot::channel();
 
-        let mut state = self.state.write().await;
+        let (active_con, tid) = {
+            let mut state = self.state.write().await;
+            let active_con = Self::require_active_con(&state)?;
+            state.last_version_req_id += 1;
+            let tid = state.last_version_req_id;
+            state
+                .version_requests
+                .insert(tid, VersionTracker { result_tx: tx });
+            (active_con, tid)
+        };
 
-        if !state.initialized {
-            return Err(MonClientError::NotInitialized);
-        }
-
-        let active_con = state
-            .active_con
-            .as_ref()
-            .ok_or(MonClientError::NotConnected)?
-            .clone();
-
-        // Allocate request ID
-        state.last_version_req_id += 1;
-        let req_id = state.last_version_req_id;
-
-        // Track request
-        state
-            .version_requests
-            .insert(req_id, VersionTracker { result_tx: tx });
-
-        drop(state);
-
-        // Use unified CephMessage framework
-        let msg = MMonGetVersion::new(req_id, what);
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        // Set the transaction ID in the message header to match the payload
-        message.header.set_tid(req_id);
-
-        active_con.send_message(message).await?;
-
-        // Wait for response with timeout
-        let result = tokio::time::timeout(self.command_timeout().await, rx)
-            .await
-            .map_err(|_| MonClientError::Timeout)?
-            .map_err(|_| MonClientError::Other("Channel closed".into()))?;
-
-        Ok(result)
+        let msg = MMonGetVersion::new(tid, what);
+        self.send_and_wait(&active_con, &msg, tid, rx).await
     }
 
     /// Send a command to the monitor cluster
@@ -1443,111 +1441,40 @@ impl MonClient {
     /// # }
     /// ```
     pub async fn invoke(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
-        self.send_command(cmd, inbl).await
-    }
-
-    /// Send a command to the monitor cluster (internal implementation)
-    async fn send_command(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
         let (tx, rx) = oneshot::channel();
 
-        let mut state = self.state.write().await;
+        let (active_con, tid) = {
+            let mut state = self.state.write().await;
+            let active_con = Self::require_active_con(&state)?;
+            state.last_command_tid += 1;
+            let tid = state.last_command_tid;
+            state.commands.insert(tid, CommandTracker { result_tx: tx });
+            (active_con, tid)
+        };
 
-        if !state.initialized {
-            return Err(MonClientError::NotInitialized);
-        }
-
-        let active_con = state
-            .active_con
-            .as_ref()
-            .ok_or(MonClientError::NotConnected)?
-            .clone();
-
-        // Allocate command ID
-        state.last_command_tid += 1;
-        let tid = state.last_command_tid;
-
-        // Track command
-        state.commands.insert(tid, CommandTracker { result_tx: tx });
-
-        drop(state);
-
-        // Create MMonCommand with cluster fsid
         let fsid = self.get_fsid().await;
-        tracing::debug!(
-            "send_command: Sending command (tid={}): {:?} with fsid: {}",
-            tid,
-            cmd,
-            fsid
-        );
+        debug!("send_command: tid={}, cmd={:?}, fsid={}", tid, cmd, fsid);
         let msg = MMonCommand::new(cmd, inbl, fsid);
-
-        // Use unified CephMessage framework
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        // Set the transaction ID in the message header
-        message.header.set_tid(tid);
-
-        tracing::trace!(
-            "send_command: About to send command message with tid={}",
-            tid
-        );
-        active_con.send_message(message).await?;
-        tracing::trace!("send_command: Command message sent successfully, waiting for response");
-
-        // Wait for response with timeout
-        let result = tokio::time::timeout(self.command_timeout().await, rx)
-            .await
-            .map_err(|_| MonClientError::Timeout)?
-            .map_err(|_| MonClientError::Other("Channel closed".into()))?;
-
-        Ok(result)
+        self.send_and_wait(&active_con, &msg, tid, rx).await
     }
 
     /// Send a pool operation to the monitor cluster
     ///
     /// This is a low-level helper for sending MPoolOp messages.
     /// Most users should use OSDClient's create_pool() and delete_pool() methods instead.
-    pub async fn send_poolop(&self, _pool_name: String, msg: MPoolOp) -> Result<PoolOpResult> {
+    pub async fn send_poolop(&self, msg: MPoolOp) -> Result<PoolOpResult> {
         let (tx, rx) = oneshot::channel();
 
-        let mut state = self.state.write().await;
+        let (active_con, tid) = {
+            let mut state = self.state.write().await;
+            let active_con = Self::require_active_con(&state)?;
+            state.last_poolop_tid += 1;
+            let tid = state.last_poolop_tid;
+            state.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
+            (active_con, tid)
+        };
 
-        if !state.initialized {
-            return Err(MonClientError::NotInitialized);
-        }
-
-        let active_con = state
-            .active_con
-            .as_ref()
-            .ok_or(MonClientError::NotConnected)?
-            .clone();
-
-        // Allocate pool operation ID
-        state.last_poolop_tid += 1;
-        let tid = state.last_poolop_tid;
-
-        // Track pool operation
-        state.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
-
-        drop(state);
-
-        // Use unified CephMessage framework
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let mut message = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        // Set the transaction ID in the message header
-        message.header.set_tid(tid);
-
-        active_con.send_message(message).await?;
-
-        // Wait for response with timeout
-        let result = tokio::time::timeout(self.command_timeout().await, rx)
-            .await
-            .map_err(|_| MonClientError::Timeout)?
-            .map_err(|_| MonClientError::Other("Channel closed".into()))?;
-
-        Ok(result)
+        self.send_and_wait(&active_con, &msg, tid, rx).await
     }
 
     /// Create a pool-level snapshot.
@@ -1561,7 +1488,7 @@ impl MonClient {
     pub async fn snap_create(&self, pool_id: u32, name: &str) -> Result<()> {
         let fsid = self.get_fsid().await;
         let msg = MPoolOp::create_snap(fsid.bytes, pool_id, name.to_string(), 0);
-        let result = self.send_poolop(name.to_string(), msg).await?;
+        let result = self.send_poolop(msg).await?;
         if result.is_success() {
             Ok(())
         } else {
@@ -1581,7 +1508,7 @@ impl MonClient {
         let fsid = self.get_fsid().await;
         // snap_id = 0 here; the monitor resolves it from the name
         let msg = MPoolOp::delete_snap(fsid.bytes, pool_id, 0, name.to_string(), 0);
-        let result = self.send_poolop(name.to_string(), msg).await?;
+        let result = self.send_poolop(msg).await?;
         if result.is_success() {
             Ok(())
         } else {

@@ -6,6 +6,7 @@
 
 use crate::error::Result;
 use bytes::{Bytes, BytesMut};
+use denc::Denc;
 
 /// Common fields for all PaxosServiceMessage types
 ///
@@ -48,7 +49,6 @@ impl PaxosFields {
 
     /// Encode paxos fields to buffer (paxos_encode in C++)
     pub fn encode(&self, buf: &mut BytesMut) -> crate::error::Result<()> {
-        use denc::Denc;
         self.version.encode(buf, 0)?;
         self.deprecated_session_mon.encode(buf, 0)?;
         self.deprecated_session_mon_tid.encode(buf, 0)?;
@@ -57,8 +57,6 @@ impl PaxosFields {
 
     /// Decode paxos fields from buffer (paxos_decode in C++)
     pub fn decode(data: &mut &[u8]) -> Result<Self> {
-        use denc::Denc;
-
         let version = u64::decode(data, 0)?;
         let deprecated_session_mon = i16::decode(data, 0)?;
         let deprecated_session_mon_tid = u64::decode(data, 0)?;

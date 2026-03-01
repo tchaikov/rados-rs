@@ -1209,7 +1209,7 @@ impl OSDClient {
         // Send via MonClient
         let result = self
             .mon_client
-            .send_poolop(pool_name.to_string(), msg)
+            .send_poolop(msg)
             .await
             .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
 
@@ -1275,16 +1275,11 @@ impl OSDClient {
         );
 
         // Create and send MPoolOp delete message
-        let msg = monclient::MPoolOp::delete_pool(
-            self.fsid.bytes,
-            pool_id,
-            pool_name.to_string(),
-            version,
-        );
+        let msg = monclient::MPoolOp::delete_pool(self.fsid.bytes, pool_id, version);
 
         let result = self
             .mon_client
-            .send_poolop(pool_name.to_string(), msg)
+            .send_poolop(msg)
             .await
             .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
 
