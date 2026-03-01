@@ -881,6 +881,25 @@ define_control_frame!(
     auth_payload: Bytes
 );
 
+impl AuthRequestFrame {
+    /// Parse AuthRequestFrame directly from a Frame's segments
+    /// This avoids the inefficiency of encoding then decoding
+    pub fn from_frame(frame: &Frame) -> Result<Self, RadosError> {
+        if frame.segments.is_empty() {
+            return Err(RadosError::Protocol(
+                "AUTH_REQUEST frame missing payload".to_string(),
+            ));
+        }
+
+        let mut payload = frame.segments[0].clone();
+        Ok(Self {
+            method: u32::decode(&mut payload, 0)?,
+            preferred_modes: Vec::<u32>::decode(&mut payload, 0)?,
+            auth_payload: Bytes::decode(&mut payload, 0)?,
+        })
+    }
+}
+
 define_control_frame!(
     AuthDoneFrame,
     AuthDone,

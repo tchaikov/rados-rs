@@ -1683,6 +1683,19 @@ impl AuthAccepting {
             client_preferred_modes: Vec::new(),
         }
     }
+
+    /// Negotiate connection mode from client's preferred modes.
+    /// Server preference order: SECURE > CRC
+    fn negotiate_connection_mode(&self, client_modes: &[u32]) -> u32 {
+        const SECURE: u32 = crate::ConnectionMode::Secure as u32;
+        const CRC: u32 = crate::ConnectionMode::Crc as u32;
+
+        if client_modes.contains(&SECURE) {
+            SECURE
+        } else {
+            CRC // Default to CRC (covers both explicit CRC and no match)
+        }
+    }
 }
 
 impl State for AuthAccepting {
@@ -1692,38 +1705,19 @@ impl State for AuthAccepting {
         match frame.preamble.tag {
             Tag::AuthRequest => {
                 // Parse AUTH_REQUEST frame to extract method, preferred_modes, and auth_payload
-                let auth_request = AuthRequestFrame::from_wire(frame.encode())?;
+                let auth_request = AuthRequestFrame::from_frame(&frame)?;
 
-                // Store client's preferred modes for negotiation (only in phase 0)
                 if self.phase == 0 {
+                    // Store client's preferred modes and negotiate connection mode
                     self.client_preferred_modes = auth_request.preferred_modes.clone();
-
-                    // Negotiate connection mode
-                    // Server supports: CRC (1) and SECURE (2)
-                    // Prefer SECURE if both client and server support it
-                    self.connection_mode = if auth_request
-                        .preferred_modes
-                        .contains(&(crate::ConnectionMode::Secure as u32))
-                    {
-                        crate::ConnectionMode::Secure.into()
-                    } else if auth_request
-                        .preferred_modes
-                        .contains(&(crate::ConnectionMode::Crc as u32))
-                    {
-                        crate::ConnectionMode::Crc.into()
-                    } else {
-                        // Default to CRC if no common mode
-                        crate::ConnectionMode::Crc.into()
-                    };
+                    self.connection_mode =
+                        self.negotiate_connection_mode(&auth_request.preferred_modes);
 
                     tracing::debug!(
                         "Server: Negotiated connection_mode={} from client preferred_modes={:?}",
                         self.connection_mode,
                         auth_request.preferred_modes
                     );
-                }
-
-                if self.phase == 0 {
                     // Phase 1: Initial authentication request
                     // Client sends: auth_mode + entity_name + global_id
                     // Server responds with: server_challenge
