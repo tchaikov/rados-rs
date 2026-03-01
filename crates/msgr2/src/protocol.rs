@@ -1361,12 +1361,80 @@ impl Connection {
             StateResult::SendFrame { frame, .. } => {
                 tracing::debug!("Sending AUTH_DONE");
                 self.state.send_frame(&frame).await?;
+
+                // Check if we transitioned to AUTH_ACCEPTING_SIGN state (SECURE mode)
+                if self.state.current_state_kind() == StateKind::AuthAcceptingSign {
+                    tracing::debug!("SECURE mode: Performing AUTH_SIGNATURE exchange");
+
+                    // Server needs to send AUTH_SIGNATURE (from enter())
+                    match self.state.enter()? {
+                        StateResult::SendAndWait {
+                            frame: sig_frame, ..
+                        } => {
+                            tracing::debug!("Sending server AUTH_SIGNATURE");
+                            self.state.send_frame(&sig_frame).await?;
+
+                            // Now wait for client's AUTH_SIGNATURE
+                            tracing::debug!("Waiting for client AUTH_SIGNATURE...");
+                            let client_sig = self.state.recv_frame().await?;
+                            tracing::debug!(
+                                "Received client AUTH_SIGNATURE (tag: {:?})",
+                                client_sig.preamble.tag
+                            );
+
+                            // Process client's AUTH_SIGNATURE
+                            match self.state.handle_frame(client_sig)? {
+                                StateResult::Transition(_) | StateResult::Continue => {
+                                    tracing::debug!("AUTH_SIGNATURE verified, transitioned to SESSION_ACCEPTING");
+                                }
+                                result => {
+                                    return Err(Error::Protocol(format!(
+                                        "Unexpected AUTH_SIGNATURE result: {:?}",
+                                        result
+                                    )));
+                                }
+                            }
+                        }
+                        result => {
+                            return Err(Error::Protocol(format!(
+                                "Unexpected AUTH_ACCEPTING_SIGN enter result: {:?}",
+                                result
+                            )));
+                        }
+                    }
+                }
             }
             result => {
                 return Err(Error::Protocol(format!(
                     "Unexpected AUTH processing result: {:?}",
                     result
                 )));
+            }
+        }
+
+        // Check if we need to handle compression negotiation
+        if self.state.current_state_kind() == StateKind::CompressionAccepting {
+            tracing::debug!(
+                "Compression supported: Waiting for COMPRESSION_REQUEST from client..."
+            );
+            let compression_request = self.state.recv_frame().await?;
+            tracing::debug!(
+                "Received COMPRESSION_REQUEST (tag: {:?})",
+                compression_request.preamble.tag
+            );
+
+            // Process COMPRESSION_REQUEST and send COMPRESSION_DONE
+            match self.state.handle_frame(compression_request)? {
+                StateResult::SendFrame { frame, .. } => {
+                    tracing::debug!("Sending COMPRESSION_DONE");
+                    self.state.send_frame(&frame).await?;
+                }
+                result => {
+                    return Err(Error::Protocol(format!(
+                        "Unexpected COMPRESSION processing result: {:?}",
+                        result
+                    )));
+                }
             }
         }
 

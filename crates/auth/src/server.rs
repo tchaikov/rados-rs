@@ -144,7 +144,7 @@ impl CephXServerHandler {
         entity_name: &EntityName,
         global_id: u64,
         payload: &[u8],
-    ) -> Result<(CryptoKey, Bytes)> {
+    ) -> Result<(CryptoKey, CryptoKey, Bytes)> {
         let mut buf = Bytes::copy_from_slice(payload);
 
         // 1. Parse CephXRequestHeader
@@ -234,7 +234,18 @@ impl CephXServerHandler {
         // Add service tickets
         service_tickets.encode(&mut response, 0)?;
 
-        Ok((session_key, response.freeze()))
+        // 8. Generate connection_secret for SECURE mode encryption
+        let mut connection_secret_bytes = vec![0u8; AES_KEY_LEN];
+        rand::thread_rng().fill_bytes(&mut connection_secret_bytes);
+        let connection_secret =
+            CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(connection_secret_bytes));
+
+        debug!(
+            "Server: Generated connection_secret: {} bytes",
+            connection_secret.len()
+        );
+
+        Ok((session_key, connection_secret, response.freeze()))
     }
 
     /// Generate service tickets for the client
@@ -299,7 +310,8 @@ impl CephXServerHandler {
         &self,
         global_id: u64,
         connection_mode: u8,
-        _session_key: &CryptoKey,
+        session_key: &CryptoKey,
+        connection_secret: &CryptoKey,
         service_tickets: Bytes,
     ) -> Result<Bytes> {
         use denc::Denc;
@@ -311,8 +323,20 @@ impl CephXServerHandler {
         // 2. connection_mode
         response.put_u8(connection_mode);
 
-        // 3. auth_payload (session key + tickets)
+        // 3. auth_payload consists of:
+        //    - service_tickets (session key + tickets)
+        //    - connection_secret bufferlist (encrypted with session_key)
+        //    - extra_tickets bufferlist (optional, not implemented yet)
+
         response.extend_from_slice(&service_tickets);
+
+        // 4. Append connection_secret as a bufferlist (u32 len + encrypted data)
+        //    Encrypt connection_secret with session_key
+        let encrypted_connection_secret = session_key.encrypt(connection_secret.get_secret())?;
+        encrypted_connection_secret.encode(&mut response, 0)?;
+
+        // 5. Append empty extra_tickets bufferlist (u32 len = 0)
+        0u32.encode(&mut response, 0)?;
 
         Ok(response.freeze())
     }

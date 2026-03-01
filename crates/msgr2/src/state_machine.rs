@@ -5,8 +5,8 @@
 use crate::error::{Error, Result};
 use crate::frames::{
     AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, AuthSignatureFrame,
-    CompressionRequestFrame, Frame, FrameTrait, HelloFrame, Keepalive2AckFrame, ServerIdentFrame,
-    Tag,
+    CompressionDoneFrame, CompressionRequestFrame, Frame, FrameTrait, HelloFrame,
+    Keepalive2AckFrame, ServerIdentFrame, Tag,
 };
 use bytes::{Bytes, BytesMut};
 use denc::Denc;
@@ -100,6 +100,10 @@ pub enum StateKind {
     HelloAccepting,
     /// Server: Performing authentication
     AuthAccepting,
+    /// Server: Exchanging AUTH_SIGNATURE frames
+    AuthAcceptingSign,
+    /// Server: Negotiating compression
+    CompressionAccepting,
     /// Server: Accepting session
     SessionAccepting,
     /// Connection established and ready for messages
@@ -111,7 +115,10 @@ impl StateKind {
     pub fn is_auth_state(&self) -> bool {
         matches!(
             self,
-            StateKind::AuthConnecting | StateKind::AuthConnectingSign | StateKind::AuthAccepting
+            StateKind::AuthConnecting
+                | StateKind::AuthConnectingSign
+                | StateKind::AuthAccepting
+                | StateKind::AuthAcceptingSign
         )
     }
 
@@ -135,6 +142,8 @@ impl StateKind {
             StateKind::BannerAccepting
                 | StateKind::HelloAccepting
                 | StateKind::AuthAccepting
+                | StateKind::AuthAcceptingSign
+                | StateKind::CompressionAccepting
                 | StateKind::SessionAccepting
         )
     }
@@ -160,6 +169,8 @@ impl StateKind {
             StateKind::BannerAccepting => "BANNER_ACCEPTING",
             StateKind::HelloAccepting => "HELLO_ACCEPTING",
             StateKind::AuthAccepting => "AUTH_ACCEPTING",
+            StateKind::AuthAcceptingSign => "AUTH_ACCEPTING_SIGN",
+            StateKind::CompressionAccepting => "COMPRESSION_ACCEPTING",
             StateKind::SessionAccepting => "SESSION_ACCEPTING",
             StateKind::Ready => "READY",
         }
@@ -1638,6 +1649,10 @@ pub struct AuthAccepting {
     global_id: Option<u64>,
     /// Authentication phase (0 = initial, 1 = challenge response)
     phase: u8,
+    /// Negotiated connection mode (CRC=1, SECURE=2)
+    connection_mode: u32,
+    /// Client's preferred connection modes
+    client_preferred_modes: Vec<u32>,
 }
 
 impl Default for AuthAccepting {
@@ -1653,6 +1668,8 @@ impl AuthAccepting {
             entity_name: None,
             global_id: None,
             phase: 0,
+            connection_mode: crate::ConnectionMode::Crc.into(), // Default to CRC
+            client_preferred_modes: Vec::new(),
         }
     }
 
@@ -1662,6 +1679,8 @@ impl AuthAccepting {
             entity_name: None,
             global_id: None,
             phase: 0,
+            connection_mode: crate::ConnectionMode::Crc.into(), // Default to CRC
+            client_preferred_modes: Vec::new(),
         }
     }
 }
@@ -1672,13 +1691,37 @@ impl State for AuthAccepting {
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
             Tag::AuthRequest => {
-                // Extract payload from frame
-                // AUTH_REQUEST frame has payload in segment 0
-                let payload = if !frame.segments.is_empty() {
-                    &frame.segments[0]
-                } else {
-                    return Err(Error::protocol_error("AUTH_REQUEST frame has no payload"));
-                };
+                // Parse AUTH_REQUEST frame to extract method, preferred_modes, and auth_payload
+                let auth_request = AuthRequestFrame::from_wire(frame.encode())?;
+
+                // Store client's preferred modes for negotiation (only in phase 0)
+                if self.phase == 0 {
+                    self.client_preferred_modes = auth_request.preferred_modes.clone();
+
+                    // Negotiate connection mode
+                    // Server supports: CRC (1) and SECURE (2)
+                    // Prefer SECURE if both client and server support it
+                    self.connection_mode = if auth_request
+                        .preferred_modes
+                        .contains(&(crate::ConnectionMode::Secure as u32))
+                    {
+                        crate::ConnectionMode::Secure.into()
+                    } else if auth_request
+                        .preferred_modes
+                        .contains(&(crate::ConnectionMode::Crc as u32))
+                    {
+                        crate::ConnectionMode::Crc.into()
+                    } else {
+                        // Default to CRC if no common mode
+                        crate::ConnectionMode::Crc.into()
+                    };
+
+                    tracing::debug!(
+                        "Server: Negotiated connection_mode={} from client preferred_modes={:?}",
+                        self.connection_mode,
+                        auth_request.preferred_modes
+                    );
+                }
 
                 if self.phase == 0 {
                     // Phase 1: Initial authentication request
@@ -1687,7 +1730,7 @@ impl State for AuthAccepting {
 
                     if let Some(ref mut handler) = self.auth_handler {
                         let (entity_name, global_id, challenge_payload) = handler
-                            .handle_initial_request(payload)
+                            .handle_initial_request(&auth_request.auth_payload)
                             .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
 
                         tracing::debug!(
@@ -1711,20 +1754,29 @@ impl State for AuthAccepting {
                             next_state: None, // Stay in AuthAccepting for phase 2
                         })
                     } else {
-                        // No auth handler - send AUTH_DONE with no authentication
+                        // No auth handler - send AUTH_DONE with negotiated connection mode
                         tracing::warn!(
                             "Server: No auth handler configured, skipping authentication"
                         );
-                        let auth_done = AuthDoneFrame::new(
-                            1001,
-                            crate::ConnectionMode::Crc.into(),
-                            Bytes::new(),
-                        );
+                        let auth_done =
+                            AuthDoneFrame::new(1001, self.connection_mode, Bytes::new());
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+
+                        // If SECURE mode, transition to AuthAcceptingSign for signature exchange
+                        let next_state: Box<dyn State> =
+                            if self.connection_mode == crate::ConnectionMode::Secure as u32 {
+                                Box::new(AuthAcceptingSign::new(
+                                    self.connection_mode,
+                                    None, // No session key for AUTH_NONE
+                                    None, // No connection secret for AUTH_NONE
+                                ))
+                            } else {
+                                Box::new(SessionAccepting::new())
+                            };
 
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
-                            next_state: Some(Box::new(SessionAccepting::new())),
+                            next_state: Some(next_state),
                         })
                     }
                 } else {
@@ -1735,34 +1787,45 @@ impl State for AuthAccepting {
                     if let (Some(ref mut handler), Some(ref entity_name), Some(global_id)) =
                         (&mut self.auth_handler, &self.entity_name, self.global_id)
                     {
-                        let (session_key, auth_payload) = handler
-                            .handle_authenticate(entity_name, global_id, payload)
+                        let (session_key, connection_secret, auth_payload) = handler
+                            .handle_authenticate(entity_name, global_id, &auth_request.auth_payload)
                             .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
 
                         tracing::info!("Server: Client {} authenticated successfully", entity_name);
 
-                        // Build AUTH_DONE response
+                        // Build AUTH_DONE response with negotiated connection mode
                         let auth_done_payload = handler
                             .build_auth_done_response(
                                 global_id,
-                                crate::ConnectionMode::Crc as u8,
+                                self.connection_mode as u8,
                                 &session_key,
+                                &connection_secret,
                                 auth_payload,
                             )
                             .map_err(|e| {
                                 Error::protocol_error(&format!("Failed to build AUTH_DONE: {}", e))
                             })?;
 
-                        let auth_done = AuthDoneFrame::new(
-                            global_id,
-                            crate::ConnectionMode::Crc.into(),
-                            auth_done_payload,
-                        );
+                        let auth_done =
+                            AuthDoneFrame::new(global_id, self.connection_mode, auth_done_payload);
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+
+                        // If SECURE mode, transition to AuthAcceptingSign for signature exchange
+                        // Otherwise, go directly to SessionAccepting
+                        let next_state: Box<dyn State> =
+                            if self.connection_mode == crate::ConnectionMode::Secure as u32 {
+                                Box::new(AuthAcceptingSign::new(
+                                    self.connection_mode,
+                                    Some(session_key.secret.clone()),
+                                    Some(connection_secret.secret.clone()), // Pass connection_secret for encryption setup
+                                ))
+                            } else {
+                                Box::new(SessionAccepting::new())
+                            };
 
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
-                            next_state: Some(Box::new(SessionAccepting::new())),
+                            next_state: Some(next_state),
                         })
                     } else {
                         Err(Error::protocol_error(
@@ -1773,6 +1836,177 @@ impl State for AuthAccepting {
             }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in AUTH_ACCEPTING state",
+                frame.preamble.tag
+            ))),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AuthAcceptingSign {
+    /// Negotiated connection mode
+    connection_mode: u32,
+    /// Session key for HMAC computation
+    session_key: Option<Bytes>,
+    /// Connection secret for encryption
+    connection_secret: Option<Bytes>,
+    /// Server's signature to send
+    our_signature: Bytes,
+    /// Expected client signature to verify
+    expected_client_signature: Option<Bytes>,
+}
+
+impl AuthAcceptingSign {
+    pub fn new(
+        connection_mode: u32,
+        session_key: Option<Bytes>,
+        connection_secret: Option<Bytes>,
+    ) -> Self {
+        Self {
+            connection_mode,
+            session_key,
+            connection_secret,
+            our_signature: Bytes::new(), // Will be computed in apply_result
+            expected_client_signature: None, // Will be computed in apply_result
+        }
+    }
+
+    pub fn new_with_signatures(
+        connection_mode: u32,
+        session_key: Option<Bytes>,
+        connection_secret: Option<Bytes>,
+        our_signature: Bytes,
+        expected_client_signature: Option<Bytes>,
+    ) -> Self {
+        Self {
+            connection_mode,
+            session_key,
+            connection_secret,
+            our_signature,
+            expected_client_signature,
+        }
+    }
+}
+
+impl State for AuthAcceptingSign {
+    impl_state_boilerplate!(
+        AuthAcceptingSign,
+        StateKind::AuthAcceptingSign,
+        &[Tag::AuthSignature]
+    );
+
+    fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+        match frame.preamble.tag {
+            Tag::AuthSignature => {
+                tracing::debug!("Server: Received AUTH_SIGNATURE from client");
+
+                // Verify client's AUTH_SIGNATURE
+                if let Some(ref expected_sig) = self.expected_client_signature {
+                    // Extract client's signature from frame payload
+                    if let Some(segment) = frame.segments.first() {
+                        let client_signature = segment.clone();
+
+                        // Verify signature matches expected
+                        if client_signature == *expected_sig {
+                            tracing::info!(
+                                "Client AUTH_SIGNATURE verified successfully ({} bytes)",
+                                client_signature.len()
+                            );
+                        } else {
+                            tracing::error!(
+                                "✗ Client AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
+                                expected_sig.len(),
+                                client_signature.len()
+                            );
+                            return Err(Error::protocol_error(
+                                "Client AUTH_SIGNATURE verification failed",
+                            ));
+                        }
+                    } else {
+                        return Err(Error::protocol_error(
+                            "AUTH_SIGNATURE frame missing payload",
+                        ));
+                    }
+                } else {
+                    // No expected signature (CRC mode or AUTH_NONE), just accept it
+                    tracing::debug!(
+                        "Received AUTH_SIGNATURE in CRC/AUTH_NONE mode, accepting without verification"
+                    );
+                }
+
+                // After verification, transition to SessionAccepting
+                Ok(StateResult::Transition(Box::new(SessionAccepting::new())))
+            }
+            _ => Err(Error::protocol_error(&format!(
+                "Unexpected frame {:?} in AUTH_ACCEPTING_SIGN state",
+                frame.preamble.tag
+            ))),
+        }
+    }
+
+    fn enter(&mut self) -> Result<StateResult> {
+        // Send AUTH_SIGNATURE frame with pre-computed HMAC-SHA256 signature
+        tracing::debug!("AuthAcceptingSign::enter - Sending AUTH_SIGNATURE to client");
+        tracing::debug!("  signature length: {} bytes", self.our_signature.len());
+
+        let auth_sig_frame = AuthSignatureFrame::new(self.our_signature.clone());
+        let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature);
+
+        tracing::debug!(
+            "Sending AUTH_SIGNATURE to client (signature: {} bytes)",
+            self.our_signature.len()
+        );
+
+        Ok(StateResult::SendAndWait {
+            frame,
+            next_state: Box::new(AuthAcceptingSign::new_with_signatures(
+                self.connection_mode,
+                self.session_key.clone(),
+                self.connection_secret.clone(),
+                self.our_signature.clone(),
+                self.expected_client_signature.clone(),
+            )),
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct CompressionAccepting;
+
+impl CompressionAccepting {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl State for CompressionAccepting {
+    impl_state_boilerplate!(
+        CompressionAccepting,
+        StateKind::CompressionAccepting,
+        &[Tag::CompressionRequest]
+    );
+
+    fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+        match frame.preamble.tag {
+            Tag::CompressionRequest => {
+                tracing::debug!("Server: Received COMPRESSION_REQUEST from client");
+
+                // For now, respond with no compression (COMP_ALG_NONE)
+                // TODO: Implement actual compression method selection
+                let compression_done = CompressionDoneFrame::new(false, 0u32);
+                let response_frame =
+                    create_frame_from_trait(&compression_done, Tag::CompressionDone);
+
+                tracing::debug!("Server: Sending COMPRESSION_DONE (no compression)");
+
+                // After sending COMPRESSION_DONE, transition to SessionAccepting
+                Ok(StateResult::SendFrame {
+                    frame: response_frame,
+                    next_state: Some(Box::new(SessionAccepting::new())),
+                })
+            }
+            _ => Err(Error::protocol_error(&format!(
+                "Unexpected frame {:?} in COMPRESSION_ACCEPTING state",
                 frame.preamble.tag
             ))),
         }
@@ -2456,6 +2690,101 @@ impl StateMachine {
                     // Enter new state
                     let enter_result = self.current_state.enter()?;
                     return self.apply_result(enter_result);
+                } else if new_state.kind() == StateKind::AuthAcceptingSign {
+                    // Server-side: Compute signatures for AUTH_SIGNATURE exchange
+                    let auth_sign = new_state
+                        .as_any()
+                        .downcast_ref::<AuthAcceptingSign>()
+                        .expect("State kind is AUTH_ACCEPTING_SIGN but downcast failed");
+
+                    // Extract parameters
+                    let connection_mode = auth_sign.connection_mode;
+                    let session_key = auth_sign.session_key.clone();
+                    let connection_secret = auth_sign.connection_secret.clone();
+
+                    // Server computes:
+                    // - our_signature: HMAC-SHA256(session_key, pre_auth_rxbuf) - what we send to client
+                    // - expected_client_signature: HMAC-SHA256(session_key, pre_auth_txbuf) - what we expect from client
+                    //
+                    // Note: This is "crossed" from client perspective:
+                    // - Server's rxbuf is client's txbuf
+                    // - Server's txbuf is client's rxbuf
+
+                    let our_signature = if let Some(ref key) = session_key {
+                        use hmac::{Hmac, Mac};
+                        use sha2::Sha256;
+
+                        type HmacSha256 = Hmac<Sha256>;
+
+                        tracing::debug!(
+                            "Computing server AUTH_SIGNATURE: HMAC-SHA256(key={} bytes, rxbuf={} bytes)",
+                            key.len(),
+                            self.pre_auth_rxbuf.len()
+                        );
+
+                        let mut mac = HmacSha256::new_from_slice(key)
+                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
+                        mac.update(&self.pre_auth_rxbuf);
+                        let result = mac.finalize();
+                        Bytes::copy_from_slice(&result.into_bytes())
+                    } else {
+                        // No session key, send zero signature
+                        Bytes::from(vec![0u8; 32])
+                    };
+
+                    // Compute expected client signature (HMAC of pre_auth_txbuf)
+                    let expected_client_signature = if let Some(ref key) = session_key {
+                        use hmac::{Hmac, Mac};
+                        use sha2::Sha256;
+
+                        type HmacSha256 = Hmac<Sha256>;
+
+                        let mut mac = HmacSha256::new_from_slice(key)
+                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
+                        mac.update(&self.pre_auth_txbuf);
+                        let result = mac.finalize();
+                        Some(Bytes::copy_from_slice(&result.into_bytes()))
+                    } else {
+                        None
+                    };
+
+                    tracing::debug!(
+                        "Computed server AUTH_SIGNATURE: {} bytes from {} bytes rxbuf",
+                        our_signature.len(),
+                        self.pre_auth_rxbuf.len()
+                    );
+                    tracing::debug!(
+                        "Computed expected client signature: {} bytes from {} bytes txbuf",
+                        expected_client_signature
+                            .as_ref()
+                            .map(|s| s.len())
+                            .unwrap_or(0),
+                        self.pre_auth_txbuf.len()
+                    );
+
+                    // Complete pre-auth phase and store session_key
+                    self.complete_pre_auth(session_key.clone());
+
+                    if let Some(ref connection_secret) = connection_secret {
+                        tracing::debug!(
+                            "Setting up frame encryption for SECURE mode (server-side)"
+                        );
+                        self.setup_encryption(connection_secret)?;
+                    }
+
+                    // Create new AuthAcceptingSign with computed signatures
+                    let new_state_with_sig = Box::new(AuthAcceptingSign::new_with_signatures(
+                        connection_mode,
+                        session_key,
+                        connection_secret,
+                        our_signature,
+                        expected_client_signature,
+                    ));
+
+                    self.current_state = new_state_with_sig;
+                    // Enter new state
+                    let enter_result = self.current_state.enter()?;
+                    return self.apply_result(enter_result);
                 } else if new_state.kind() == StateKind::CompressionConnecting {
                     // Check if this is after COMPRESSION_DONE (has algorithm set)
                     let compression_state = new_state
@@ -2524,6 +2853,22 @@ impl StateMachine {
                         return self.apply_result(enter_result);
                     }
                     // If peer supports compression and no algorithm set yet, proceed normally (will send COMPRESSION_REQUEST)
+                } else if new_state.kind() == StateKind::SessionAccepting {
+                    // Check if we're transitioning from AuthAcceptingSign (server-side)
+                    // If compression is supported, redirect to CompressionAccepting instead
+                    if self.current_state.kind() == StateKind::AuthAcceptingSign {
+                        // Check if peer supports compression
+                        let peer_features = crate::FeatureSet::from(self.peer_supported_features);
+                        if peer_features.contains(crate::FeatureSet::COMPRESSION) {
+                            tracing::debug!(
+                                "Server: Peer supports compression, transitioning to COMPRESSION_ACCEPTING"
+                            );
+                            self.current_state = Box::new(CompressionAccepting::new());
+                            let enter_result = self.current_state.enter()?;
+                            return self.apply_result(enter_result);
+                        }
+                    }
+                    // Otherwise, proceed with SessionAccepting normally
                 } else if new_state.kind() == StateKind::SessionConnecting {
                     // Store global_id from SessionConnecting state and fix up addresses
                     let session_state = new_state
@@ -2584,6 +2929,96 @@ impl StateMachine {
                         } else {
                             self.current_state = new_state;
                         }
+                    } else if new_state.kind() == StateKind::AuthAcceptingSign {
+                        // Server-side: Compute signatures for AUTH_SIGNATURE exchange
+                        let auth_sign = new_state
+                            .as_any()
+                            .downcast_ref::<AuthAcceptingSign>()
+                            .expect("State kind is AUTH_ACCEPTING_SIGN but downcast failed");
+
+                        // Extract parameters
+                        let connection_mode = auth_sign.connection_mode;
+                        let session_key = auth_sign.session_key.clone();
+                        let connection_secret = auth_sign.connection_secret.clone();
+
+                        // Server computes:
+                        // - our_signature: HMAC-SHA256(session_key, pre_auth_rxbuf) - what we send to client
+                        // - expected_client_signature: HMAC-SHA256(session_key, pre_auth_txbuf) - what we expect from client
+
+                        let our_signature = if let Some(ref key) = session_key {
+                            use hmac::{Hmac, Mac};
+                            use sha2::Sha256;
+
+                            type HmacSha256 = Hmac<Sha256>;
+
+                            tracing::debug!(
+                                "Computing server AUTH_SIGNATURE: HMAC-SHA256(key={} bytes, rxbuf={} bytes)",
+                                key.len(),
+                                self.pre_auth_rxbuf.len()
+                            );
+
+                            let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
+                                Error::protocol_error(&format!("Invalid key: {:?}", e))
+                            })?;
+                            mac.update(&self.pre_auth_rxbuf);
+                            let result = mac.finalize();
+                            Bytes::copy_from_slice(&result.into_bytes())
+                        } else {
+                            // No session key, send zero signature
+                            Bytes::from(vec![0u8; 32])
+                        };
+
+                        // Compute expected client signature (HMAC of pre_auth_txbuf)
+                        let expected_client_signature = if let Some(ref key) = session_key {
+                            use hmac::{Hmac, Mac};
+                            use sha2::Sha256;
+
+                            type HmacSha256 = Hmac<Sha256>;
+
+                            let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
+                                Error::protocol_error(&format!("Invalid key: {:?}", e))
+                            })?;
+                            mac.update(&self.pre_auth_txbuf);
+                            let result = mac.finalize();
+                            Some(Bytes::copy_from_slice(&result.into_bytes()))
+                        } else {
+                            None
+                        };
+
+                        tracing::debug!(
+                            "Computed server AUTH_SIGNATURE: {} bytes from {} bytes rxbuf",
+                            our_signature.len(),
+                            self.pre_auth_rxbuf.len()
+                        );
+                        tracing::debug!(
+                            "Computed expected client signature: {} bytes from {} bytes txbuf",
+                            expected_client_signature
+                                .as_ref()
+                                .map(|s| s.len())
+                                .unwrap_or(0),
+                            self.pre_auth_txbuf.len()
+                        );
+
+                        // Complete pre-auth phase and store session_key
+                        self.complete_pre_auth(session_key.clone());
+
+                        if let Some(ref connection_secret) = connection_secret {
+                            tracing::debug!(
+                                "Setting up frame encryption for SECURE mode (server-side)"
+                            );
+                            self.setup_encryption(connection_secret)?;
+                        }
+
+                        // Create new AuthAcceptingSign with computed signatures
+                        let new_state_with_sig = Box::new(AuthAcceptingSign::new_with_signatures(
+                            connection_mode,
+                            session_key,
+                            connection_secret,
+                            our_signature,
+                            expected_client_signature,
+                        ));
+
+                        self.current_state = new_state_with_sig;
                     } else {
                         self.current_state = new_state;
                     }
