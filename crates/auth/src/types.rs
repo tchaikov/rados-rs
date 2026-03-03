@@ -456,5 +456,4 @@ impl CephXSession {
             .get(&service_type)
             .is_some_and(|h| h.have_key && !h.is_expired())
     }
-
 }

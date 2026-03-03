@@ -62,8 +62,15 @@ pub async fn run_io_loop<R, Fut>(
 
     loop {
         // Phase 1: Drain all pending messages into PriorityQueue (non-blocking)
+        let mut drained_count = 0;
         while let Ok(msg) = send_rx.try_recv() {
             outbound.push_back(msg);
+            drained_count += 1;
+
+            // Yield every 100 messages to avoid starving other tasks
+            if drained_count % 100 == 0 {
+                tokio::task::yield_now().await;
+            }
         }
 
         // Phase 2: If we have queued messages, send highest priority first

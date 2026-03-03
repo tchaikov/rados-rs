@@ -103,8 +103,10 @@ impl DencAttrs {
                         }
                     }
                     syn::Meta::NameValue(nv) if nv.path.is_ident("version") => {
-                        out.version =
-                            Self::parse_u8_expr(&nv.value, "Invalid version in #[denc(version = N)]");
+                        out.version = Self::parse_u8_expr(
+                            &nv.value,
+                            "Invalid version in #[denc(version = N)]",
+                        );
                     }
                     syn::Meta::NameValue(nv) if nv.path.is_ident("compat") => {
                         out.compat =

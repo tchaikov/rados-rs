@@ -386,6 +386,9 @@ impl MonClient {
                                     info!("MonClient dropped, terminating drain task");
                                     break;
                                 }
+
+                                // Yield after processing each message to avoid starving other tasks
+                                tokio::task::yield_now().await;
                             }
                             None => {
                                 info!("MonClient message channel closed, drain task exiting");
@@ -940,6 +943,9 @@ impl MonClient {
                     if let Err(e) = self_clone.tick(&state).await {
                         error!("Error in tick: {}", e);
                     }
+
+                    // Yield to allow other tasks to run
+                    tokio::task::yield_now().await;
                 }
 
                 info!("Tick loop terminated");
@@ -1740,6 +1746,9 @@ impl MonClient {
                         }
                         _ => {}
                     }
+
+                    // Yield after processing event to avoid starving other tasks
+                    tokio::task::yield_now().await;
                 }
                 _ = tokio::time::sleep(timeout_duration) => {
                     return Err(MonClientError::Timeout);
