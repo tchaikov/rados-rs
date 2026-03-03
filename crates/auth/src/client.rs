@@ -366,37 +366,17 @@ impl CephXClientHandler {
     ) -> Result<Option<Bytes>> {
         use crate::protocol::CephXEncryptedEnvelope;
 
-        // Read outer bufferlist length
-        let cbl_len = u32::decode(payload, 0)? as usize;
-        if cbl_len == 0 {
+        // Read outer bufferlist (length-prefixed)
+        let mut encrypted_secret_bl = Bytes::decode(payload, 0)?;
+        if encrypted_secret_bl.is_empty() {
             return Ok(None);
         }
 
-        if payload.remaining() < cbl_len {
-            return Err(CephXError::ProtocolError(format!(
-                "Insufficient data for connection_secret: need {}, have {}",
-                cbl_len,
-                payload.remaining()
-            )));
-        }
-
-        let mut encrypted_secret_bl = payload.split_to(cbl_len);
-
-        // Read inner encrypted data length
-        let inner_len = u32::decode(&mut encrypted_secret_bl, 0)? as usize;
-        if inner_len == 0 {
+        // Read inner encrypted data (length-prefixed)
+        let encrypted_secret = Bytes::decode(&mut encrypted_secret_bl, 0)?;
+        if encrypted_secret.is_empty() {
             return Ok(None);
         }
-
-        if encrypted_secret_bl.remaining() < inner_len {
-            return Err(CephXError::ProtocolError(format!(
-                "Insufficient data for encrypted connection_secret: need {}, have {}",
-                inner_len,
-                encrypted_secret_bl.remaining()
-            )));
-        }
-
-        let encrypted_secret = encrypted_secret_bl.split_to(inner_len);
 
         // Decrypt connection_secret
         let mut decrypted_secret = session_key.decrypt(&encrypted_secret)?;
