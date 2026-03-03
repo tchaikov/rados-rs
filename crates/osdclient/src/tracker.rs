@@ -145,16 +145,16 @@ impl Tracker {
                         .collect();
 
                     // Remove and timeout each expired operation
-                    for (i, (deadline, osd_id, tid)) in expired.iter().enumerate() {
-                        ops.remove(&(*deadline, *osd_id, *tid));
-                        index.remove(&(*osd_id, *tid));
+                    for (i, &(deadline, osd_id, tid)) in expired.iter().enumerate() {
+                        ops.remove(&(deadline, osd_id, tid));
+                        index.remove(&(osd_id, tid));
                         warn!(
                             "Operation timeout: OSD {} tid={} (deadline exceeded by {:?})",
                             osd_id,
                             tid,
-                            now.duration_since(*deadline)
+                            now.duration_since(deadline)
                         );
-                        timeout_callback(*osd_id, *tid);
+                        timeout_callback(osd_id, tid);
 
                         // Yield every 50 timeouts to avoid blocking other tasks
                         if i > 0 && i % 50 == 0 {
