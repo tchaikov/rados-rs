@@ -77,26 +77,27 @@ impl MonitorAuthProvider {
         })
     }
 
+    /// Helper to lock the handler and convert poison errors
+    fn lock_handler(&self) -> Result<std::sync::MutexGuard<'_, crate::client::CephXClientHandler>> {
+        self.handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))
+    }
+
     /// Set the service ticket types to request alongside the AUTH ticket.
     ///
     /// `keys` is a bitmask of `EntityType::*` values. Defaults to
     /// `MON | OSD | MGR`, which is appropriate for rados clients. MDS clients
     /// should add `EntityType::MDS`.
     pub fn set_want_keys(&mut self, keys: EntityType) -> Result<()> {
-        let mut handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let mut handler = self.lock_handler()?;
         handler.set_want_keys(keys);
         Ok(())
     }
 
     /// Set the secret key from base64 string
     pub fn set_secret_key_from_base64(&mut self, key_str: &str) -> Result<()> {
-        let mut handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let mut handler = self.lock_handler()?;
         handler.set_secret_key_from_base64(key_str)
     }
 
@@ -105,10 +106,7 @@ impl MonitorAuthProvider {
         use crate::keyring::Keyring;
         let keyring = Keyring::from_file(keyring_path)?;
 
-        let mut handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let mut handler = self.lock_handler()?;
 
         let entity_str = format!("client.{}", handler.entity_name.id);
         let key = keyring.get_key(&entity_str).ok_or_else(|| {
@@ -127,10 +125,7 @@ impl MonitorAuthProvider {
 impl AuthProvider for MonitorAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, _service_id: u32) -> Result<Bytes> {
         // Lock the handler to build auth payload
-        let handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let handler = self.lock_handler()?;
 
         // For monitors, do full CephX authentication
         // Check if we've received server challenge
@@ -150,10 +145,7 @@ impl AuthProvider for MonitorAuthProvider {
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
         // Lock the handler to handle auth response
-        let mut handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let mut handler = self.lock_handler()?;
 
         // Distinguish between AUTH_REPLY_MORE (server challenge) and AUTH_DONE (final result)
         // AUTH_REPLY_MORE: starts with u32 length prefix followed by CephXServerChallenge
@@ -231,6 +223,13 @@ impl ServiceAuthProvider {
         }
     }
 
+    /// Helper to lock the handler and convert poison errors
+    fn lock_handler(&self) -> Result<std::sync::MutexGuard<'_, crate::client::CephXClientHandler>> {
+        self.handler
+            .lock()
+            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))
+    }
+
     /// Get a reference to the shared handler
     pub fn handler(&self) -> &std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>> {
         &self.handler
@@ -250,15 +249,14 @@ impl AuthProvider for ServiceAuthProvider {
 
         // Lock the handler to build authorizer from existing tickets
         // This is a very fast operation (just crypto operations)
-        let mut handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
-        let result = handler.build_authorizer(
-            EntityType::from_bits_retain(service_id),
-            global_id,
-            self.server_challenge,
-        );
+        let result = {
+            let mut handler = self.lock_handler()?;
+            handler.build_authorizer(
+                EntityType::from_bits_retain(service_id),
+                global_id,
+                self.server_challenge,
+            )
+        };
 
         if let Err(ref e) = result {
             debug!("build_authorizer failed: {:?}", e);
@@ -297,35 +295,27 @@ impl AuthProvider for ServiceAuthProvider {
             })?;
 
             // Lock the handler to decrypt the challenge
-            let handler = self
-                .handler
-                .lock()
-                .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+            let server_challenge = {
+                let handler = self.lock_handler()?;
+                // Decrypt and extract server_challenge
+                handler.decrypt_authorize_challenge(
+                    EntityType::from_bits_retain(service_id),
+                    payload.clone(),
+                )?
+            };
 
-            // Decrypt and extract server_challenge
-            match handler.decrypt_authorize_challenge(
-                EntityType::from_bits_retain(service_id),
-                payload.clone(),
-            ) {
-                Ok(server_challenge) => {
-                    debug!(
-                        "Successfully extracted server_challenge: 0x{:016x}",
-                        server_challenge
-                    );
+            debug!(
+                "Successfully extracted server_challenge: 0x{:016x}",
+                server_challenge
+            );
 
-                    // Store the challenge for the next authorizer
-                    self.server_challenge = Some(server_challenge);
+            // Store the challenge for the next authorizer
+            self.server_challenge = Some(server_challenge);
 
-                    // Reset the flag so build_auth_payload sends it again with the challenge
-                    self.authorizer_sent = false;
+            // Reset the flag so build_auth_payload sends it again with the challenge
+            self.authorizer_sent = false;
 
-                    return Ok((None, None));
-                }
-                Err(e) => {
-                    debug!("Failed to decrypt challenge: {:?}", e);
-                    return Err(e);
-                }
-            }
+            return Ok((None, None));
         }
 
         info!(
@@ -334,10 +324,7 @@ impl AuthProvider for ServiceAuthProvider {
         );
 
         // Lock the handler to get the session key
-        let handler = self
-            .handler
-            .lock()
-            .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))?;
+        let handler = self.lock_handler()?;
 
         // Get the session key for this service from the ticket handler
         let session_key = if let Some(session) = handler.get_session() {
