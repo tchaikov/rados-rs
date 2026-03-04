@@ -283,15 +283,23 @@ impl VersionedEncode for MonInfo {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Minimum supported version check (Nautilus v14+)
-        crate::check_min_version!(version, 6, "MonInfo", "Nautilus v14+");
+        // Version 5 is used by v18.2.7 and earlier (has all fields except time_added)
+        // Version 6 adds time_added (added in Nov 2025, not in released versions yet)
+        crate::check_min_version!(version, 5, "MonInfo", "Nautilus v14+");
 
-        // All fields are present in v6+ (which we now require)
+        // Decode fields present in v5+
         let name = <String as Denc>::decode(buf, features)?;
         let public_addrs = <EntityAddrvec as Denc>::decode(buf, features)?;
         let priority = <u16 as Denc>::decode(buf, features)?;
         let weight = <u16 as Denc>::decode(buf, features)?;
         let crush_loc = <BTreeMap<String, String> as Denc>::decode(buf, features)?;
-        let time_added = <UTime as Denc>::decode(buf, features)?;
+
+        // time_added is only present in v6+ (added Nov 2025)
+        let time_added = if version >= 6 {
+            <UTime as Denc>::decode(buf, features)?
+        } else {
+            UTime::default()
+        };
 
         Ok(MonInfo {
             name,
@@ -461,6 +469,7 @@ impl VersionedEncode for MonMap {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Minimum supported version check (Nautilus v14+)
+        // Version 6 added ranks field, which is required for modern Ceph
         crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
 
         // Decode fsid (raw 16 bytes)
