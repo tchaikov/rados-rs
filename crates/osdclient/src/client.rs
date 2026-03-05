@@ -910,7 +910,7 @@ impl OSDClient {
         current_pg: u32,
         hobject_cursor: &denc::HObject,
         max_entries: u64,
-        pool_info: &crate::osdmap::PgPool,
+        pool_info: &crate::PgPool,
         osdmap: &Arc<crate::osdmap::OSDMap>,
         crush_map: &crush::CrushMap,
         hashpspool: bool,
