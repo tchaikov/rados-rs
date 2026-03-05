@@ -60,7 +60,12 @@ Flamegraphs show where CPU time is spent during benchmark execution.
 cargo flamegraph --bench crush_mapping -p crush -- --bench
 ```
 
-### Message Encoding
+### Denc Encoding (Primitives)
+```bash
+cargo flamegraph --bench encoding -p denc -- --bench
+```
+
+### Message Encoding (Complex Types)
 ```bash
 cargo flamegraph --bench message_encoding -p denc -- --bench
 ```
@@ -72,7 +77,7 @@ cargo flamegraph --bench connection -p msgr2 -- --bench
 
 ### OSD Operations
 ```bash
-cargo flamegraph --bench osd_ops -p osdclient -- --bench
+cargo flamegraph --bench operations -p osdclient -- --bench
 ```
 
 Flamegraphs are saved as `flamegraph.svg` in the current directory.
@@ -127,38 +132,75 @@ Look for:
 
 ### CRUSH Mapping (crush crate)
 
-**Benchmark**: `crush_mapping/map_pg_to_osds`
+**Benchmark**: `single_placement/replicas/3`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
 
-### Message Encoding (denc crate)
-
-**Benchmark**: `message_encoding/encode_mon_map`
+**Benchmark**: `batch_placement/replicas/3`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
 
-**Benchmark**: `message_encoding/decode_mon_map`
+### Denc Encoding (denc crate - primitives)
+
+**Benchmark**: `primitives/u32/encode`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `primitives/bytes/encode/4096`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+### Message Encoding (denc crate - complex types)
+
+**Benchmark**: `complex/entity_name/encode`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `complex/entity_addr/encode/msgr2`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `composite/message/encode`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
 
 ### Connection (msgr2 crate)
 
-**Benchmark**: `connection/handshake`
+**Benchmark**: `hello_frame/encode`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `client_ident_frame/encode`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `message_frame/encode_1kb`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
 
 ### OSD Operations (osdclient crate)
 
-**Benchmark**: `osd_ops/read_object`
+**Benchmark**: `osdop_build/read/4096`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
 
-**Benchmark**: `osd_ops/write_object`
+**Benchmark**: `mosdop_encode/write/4096`
+- **Baseline**: TBD
+- **Date**: TBD
+- **Hardware**: TBD
+
+**Benchmark**: `mosdop_full_message/write/4096`
 - **Baseline**: TBD
 - **Date**: TBD
 - **Hardware**: TBD
