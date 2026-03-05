@@ -2570,7 +2570,11 @@ impl StateMachine {
                     let auth_sign = new_state
                         .as_any()
                         .downcast_ref::<AuthConnectingSign>()
-                        .expect("State kind is AUTH_CONNECTING_SIGN but downcast failed");
+                        .ok_or_else(|| {
+                            Error::Protocol(
+                                "State machine error: expected AUTH_CONNECTING_SIGN state but downcast failed".into()
+                            )
+                        })?;
 
                     // Extract parameters
                     let connection_mode = auth_sign.connection_mode;
@@ -2689,7 +2693,11 @@ impl StateMachine {
                     let auth_sign = new_state
                         .as_any()
                         .downcast_ref::<AuthAcceptingSign>()
-                        .expect("State kind is AUTH_ACCEPTING_SIGN but downcast failed");
+                        .ok_or_else(|| {
+                            Error::Protocol(
+                                "State machine error: expected AUTH_ACCEPTING_SIGN state but downcast failed".into()
+                            )
+                        })?;
 
                     // Extract parameters
                     let connection_mode = auth_sign.connection_mode;
@@ -2784,7 +2792,11 @@ impl StateMachine {
                     let compression_state = new_state
                         .as_any()
                         .downcast_ref::<CompressionConnecting>()
-                        .expect("State kind is COMPRESSION_CONNECTING but downcast failed");
+                        .ok_or_else(|| {
+                            Error::Protocol(
+                                "State machine error: expected COMPRESSION_CONNECTING state but downcast failed".into()
+                            )
+                        })?;
 
                     if let Some(algorithm) = compression_state.compression_algorithm {
                         // COMPRESSION_DONE received, set up compression and transition to SESSION_CONNECTING
@@ -2868,7 +2880,11 @@ impl StateMachine {
                     let session_state = new_state
                         .as_any()
                         .downcast_ref::<SessionConnecting>()
-                        .expect("State kind is SESSION_CONNECTING but downcast failed");
+                        .ok_or_else(|| {
+                            Error::Protocol(
+                                "State machine error: expected SESSION_CONNECTING state but downcast failed".into()
+                            )
+                        })?;
 
                     self.global_id = session_state.our_global_id;
                     tracing::debug!(
@@ -2928,7 +2944,11 @@ impl StateMachine {
                         let auth_sign = new_state
                             .as_any()
                             .downcast_ref::<AuthAcceptingSign>()
-                            .expect("State kind is AUTH_ACCEPTING_SIGN but downcast failed");
+                            .ok_or_else(|| {
+                                Error::Protocol(
+                                    "State machine error: expected AUTH_ACCEPTING_SIGN state but downcast failed".into()
+                                )
+                            })?;
 
                         // Extract parameters
                         let connection_mode = auth_sign.connection_mode;
