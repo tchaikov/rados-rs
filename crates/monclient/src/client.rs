@@ -12,11 +12,13 @@ use crate::subscription::MonSub;
 use crate::types::CommandResult;
 use crate::wait_helper::wait_for_condition;
 use bytes::Bytes;
+use dashmap::DashMap;
 use denc::EntityName;
 use denc::UuidD;
 use msgr2::ceph_message::{CephMessage, CrcFlags};
 use msgr2::MapSender;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -128,8 +130,38 @@ pub struct MonClient {
     /// Entity name
     entity_name: EntityName,
 
-    /// Client state
-    state: Arc<RwLock<MonClientState>>,
+    /// Connection state (active_con, pending_cons, hunting flags)
+    connection_state: Arc<RwLock<ConnectionState>>,
+
+    /// MonMap state (monmap, want_monmap)
+    monmap_state: Arc<RwLock<MonMapState>>,
+
+    /// Subscription state
+    subscription_state: Arc<RwLock<MonSub>>,
+
+    /// Command tracking (concurrent access)
+    commands: Arc<DashMap<u64, CommandTracker>>,
+    last_command_tid: Arc<AtomicU64>,
+
+    /// Pool operation tracking (concurrent access)
+    pool_ops: Arc<DashMap<u64, PoolOpTracker>>,
+    last_poolop_tid: Arc<AtomicU64>,
+
+    /// Version request tracking (concurrent access)
+    version_requests: Arc<DashMap<u64, VersionTracker>>,
+    last_version_req_id: Arc<AtomicU64>,
+
+    /// Map version waiters
+    map_waiters: Arc<RwLock<HashMap<String, Vec<MapWaiter>>>>,
+
+    /// Auth state (authenticated, global_id, initialized)
+    auth_state: Arc<RwLock<AuthState>>,
+
+    /// Runtime configuration
+    runtime_config: Arc<RwLock<RuntimeMonClientConfig>>,
+
+    /// Latest OSDMap
+    latest_osdmap: Arc<RwLock<Option<crate::MOSDMap>>>,
 
     /// Background tasks (tick loop + drain loop)
     tasks: Arc<Mutex<JoinSet<()>>>,
@@ -185,41 +217,16 @@ impl RuntimeMonClientConfig {
     }
 }
 
-struct MonClientState {
-    /// Monitor map
-    monmap: MonMap,
-
+/// Connection state (active connection and hunting state)
+struct ConnectionState {
     /// Active connection
     active_con: Option<Arc<MonConnection>>,
 
     /// Pending connections (during hunting)
     pending_cons: HashMap<usize, Arc<MonConnection>>,
 
-    /// Subscription manager
-    subscriptions: MonSub,
-
-    /// Command tracking
-    commands: HashMap<u64, CommandTracker>,
-    last_command_tid: u64,
-
-    /// Pool operation tracking
-    pool_ops: HashMap<u64, PoolOpTracker>,
-    last_poolop_tid: u64,
-
-    /// Version request tracking
-    version_requests: HashMap<u64, VersionTracker>,
-    last_version_req_id: u64,
-
-    /// Map version waiters (for async wait_for_map)
-    map_waiters: HashMap<String, Vec<MapWaiter>>,
-
-    /// State flags
-    authenticated: bool,
-    #[allow(dead_code)]
-    global_id: u64,
+    /// Hunting flag
     hunting: bool,
-    want_monmap: bool,
-    initialized: bool,
 
     /// Hunting backoff state
     /// Current backoff multiplier for hunt interval
@@ -228,12 +235,28 @@ struct MonClientState {
     last_hunt_attempt: Option<std::time::Instant>,
     /// Whether we've ever had a successful connection (for backoff logic)
     had_a_connection: bool,
+}
 
-    /// Runtime configuration values updated via MConfig
-    runtime_config: RuntimeMonClientConfig,
+/// MonMap state
+struct MonMapState {
+    /// Monitor map
+    monmap: MonMap,
 
-    /// Latest OSDMap received from monitors
-    latest_osdmap: Option<crate::MOSDMap>,
+    /// Want monmap flag
+    want_monmap: bool,
+}
+
+/// Authentication state
+struct AuthState {
+    /// Authenticated flag
+    authenticated: bool,
+
+    /// Global ID
+    #[allow(dead_code)]
+    global_id: u64,
+
+    /// Initialized flag
+    initialized: bool,
 }
 
 struct MapWaiter {
@@ -319,36 +342,46 @@ impl MonClient {
         // Create channel for monitor messages (256 slots — monitors are low-rate senders)
         let (mon_msg_tx, mut mon_msg_rx) = mpsc::channel(MON_MESSAGE_CHANNEL_CAPACITY);
 
-        let state = MonClientState {
-            monmap,
+        // Initialize separate state components
+        let connection_state = ConnectionState {
             active_con: None,
             pending_cons: HashMap::new(),
-            subscriptions: MonSub::new(),
-            commands: HashMap::new(),
-            last_command_tid: 0,
-            pool_ops: HashMap::new(),
-            last_poolop_tid: 0,
-            version_requests: HashMap::new(),
-            last_version_req_id: 0,
-            map_waiters: HashMap::new(),
-            authenticated: false,
-            global_id: 0,
             hunting: false,
-            want_monmap: true,
-            initialized: false,
             reopen_interval_multiplier: config.hunt_interval_min_multiple,
             last_hunt_attempt: None,
             had_a_connection: false,
-            runtime_config: RuntimeMonClientConfig::from_config(&config),
-            latest_osdmap: None,
         };
 
+        let monmap_state = MonMapState {
+            monmap,
+            want_monmap: true,
+        };
+
+        let auth_state = AuthState {
+            authenticated: false,
+            global_id: 0,
+            initialized: false,
+        };
+
+        let runtime_config_init = RuntimeMonClientConfig::from_config(&config);
         let shutdown_token = CancellationToken::new();
 
         let client = Arc::new(Self {
             config,
             entity_name,
-            state: Arc::new(RwLock::new(state)),
+            connection_state: Arc::new(RwLock::new(connection_state)),
+            monmap_state: Arc::new(RwLock::new(monmap_state)),
+            subscription_state: Arc::new(RwLock::new(MonSub::new())),
+            commands: Arc::new(DashMap::new()),
+            last_command_tid: Arc::new(AtomicU64::new(0)),
+            pool_ops: Arc::new(DashMap::new()),
+            last_poolop_tid: Arc::new(AtomicU64::new(0)),
+            version_requests: Arc::new(DashMap::new()),
+            last_version_req_id: Arc::new(AtomicU64::new(0)),
+            map_waiters: Arc::new(RwLock::new(HashMap::new())),
+            auth_state: Arc::new(RwLock::new(auth_state)),
+            runtime_config: Arc::new(RwLock::new(runtime_config_init)),
+            latest_osdmap: Arc::new(RwLock::new(None)),
             tasks: Arc::new(Mutex::new(JoinSet::new())),
             shutdown_token: shutdown_token.clone(),
             map_events,
@@ -372,14 +405,7 @@ impl MonClient {
                         match msg {
                             Some(msg) => {
                                 if let Some(client_arc) = client_weak.upgrade() {
-                                    if let Err(e) = Self::dispatch_message(
-                                        &client_arc.state,
-                                        &client_arc.map_events,
-                                        &client_arc.monmap_notify,
-                                        msg,
-                                    )
-                                    .await
-                                    {
+                                    if let Err(e) = client_arc.dispatch_message(msg).await {
                                         error!("Failed to dispatch monitor message: {}", e);
                                     }
                                 } else {
@@ -406,19 +432,23 @@ impl MonClient {
 
     /// Initialize and connect to monitors
     pub async fn init(&self) -> Result<()> {
-        let mut state = self.state.write().await;
+        let mut auth_state = self.auth_state.write().await;
 
-        if state.initialized {
+        if auth_state.initialized {
             return Err(MonClientError::AlreadyInitialized);
         }
 
         info!("Initializing MonClient for {}", self.entity_name);
 
-        // Start hunting for monitors
-        state.hunting = true;
-        state.initialized = true;
+        // Mark as initialized
+        auth_state.initialized = true;
+        drop(auth_state);
 
-        drop(state);
+        // Start hunting for monitors
+        {
+            let mut conn_state = self.connection_state.write().await;
+            conn_state.hunting = true;
+        }
 
         // Start tick loop for periodic keepalive and auth renewal
         self.start_tick_loop()?;
@@ -446,21 +476,23 @@ impl MonClient {
 
         info!("Shutting down MonClient");
 
+        // Cancel all pending operations by clearing their trackers.
+        // Callers blocked on rx.await will receive a RecvError ("Channel closed"),
+        // which they handle as an error. This matches C++ MonClient::shutdown()
+        // which cancels pending version_requests, commands, and pool_ops.
+        self.version_requests.clear();
+        self.commands.clear();
+        self.pool_ops.clear();
+
+        // Take connections to close them after releasing the lock
         let (active_con, pending_cons) = {
-            let mut state = self.state.write().await;
-
-            // Cancel all pending operations by dropping their senders.
-            // Callers blocked on rx.await will receive a RecvError ("Channel closed"),
-            // which they handle as an error. This matches C++ MonClient::shutdown()
-            // which cancels pending version_requests, commands, and pool_ops.
-            state.version_requests.clear();
-            state.commands.clear();
-            state.pool_ops.clear();
-
-            // Take connections to close them after releasing the lock
-            let active_con = state.active_con.take();
-            let pending_cons: Vec<_> = state.pending_cons.drain().map(|(_, con)| con).collect();
-
+            let mut conn_state = self.connection_state.write().await;
+            let active_con = conn_state.active_con.take();
+            let pending_cons: Vec<_> = conn_state
+                .pending_cons
+                .drain()
+                .map(|(_, con)| con)
+                .collect();
             (active_con, pending_cons)
         };
 
@@ -495,8 +527,9 @@ impl MonClient {
 
         // Apply backoff delay if we recently tried hunting
         let delay = {
-            let state = self.state.read().await;
-            self.compute_hunt_backoff_delay(&state)
+            let conn_state = self.connection_state.read().await;
+            let runtime_config = self.runtime_config.read().await;
+            self.compute_hunt_backoff_delay(&conn_state, &runtime_config)
         };
 
         if let Some(delay) = delay {
@@ -506,10 +539,11 @@ impl MonClient {
         // Record hunt attempt time before trying
         let hunt_start = std::time::Instant::now();
 
-        let state = self.state.read().await;
-        let monmap = state.monmap.clone();
+        let monmap = {
+            let monmap_state = self.monmap_state.read().await;
+            monmap_state.monmap.clone()
+        };
         let hunt_parallel = self.config.hunt_parallel;
-        drop(state);
 
         // Get monitors grouped by priority (lowest priority first)
         let priority_groups = monmap.get_monitors_by_priority();
@@ -602,18 +636,18 @@ impl MonClient {
 
         // Update backoff state based on hunt result
         {
-            let mut state = self.state.write().await;
-            state.last_hunt_attempt = Some(hunt_start);
+            let mut conn_state = self.connection_state.write().await;
+            conn_state.last_hunt_attempt = Some(hunt_start);
 
-            if hunt_result.is_err() && state.had_a_connection {
+            if hunt_result.is_err() && conn_state.had_a_connection {
                 // Hunt failed - increase backoff for next attempt
-                state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
-                if state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
-                    state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
+                conn_state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
+                if conn_state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
+                    conn_state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
                 }
                 debug!(
                     "Hunt failed, increased backoff multiplier to {:.2}",
-                    state.reopen_interval_multiplier
+                    conn_state.reopen_interval_multiplier
                 );
             }
         }
@@ -625,16 +659,19 @@ impl MonClient {
     ///
     /// Returns `Some(duration)` if we should wait before hunting again,
     /// or `None` if we can hunt immediately.
-    fn compute_hunt_backoff_delay(&self, state: &MonClientState) -> Option<Duration> {
-        if !state.had_a_connection {
+    fn compute_hunt_backoff_delay(
+        &self,
+        conn_state: &ConnectionState,
+        runtime_config: &RuntimeMonClientConfig,
+    ) -> Option<Duration> {
+        if !conn_state.had_a_connection {
             return None;
         }
-        let last_attempt = state.last_hunt_attempt?;
+        let last_attempt = conn_state.last_hunt_attempt?;
         let elapsed = last_attempt.elapsed();
-        let hunt_delay = state
-            .runtime_config
+        let hunt_delay = runtime_config
             .mon_client_hunt_interval
-            .mul_f64(state.reopen_interval_multiplier);
+            .mul_f64(conn_state.reopen_interval_multiplier);
 
         if elapsed >= hunt_delay {
             return None;
@@ -643,18 +680,22 @@ impl MonClient {
         let remaining = hunt_delay - elapsed;
         debug!(
             "Applying hunting backoff: waiting {:?} (multiplier: {:.2})",
-            remaining, state.reopen_interval_multiplier
+            remaining, conn_state.reopen_interval_multiplier
         );
         Some(remaining)
     }
 
     /// Connect to a specific monitor
     async fn connect_to_mon(&self, rank: usize) -> Result<()> {
-        let state = self.state.read().await;
-        let mon_info = state
-            .monmap
-            .get_mon(rank)
-            .ok_or(MonClientError::InvalidMonitorRank(rank))?;
+        let (mon_info, runtime_config) = {
+            let monmap_state = self.monmap_state.read().await;
+            let mon_info = monmap_state
+                .monmap
+                .get_mon(rank)
+                .ok_or(MonClientError::InvalidMonitorRank(rank))?;
+            let runtime_config = self.runtime_config.read().await;
+            (mon_info.clone(), *runtime_config)
+        };
 
         // Get msgr2 address
         let addr = mon_info
@@ -665,8 +706,6 @@ impl MonClient {
         let socket_addr = addr.to_socket_addr().ok_or(MonClientError::InvalidMonMap(
             "No socket addr for msgr2 address".into(),
         ))?;
-        let runtime_config = state.runtime_config;
-        drop(state);
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
 
@@ -705,49 +744,58 @@ impl MonClient {
         debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // Store as active connection (but check if we won the race)
-        let mut state = self.state.write().await;
+        let mut conn_state = self.connection_state.write().await;
 
         // If we're no longer hunting, another connection won the race
-        if !state.hunting {
+        if !conn_state.hunting {
             debug!(
                 "Connection to mon.{} succeeded but another monitor already won the hunt",
                 rank
             );
-            drop(state);
+            drop(conn_state);
             // Close this connection since we don't need it
             mon_con.close().await?;
             return Ok(());
         }
 
         // We won the race - set this as the active connection
-        state.active_con = Some(mon_con);
-        state.hunting = false;
-        // Authentication was completed during MonConnection::connect() -> establish_session()
-        state.authenticated = true;
-        state.global_id = global_id; // Store global_id in MonClient
-                                     // Move previously-acked subscriptions back to pending so they are resent on reconnect.
-        let should_send_subscriptions = state.subscriptions.reload();
+        conn_state.active_con = Some(mon_con);
+        conn_state.hunting = false;
 
         // Clear any pending connections (from parallel hunt)
-        state.pending_cons.clear();
+        conn_state.pending_cons.clear();
 
         // Mark that we've had a successful connection
-        state.had_a_connection = true;
+        conn_state.had_a_connection = true;
 
         // Un-backoff: reduce the backoff multiplier on successful connection
-        let old_multiplier = state.reopen_interval_multiplier;
-        state.reopen_interval_multiplier = (state.reopen_interval_multiplier
+        let old_multiplier = conn_state.reopen_interval_multiplier;
+        conn_state.reopen_interval_multiplier = (conn_state.reopen_interval_multiplier
             / self.config.hunt_interval_backoff)
             .max(self.config.hunt_interval_min_multiple);
 
-        if old_multiplier != state.reopen_interval_multiplier {
+        if old_multiplier != conn_state.reopen_interval_multiplier {
             debug!(
                 "Un-backoff: reduced multiplier from {:.2} to {:.2}",
-                old_multiplier, state.reopen_interval_multiplier
+                old_multiplier, conn_state.reopen_interval_multiplier
             );
         }
 
-        drop(state);
+        drop(conn_state);
+
+        // Update auth state
+        {
+            let mut auth_state = self.auth_state.write().await;
+            // Authentication was completed during MonConnection::connect() -> establish_session()
+            auth_state.authenticated = true;
+            auth_state.global_id = global_id; // Store global_id in MonClient
+        }
+
+        // Move previously-acked subscriptions back to pending so they are resent on reconnect.
+        let should_send_subscriptions = {
+            let mut sub_state = self.subscription_state.write().await;
+            sub_state.reload()
+        };
 
         // Notify waiters that authentication is complete (after releasing lock)
         self.auth_notify.notify_waiters();
@@ -762,18 +810,21 @@ impl MonClient {
 
     /// Subscribe to a cluster map
     pub async fn subscribe(&self, what: &str, start: u64, flags: u8) -> Result<()> {
-        let mut state = self.state.write().await;
-
-        if !state.initialized {
+        let auth_state = self.auth_state.read().await;
+        if !auth_state.initialized {
             return Err(MonClientError::NotInitialized);
         }
+        drop(auth_state);
 
         debug!("Subscribing to {} from version {}", what, start);
 
-        if state.subscriptions.want(what, start, flags) {
+        let mut sub_state = self.subscription_state.write().await;
+        if sub_state.want(what, start, flags) {
             // New subscription, send it if connected
-            if state.active_con.is_some() {
-                drop(state);
+            drop(sub_state);
+            let conn_state = self.connection_state.read().await;
+            if conn_state.active_con.is_some() {
+                drop(conn_state);
                 self.send_subscriptions().await?;
             }
         }
@@ -783,9 +834,9 @@ impl MonClient {
 
     /// Unsubscribe from a cluster map
     pub async fn unsubscribe(&self, what: &str) -> Result<()> {
-        let mut state = self.state.write().await;
+        let mut sub_state = self.subscription_state.write().await;
         debug!("Unsubscribing from {}", what);
-        state.subscriptions.unwant(what);
+        sub_state.unwant(what);
         Ok(())
     }
 
@@ -799,20 +850,21 @@ impl MonClient {
     /// * `what` - Map type (e.g., "osdmap", "monmap")
     /// * `epoch` - Epoch of the received map
     pub async fn notify_map_received(&self, what: &str, epoch: u64) -> Result<()> {
-        let mut state = self.state.write().await;
-
         debug!("Map received: {} epoch {}", what, epoch);
 
         // Update subscription tracking - this increments the start epoch
-        state.subscriptions.got(what, epoch);
+        let need_renew = {
+            let mut sub_state = self.subscription_state.write().await;
+            sub_state.got(what, epoch);
+            sub_state.need_renew()
+        };
 
         // Check if subscriptions need renewal
-        if state.subscriptions.need_renew() {
+        if need_renew {
             debug!(
                 "Subscriptions need renewal after receiving {} epoch {}",
                 what, epoch
             );
-            drop(state);
             self.send_subscriptions().await?;
         }
 
@@ -821,26 +873,28 @@ impl MonClient {
 
     /// Send pending subscriptions
     async fn send_subscriptions(&self) -> Result<()> {
-        let mut state = self.state.write().await;
+        let mut sub_state = self.subscription_state.write().await;
 
-        if !state.subscriptions.have_new() {
+        if !sub_state.have_new() {
             return Ok(());
         }
 
-        let active_con = state
+        let conn_state = self.connection_state.read().await;
+        let active_con = conn_state
             .active_con
             .as_ref()
             .ok_or(MonClientError::NotConnected)?
             .clone();
+        drop(conn_state);
 
         // Build subscription message
         let mut msg = MMonSubscribe::new();
-        for (what, item) in state.subscriptions.get_subs() {
+        for (what, item) in sub_state.get_subs() {
             msg.add(what.clone(), *item);
         }
 
-        state.subscriptions.renewed();
-        drop(state);
+        sub_state.renewed();
+        drop(sub_state);
 
         // Use unified CephMessage framework
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
@@ -853,8 +907,8 @@ impl MonClient {
     }
 
     async fn command_timeout(&self) -> Duration {
-        let state = self.state.read().await;
-        state.runtime_config.rados_mon_op_timeout
+        let runtime_config = self.runtime_config.read().await;
+        runtime_config.rados_mon_op_timeout
     }
 
     /// Send a CephMessage with a tid and wait for a response on the given oneshot receiver.
@@ -883,11 +937,15 @@ impl MonClient {
     /// Check that the client is initialized and connected, returning the active connection.
     ///
     /// This is the common preamble for request methods that need to send a message.
-    fn require_active_con(state: &MonClientState) -> Result<Arc<MonConnection>> {
-        if !state.initialized {
+    async fn require_active_con(&self) -> Result<Arc<MonConnection>> {
+        let auth_state = self.auth_state.read().await;
+        if !auth_state.initialized {
             return Err(MonClientError::NotInitialized);
         }
-        state
+        drop(auth_state);
+
+        let conn_state = self.connection_state.read().await;
+        conn_state
             .active_con
             .as_ref()
             .cloned()
@@ -896,7 +954,8 @@ impl MonClient {
 
     /// Start background tick loop for periodic maintenance
     fn start_tick_loop(&self) -> Result<()> {
-        let state = Arc::clone(&self.state);
+        let connection_state = Arc::clone(&self.connection_state);
+        let runtime_config = Arc::clone(&self.runtime_config);
         let self_clone = self.clone();
         let tick_token = self.shutdown_token.clone();
 
@@ -914,14 +973,14 @@ impl MonClient {
                     let interval = if let Some(explicit) = explicit_tick_interval {
                         explicit
                     } else {
-                        let state_guard = state.read().await;
-                        if state_guard.hunting {
-                            state_guard
-                                .runtime_config
+                        let conn_state = connection_state.read().await;
+                        let runtime_cfg = runtime_config.read().await;
+                        if conn_state.hunting {
+                            runtime_cfg
                                 .mon_client_hunt_interval
-                                .mul_f64(state_guard.reopen_interval_multiplier)
+                                .mul_f64(conn_state.reopen_interval_multiplier)
                         } else {
-                            state_guard.runtime_config.mon_client_ping_interval
+                            runtime_cfg.mon_client_ping_interval
                         }
                     };
 
@@ -938,7 +997,7 @@ impl MonClient {
                     }
 
                     // Perform tick operations
-                    if let Err(e) = self_clone.tick(&state).await {
+                    if let Err(e) = self_clone.tick().await {
                         error!("Error in tick: {}", e);
                     }
 
@@ -958,12 +1017,12 @@ impl MonClient {
     }
 
     /// Periodic maintenance tick
-    async fn tick(&self, state: &Arc<RwLock<MonClientState>>) -> Result<()> {
+    async fn tick(&self) -> Result<()> {
         // Phase 2.2: If we're in hunting state, continue hunting regardless of active_con
         let (is_hunting, active_con_opt) = {
-            let state_guard = state.read().await;
-            let is_hunting = state_guard.hunting;
-            let active_con = state_guard.active_con.as_ref().map(Arc::clone);
+            let conn_state = self.connection_state.read().await;
+            let is_hunting = conn_state.hunting;
+            let active_con = conn_state.active_con.as_ref().map(Arc::clone);
             (is_hunting, active_con)
         };
 
@@ -990,9 +1049,9 @@ impl MonClient {
             );
 
             {
-                let mut state_guard = state.write().await;
-                state_guard.active_con = None;
-                state_guard.hunting = true;
+                let mut conn_state = self.connection_state.write().await;
+                conn_state.active_con = None;
+                conn_state.hunting = true;
             }
 
             if let Err(e) = self.start_hunting().await {
@@ -1110,12 +1169,7 @@ impl MonClient {
     }
 
     /// Dispatch received message to appropriate handler
-    async fn dispatch_message(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        monmap_notify: &Arc<tokio::sync::Notify>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn dispatch_message(&self, msg: msgr2::message::Message) -> Result<()> {
         let msg_type = msg.msg_type();
         debug!(
             "Dispatching message type: 0x{:04x} ({}), front.len()={}",
@@ -1127,15 +1181,15 @@ impl MonClient {
         match msg_type {
             msgr2::message::CEPH_MSG_MON_MAP => {
                 info!("Received CEPH_MSG_MON_MAP");
-                Self::handle_monmap(state, map_events, monmap_notify, msg).await?;
+                self.handle_monmap(msg).await?;
             }
             msgr2::message::CEPH_MSG_PING => {
                 trace!("Received CEPH_MSG_PING, sending PING_ACK");
                 // Respond to monitor's ping with PING_ACK
                 // Clone connection before async operation to avoid holding lock
                 let active_con = {
-                    let state_guard = state.read().await;
-                    state_guard.active_con.clone()
+                    let conn_state = self.connection_state.read().await;
+                    conn_state.active_con.clone()
                 };
 
                 if let Some(active_con) = active_con {
@@ -1155,33 +1209,33 @@ impl MonClient {
             }
             CEPH_MSG_MON_SUBSCRIBE_ACK => {
                 info!("Received CEPH_MSG_MON_SUBSCRIBE_ACK");
-                Self::handle_subscribe_ack(state, msg).await?;
+                self.handle_subscribe_ack(msg).await?;
             }
             CEPH_MSG_MON_GET_VERSION_REPLY => {
                 debug!("Received CEPH_MSG_MON_GET_VERSION_REPLY");
-                Self::handle_version_reply(state, msg).await?;
+                self.handle_version_reply(msg).await?;
             }
             msgr2::message::CEPH_MSG_MON_COMMAND_ACK => {
                 debug!(
                     "Received CEPH_MSG_MON_COMMAND_ACK (0x{:04x})",
                     msgr2::message::CEPH_MSG_MON_COMMAND_ACK
                 );
-                Self::handle_command_ack(state, msg).await?;
+                self.handle_command_ack(msg).await?;
             }
             msgr2::message::CEPH_MSG_POOLOP_REPLY => {
                 debug!(
                     "Received CEPH_MSG_POOLOP_REPLY (0x{:04x})",
                     msgr2::message::CEPH_MSG_POOLOP_REPLY
                 );
-                Self::handle_poolop_reply(state, map_events, msg).await?;
+                self.handle_poolop_reply(msg).await?;
             }
             msgr2::message::CEPH_MSG_CONFIG => {
                 debug!("Received CEPH_MSG_CONFIG");
-                Self::handle_config(state, map_events, msg).await?;
+                self.handle_config(msg).await?;
             }
             msgr2::message::CEPH_MSG_OSD_MAP => {
                 debug!("Received CEPH_MSG_OSD_MAP");
-                Self::handle_osdmap(state, map_events, msg).await?;
+                self.handle_osdmap(msg).await?;
             }
             _ => {
                 return Err(MonClientError::Other(format!(
@@ -1194,12 +1248,7 @@ impl MonClient {
     }
 
     /// Handle MonMap message
-    async fn handle_monmap(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        monmap_notify: &Arc<tokio::sync::Notify>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_monmap(&self, msg: msgr2::message::Message) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
         let mmonmap: MMonMap = decode_message(&msg)?;
         info!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
@@ -1215,79 +1264,78 @@ impl MonClient {
 
         let epoch = monmap.epoch;
 
-        // Update state
-        let mut state_guard = state.write().await;
-        state_guard.monmap = monmap.clone();
-        state_guard.want_monmap = false;
+        // Update monmap state
+        {
+            let mut monmap_state = self.monmap_state.write().await;
+            monmap_state.monmap = monmap.clone();
+            monmap_state.want_monmap = false;
+        }
 
         // Mark subscription as received
-        state_guard.subscriptions.got("monmap", monmap.epoch as u64);
-
-        drop(state_guard);
+        {
+            let mut sub_state = self.subscription_state.write().await;
+            sub_state.got("monmap", monmap.epoch as u64);
+        }
 
         // Broadcast MonMap update event
-        let _ = map_events.send(MapEvent::MonMapUpdated { epoch });
+        let _ = self.map_events.send(MapEvent::MonMapUpdated { epoch });
 
         // Notify waiters that MonMap has arrived
-        monmap_notify.notify_waiters();
+        self.monmap_notify.notify_waiters();
 
         info!("MonMap updated successfully");
         Ok(())
     }
 
     /// Handle subscription ack
-    async fn handle_subscribe_ack(
-        state: &Arc<RwLock<MonClientState>>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_subscribe_ack(&self, msg: msgr2::message::Message) -> Result<()> {
         let ack: MMonSubscribeAck = decode_message(&msg)?;
         info!("Subscription acknowledged: interval={}", ack.interval);
 
-        let mut state_guard = state.write().await;
-        state_guard.subscriptions.acked(ack.interval);
+        let mut sub_state = self.subscription_state.write().await;
+        sub_state.acked(ack.interval);
 
         Ok(())
     }
 
     /// Handle config update message
-    async fn handle_config(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_config(&self, msg: msgr2::message::Message) -> Result<()> {
         let mconfig: MConfig = decode_message(&msg)?;
-        let has_receivers = map_events.receiver_count() > 0;
-        let mut state_guard = state.write().await;
-        state_guard.runtime_config.update_from_map(&mconfig.config);
-        drop(state_guard);
+        let has_receivers = self.map_events.receiver_count() > 0;
+
+        {
+            let mut runtime_config = self.runtime_config.write().await;
+            runtime_config.update_from_map(&mconfig.config);
+        }
+
         if has_receivers {
             let keys: Vec<String> = mconfig.config.keys().cloned().collect();
-            let _ = map_events.send(MapEvent::ConfigUpdated { keys });
+            let _ = self.map_events.send(MapEvent::ConfigUpdated { keys });
         }
         Ok(())
     }
 
     /// Handle OSDMap message
-    async fn handle_osdmap(
-        state: &Arc<RwLock<MonClientState>>,
-        map_events: &broadcast::Sender<MapEvent>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
         let osdmap: MOSDMap = decode_message(&msg)?;
 
         let epoch = osdmap.get_last();
         debug!("Received OSDMap: epoch={}", epoch);
 
-        // Cache the latest OSDMap in state
-        let mut state_guard = state.write().await;
-        state_guard.latest_osdmap = Some(osdmap.clone());
+        // Cache the latest OSDMap
+        {
+            let mut latest_osdmap = self.latest_osdmap.write().await;
+            *latest_osdmap = Some(osdmap.clone());
+        }
 
         // Mark subscription as received
-        state_guard.subscriptions.got("osdmap", epoch as u64);
-        drop(state_guard);
+        {
+            let mut sub_state = self.subscription_state.write().await;
+            sub_state.got("osdmap", epoch as u64);
+        }
 
         // Broadcast OSDMap update event
-        let _ = map_events.send(MapEvent::OsdMapUpdated {
+        let _ = self.map_events.send(MapEvent::OsdMapUpdated {
             epoch: epoch as u64,
         });
 
@@ -1296,10 +1344,7 @@ impl MonClient {
     }
 
     /// Handle version reply
-    async fn handle_version_reply(
-        state: &Arc<RwLock<MonClientState>>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_version_reply(&self, msg: msgr2::message::Message) -> Result<()> {
         let reply: MMonGetVersionReply = decode_message(&msg)?;
 
         // Get the transaction ID from the message payload (not header in this case)
@@ -1311,9 +1356,7 @@ impl MonClient {
         );
 
         // Find and complete the pending version request
-        let mut state_guard = state.write().await;
-        if let Some(tracker) = state_guard.version_requests.remove(&tid) {
-            drop(state_guard); // Release lock before sending
+        if let Some((_, tracker)) = self.version_requests.remove(&tid) {
             let _ = tracker
                 .result_tx
                 .send((reply.version, reply.oldest_version));
@@ -1328,10 +1371,7 @@ impl MonClient {
     }
 
     /// Handle command ack
-    async fn handle_command_ack(
-        state: &Arc<RwLock<MonClientState>>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_command_ack(&self, msg: msgr2::message::Message) -> Result<()> {
         // Decode the command ack message from the front payload
         let ack = MMonCommandAck::decode(&msg.front)?;
 
@@ -1344,11 +1384,9 @@ impl MonClient {
         );
 
         // Find and complete the pending command by matching tid
-        let mut state_guard = state.write().await;
-        if let Some(tracker) = state_guard.commands.remove(&tid) {
-            drop(state_guard); // Release lock before sending
-                               // The command output is in the data field, not the rs field
-                               // Use rs only if data is empty (for error messages)
+        if let Some((_, tracker)) = self.commands.remove(&tid) {
+            // The command output is in the data field, not the rs field
+            // Use rs only if data is empty (for error messages)
             let outs = if !msg.data.is_empty() {
                 String::from_utf8_lossy(&msg.data).to_string()
             } else {
@@ -1367,11 +1405,7 @@ impl MonClient {
     }
 
     /// Handle pool operation reply
-    async fn handle_poolop_reply(
-        state: &Arc<RwLock<MonClientState>>,
-        _map_events: &broadcast::Sender<MapEvent>,
-        msg: msgr2::message::Message,
-    ) -> Result<()> {
+    async fn handle_poolop_reply(&self, msg: msgr2::message::Message) -> Result<()> {
         // Decode the pool operation reply message from the front payload
         let reply = MPoolOpReply::decode(&msg.front)?;
 
@@ -1382,9 +1416,7 @@ impl MonClient {
         );
 
         // Find and complete the pending pool operation by matching tid
-        let mut state_guard = state.write().await;
-        if let Some(tracker) = state_guard.pool_ops.remove(&tid) {
-            drop(state_guard); // Release lock before sending
+        if let Some((_, tracker)) = self.pool_ops.remove(&tid) {
             let result =
                 PoolOpResult::new(reply.reply_code as i32, reply.epoch, reply.response_data);
             let _ = tracker.result_tx.send(result);
@@ -1402,16 +1434,10 @@ impl MonClient {
     pub async fn get_version(&self, what: &str) -> Result<(u64, u64)> {
         let (tx, rx) = oneshot::channel();
 
-        let (active_con, tid) = {
-            let mut state = self.state.write().await;
-            let active_con = Self::require_active_con(&state)?;
-            state.last_version_req_id += 1;
-            let tid = state.last_version_req_id;
-            state
-                .version_requests
-                .insert(tid, VersionTracker { result_tx: tx });
-            (active_con, tid)
-        };
+        let active_con = self.require_active_con().await?;
+        let tid = self.last_version_req_id.fetch_add(1, Ordering::SeqCst) + 1;
+        self.version_requests
+            .insert(tid, VersionTracker { result_tx: tx });
 
         let msg = MMonGetVersion::new(tid, what);
         self.send_and_wait(&active_con, &msg, tid, rx).await
@@ -1452,14 +1478,9 @@ impl MonClient {
     pub async fn invoke(&self, cmd: Vec<String>, inbl: Bytes) -> Result<CommandResult> {
         let (tx, rx) = oneshot::channel();
 
-        let (active_con, tid) = {
-            let mut state = self.state.write().await;
-            let active_con = Self::require_active_con(&state)?;
-            state.last_command_tid += 1;
-            let tid = state.last_command_tid;
-            state.commands.insert(tid, CommandTracker { result_tx: tx });
-            (active_con, tid)
-        };
+        let active_con = self.require_active_con().await?;
+        let tid = self.last_command_tid.fetch_add(1, Ordering::SeqCst) + 1;
+        self.commands.insert(tid, CommandTracker { result_tx: tx });
 
         let fsid = self.get_fsid().await;
         debug!("send_command: tid={}, cmd={:?}, fsid={}", tid, cmd, fsid);
@@ -1474,14 +1495,9 @@ impl MonClient {
     pub async fn send_poolop(&self, msg: MPoolOp) -> Result<PoolOpResult> {
         let (tx, rx) = oneshot::channel();
 
-        let (active_con, tid) = {
-            let mut state = self.state.write().await;
-            let active_con = Self::require_active_con(&state)?;
-            state.last_poolop_tid += 1;
-            let tid = state.last_poolop_tid;
-            state.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
-            (active_con, tid)
-        };
+        let active_con = self.require_active_con().await?;
+        let tid = self.last_poolop_tid.fetch_add(1, Ordering::SeqCst) + 1;
+        self.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
 
         self.send_and_wait(&active_con, &msg, tid, rx).await
     }
@@ -1530,14 +1546,14 @@ impl MonClient {
 
     /// Check if connected to a monitor
     pub async fn is_connected(&self) -> bool {
-        let state = self.state.read().await;
-        state.active_con.is_some()
+        let conn_state = self.connection_state.read().await;
+        conn_state.active_con.is_some()
     }
 
     /// Check if authenticated
     pub async fn is_authenticated(&self) -> bool {
-        let state = self.state.read().await;
-        state.authenticated
+        let auth_state = self.auth_state.read().await;
+        auth_state.authenticated
     }
 
     /// Wait for authentication to complete
@@ -1575,8 +1591,8 @@ impl MonClient {
     pub async fn wait_for_monmap(&self, timeout: std::time::Duration) -> Result<()> {
         wait_for_condition(
             || async {
-                let state = self.state.read().await;
-                if !state.want_monmap && state.monmap.fsid != uuid::Uuid::nil() {
+                let monmap_state = self.monmap_state.read().await;
+                if !monmap_state.want_monmap && monmap_state.monmap.fsid != uuid::Uuid::nil() {
                     info!("MonMap received via event notification");
                     Some(())
                 } else {
@@ -1592,8 +1608,8 @@ impl MonClient {
 
     /// Get the cluster FSID
     pub async fn get_fsid(&self) -> UuidD {
-        let state = self.state.read().await;
-        UuidD::from_bytes(*state.monmap.fsid.as_bytes())
+        let monmap_state = self.monmap_state.read().await;
+        UuidD::from_bytes(*monmap_state.monmap.fsid.as_bytes())
     }
 
     /// Get the global ID assigned during authentication
@@ -1601,8 +1617,8 @@ impl MonClient {
     /// Returns the global ID assigned by the monitor during authentication.
     /// Returns 0 if not authenticated yet.
     pub async fn get_global_id(&self) -> u64 {
-        let state = self.state.read().await;
-        state.global_id
+        let auth_state = self.auth_state.read().await;
+        auth_state.global_id
     }
 
     /// Get the entity name string (e.g., "client.admin")
@@ -1633,8 +1649,8 @@ impl MonClient {
     /// # }
     /// ```
     pub async fn get_service_auth_provider(&self) -> Option<auth::ServiceAuthProvider> {
-        let state = self.state.read().await;
-        if let Some(conn) = state.active_con.as_ref() {
+        let conn_state = self.connection_state.read().await;
+        if let Some(conn) = conn_state.active_con.as_ref() {
             conn.create_service_auth_provider().await
         } else {
             None
@@ -1643,20 +1659,20 @@ impl MonClient {
 
     /// Get the number of monitors
     pub async fn get_mon_count(&self) -> usize {
-        let state = self.state.read().await;
-        state.monmap.size()
+        let monmap_state = self.monmap_state.read().await;
+        monmap_state.monmap.size()
     }
 
     /// Get the current monmap epoch
     pub async fn get_monmap_epoch(&self) -> u32 {
-        let state = self.state.read().await;
-        state.monmap.epoch
+        let monmap_state = self.monmap_state.read().await;
+        monmap_state.monmap.epoch
     }
 
     /// Get monitor addresses by rank
     pub async fn get_mon_addrs(&self, rank: usize) -> Result<denc::EntityAddrvec> {
-        let state = self.state.read().await;
-        state
+        let monmap_state = self.monmap_state.read().await;
+        monmap_state
             .monmap
             .get_addrs(rank)
             .cloned()
@@ -1667,10 +1683,10 @@ impl MonClient {
     pub async fn wait_for_map(&self, what: &str, version: u64) -> Result<()> {
         // Check if we already have this version
         {
-            let state = self.state.read().await;
+            let monmap_state = self.monmap_state.read().await;
             match what {
                 "monmap" => {
-                    if state.monmap.epoch as u64 >= version {
+                    if monmap_state.monmap.epoch as u64 >= version {
                         return Ok(());
                     }
                 }
@@ -1686,9 +1702,8 @@ impl MonClient {
         // Create waiter
         let (tx, rx) = oneshot::channel();
         {
-            let mut state = self.state.write().await;
-            state
-                .map_waiters
+            let mut map_waiters = self.map_waiters.write().await;
+            map_waiters
                 .entry(what.to_string())
                 .or_default()
                 .push(MapWaiter { tx });
@@ -1734,8 +1749,8 @@ impl MonClient {
                         Ok(MapEvent::OsdMapUpdated { epoch: recv_epoch }) => {
                             if recv_epoch >= epoch {
                                 // Map received, extract from state
-                                let state = self.state.read().await;
-                                if let Some(osdmap) = state.latest_osdmap.clone() {
+                                let latest_osdmap = self.latest_osdmap.read().await;
+                                if let Some(osdmap) = latest_osdmap.clone() {
                                     return Ok(osdmap);
                                 } else {
                                     return Err(MonClientError::Other(
@@ -1764,8 +1779,8 @@ impl MonClient {
     ///
     /// Returns a cloned copy of the cached MonMap.
     pub async fn get_monmap(&self) -> MonMap {
-        let state = self.state.read().await;
-        state.monmap.clone()
+        let monmap_state = self.monmap_state.read().await;
+        monmap_state.monmap.clone()
     }
 }
 
