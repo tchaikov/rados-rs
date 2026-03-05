@@ -1625,14 +1625,19 @@ impl OSDClient {
         info!("OSDClient shutdown complete");
     }
 
-    /// Handle OSDMap message (moved from MonClient)
-    async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
+    /// Decode and validate MOSDMap message
+    ///
+    /// Returns the decoded MOSDMap and current epoch if validation passes
+    fn decode_and_validate_osdmap(
+        &self,
+        msg: &msgr2::message::Message,
+    ) -> Result<(monclient::messages::MOSDMap, denc::Epoch)> {
         use monclient::messages::MOSDMap;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
 
         info!("Handling OSDMap message ({} bytes)", msg.front.len());
 
         // Decode MOSDMap
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
         let header = CephMsgHeader::new(MOSDMap::msg_type(), MOSDMap::msg_version(0));
         let mosdmap = MOSDMap::decode_payload(&header, &msg.front, &[], &[])
             .map_err(|e| OSDClientError::Decoding(format!("Failed to decode MOSDMap: {}", e)))?;
@@ -1644,16 +1649,16 @@ impl OSDClient {
             mosdmap.incremental_maps.len()
         );
 
-        // 1. Validate FSID
+        // Validate FSID
         if mosdmap.fsid != self.fsid.bytes {
             warn!(
                 "Ignoring OSDMap with wrong fsid (expected {:?}, got {:?})",
                 self.fsid.bytes, mosdmap.fsid
             );
-            return Ok(());
+            return Err(OSDClientError::Internal("FSID mismatch".into()));
         }
 
-        // 2. Check if we've already processed these epochs
+        // Check if we've already processed these epochs
         let current_epoch = self
             .osdmap_rx
             .borrow()
@@ -1668,7 +1673,7 @@ impl OSDClient {
                 mosdmap.get_last(),
                 current_epoch
             );
-            return Ok(());
+            return Err(OSDClientError::Internal("Stale epoch".into()));
         }
 
         debug!(
@@ -1678,121 +1683,193 @@ impl OSDClient {
             current_epoch
         );
 
-        // 3. Process epochs sequentially
+        Ok((mosdmap, current_epoch))
+    }
+
+    /// Process OSDMap updates (incremental and full maps)
+    ///
+    /// Returns the updated map if any updates were successfully applied
+    fn process_osdmap_updates(
+        &self,
+        mosdmap: &monclient::messages::MOSDMap,
+        current_epoch: denc::Epoch,
+    ) -> Option<Arc<crate::osdmap::OSDMap>> {
+        let current_map = self.osdmap_rx.borrow().clone();
+
+        if current_epoch.as_u32() > 0 {
+            // We have a current map, apply updates sequentially
+            self.apply_sequential_updates(mosdmap, current_epoch, current_map)
+        } else {
+            // No current map, use latest full map
+            self.load_initial_map(mosdmap)
+        }
+    }
+
+    /// Apply sequential updates to existing map
+    fn apply_sequential_updates(
+        &self,
+        mosdmap: &monclient::messages::MOSDMap,
+        current_epoch: denc::Epoch,
+        current_map: Option<Arc<crate::osdmap::OSDMap>>,
+    ) -> Option<Arc<crate::osdmap::OSDMap>> {
+        let mut working_map = current_map;
         let mut updated = false;
-        let mut new_map: Option<Arc<crate::osdmap::OSDMap>> = None;
-        {
-            let current_map = self.osdmap_rx.borrow().clone();
 
-            if current_epoch.as_u32() > 0 {
-                // We have a current map, apply updates sequentially
-                let mut working_map = current_map;
-                for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
-                    let current_map_epoch = working_map
-                        .as_ref()
-                        .map(|m| m.epoch)
-                        .unwrap_or(denc::Epoch::new(0));
+        for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
+            let current_map_epoch = working_map
+                .as_ref()
+                .map(|m| m.epoch)
+                .unwrap_or(denc::Epoch::new(0));
 
-                    if current_map_epoch == denc::Epoch::new(e - 1)
-                        && mosdmap.incremental_maps.contains_key(&e)
-                    {
-                        // Apply incremental
-                        debug!("Applying incremental OSDMap for epoch {}", e);
-                        let inc_bl = mosdmap.incremental_maps.get(&e).unwrap();
-
-                        match crate::osdmap::OSDMapIncremental::decode_versioned(
-                            &mut inc_bl.as_ref(),
-                            0,
-                        ) {
-                            Ok(inc_map) => {
-                                debug!(
-                                    "Decoded incremental: epoch={}, {} new pools, {} old pools",
-                                    inc_map.epoch,
-                                    inc_map.new_pools.len(),
-                                    inc_map.old_pools.len()
-                                );
-
-                                if let Some(current_map) = &working_map {
-                                    let mut updated_map = (**current_map).clone();
-                                    if let Err(err) = inc_map.apply_to(&mut updated_map) {
-                                        warn!("Failed to apply incremental epoch {}: {}", e, err);
-                                    } else {
-                                        working_map = Some(Arc::new(updated_map));
-                                        updated = true;
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                warn!("Failed to decode incremental epoch {}: {}", e, err);
-                            }
-                        }
-                    } else if mosdmap.maps.contains_key(&e) {
-                        // Use full map
-                        debug!("Using full OSDMap for epoch {}", e);
-                        let full_bl = mosdmap.maps.get(&e).unwrap();
-                        match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
-                            Ok(full_map) => {
-                                debug!("Decoded full OSDMap: epoch={}", full_map.epoch);
-                                working_map = Some(Arc::new(full_map));
-                                updated = true;
-                            }
-                            Err(err) => {
-                                warn!("Failed to decode full map epoch {}: {}", e, err);
-                            }
-                        }
-                    } else {
-                        warn!("Missing epoch {} (incremental and full)", e);
-                    }
+            if current_map_epoch == denc::Epoch::new(e - 1)
+                && mosdmap.incremental_maps.contains_key(&e)
+            {
+                // Apply incremental
+                if let Some(new_map) = self.apply_incremental_map(mosdmap, e, &working_map) {
+                    working_map = Some(new_map);
+                    updated = true;
                 }
-                new_map = working_map;
+            } else if mosdmap.maps.contains_key(&e) {
+                // Use full map
+                if let Some(new_map) = self.apply_full_map(mosdmap, e) {
+                    working_map = Some(new_map);
+                    updated = true;
+                }
             } else {
-                // No current map, use latest full map
-                if let Some((&latest_epoch, full_bl)) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)
-                {
-                    debug!("Using latest full OSDMap (epoch {})", latest_epoch);
-                    match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
-                        Ok(full_map) => {
-                            info!("Initial OSDMap loaded: epoch={}", full_map.epoch);
-                            new_map = Some(Arc::new(full_map));
-                            updated = true;
-                        }
-                        Err(err) => {
-                            warn!("Failed to decode initial full map: {}", err);
-                        }
-                    }
-                }
+                warn!("Missing epoch {} (incremental and full)", e);
             }
         }
 
-        // 4. Update watch channel and rescan pending operations if map updated
         if updated {
-            if let Some(map) = new_map {
-                let final_epoch = map.epoch;
-                self.osdmap_tx.send(Some(map)).ok();
+            working_map
+        } else {
+            None
+        }
+    }
 
-                info!(
-                    "OSDMap updated to epoch {}, rescanning pending operations",
-                    final_epoch
+    /// Apply incremental map update
+    fn apply_incremental_map(
+        &self,
+        mosdmap: &monclient::messages::MOSDMap,
+        epoch: u32,
+        working_map: &Option<Arc<crate::osdmap::OSDMap>>,
+    ) -> Option<Arc<crate::osdmap::OSDMap>> {
+        debug!("Applying incremental OSDMap for epoch {}", epoch);
+        let inc_bl = mosdmap.incremental_maps.get(&epoch)?;
+
+        match crate::osdmap::OSDMapIncremental::decode_versioned(&mut inc_bl.as_ref(), 0) {
+            Ok(inc_map) => {
+                debug!(
+                    "Decoded incremental: epoch={}, {} new pools, {} old pools",
+                    inc_map.epoch,
+                    inc_map.new_pools.len(),
+                    inc_map.old_pools.len()
                 );
 
-                // Notify MonClient that we received this osdmap epoch
-                // This allows MonClient to track subscription state and renew if needed
-                if let Err(e) = self
-                    .mon_client
-                    .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
-                    .await
-                {
-                    warn!(
-                        "Failed to notify MonClient of osdmap epoch {}: {}",
-                        final_epoch, e
-                    );
-                }
-
-                // Call scan_requests_on_map_change
-                if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
-                    warn!("Failed to rescan requests after OSDMap update: {}", e);
+                if let Some(current_map) = working_map {
+                    let mut updated_map = (**current_map).clone();
+                    if let Err(err) = inc_map.apply_to(&mut updated_map) {
+                        warn!("Failed to apply incremental epoch {}: {}", epoch, err);
+                        None
+                    } else {
+                        Some(Arc::new(updated_map))
+                    }
+                } else {
+                    None
                 }
             }
+            Err(err) => {
+                warn!("Failed to decode incremental epoch {}: {}", epoch, err);
+                None
+            }
+        }
+    }
+
+    /// Apply full map update
+    fn apply_full_map(
+        &self,
+        mosdmap: &monclient::messages::MOSDMap,
+        epoch: u32,
+    ) -> Option<Arc<crate::osdmap::OSDMap>> {
+        debug!("Using full OSDMap for epoch {}", epoch);
+        let full_bl = mosdmap.maps.get(&epoch)?;
+
+        match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+            Ok(full_map) => {
+                debug!("Decoded full OSDMap: epoch={}", full_map.epoch);
+                Some(Arc::new(full_map))
+            }
+            Err(err) => {
+                warn!("Failed to decode full map epoch {}: {}", epoch, err);
+                None
+            }
+        }
+    }
+
+    /// Load initial map when no current map exists
+    fn load_initial_map(
+        &self,
+        mosdmap: &monclient::messages::MOSDMap,
+    ) -> Option<Arc<crate::osdmap::OSDMap>> {
+        let (&latest_epoch, full_bl) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)?;
+
+        debug!("Using latest full OSDMap (epoch {})", latest_epoch);
+        match crate::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+            Ok(full_map) => {
+                info!("Initial OSDMap loaded: epoch={}", full_map.epoch);
+                Some(Arc::new(full_map))
+            }
+            Err(err) => {
+                warn!("Failed to decode initial full map: {}", err);
+                None
+            }
+        }
+    }
+
+    /// Update OSDMap state and notify subscribers
+    async fn update_osdmap_state(&self, new_map: Arc<crate::osdmap::OSDMap>) -> Result<()> {
+        let final_epoch = new_map.epoch;
+        self.osdmap_tx.send(Some(new_map)).ok();
+
+        info!(
+            "OSDMap updated to epoch {}, rescanning pending operations",
+            final_epoch
+        );
+
+        // Notify MonClient that we received this osdmap epoch
+        if let Err(e) = self
+            .mon_client
+            .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
+            .await
+        {
+            warn!(
+                "Failed to notify MonClient of osdmap epoch {}: {}",
+                final_epoch, e
+            );
+        }
+
+        // Rescan pending operations
+        if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
+            warn!("Failed to rescan requests after OSDMap update: {}", e);
+        }
+
+        Ok(())
+    }
+
+    /// Handle OSDMap message (moved from MonClient)
+    async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
+        // Decode and validate
+        let (mosdmap, current_epoch) = match self.decode_and_validate_osdmap(&msg) {
+            Ok(result) => result,
+            Err(_) => return Ok(()), // Already logged, skip processing
+        };
+
+        // Process map updates
+        let new_map = self.process_osdmap_updates(&mosdmap, current_epoch);
+
+        // Update state if we got a new map
+        if let Some(map) = new_map {
+            self.update_osdmap_state(map).await?;
         }
 
         Ok(())
