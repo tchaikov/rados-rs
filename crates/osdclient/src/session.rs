@@ -82,7 +82,7 @@ struct IoTaskContext {
     osd_id: i32,
     pending_ops: Arc<DashMap<u64, PendingOp>>,
     #[allow(dead_code)]
-    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<parking_lot::RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::client::OSDClient>,
     /// Session incarnation for this connection
@@ -91,7 +91,7 @@ struct IoTaskContext {
     #[allow(dead_code)]
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address)
-    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
+    session_info: Arc<parking_lot::RwLock<SessionInfo>>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -114,7 +114,7 @@ pub struct OSDSession {
     /// Global ID from monitor authentication (for AUTH_NONE authorizers)
     global_id: u64,
     /// Per-PG backoff tracker using efficient data structures
-    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<parking_lot::RwLock<BackoffTracker>>,
     /// Channel for routing MOSDMap messages to OSDClient
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
@@ -128,7 +128,7 @@ pub struct OSDSession {
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address combined)
     /// Using a single lock reduces lock acquisitions and simplifies the code.
-    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
+    session_info: Arc<parking_lot::RwLock<SessionInfo>>,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -205,7 +205,7 @@ impl OSDSession {
             client_inc,
             auth_provider,
             global_id,
-            backoff_tracker: Arc::new(tokio::sync::RwLock::new(BackoffTracker::new())),
+            backoff_tracker: Arc::new(parking_lot::RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
             tracker,
@@ -213,7 +213,7 @@ impl OSDSession {
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
             // Start with no peer address and disconnected state
-            session_info: Arc::new(tokio::sync::RwLock::new(SessionInfo {
+            session_info: Arc::new(parking_lot::RwLock::new(SessionInfo {
                 conn_state: ConnectionState::Disconnected,
                 peer_addr: None,
             })),
@@ -252,13 +252,13 @@ impl OSDSession {
         let _lock = self.connecting_lock.lock().await;
 
         // Check if already connected (double-check after acquiring lock)
-        if self.session_info.read().await.conn_state == ConnectionState::Connected {
+        if self.session_info.read().conn_state == ConnectionState::Connected {
             info!("OSD {} already connected, skipping", self.osd_id);
             return Ok(());
         }
 
         // Transition to Connecting state
-        self.session_info.write().await.conn_state = ConnectionState::Connecting;
+        self.session_info.write().conn_state = ConnectionState::Connecting;
 
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
@@ -298,10 +298,11 @@ impl OSDSession {
         info!("✓ Session established with OSD {}", self.osd_id);
 
         // Store peer address and transition to Connected state
-        let mut info = self.session_info.write().await;
-        info.peer_addr = Some(entity_addr.clone());
-        info.conn_state = ConnectionState::Connected;
-        drop(info);
+        {
+            let mut info = self.session_info.write();
+            info.peer_addr = Some(entity_addr.clone());
+            info.conn_state = ConnectionState::Connected;
+        }
 
         // Increment connection incarnation following Ceph pattern
         // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
@@ -429,7 +430,7 @@ impl OSDSession {
         } else {
             ConnectionState::Disconnected
         };
-        ctx.session_info.write().await.conn_state = final_state;
+        ctx.session_info.write().conn_state = final_state;
 
         // Leave pending ops in the session.
         // They are migrated eagerly by get_or_create_session() the next time any operation
@@ -461,7 +462,7 @@ impl OSDSession {
     }
 
     /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
-    pub fn backoff_tracker(&self) -> Arc<tokio::sync::RwLock<BackoffTracker>> {
+    pub fn backoff_tracker(&self) -> Arc<parking_lot::RwLock<BackoffTracker>> {
         Arc::clone(&self.backoff_tracker)
     }
 
@@ -914,7 +915,7 @@ impl OSDSession {
     /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
         // Check explicit connection state
-        self.session_info.read().await.conn_state == ConnectionState::Connected
+        self.session_info.read().conn_state == ConnectionState::Connected
     }
 
     /// Await the I/O task to ensure it has stopped
@@ -927,7 +928,7 @@ impl OSDSession {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
-        self.session_info.write().await.conn_state = ConnectionState::Closed;
+        self.session_info.write().conn_state = ConnectionState::Closed;
     }
 
     /// Get the peer address for this session
@@ -935,7 +936,7 @@ impl OSDSession {
     /// Returns the EntityAddr that was used to establish the current connection.
     /// Used to validate that the session's address matches the current OSDMap.
     pub async fn get_peer_address(&self) -> Option<denc::EntityAddr> {
-        self.session_info.read().await.peer_addr.clone()
+        self.session_info.read().peer_addr.clone()
     }
 
     /// Get the current connection state
@@ -943,7 +944,7 @@ impl OSDSession {
     /// Provides explicit state information for observability and debugging.
     /// Following Ceph pattern for explicit connection state tracking.
     pub async fn connection_state(&self) -> ConnectionState {
-        self.session_info.read().await.conn_state
+        self.session_info.read().conn_state
     }
 
     /// Check if an operation is blocked by an active backoff
@@ -951,7 +952,7 @@ impl OSDSession {
     /// Uses efficient range lookup matching Ceph's _send_op() logic
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _send_op()
     async fn is_blocked_by_backoff(&self, pgid: &StripedPgId, hobj: &denc::HObject) -> bool {
-        let tracker = self.backoff_tracker.read().await;
+        let tracker = self.backoff_tracker.read();
         tracker.is_blocked(pgid, hobj).is_some()
     }
 

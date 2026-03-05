@@ -112,8 +112,12 @@ impl OSDClient {
                 if let Some(client) = weak_for_callback.upgrade() {
                     let sessions = client.sessions.clone();
                     tokio::spawn(async move {
-                        let sessions_guard = sessions.read().await;
-                        if let Some(session) = sessions_guard.get(&osd_id) {
+                        let session = {
+                            let sessions_guard = sessions.read().await;
+                            sessions_guard.get(&osd_id).cloned()
+                        };
+
+                        if let Some(session) = session {
                             if let Some(pending_op) = session.remove_pending_op(tid).await {
                                 // Check incarnation - operation might be from a previous connection
                                 // that has since reconnected. In that case, silently drop the timeout.
@@ -361,12 +365,13 @@ impl OSDClient {
             // its pending ops kicked into the new session after creation.
         }
 
-        let mut sessions = self.sessions.write().await;
+        let old_session = {
+            let mut sessions = self.sessions.write().await;
 
-        // Insert the new session, replacing any disconnected session.
-        // insert() returns the old value so we can kick its pending ops.
-        let old_session = sessions.insert(osd_id, Arc::clone(&session));
-        drop(sessions);
+            // Insert the new session, replacing any disconnected session.
+            // insert() returns the old value so we can kick its pending ops.
+            sessions.insert(osd_id, Arc::clone(&session))
+        };
 
         // Kick ops from old disconnected session into new session.
         // Matches C++ Objecter::_kick_requests() called after _reopen_session():
@@ -1389,15 +1394,15 @@ impl OSDClient {
         // This ensures the next get_or_create_session() creates a fresh
         // connection with the updated address.
         if !sessions_to_close.is_empty() {
-            let mut sessions = self.sessions.write().await;
             for osd_id in &sessions_to_close {
-                if let Some(session) = sessions.remove(osd_id) {
+                let session = {
+                    let mut sessions = self.sessions.write().await;
+                    sessions.remove(osd_id)
+                };
+
+                if let Some(session) = session {
                     info!("Removing stale session for OSD {}", osd_id);
-                    // Release write lock before closing session (which may do I/O)
-                    drop(sessions);
                     session.close().await;
-                    // Re-acquire write lock if there are more sessions to close
-                    sessions = self.sessions.write().await;
                 }
             }
         }
@@ -1839,7 +1844,7 @@ impl OSDClient {
                 // Register backoff in session
                 {
                     let tracker = session.backoff_tracker();
-                    let mut tracker = tracker.write().await;
+                    let mut tracker = tracker.write();
                     let entry = BackoffEntry {
                         pgid: backoff.pgid,
                         id: backoff.id,
@@ -1896,7 +1901,7 @@ impl OSDClient {
                 // Remove backoff from session
                 {
                     let tracker = session.backoff_tracker();
-                    let mut tracker = tracker.write().await;
+                    let mut tracker = tracker.write();
                     tracker.remove_by_id(backoff.id, &backoff.begin, &backoff.end);
                 }
 

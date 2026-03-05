@@ -744,44 +744,51 @@ impl MonClient {
         debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // Store as active connection (but check if we won the race)
-        let mut conn_state = self.connection_state.write().await;
+        let (should_close_connection, mon_con_to_close) = {
+            let mut conn_state = self.connection_state.write().await;
 
-        // If we're no longer hunting, another connection won the race
-        if !conn_state.hunting {
-            debug!(
-                "Connection to mon.{} succeeded but another monitor already won the hunt",
-                rank
-            );
-            drop(conn_state);
+            // If we're no longer hunting, another connection won the race
+            if !conn_state.hunting {
+                debug!(
+                    "Connection to mon.{} succeeded but another monitor already won the hunt",
+                    rank
+                );
+                (true, Some(mon_con))
+            } else {
+                // We won the race - set this as the active connection
+                conn_state.active_con = Some(mon_con);
+                conn_state.hunting = false;
+
+                // Clear any pending connections (from parallel hunt)
+                conn_state.pending_cons.clear();
+
+                // Mark that we've had a successful connection
+                conn_state.had_a_connection = true;
+
+                // Un-backoff: reduce the backoff multiplier on successful connection
+                let old_multiplier = conn_state.reopen_interval_multiplier;
+                conn_state.reopen_interval_multiplier = (conn_state.reopen_interval_multiplier
+                    / self.config.hunt_interval_backoff)
+                    .max(self.config.hunt_interval_min_multiple);
+
+                if old_multiplier != conn_state.reopen_interval_multiplier {
+                    debug!(
+                        "Un-backoff: reduced multiplier from {:.2} to {:.2}",
+                        old_multiplier, conn_state.reopen_interval_multiplier
+                    );
+                }
+
+                (false, None)
+            }
+        };
+
+        if should_close_connection {
             // Close this connection since we don't need it
-            mon_con.close().await?;
+            if let Some(con) = mon_con_to_close {
+                con.close().await?;
+            }
             return Ok(());
         }
-
-        // We won the race - set this as the active connection
-        conn_state.active_con = Some(mon_con);
-        conn_state.hunting = false;
-
-        // Clear any pending connections (from parallel hunt)
-        conn_state.pending_cons.clear();
-
-        // Mark that we've had a successful connection
-        conn_state.had_a_connection = true;
-
-        // Un-backoff: reduce the backoff multiplier on successful connection
-        let old_multiplier = conn_state.reopen_interval_multiplier;
-        conn_state.reopen_interval_multiplier = (conn_state.reopen_interval_multiplier
-            / self.config.hunt_interval_backoff)
-            .max(self.config.hunt_interval_min_multiple);
-
-        if old_multiplier != conn_state.reopen_interval_multiplier {
-            debug!(
-                "Un-backoff: reduced multiplier from {:.2} to {:.2}",
-                old_multiplier, conn_state.reopen_interval_multiplier
-            );
-        }
-
-        drop(conn_state);
 
         // Update auth state
         {
@@ -873,28 +880,31 @@ impl MonClient {
 
     /// Send pending subscriptions
     async fn send_subscriptions(&self) -> Result<()> {
-        let mut sub_state = self.subscription_state.write().await;
+        let (active_con, msg) = {
+            let mut sub_state = self.subscription_state.write().await;
 
-        if !sub_state.have_new() {
-            return Ok(());
-        }
+            if !sub_state.have_new() {
+                return Ok(());
+            }
 
-        let conn_state = self.connection_state.read().await;
-        let active_con = conn_state
-            .active_con
-            .as_ref()
-            .ok_or(MonClientError::NotConnected)?
-            .clone();
-        drop(conn_state);
+            let conn_state = self.connection_state.read().await;
+            let active_con = conn_state
+                .active_con
+                .as_ref()
+                .ok_or(MonClientError::NotConnected)?
+                .clone();
+            drop(conn_state);
 
-        // Build subscription message
-        let mut msg = MMonSubscribe::new();
-        for (what, item) in sub_state.get_subs() {
-            msg.add(what.clone(), *item);
-        }
+            // Build subscription message
+            let mut msg = MMonSubscribe::new();
+            for (what, item) in sub_state.get_subs() {
+                msg.add(what.clone(), *item);
+            }
 
-        sub_state.renewed();
-        drop(sub_state);
+            sub_state.renewed();
+
+            (active_con, msg)
+        };
 
         // Use unified CephMessage framework
         let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
