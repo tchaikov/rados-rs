@@ -622,24 +622,27 @@ impl OSDSession {
         // Track the operation
         // Note: We store Arc<MOSDOp> to avoid cloning the entire operation on retries.
         // The reqid and object_id are cloned here but only once per operation submission.
+        // Wrap op in Arc first to avoid partial move issues
+        let op_arc = Arc::new(op);
+
         {
             let mut pending = self.pending_ops.write().await;
             pending.insert(
                 tid,
                 PendingOp {
                     tid,
-                    reqid: op.reqid.clone(),
+                    reqid: op_arc.reqid.clone(),
                     result_tx: tx,
                     submitted_at: Instant::now(),
                     attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                    pool_id: op.object.pool,
-                    object_id: op.object.oid.clone(),
-                    osdmap_epoch: op.osdmap_epoch,
-                    op: Arc::new(op.clone()),
+                    pool_id: op_arc.object.pool,
+                    object_id: op_arc.object.oid.clone(),
+                    osdmap_epoch: op_arc.osdmap_epoch,
+                    op: op_arc.clone(),
                     state: crate::types::OpState::Queued,
                     target: crate::types::OpTarget::new(
-                        op.osdmap_epoch,
-                        op.pgid,
+                        op_arc.osdmap_epoch,
+                        op_arc.pgid,
                         self.osd_id,
                         vec![self.osd_id],
                     ),
@@ -665,7 +668,7 @@ impl OSDSession {
         }
 
         // Encode the operation using shared helper (priority goes in message header)
-        let msg = Self::encode_operation(&op, tid, priority)?;
+        let msg = Self::encode_operation(&op_arc, tid, priority)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         debug!("Submitting operation tid={} to OSD {}", tid, self.osd_id);
