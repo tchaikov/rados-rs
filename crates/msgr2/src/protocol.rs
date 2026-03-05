@@ -157,7 +157,7 @@ impl FrameIO {
 
         // Step 2: Convert to wire format with proper preamble, segments, epilogue, and CRCs
         // Use msgr2.1 (is_rev1 = true) to match the banner we sent
-        let wire_bytes = frame_to_send.to_wire(true);
+        let wire_bytes = frame_to_send.to_wire(true)?;
 
         tracing::debug!(
             "Sending frame: tag={:?}, {} segments, {} wire bytes, compressed={}",
@@ -1647,7 +1647,7 @@ impl Connection {
                                     msg.data.clone(),
                                 );
 
-                                let frame = create_frame_from_trait(&msg_frame, Tag::Message);
+                                let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
                                 self.state.send_frame(&frame).await?;
                             }
 
@@ -1970,7 +1970,7 @@ impl Connection {
         );
 
         // Create Frame from MessageFrame
-        let frame = create_frame_from_trait(&msg_frame, Tag::Message);
+        let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
 
         tracing::debug!("Created frame with {} segments", frame.segments.len());
         for (i, seg) in frame.segments.iter().enumerate() {
@@ -2144,7 +2144,7 @@ impl Connection {
 
         // Create Keepalive2 frame
         let keepalive_frame = Keepalive2Frame::new(timestamp_sec, timestamp_nsec);
-        let frame = create_frame_from_trait(&keepalive_frame, crate::frames::Tag::Keepalive2);
+        let frame = create_frame_from_trait(&keepalive_frame, crate::frames::Tag::Keepalive2)?;
 
         tracing::trace!(
             "Sending KEEPALIVE2 with timestamp {}.{:09}",

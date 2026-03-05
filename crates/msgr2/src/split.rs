@@ -169,7 +169,7 @@ impl SendHalf {
         let timestamp_nsec = now.subsec_nanos();
 
         let keepalive_frame = Keepalive2Frame::new(timestamp_sec, timestamp_nsec);
-        let frame = create_frame_from_trait(&keepalive_frame, Tag::Keepalive2);
+        let frame = create_frame_from_trait(&keepalive_frame, Tag::Keepalive2)?;
 
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.cmd_tx
@@ -285,7 +285,13 @@ async fn send_outbound_entry(
 
     // Convert to frame and send (move fields — msg is not used after this)
     let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
-    let frame = create_frame_from_trait(&msg_frame, Tag::Message);
+    let frame = match create_frame_from_trait(&msg_frame, Tag::Message) {
+        Ok(f) => f,
+        Err(e) => {
+            let _ = reply.send(Err(e));
+            return false;
+        }
+    };
     let result = connection_state.send_frame(&frame).await;
     let success = result.is_ok();
     let _ = reply.send(result);

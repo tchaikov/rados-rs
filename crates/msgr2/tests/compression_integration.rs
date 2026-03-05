@@ -271,7 +271,9 @@ fn test_frame_to_wire_preserves_compression_flag() {
     let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
 
     // Convert to wire format
-    let wire_bytes = compressed_frame.to_wire(true);
+    let wire_bytes = compressed_frame
+        .to_wire(true)
+        .expect("to_wire should succeed");
 
     // Verify wire format is not empty
     assert!(!wire_bytes.is_empty(), "Wire bytes should not be empty");

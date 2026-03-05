@@ -15,7 +15,7 @@ use std::fmt::Debug;
 use tracing;
 
 /// Helper function to create a Frame from a FrameTrait
-pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Frame {
+pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Result<Frame> {
     // Use msgr2_frame_assumed features for frame encoding
     // msgr2_frame_assumed = MSG_ADDR2 | SERVER_NAUTILUS
     use denc::features::CephFeatures;
@@ -23,8 +23,8 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Fram
         .union(CephFeatures::MASK_SERVER_NAUTILUS)
         .bits();
 
-    let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED);
-    Frame {
+    let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED)?;
+    Ok(Frame {
         preamble: crate::frames::Preamble {
             tag,
             num_segments: segments.len() as u8,
@@ -43,7 +43,7 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Fram
             crc: 0,
         },
         segments,
-    }
+    })
 }
 
 /// Result of frame processing that indicates next action
@@ -373,7 +373,7 @@ impl State for HelloConnecting {
                 denc::EntityType::CLIENT.bits() as u8,
                 denc::EntityAddr::default(),
             );
-            let frame = create_frame_from_trait(&hello_frame, Tag::Hello);
+            let frame = create_frame_from_trait(&hello_frame, Tag::Hello)?;
 
             Ok(StateResult::SendAndWait {
                 frame,
@@ -635,7 +635,7 @@ impl State for AuthConnecting {
                         // For AuthRequestMore, we only send the auth_payload
                         let auth_frame = AuthRequestMoreFrame::new(auth_payload);
                         let response_frame =
-                            create_frame_from_trait(&auth_frame, Tag::AuthRequestMore);
+                            create_frame_from_trait(&auth_frame, Tag::AuthRequestMore)?;
 
                         // Preserve auth_provider state by not creating new AuthConnecting
                         Ok(StateResult::SendFrame {
@@ -799,7 +799,7 @@ impl State for AuthConnecting {
         };
 
         let auth_frame = AuthRequestFrame::new(method, preferred_modes.clone(), auth_payload);
-        let frame = create_frame_from_trait(&auth_frame, Tag::AuthRequest);
+        let frame = create_frame_from_trait(&auth_frame, Tag::AuthRequest)?;
 
         Ok(StateResult::SendAndWait {
             frame,
@@ -945,7 +945,7 @@ impl State for CompressionConnecting {
         );
 
         let compression_request = CompressionRequestFrame::new(is_compress, preferred_methods);
-        let frame = create_frame_from_trait(&compression_request, Tag::CompressionRequest);
+        let frame = create_frame_from_trait(&compression_request, Tag::CompressionRequest)?;
 
         Ok(StateResult::SendAndWait {
             frame,
@@ -1100,7 +1100,7 @@ impl State for AuthConnectingSign {
         );
 
         let auth_sig_frame = AuthSignatureFrame::new(self.our_signature.clone());
-        let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature);
+        let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature)?;
 
         tracing::debug!(
             "Sending AUTH_SIGNATURE to server (signature: {} bytes)",
@@ -1515,7 +1515,7 @@ impl State for SessionConnecting {
                 self.in_seq,
             );
 
-            let frame = create_frame_from_trait(&reconnect, Tag::SessionReconnect);
+            let frame = create_frame_from_trait(&reconnect, Tag::SessionReconnect)?;
 
             tracing::debug!("Created SESSION_RECONNECT frame");
             tracing::debug!("  addrs: {:?}", addrs);
@@ -1575,7 +1575,7 @@ impl State for SessionConnecting {
                 flags,
                 self.client_cookie,
             );
-            let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent);
+            let frame = create_frame_from_trait(&client_ident, Tag::ClientIdent)?;
 
             tracing::debug!(
                 "Created CLIENT_IDENT frame, {} segments",
@@ -1624,7 +1624,7 @@ impl State for HelloAccepting {
                     denc::EntityType::CLIENT.bits() as u8,
                     denc::EntityAddr::default(),
                 );
-                let response_frame = create_frame_from_trait(&hello_frame, Tag::Hello);
+                let response_frame = create_frame_from_trait(&hello_frame, Tag::Hello)?;
 
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
@@ -1741,7 +1741,7 @@ impl State for AuthAccepting {
                         // Send AUTH_REPLY_MORE with server challenge
                         let auth_more = AuthRequestMoreFrame::new(challenge_payload);
                         let response_frame =
-                            create_frame_from_trait(&auth_more, Tag::AuthReplyMore);
+                            create_frame_from_trait(&auth_more, Tag::AuthReplyMore)?;
 
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
@@ -1754,7 +1754,7 @@ impl State for AuthAccepting {
                         );
                         let auth_done =
                             AuthDoneFrame::new(1001, self.connection_mode, Bytes::new());
-                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone)?;
 
                         // If SECURE mode, transition to AuthAcceptingSign for signature exchange
                         let next_state: Box<dyn State> =
@@ -1802,7 +1802,7 @@ impl State for AuthAccepting {
 
                         let auth_done =
                             AuthDoneFrame::new(global_id, self.connection_mode, auth_done_payload);
-                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone);
+                        let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone)?;
 
                         // If SECURE mode, transition to AuthAcceptingSign for signature exchange
                         // Otherwise, go directly to SessionAccepting
@@ -1944,7 +1944,7 @@ impl State for AuthAcceptingSign {
         tracing::debug!("  signature length: {} bytes", self.our_signature.len());
 
         let auth_sig_frame = AuthSignatureFrame::new(self.our_signature.clone());
-        let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature);
+        let frame = create_frame_from_trait(&auth_sig_frame, Tag::AuthSignature)?;
 
         tracing::debug!(
             "Sending AUTH_SIGNATURE to client (signature: {} bytes)",
@@ -1989,7 +1989,7 @@ impl State for CompressionAccepting {
                 // TODO: Implement actual compression method selection
                 let compression_done = CompressionDoneFrame::new(false, 0u32);
                 let response_frame =
-                    create_frame_from_trait(&compression_done, Tag::CompressionDone);
+                    create_frame_from_trait(&compression_done, Tag::CompressionDone)?;
 
                 tracing::debug!("Server: Sending COMPRESSION_DONE (no compression)");
 
@@ -2036,7 +2036,7 @@ impl State for SessionAccepting {
                 // For now, just send a default SERVER_IDENT response
                 let addrs = denc::EntityAddrvec::with_addr(denc::EntityAddr::default());
                 let server_ident = ServerIdentFrame::new(addrs, 0, 0, 0, 0, 0, 0);
-                let response_frame = create_frame_from_trait(&server_ident, Tag::ServerIdent);
+                let response_frame = create_frame_from_trait(&server_ident, Tag::ServerIdent)?;
 
                 // After sending SERVER_IDENT, transition to Ready state
                 // The state machine will handle the transition after the frame is sent
@@ -2090,7 +2090,7 @@ impl State for Ready {
 
                     // Send keepalive ack with the same timestamp
                     let ack_frame = Keepalive2AckFrame::new(timestamp_sec, timestamp_nsec);
-                    let response_frame = create_frame_from_trait(&ack_frame, Tag::Keepalive2Ack);
+                    let response_frame = create_frame_from_trait(&ack_frame, Tag::Keepalive2Ack)?;
 
                     Ok(StateResult::SendFrame {
                         frame: response_frame,

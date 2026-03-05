@@ -151,7 +151,7 @@ impl Frame {
 
     /// Convert Frame to wire format with proper preamble, segments, and epilogue
     /// This should be used when sending frames over the network
-    pub fn to_wire(&self, is_rev1: bool) -> Bytes {
+    pub fn to_wire(&self, is_rev1: bool) -> Result<Bytes, RadosError> {
         let mut assembler = FrameAssembler::new(is_rev1);
         // Copy compression flag from preamble if set
         if self.preamble.is_compressed() {
@@ -161,9 +161,7 @@ impl Frame {
             .iter()
             .map(|s| s.align)
             .collect();
-        assembler
-            .assemble_frame(self.preamble.tag, &self.segments, &alignments)
-            .expect("Failed to assemble frame")
+        assembler.assemble_frame(self.preamble.tag, &self.segments, &alignments)
     }
 
     /// Create a compressed version of this frame.
@@ -274,7 +272,7 @@ pub trait FrameTrait: Sized {
     const NUM_SEGMENTS: usize;
 
     fn segment_alignments() -> &'static [u16];
-    fn get_segments(&self, features: u64) -> Vec<Bytes>;
+    fn get_segments(&self, features: u64) -> Result<Vec<Bytes>, RadosError>;
     fn from_segments(segments: Vec<Bytes>) -> Result<Self, RadosError>;
 }
 
@@ -444,7 +442,7 @@ impl FrameAssembler {
         frame: &F,
         features: u64,
     ) -> Result<Bytes, RadosError> {
-        let segments = frame.get_segments(features);
+        let segments = frame.get_segments(features)?;
         let alignments = F::segment_alignments();
         self.assemble_frame(F::TAG, &segments, alignments)
     }
@@ -713,7 +711,7 @@ macro_rules! define_frame {
                 &Self::SEGMENT_ALIGNMENTS
             }
 
-            fn get_segments(&self, features: u64) -> Vec<Bytes> {
+            fn get_segments(&self, features: u64) -> Result<Vec<Bytes>, RadosError> {
                 self.segments_to_bytes(features)
             }
 
@@ -752,15 +750,14 @@ macro_rules! define_control_frame {
                 FrameAssembler::from_wire(buf)
             }
 
-            fn segments_to_bytes(&self, _features: u64) -> Vec<Bytes> {
+            fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
                 let mut buf = BytesMut::new();
                 $(
                     // Use the unified trait to handle both Denc and FeaturedDenc
-                    let encoded = self.$field_name.encode_with_features(_features)
-                        .expect("Failed to encode field");
+                    let encoded = self.$field_name.encode_with_features(_features)?;
                     buf.extend_from_slice(&encoded);
                 )*
-                vec![buf.freeze()]
+                Ok(vec![buf.freeze()])
             }
 
             fn from_bytes_segments(mut segments: Vec<Bytes>) -> Result<Self, RadosError> {
@@ -817,17 +814,19 @@ impl MessageFrame {
         FrameAssembler::from_wire(buf)
     }
 
-    fn segments_to_bytes(&self, _features: u64) -> Vec<Bytes> {
-        vec![
+    fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
+        Ok(vec![
             {
                 let mut buf = BytesMut::new();
-                self.header.encode(&mut buf).unwrap_or(());
+                self.header
+                    .encode(&mut buf)
+                    .map_err(|e| RadosError::Protocol(format!("Failed to encode header: {}", e)))?;
                 buf.freeze()
             },
             self.front.clone(),
             self.middle.clone(),
             self.data.clone(),
-        ]
+        ])
     }
 
     fn from_bytes_segments(mut segments: Vec<Bytes>) -> Result<Self, RadosError> {
@@ -956,9 +955,9 @@ impl AuthSignatureFrame {
         Self { signature }
     }
 
-    fn segments_to_bytes(&self, _features: u64) -> Vec<Bytes> {
+    fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
         // Encode signature as raw bytes without length prefix (unlike default Bytes encoding)
-        vec![self.signature.clone()]
+        Ok(vec![self.signature.clone()])
     }
 
     fn from_bytes_segments(mut segments: Vec<Bytes>) -> Result<Self, RadosError> {
@@ -1081,8 +1080,8 @@ impl WaitFrame {
         FrameAssembler::from_wire(buf)
     }
 
-    fn segments_to_bytes(&self, _features: u64) -> Vec<Bytes> {
-        vec![Bytes::new()]
+    fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
+        Ok(vec![Bytes::new()])
     }
 
     fn from_bytes_segments(_segments: Vec<Bytes>) -> Result<Self, RadosError> {
