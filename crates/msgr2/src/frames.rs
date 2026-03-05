@@ -573,7 +573,16 @@ impl FrameAssembler {
         preamble: Preamble,
         segments: &[Bytes],
     ) -> Result<Bytes, RadosError> {
-        let mut frame = BytesMut::new();
+        // Calculate total size: preamble + all segments + epilogue
+        // epilogue = 1 byte (late_flags) + 4*MAX_NUM_SEGMENTS bytes (crc_values)
+        let epilogue_size = 1 + 4 * MAX_NUM_SEGMENTS;
+        let segments_size: usize = segments
+            .iter()
+            .take(self.descs.len())
+            .map(|s| s.len())
+            .sum();
+        let total_size = PREAMBLE_SIZE + segments_size + epilogue_size;
+        let mut frame = BytesMut::with_capacity(total_size);
 
         // Add preamble
         frame.extend_from_slice(&preamble.encode());
@@ -605,7 +614,25 @@ impl FrameAssembler {
         preamble: Preamble,
         segments: &[Bytes],
     ) -> Result<Bytes, RadosError> {
-        let mut frame = BytesMut::new();
+        // Calculate total size: preamble + segments + first_crc + epilogue (if multi-segment)
+        let segments_size: usize = segments
+            .iter()
+            .take(self.descs.len())
+            .map(|s| s.len())
+            .sum();
+        let first_crc_size = if !segments.is_empty() && !segments[0].is_empty() {
+            FRAME_CRC_SIZE
+        } else {
+            0
+        };
+        // epilogue for multi-segment: 1 byte (late_status) + (MAX_NUM_SEGMENTS-1) * 4 bytes (crc_values)
+        let epilogue_size = if self.descs.len() > 1 {
+            1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE
+        } else {
+            0
+        };
+        let total_size = PREAMBLE_SIZE + segments_size + first_crc_size + epilogue_size;
+        let mut frame = BytesMut::with_capacity(total_size);
 
         // Add preamble
         frame.extend_from_slice(&preamble.encode());
