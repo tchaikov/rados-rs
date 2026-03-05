@@ -904,10 +904,8 @@ impl MonClient {
         let explicit_tick_interval = self.config.tick_interval;
 
         // Spawn into the shared JoinSet so shutdown() can await all tasks together.
-        self.tasks
-            .try_lock()
-            .expect("tasks lock should not be contended during init")
-            .spawn(async move {
+        if let Ok(mut tasks) = self.tasks.try_lock() {
+            tasks.spawn(async move {
                 info!("Tick loop started");
 
                 loop {
@@ -950,8 +948,10 @@ impl MonClient {
 
                 info!("Tick loop terminated");
             });
-
-        info!("Started tick loop");
+            info!("Started tick loop");
+        } else {
+            error!("Failed to acquire tasks lock during init - lock may be poisoned");
+        }
     }
 
     /// Periodic maintenance tick
