@@ -32,6 +32,11 @@ flate2 = "1.0"         # Zlib/gzip compression
 [dev-dependencies]
 tempfile = "3"
 cephconfig = { path = "../cephconfig" }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "connection"
+harness = false
 
 [lib]
 name = "msgr2"
