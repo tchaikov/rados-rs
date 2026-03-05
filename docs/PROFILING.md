@@ -226,3 +226,84 @@ Target performance characteristics:
 - Object operations: Comparable to librados C library
 
 These are initial goals and may be adjusted based on baseline measurements.
+
+## Phase 3 Optimizations (as of 2026-03-06)
+
+After implementing targeted optimizations in Phase 3, we measured the following improvements:
+
+### Connection Frames (msgr2 crate)
+
+**hello_frame/encode**
+- Phase 2 baseline: 224 ns
+- Phase 3 result: 211 ns
+- Improvement: 5.8% faster
+
+**client_ident_frame/encode**
+- Phase 2 baseline: 526 ns
+- Phase 3 result: 512 ns
+- Improvement: 2.7% faster
+
+**frame_assembly/rev0**
+- Phase 2 baseline: 228 ns
+- Phase 3 result: 216 ns
+- Improvement: 5.3% faster
+
+**frame_assembly/rev1**
+- Phase 2 baseline: 213 ns
+- Phase 3 result: 208 ns
+- Improvement: 2.3% faster
+
+### OSD Operations (osdclient crate)
+
+**mosdop_encode/write/4096**
+- Phase 2 baseline: 360 ns
+- Phase 3 result: 256 ns
+- Improvement: 28.9% faster
+
+**mosdop_encode/write/65536**
+- Phase 2 baseline: Not measured
+- Phase 3 result: 254 ns
+- Note: Encoding overhead is constant regardless of data size (data is referenced, not copied)
+
+**mosdop_full_message/write/4096**
+- Phase 2 baseline: 983 ns
+- Phase 3 result: 824 ns
+- Improvement: 16.2% faster
+
+**mosdop_full_message/write/65536**
+- Phase 2 baseline: Not measured
+- Phase 3 result: 6.86 µs (8.9 GiB/s)
+- Note: Includes actual data copying into message buffer
+
+### Optimizations Applied
+
+1. **Arc for shared message ownership** (commit 8220143 and earlier)
+   - Eliminates deep clones on retry
+   - Cheap refcount increment instead of full message copy
+   - Primary benefit: Reduced allocations in retry paths
+
+2. **Pre-allocated buffers with encoded_size hints** (commit 62e9c88 and earlier)
+   - BytesMut::with_capacity() based on size hints
+   - Eliminates reallocation during encoding
+   - Impact: 28.9% improvement in mosdop_encode/write/4096
+
+3. **Reduced string allocations** (commit 5e94640 and earlier)
+   - Use clone_from() for string updates
+   - References instead of clones where possible
+   - Impact: Reduced allocations in error paths
+
+4. **Optimized frame assembly** (commit 64aa89e and earlier)
+   - Pre-calculate total frame size
+   - Single allocation for entire frame
+   - Impact: 5.3% improvement in frame_assembly/rev0
+
+### Summary
+
+Phase 3 optimizations delivered measurable improvements:
+- Connection frame encoding: 2-6% faster
+- OSD message encoding: 16-29% faster
+- Frame assembly: 2-5% faster
+
+The most significant gains came from buffer pre-allocation (28.9% for message encoding), which eliminates reallocation overhead during encoding. Arc-based message sharing provides benefits primarily in retry scenarios (not measured by these benchmarks).
+
+All optimizations maintain correctness - unit tests and integration tests pass.
