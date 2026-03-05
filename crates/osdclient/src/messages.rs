@@ -628,7 +628,7 @@ mod tests {
         // Create a PGLS operation
         let object = ObjectId::new(3, "");
         let pgid = StripedPgId::from_pg(3, 0);
-        let ops = vec![OSDOp::pgls(100, denc::HObject::empty_cursor(3), 20)];
+        let ops = vec![OSDOp::pgls(100, denc::HObject::empty_cursor(3), 20).unwrap()];
         let reqid = RequestId::new("client.0", 1, 1);
 
         let mosdop = MOSDOp::new(
@@ -776,7 +776,7 @@ mod tests {
         // Create a PGLS operation using the helper function
         let object = ObjectId::new(3, "");
         let pgid = StripedPgId::from_pg(3, 0);
-        let ops = vec![OSDOp::pgls(100, denc::HObject::empty_cursor(3), 20)];
+        let ops = vec![OSDOp::pgls(100, denc::HObject::empty_cursor(3), 20).unwrap()];
         let reqid = RequestId::new("client.0", 1, 1);
 
         let mosdop = MOSDOp::new(

@@ -718,17 +718,19 @@ impl OSDOp {
     /// * `max_entries` - Maximum number of entries to return
     /// * `cursor` - Continuation cursor (HObject for pagination)
     /// * `start_epoch` - OSD map epoch for consistency
-    pub fn pgls(max_entries: u64, cursor: denc::HObject, start_epoch: u32) -> Self {
+    pub fn pgls(
+        max_entries: u64,
+        cursor: denc::HObject,
+        start_epoch: u32,
+    ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
         use denc::denc::Denc;
 
         // Encode cursor (hobject_t) into indata
         let mut indata = BytesMut::new();
-        cursor
-            .encode(&mut indata, 0)
-            .expect("Failed to encode HObject cursor");
+        cursor.encode(&mut indata, 0)?;
 
-        Self {
+        Ok(Self {
             op: OpCode::Pgls,
             flags: 0, // Operation-specific flags (CEPH_OSD_OP_FLAG_*), not RMW flags
             op_data: OpData::Pgls {
@@ -736,7 +738,7 @@ impl OSDOp {
                 start_epoch,
             },
             indata: indata.freeze(),
-        }
+        })
     }
 
     /// Create a CALL operation for object class method invocation
@@ -745,7 +747,11 @@ impl OSDOp {
     /// * `class` - Object class name (e.g., "lock", "rbd")
     /// * `method` - Method name (e.g., "lock", "unlock")
     /// * `indata` - Method-specific input data
-    pub fn call(class: impl Into<String>, method: impl Into<String>, indata: Bytes) -> Self {
+    pub fn call(
+        class: impl Into<String>,
+        method: impl Into<String>,
+        indata: Bytes,
+    ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
         use denc::denc::Denc;
 
@@ -754,15 +760,11 @@ impl OSDOp {
 
         // Encode class and method into indata buffer (prepended to actual indata)
         let mut buf = BytesMut::new();
-        class
-            .encode(&mut buf, 0)
-            .expect("Failed to encode class name");
-        method
-            .encode(&mut buf, 0)
-            .expect("Failed to encode method name");
+        class.encode(&mut buf, 0)?;
+        method.encode(&mut buf, 0)?;
         buf.extend_from_slice(&indata);
 
-        Self {
+        Ok(Self {
             op: OpCode::Call,
             flags: 0,
             op_data: OpData::Call {
@@ -771,7 +773,7 @@ impl OSDOp {
                 indata_len: indata.len() as u32,
             },
             indata: buf.freeze(),
-        }
+        })
     }
 
     /// Create an exclusive lock operation
@@ -786,7 +788,7 @@ impl OSDOp {
         cookie: &str,
         description: &str,
         duration: Option<std::time::Duration>,
-    ) -> Self {
+    ) -> Result<Self, crate::error::OSDClientError> {
         use crate::lock::{LockFlags, LockRequest, LockType};
         use denc::Denc;
 
@@ -801,7 +803,7 @@ impl OSDOp {
         };
 
         let mut buf = bytes::BytesMut::new();
-        Denc::encode(&request, &mut buf, 0).expect("Failed to encode lock request");
+        Denc::encode(&request, &mut buf, 0)?;
         Self::call("lock", "lock", buf.freeze())
     }
 
@@ -819,7 +821,7 @@ impl OSDOp {
         tag: &str,
         description: &str,
         duration: Option<std::time::Duration>,
-    ) -> Self {
+    ) -> Result<Self, crate::error::OSDClientError> {
         use crate::lock::{LockFlags, LockRequest, LockType};
         use denc::Denc;
 
@@ -834,7 +836,7 @@ impl OSDOp {
         };
 
         let mut buf = bytes::BytesMut::new();
-        Denc::encode(&request, &mut buf, 0).expect("Failed to encode lock request");
+        Denc::encode(&request, &mut buf, 0)?;
         Self::call("lock", "lock", buf.freeze())
     }
 
@@ -843,7 +845,7 @@ impl OSDOp {
     /// # Arguments
     /// * `name` - Lock name to unlock
     /// * `cookie` - Lock identifier that was used when acquiring the lock
-    pub fn unlock(name: &str, cookie: &str) -> Self {
+    pub fn unlock(name: &str, cookie: &str) -> Result<Self, crate::error::OSDClientError> {
         use crate::lock::UnlockRequest;
         use denc::Denc;
 
@@ -853,7 +855,7 @@ impl OSDOp {
         };
 
         let mut buf = bytes::BytesMut::new();
-        Denc::encode(&request, &mut buf, 0).expect("Failed to encode unlock request");
+        Denc::encode(&request, &mut buf, 0)?;
         Self::call("lock", "unlock", buf.freeze())
     }
 
@@ -861,16 +863,15 @@ impl OSDOp {
     ///
     /// # Arguments
     /// * `name` - Attribute name
-    pub fn get_xattr(name: impl Into<String>) -> Self {
+    pub fn get_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
         use denc::denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)
-            .expect("Failed to encode xattr name");
+        name.encode(&mut extent_buf, 0)?;
 
-        Self {
+        Ok(Self {
             op: OpCode::GetXattr,
             flags: 0,
             op_data: OpData::Xattr {
@@ -880,7 +881,7 @@ impl OSDOp {
                 cmp_mode: 0,
             },
             indata: extent_buf.freeze(),
-        }
+        })
     }
 
     /// Set an extended attribute
@@ -888,16 +889,18 @@ impl OSDOp {
     /// # Arguments
     /// * `name` - Attribute name
     /// * `value` - Attribute value
-    pub fn set_xattr(name: impl Into<String>, value: Bytes) -> Self {
+    pub fn set_xattr(
+        name: impl Into<String>,
+        value: Bytes,
+    ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
         use denc::denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)
-            .expect("Failed to encode xattr name");
+        name.encode(&mut extent_buf, 0)?;
 
-        Self {
+        Ok(Self {
             op: OpCode::SetXattr,
             flags: 0,
             op_data: OpData::Xattr {
@@ -911,23 +914,22 @@ impl OSDOp {
                 buf.extend_from_slice(&value);
                 buf.freeze()
             },
-        }
+        })
     }
 
     /// Remove an extended attribute
     ///
     /// # Arguments
     /// * `name` - Attribute name to remove
-    pub fn remove_xattr(name: impl Into<String>) -> Self {
+    pub fn remove_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
         use denc::denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)
-            .expect("Failed to encode xattr name");
+        name.encode(&mut extent_buf, 0)?;
 
-        Self {
+        Ok(Self {
             op: OpCode::RemoveXattr,
             flags: 0,
             op_data: OpData::Xattr {
@@ -937,7 +939,7 @@ impl OSDOp {
                 cmp_mode: 0,
             },
             indata: extent_buf.freeze(),
-        }
+        })
     }
 
     /// List all extended attributes

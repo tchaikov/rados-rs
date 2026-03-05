@@ -343,7 +343,7 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new()
-            .op(OSDOp::lock_exclusive(name, cookie, description, duration))
+            .op(OSDOp::lock_exclusive(name, cookie, description, duration)?)
             .build();
 
         self.client
@@ -385,7 +385,13 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new()
-            .op(OSDOp::lock_shared(name, cookie, tag, description, duration))
+            .op(OSDOp::lock_shared(
+                name,
+                cookie,
+                tag,
+                description,
+                duration,
+            )?)
             .build();
 
         self.client
@@ -411,7 +417,7 @@ impl IoCtx {
             name, oid_str, self.pool_id
         );
 
-        let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)).build();
+        let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)?).build();
 
         self.client
             .execute_built_op(self.pool_id, &oid_str, op)
@@ -444,7 +450,7 @@ impl IoCtx {
             name_str, oid_str, self.pool_id
         );
 
-        let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)).build();
+        let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)?).build();
 
         let result = self
             .client
@@ -483,7 +489,7 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new()
-            .op(OSDOp::set_xattr(name_str, value))
+            .op(OSDOp::set_xattr(name_str, value)?)
             .build();
 
         self.client
@@ -513,7 +519,7 @@ impl IoCtx {
             name_str, oid_str, self.pool_id
         );
 
-        let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)).build();
+        let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
         self.client
             .execute_built_op(self.pool_id, &oid_str, op)

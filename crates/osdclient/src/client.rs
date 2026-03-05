@@ -985,7 +985,7 @@ impl OSDClient {
                 remaining,
                 hobject_cursor.clone(),
                 osdmap_epoch.as_u32(),
-            )];
+            )?];
 
             // Acquire throttle permit
             let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await;
