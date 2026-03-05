@@ -16,6 +16,7 @@ A Rust implementation of librados for Ceph cluster communication.
 2. **Test after every change** - Run tests before committing
 3. **Use auto memory** - Record learnings for future reference
 4. **Prefer simple over clever** - Clean field names (e.g., `sec`/`nsec` over `tv_sec`/`tv_nsec`)
+5. **Propagate errors, don't panic** - Use `?` operator instead of `.expect()` or `.unwrap()` in production code
 
 ---
 
@@ -32,6 +33,7 @@ A Rust implementation of librados for Ceph cluster communication.
 - [Troubleshooting](#troubleshooting-common-issues)
 - [Verification Workflow](#verification-workflow)
 - [Architecture Notes](#architecture-notes)
+- [Error Handling Guidelines](#error-handling-guidelines)
 - [Pre-Commit Checklist](#pre-commit-checklist)
 - [Quick Reference](#quick-reference)
 
@@ -588,6 +590,7 @@ When reviewing code, investigate if you see:
 7. ❌ Duplicate type definitions across crates
 8. ❌ Verbose C-style field names when simpler names would work
 9. ❌ Missing version checks in versioned types (use `check_min_version!`)
+10. ❌ `.expect()` or `.unwrap()` in production code paths
 
 **Action**: Refactor to use Denc trait or consolidate into reusable structures.
 
@@ -597,6 +600,144 @@ When reviewing code, investigate if you see:
 2. **Helper functions in `crush` crate** - Avoids circular dependency
 3. **Low-level AES encryption/decryption** - Requires raw bytes
 4. **Test code** - May need manual encoding for specific test scenarios
+
+---
+
+## Error Handling Guidelines
+
+### Core Principle: Propagate Errors, Don't Panic
+
+Production code should **never** use `.expect()` or `.unwrap()` on operations that can fail. Always propagate errors using the `?` operator or explicit error handling.
+
+### ✅ GOOD: Error Propagation
+
+```rust
+// In production code - propagate errors
+pub async fn connect(&mut self) -> Result<(), RadosError> {
+    let stream = TcpStream::connect(&self.addr).await?;
+    self.protocol.initialize(stream).await?;
+    Ok(())
+}
+
+// Handle specific errors when needed
+pub fn parse_config(&self) -> Result<Config, RadosError> {
+    let data = self.data.lock()
+        .map_err(|_| RadosError::LockPoisoned("config data lock poisoned".into()))?;
+
+    Config::from_bytes(&data)
+}
+```
+
+### ❌ BAD: Panicking on Errors
+
+```rust
+// BAD: expect() in production code
+pub async fn connect(&mut self) {
+    let stream = TcpStream::connect(&self.addr)
+        .await
+        .expect("Failed to connect");  // ❌ Will panic!
+}
+
+// BAD: unwrap() in production code
+pub fn parse_config(&self) -> Config {
+    let data = self.data.lock().unwrap();  // ❌ Will panic on poison!
+    Config::from_bytes(&data).unwrap()     // ❌ Will panic on error!
+}
+```
+
+### When `.unwrap()` is Acceptable
+
+1. **Test code** - Tests should panic on unexpected failures
+2. **Infallible operations** - Operations that cannot fail by construction:
+   ```rust
+   // OK: SystemTime after UNIX_EPOCH cannot fail
+   let duration = SystemTime::now()
+       .duration_since(UNIX_EPOCH)
+       .unwrap();
+
+   // OK: Encoding primitives to BytesMut (auto-grows)
+   buf.put_u32_le(value);
+
+   // OK: Map access after verifying key exists
+   if map.contains_key(&key) {
+       let value = map.get(&key).unwrap();  // Safe by construction
+   }
+   ```
+3. **Documentation examples** - Simplified for clarity
+
+### Error Conversion Patterns
+
+#### Lock Poisoning
+```rust
+// Convert PoisonError to RadosError
+let data = self.data.lock()
+    .map_err(|_| RadosError::LockPoisoned("data lock poisoned".into()))?;
+```
+
+#### Semaphore Acquisition
+```rust
+// Convert AcquireError to RadosError
+let permit = self.semaphore.acquire().await
+    .map_err(|_| RadosError::Internal("semaphore closed".into()))?;
+```
+
+#### Type Downcasting
+```rust
+// Handle downcast failures gracefully
+let state = self.state.downcast_ref::<ExpectedState>()
+    .ok_or_else(|| RadosError::Protocol(
+        format!("unexpected state: expected ExpectedState, got {:?}",
+                self.state.type_id())
+    ))?;
+```
+
+#### Frame Assembly
+```rust
+// Propagate frame assembly errors
+let frame = Frame::to_wire(&data)?;  // Returns Result
+let parsed = Frame::from_wire(&bytes)?;
+```
+
+### Common Error Types
+
+- **`RadosError::LockPoisoned`** - Mutex/RwLock poisoning
+- **`RadosError::Internal`** - Internal invariant violations
+- **`RadosError::Protocol`** - Protocol-level errors (encoding, state machine)
+- **`RadosError::Io`** - I/O errors (network, file system)
+- **`RadosError::Authentication`** - Auth failures
+
+### Testing Error Paths
+
+Always test error conditions:
+
+```rust
+#[tokio::test]
+async fn test_connection_failure() {
+    let mut client = Client::new("invalid:9999");
+
+    // Verify error is returned, not panic
+    let result = client.connect().await;
+    assert!(result.is_err());
+
+    match result {
+        Err(RadosError::Io(_)) => { /* expected */ }
+        _ => panic!("Expected Io error"),
+    }
+}
+```
+
+### Migration Strategy
+
+When removing `.expect()` or `.unwrap()`:
+
+1. **Identify the operation** - What can fail?
+2. **Choose error type** - Which `RadosError` variant fits?
+3. **Propagate with `?`** - Let caller handle the error
+4. **Update function signature** - Add `Result<T, RadosError>` return type
+5. **Update callers** - Propagate errors up the call chain
+6. **Test error paths** - Verify errors are handled correctly
+
+See [UNWRAP_AUDIT.md](UNWRAP_AUDIT.md) for a complete audit of remaining unwraps in the codebase.
 
 ---
 
@@ -797,6 +938,8 @@ Before committing any code, verify:
 - [ ] Using Denc trait instead of manual encoding
 - [ ] Field names are simple and clear (not verbose C-style)
 - [ ] Custom Serialize impl added if needed for corpus compatibility
+- [ ] No `.expect()` or `.unwrap()` in production code paths
+- [ ] Errors propagated with `?` operator, not panics
 - [ ] Updated auto memory if learned something new
 - [ ] Commit message is descriptive
 
@@ -807,6 +950,7 @@ Before committing any code, verify:
 ### DO:
 ✅ Use Denc trait for all encoding/decoding in high-level code
 ✅ Use `?` operator for error propagation
+✅ Propagate errors instead of panicking (no `.expect()` or `.unwrap()` in production)
 ✅ Define constants once, import everywhere
 ✅ Implement Denc for reusable patterns
 ✅ Test against corpus data
@@ -821,6 +965,7 @@ Before committing any code, verify:
 ❌ Use manual primitives (`get_u*_le`, `put_u*_le`) outside `impl Denc`
 ❌ Add manual buffer checks (`remaining() < N`)
 ❌ Wrap every field with `.map_err()`
+❌ Use `.expect()` or `.unwrap()` in production code
 ❌ Duplicate constants across files
 ❌ Duplicate type definitions across crates
 ❌ Use verbose C-style field names when simpler names work
