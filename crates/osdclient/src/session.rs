@@ -9,11 +9,11 @@
 //! - A dedicated `io_task()` owns the Connection and multiplexes send/receive
 //! - No locks held during I/O operations
 
-use std::collections::HashMap;
+use dashmap::DashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::{mpsc, oneshot, Mutex, RwLock};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -80,9 +80,9 @@ struct SessionInfo {
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
-    pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
+    pending_ops: Arc<DashMap<u64, PendingOp>>,
     #[allow(dead_code)]
-    backoff_tracker: Arc<RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::client::OSDClient>,
     /// Session incarnation for this connection
@@ -91,7 +91,7 @@ struct IoTaskContext {
     #[allow(dead_code)]
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address)
-    session_info: Arc<RwLock<SessionInfo>>,
+    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -104,7 +104,7 @@ pub struct OSDSession {
     pub osd_id: i32,
     // Channel for sending messages - like Linux kernel's out_queue
     send_tx: mpsc::Sender<msgr2::message::Message>,
-    pending_ops: Arc<RwLock<HashMap<u64, PendingOp>>>,
+    pending_ops: Arc<DashMap<u64, PendingOp>>,
     next_tid: AtomicU64,
     #[allow(dead_code)]
     entity_name: String,
@@ -114,7 +114,7 @@ pub struct OSDSession {
     /// Global ID from monitor authentication (for AUTH_NONE authorizers)
     global_id: u64,
     /// Per-PG backoff tracker using efficient data structures
-    backoff_tracker: Arc<RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
     /// Channel for routing MOSDMap messages to OSDClient
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
@@ -128,7 +128,7 @@ pub struct OSDSession {
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address combined)
     /// Using a single lock reduces lock acquisitions and simplifies the code.
-    session_info: Arc<RwLock<SessionInfo>>,
+    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -199,13 +199,13 @@ impl OSDSession {
         Self {
             osd_id,
             send_tx,
-            pending_ops: Arc::new(RwLock::new(HashMap::new())),
+            pending_ops: Arc::new(DashMap::new()),
             next_tid: AtomicU64::new(1),
             entity_name,
             client_inc,
             auth_provider,
             global_id,
-            backoff_tracker: Arc::new(RwLock::new(BackoffTracker::new())),
+            backoff_tracker: Arc::new(tokio::sync::RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
             tracker,
@@ -213,7 +213,7 @@ impl OSDSession {
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
             // Start with no peer address and disconnected state
-            session_info: Arc::new(RwLock::new(SessionInfo {
+            session_info: Arc::new(tokio::sync::RwLock::new(SessionInfo {
                 conn_state: ConnectionState::Disconnected,
                 peer_addr: None,
             })),
@@ -437,7 +437,7 @@ impl OSDSession {
         // when an OSDMap update arrives. This avoids a type cycle that would arise from
         // spawning kick_requests() here (io_task → kick → get_or_create_session → connect →
         // io_task forms an opaque-async-return cycle the compiler cannot resolve).
-        let n = ctx.pending_ops.read().await.len();
+        let n = ctx.pending_ops.len();
         if n > 0 {
             info!(
                 "OSD {} I/O task exited with {} pending ops; will be kicked on next session use",
@@ -452,17 +452,16 @@ impl OSDSession {
 
     /// Check if this session has a pending operation with the given tid
     pub async fn has_pending_op(&self, tid: u64) -> bool {
-        let pending = self.pending_ops.read().await;
-        pending.contains_key(&tid)
+        self.pending_ops.contains_key(&tid)
     }
 
     /// Get a clone of pending_ops for iteration (used by OSDClient for message routing)
-    pub fn pending_ops(&self) -> Arc<RwLock<HashMap<u64, PendingOp>>> {
+    pub fn pending_ops(&self) -> Arc<DashMap<u64, PendingOp>> {
         Arc::clone(&self.pending_ops)
     }
 
     /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
-    pub fn backoff_tracker(&self) -> Arc<RwLock<BackoffTracker>> {
+    pub fn backoff_tracker(&self) -> Arc<tokio::sync::RwLock<BackoffTracker>> {
         Arc::clone(&self.backoff_tracker)
     }
 
@@ -529,7 +528,7 @@ impl OSDSession {
         tid: u64,
         mut pending_op: PendingOp,
         send_tx: &mpsc::Sender<msgr2::message::Message>,
-        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+        pending_ops: &Arc<DashMap<u64, PendingOp>>,
     ) -> Result<()> {
         // Encode the operation (priority is preserved from original op)
         let msg = Self::encode_operation(&pending_op.op, tid, pending_op.priority)?;
@@ -544,8 +543,7 @@ impl OSDSession {
         match send_tx.try_send(msg) {
             Ok(()) => {
                 // Send succeeded - add back to pending ops
-                let mut pending = pending_ops.write().await;
-                pending.insert(tid, pending_op);
+                pending_ops.insert(tid, pending_op);
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
@@ -626,8 +624,7 @@ impl OSDSession {
         let op_arc = Arc::new(op);
 
         {
-            let mut pending = self.pending_ops.write().await;
-            pending.insert(
+            self.pending_ops.insert(
                 tid,
                 PendingOp {
                     tid,
@@ -687,13 +684,10 @@ impl OSDSession {
     async fn handle_reply(
         tid: u64,
         reply: MOSDOpReply,
-        pending_ops: &Arc<RwLock<HashMap<u64, PendingOp>>>,
+        pending_ops: &Arc<DashMap<u64, PendingOp>>,
         current_incarnation: u32,
     ) -> Option<(PendingOp, u32)> {
-        let pending_op = {
-            let mut pending = pending_ops.write().await;
-            pending.remove(&tid)
-        };
+        let pending_op = pending_ops.remove(&tid).map(|(_, v)| v);
 
         if let Some(pending_op) = pending_op {
             // Check incarnation first - most important staleness check
@@ -859,12 +853,12 @@ impl OSDSession {
         let osd_id = self.osd_id;
         let send_tx = &self.send_tx;
         let pending_ops = &self.pending_ops;
-        let pending = pending_ops.read().await;
 
         let mut ops_to_resend = Vec::new();
 
         // Find all operations in this PG that fall within the backoff range
-        for (tid, pending_op) in pending.iter() {
+        for entry in pending_ops.iter() {
+            let (tid, pending_op) = entry.pair();
             // Check if this operation is for the same PG
             if pending_op.op.pgid != *pgid {
                 continue;
@@ -881,8 +875,6 @@ impl OSDSession {
                 ops_to_resend.push((*tid, Arc::clone(&pending_op.op), pending_op.priority));
             }
         }
-
-        drop(pending);
 
         // Resend the operations
         // IMPORTANT: Use try_send() to avoid deadlock (we're in the io_task)
@@ -971,10 +963,12 @@ impl OSDSession {
     /// Used by OSDClient to determine which operations need rescanning.
     /// Note: object_id is cloned here, but this is only called during OSDMap updates (infrequent).
     pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
-        let pending = self.pending_ops.read().await;
-        pending
+        self.pending_ops
             .iter()
-            .map(|(tid, op)| (*tid, op.pool_id, op.object_id.clone(), op.osdmap_epoch))
+            .map(|entry| {
+                let (tid, op) = entry.pair();
+                (*tid, op.pool_id, op.object_id.clone(), op.osdmap_epoch)
+            })
             .collect()
     }
 
@@ -983,8 +977,7 @@ impl OSDSession {
     /// Used during OSDMap rescanning to extract operations that need to be
     /// migrated to a different OSD. Returns None if the operation doesn't exist.
     pub async fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
-        let mut pending = self.pending_ops.write().await;
-        pending.remove(&tid)
+        self.pending_ops.remove(&tid).map(|(_, v)| v)
     }
 
     /// Insert a migrated operation from another session
@@ -1037,7 +1030,7 @@ impl OSDSession {
         let priority = pending_op.priority;
 
         // Insert into pending operations
-        self.pending_ops.write().await.insert(tid, pending_op);
+        self.pending_ops.insert(tid, pending_op);
 
         // Encode and send the operation using shared helper (priority preserved from original)
         let msg = Self::encode_operation(&op, tid, priority)?;

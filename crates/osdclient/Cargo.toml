@@ -16,6 +16,7 @@ serde = { workspace = true }
 crc32c = { workspace = true }
 libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
+dashmap = "5.5"
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }
