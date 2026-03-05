@@ -130,80 +130,82 @@ Look for:
 
 ## Baseline Results
 
+Recorded on 2026-03-05 using AMD Ryzen 9 9950X3D 16-Core Processor.
+
 ### CRUSH Mapping (crush crate)
 
 **Benchmark**: `single_placement/replicas/3`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 4.91 µs
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `batch_placement/replicas/3`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 809 µs (100 objects)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 ### Denc Encoding (denc crate - primitives)
 
 **Benchmark**: `primitives/u32/encode`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 2.21 ns (1.67 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `primitives/bytes/encode/4096`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 19.5 ns (196 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 ### Message Encoding (denc crate - complex types)
 
 **Benchmark**: `complex/entity_name/encode`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 6.76 ns (1.79 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `complex/entity_addr/encode/msgr2`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 17.1 ns (7.99 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `composite/message/encode`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 37.1 ns (10.7 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 ### Connection (msgr2 crate)
 
 **Benchmark**: `hello_frame/encode`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 258 ns
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `client_ident_frame/encode`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 566 ns
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `message_frame/encode_1kb`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 371 ns (2.57 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 ### OSD Operations (osdclient crate)
 
 **Benchmark**: `osdop_build/read/4096`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 8.64 ns
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `mosdop_encode/write/4096`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 360 ns (10.6 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 **Benchmark**: `mosdop_full_message/write/4096`
-- **Baseline**: TBD
-- **Date**: TBD
-- **Hardware**: TBD
+- **Baseline**: 983 ns (3.88 GiB/s)
+- **Date**: 2026-03-05
+- **Hardware**: AMD Ryzen 9 9950X3D
 
 ## Continuous Monitoring
 
