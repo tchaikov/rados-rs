@@ -272,28 +272,31 @@ impl OSDClient {
         let current_addr = self.get_osd_address(osd_id).await?;
 
         // Check if we already have a session
-        {
+        // Clone Arc before releasing lock to avoid holding lock across await
+        let existing_session = {
             let sessions = self.sessions.read().await;
-            if let Some(session) = sessions.get(&osd_id) {
-                if session.is_connected().await {
-                    // Validate that session's address matches current OSDMap
-                    // This prevents wasted reconnection attempts to stale addresses
-                    // Reference: Ceph Objecter checks OSDMap during reconnect
-                    let session_addr = session.get_peer_address().await;
+            sessions.get(&osd_id).map(Arc::clone)
+        };
 
-                    // Compare addresses (ignoring nonce which can change)
-                    if let Some(session_addr) = session_addr {
-                        if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
-                            return Ok(Arc::clone(session));
-                        } else {
-                            info!(
-                                "OSD {} address changed in OSDMap (was {:?}, now {:?}), creating new session",
-                                osd_id,
-                                session_addr.to_socket_addr(),
-                                current_addr.to_socket_addr()
-                            );
-                            // Address changed, fall through to create new session
-                        }
+        if let Some(session) = existing_session {
+            if session.is_connected().await {
+                // Validate that session's address matches current OSDMap
+                // This prevents wasted reconnection attempts to stale addresses
+                // Reference: Ceph Objecter checks OSDMap during reconnect
+                let session_addr = session.get_peer_address().await;
+
+                // Compare addresses (ignoring nonce which can change)
+                if let Some(session_addr) = session_addr {
+                    if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
+                        return Ok(session);
+                    } else {
+                        info!(
+                            "OSD {} address changed in OSDMap (was {:?}, now {:?}), creating new session",
+                            osd_id,
+                            session_addr.to_socket_addr(),
+                            current_addr.to_socket_addr()
+                        );
+                        // Address changed, fall through to create new session
                     }
                 }
             }
@@ -327,32 +330,38 @@ impl OSDClient {
         let session = Arc::new(session);
 
         // Now acquire write lock only to insert the connected session
-        let mut sessions = self.sessions.write().await;
-
         // Double-check after acquiring write lock to avoid race condition
-        if let Some(existing) = sessions.get(&osd_id) {
+        // Clone existing session before releasing lock to check it outside critical section
+        let existing_to_check = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&osd_id).map(Arc::clone)
+        };
+
+        if let Some(existing) = existing_to_check {
             if existing.is_connected().await {
-                // Re-validate address with write lock held
+                // Re-validate address outside lock
                 let session_addr = existing.get_peer_address().await;
 
                 if let Some(session_addr) = session_addr {
                     if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
                         // Another task created a session while we were connecting
                         // Close our redundant session and return existing one
-                        let existing_clone = Arc::clone(existing);
-                        drop(sessions);
                         session.close().await;
-                        return Ok(existing_clone);
+                        return Ok(existing);
                     }
                 }
 
                 // Address changed, remove old session
                 info!("Removing old session for OSD {} with stale address", osd_id);
+                let mut sessions = self.sessions.write().await;
                 sessions.remove(&osd_id);
+                drop(sessions);
             }
             // Disconnected session stays in the map; it will be replaced below and
             // its pending ops kicked into the new session after creation.
         }
+
+        let mut sessions = self.sessions.write().await;
 
         // Insert the new session, replacing any disconnected session.
         // insert() returns the old value so we can kick its pending ops.
@@ -1543,8 +1552,13 @@ impl OSDClient {
         self.shutdown_token.cancel();
 
         // Await all I/O tasks to ensure they have stopped
-        let sessions = self.sessions.read().await;
-        for (_, session) in sessions.iter() {
+        // Clone sessions before releasing lock to avoid holding lock across await
+        let sessions_to_close = {
+            let sessions = self.sessions.read().await;
+            sessions.values().map(Arc::clone).collect::<Vec<_>>()
+        };
+
+        for session in sessions_to_close {
             session.close().await;
         }
 
@@ -1747,10 +1761,13 @@ impl OSDClient {
         debug!("OSD {} sent OSDOpReply for tid={}", osd_id, tid);
 
         // Get the session for this OSD
-        let sessions = self.sessions.read().await;
-        let session = sessions.get(&osd_id).ok_or_else(|| {
-            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
-        })?;
+        // Clone Arc before releasing lock to avoid holding lock across await
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&osd_id).cloned().ok_or_else(|| {
+                OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
+            })?
+        };
 
         // Check if retry is needed (returns Some if EAGAIN on replica read)
         if let Some((pending_op, new_flags)) = session.handle_osd_op_reply(tid, reply).await {
@@ -1798,10 +1815,13 @@ impl OSDClient {
         );
 
         // Get the session for this OSD (the one that sent the backoff)
-        let sessions = self.sessions.read().await;
-        let session = sessions.get(&osd_id).ok_or_else(|| {
-            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
-        })?;
+        // Clone Arc before releasing lock to avoid holding lock across await
+        let session = {
+            let sessions = self.sessions.read().await;
+            sessions.get(&osd_id).cloned().ok_or_else(|| {
+                OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
+            })?
+        };
 
         match backoff.op {
             CEPH_OSD_BACKOFF_OP_BLOCK => {
