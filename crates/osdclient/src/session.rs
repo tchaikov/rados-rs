@@ -151,7 +151,8 @@ pub struct PendingOp {
     /// OSDMap epoch this operation was submitted against
     pub osdmap_epoch: u32,
     /// Full operation for potential resubmission
-    pub op: MOSDOp,
+    /// Wrapped in Arc for cheap cloning during retries
+    pub op: Arc<MOSDOp>,
     /// Operation state
     pub state: crate::types::OpState,
     /// Target information
@@ -500,13 +501,19 @@ impl OSDSession {
         mut pending_op: PendingOp,
         new_flags: u32,
     ) -> Result<()> {
-        // Update operation for retry
-        pending_op.op.flags = new_flags;
+        // Create new MOSDOp with updated fields for retry
+        let mut new_mosdop = (*pending_op.op).clone();
+        new_mosdop.flags = new_flags;
+
+        // Update attempts and retry_attempt
         pending_op.attempts += 1;
-        pending_op.op.retry_attempt = pending_op.attempts - 1;
+        new_mosdop.retry_attempt = pending_op.attempts - 1;
 
         // Update incarnation (operation is being resent in current session)
         pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
+
+        // Replace the Arc with updated operation
+        pending_op.op = Arc::new(new_mosdop);
 
         // Resubmit the operation
         Self::resubmit_operation(tid, pending_op, &self.send_tx, &self.pending_ops).await
@@ -623,7 +630,7 @@ impl OSDSession {
                     pool_id: op.object.pool,
                     object_id: op.object.oid.clone(),
                     osdmap_epoch: op.osdmap_epoch,
-                    op: op.clone(),
+                    op: Arc::new(op.clone()),
                     state: crate::types::OpState::Queued,
                     target: crate::types::OpTarget::new(
                         op.osdmap_epoch,
@@ -754,27 +761,33 @@ impl OSDSession {
                 // Increment redirect counter
                 updated_op.redirect_count += 1;
 
+                // Create a new MOSDOp with updated fields (Arc requires creating new instance)
+                let mut new_mosdop = (*updated_op.op).clone();
+
                 // Update object locator with redirect information
                 if redirect.redirect_locator.pool_id != u64::MAX {
-                    updated_op.op.object.pool = redirect.redirect_locator.pool_id;
+                    new_mosdop.object.pool = redirect.redirect_locator.pool_id;
                 }
                 if !redirect.redirect_locator.key.is_empty() {
-                    updated_op.op.object.key = redirect.redirect_locator.key.clone();
+                    new_mosdop.object.key = redirect.redirect_locator.key.clone();
                 }
                 if !redirect.redirect_locator.namespace.is_empty() {
-                    updated_op.op.object.namespace = redirect.redirect_locator.namespace.clone();
+                    new_mosdop.object.namespace = redirect.redirect_locator.namespace.clone();
                 }
                 if !redirect.redirect_object.is_empty() {
-                    updated_op.op.object.oid = redirect.redirect_object.clone();
+                    new_mosdop.object.oid = redirect.redirect_object.clone();
                 }
 
                 // Set redirect flags (following Ceph Objecter.cc:3747-3749)
                 use crate::types::OsdOpFlags;
-                updated_op.op.flags |= OsdOpFlags::REDIRECTED.bits();
-                updated_op.op.flags |= OsdOpFlags::IGNORE_CACHE.bits();
-                updated_op.op.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
+                new_mosdop.flags |= OsdOpFlags::REDIRECTED.bits();
+                new_mosdop.flags |= OsdOpFlags::IGNORE_CACHE.bits();
+                new_mosdop.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
 
-                let new_flags = updated_op.op.flags;
+                let new_flags = new_mosdop.flags;
+
+                // Replace the Arc with the updated operation
+                updated_op.op = Arc::new(new_mosdop);
 
                 // Return operation for resubmission with updated flags
                 // The caller (OSDClient) will recalculate target OSD via CRUSH
@@ -794,9 +807,16 @@ impl OSDSession {
                         tid
                     );
 
-                    // Remove replica read flags and retry (will go to primary)
-                    let new_flags = pending_op.op.flags & !replica_flags;
-                    return Some((pending_op, new_flags));
+                    // Create new MOSDOp with replica read flags removed
+                    let mut new_mosdop = (*pending_op.op).clone();
+                    new_mosdop.flags &= !replica_flags;
+                    let new_flags = new_mosdop.flags;
+
+                    // Update the Arc
+                    let mut updated_op = pending_op;
+                    updated_op.op = Arc::new(new_mosdop);
+
+                    return Some((updated_op, new_flags));
                 }
             }
 
@@ -844,7 +864,7 @@ impl OSDSession {
                     "OSD {} backoff lifted: will resend operation tid={} for object={} in range [{:?}, {:?})",
                     osd_id, tid, pending_op.op.object.oid, begin, end
                 );
-                ops_to_resend.push((*tid, pending_op.op.clone(), pending_op.priority));
+                ops_to_resend.push((*tid, Arc::clone(&pending_op.op), pending_op.priority));
             }
         }
 
@@ -852,13 +872,13 @@ impl OSDSession {
 
         // Resend the operations
         // IMPORTANT: Use try_send() to avoid deadlock (we're in the io_task)
-        for (tid, op, priority) in ops_to_resend {
-            match Self::encode_operation(&op, tid, priority) {
+        for (tid, op_arc, priority) in ops_to_resend {
+            match Self::encode_operation(&op_arc, tid, priority) {
                 Ok(msg) => match send_tx.try_send(msg) {
                     Ok(()) => {
                         info!(
                             "OSD {} resent operation tid={} for object={} after backoff lifted",
-                            osd_id, tid, op.object.oid
+                            osd_id, tid, op_arc.object.oid
                         );
                     }
                     Err(mpsc::error::TrySendError::Full(_)) => {
@@ -966,9 +986,13 @@ impl OSDSession {
     ) -> Result<()> {
         let tid = pending_op.tid;
 
+        // Create new MOSDOp with updated epoch
+        let mut new_mosdop = (*pending_op.op).clone();
+        new_mosdop.osdmap_epoch = new_osdmap_epoch;
+
         // Update the operation's OSDMap epoch
         pending_op.osdmap_epoch = new_osdmap_epoch;
-        pending_op.op.osdmap_epoch = new_osdmap_epoch;
+        pending_op.op = Arc::new(new_mosdop);
 
         // Increment attempts counter (matching C++ Objecter behavior)
         pending_op.attempts += 1;
@@ -994,7 +1018,7 @@ impl OSDSession {
         }
 
         // Extract op and priority before inserting (avoids re-acquiring lock)
-        let op = pending_op.op.clone();
+        let op = Arc::clone(&pending_op.op);
         let priority = pending_op.priority;
 
         // Insert into pending operations
