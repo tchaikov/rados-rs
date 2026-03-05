@@ -543,8 +543,24 @@ impl MonClient {
             let monmap_state = self.monmap_state.read().await;
             monmap_state.monmap.clone()
         };
-        let hunt_parallel = self.config.hunt_parallel;
 
+        // Select monitors by priority and shuffle them
+        let selected_ranks = self.select_monitors_by_priority(&monmap)?;
+
+        // Try connecting to monitors in parallel
+        let hunt_result = self.connect_parallel(&selected_ranks).await;
+
+        // Update backoff state based on hunt result
+        self.update_hunt_backoff(hunt_start, hunt_result.is_err())
+            .await;
+
+        hunt_result
+    }
+
+    /// Select monitors by priority and apply weighted shuffling
+    ///
+    /// Returns a list of monitor ranks to try, ordered by weighted random selection.
+    fn select_monitors_by_priority(&self, monmap: &MonMap) -> Result<Vec<usize>> {
         // Get monitors grouped by priority (lowest priority first)
         let priority_groups = monmap.get_monitors_by_priority();
 
@@ -559,45 +575,67 @@ impl MonClient {
             return Err(MonClientError::MonitorUnavailable);
         }
 
-        // Shuffle ranks based on weights
-        let mut selected_ranks = ranks.clone();
-        if selected_ranks.len() > 1 {
-            // Check if all weights are zero
-            let weights: Vec<u16> = selected_ranks
-                .iter()
-                .map(|&rank| monmap.get_weight(rank))
-                .collect();
+        // Apply weighted shuffling
+        let selected_ranks = self.weighted_shuffle(ranks, monmap)?;
 
-            let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+        Ok(selected_ranks)
+    }
 
-            if total_weight == 0 {
-                // All weights are zero, use uniform random selection
-                use rand::seq::SliceRandom;
-                let mut rng = rand::thread_rng();
-                selected_ranks.shuffle(&mut rng);
-            } else {
-                // Use weighted random selection
-                use rand::distributions::WeightedIndex;
-                use rand::prelude::*;
-                let mut rng = rand::thread_rng();
+    /// Shuffle monitor ranks using weighted random selection
+    ///
+    /// If all weights are zero, uses uniform random shuffling.
+    /// Otherwise, uses Fisher-Yates with weighted selection.
+    fn weighted_shuffle(&self, ranks: &[usize], monmap: &MonMap) -> Result<Vec<usize>> {
+        let mut selected_ranks = ranks.to_vec();
 
-                // Shuffle with weights (Fisher-Yates with weighted selection)
-                let mut shuffled = Vec::new();
-                let mut remaining_ranks = selected_ranks.clone();
-                let mut remaining_weights = weights.clone();
-
-                while !remaining_ranks.is_empty() {
-                    let dist = WeightedIndex::new(&remaining_weights).map_err(|e| {
-                        MonClientError::InvalidMonMap(format!("Invalid weights: {}", e))
-                    })?;
-                    let idx = dist.sample(&mut rng);
-                    shuffled.push(remaining_ranks.remove(idx));
-                    remaining_weights.remove(idx);
-                }
-
-                selected_ranks = shuffled;
-            }
+        if selected_ranks.len() <= 1 {
+            return Ok(selected_ranks);
         }
+
+        // Collect weights for all ranks
+        let weights: Vec<u16> = selected_ranks
+            .iter()
+            .map(|&rank| monmap.get_weight(rank))
+            .collect();
+
+        let total_weight: u32 = weights.iter().map(|&w| w as u32).sum();
+
+        if total_weight == 0 {
+            // All weights are zero, use uniform random selection
+            use rand::seq::SliceRandom;
+            let mut rng = rand::thread_rng();
+            selected_ranks.shuffle(&mut rng);
+        } else {
+            // Use weighted random selection (Fisher-Yates with weighted selection)
+            use rand::distributions::WeightedIndex;
+            use rand::prelude::*;
+            let mut rng = rand::thread_rng();
+
+            let mut shuffled = Vec::new();
+            let mut remaining_ranks = selected_ranks;
+            let mut remaining_weights = weights;
+
+            while !remaining_ranks.is_empty() {
+                let dist = WeightedIndex::new(&remaining_weights).map_err(|e| {
+                    MonClientError::InvalidMonMap(format!("Invalid weights: {}", e))
+                })?;
+                let idx = dist.sample(&mut rng);
+                shuffled.push(remaining_ranks.remove(idx));
+                remaining_weights.remove(idx);
+            }
+
+            selected_ranks = shuffled;
+        }
+
+        Ok(selected_ranks)
+    }
+
+    /// Attempt to connect to monitors in parallel
+    ///
+    /// Tries up to `hunt_parallel` monitors concurrently.
+    /// Returns success if any connection succeeds.
+    async fn connect_parallel(&self, selected_ranks: &[usize]) -> Result<()> {
+        let hunt_parallel = self.config.hunt_parallel;
 
         // Determine how many monitors to try in parallel
         let n = if hunt_parallel == 0 || hunt_parallel > selected_ranks.len() {
@@ -606,8 +644,7 @@ impl MonClient {
             hunt_parallel
         };
 
-        // Try connecting to n monitors in parallel
-        let hunt_result = if n == 1 {
+        if n == 1 {
             // Simple case: try one monitor
             self.connect_to_mon(selected_ranks[0]).await
         } else {
@@ -626,33 +663,30 @@ impl MonClient {
             // Wait for the first successful connection
             match select_ok(futures).await {
                 Ok((_, _)) => {
-                    // First connection succeeded
                     info!("Successfully connected to a monitor");
                     Ok(())
                 }
                 Err(e) => Err(e),
             }
-        };
-
-        // Update backoff state based on hunt result
-        {
-            let mut conn_state = self.connection_state.write().await;
-            conn_state.last_hunt_attempt = Some(hunt_start);
-
-            if hunt_result.is_err() && conn_state.had_a_connection {
-                // Hunt failed - increase backoff for next attempt
-                conn_state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
-                if conn_state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
-                    conn_state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
-                }
-                debug!(
-                    "Hunt failed, increased backoff multiplier to {:.2}",
-                    conn_state.reopen_interval_multiplier
-                );
-            }
         }
+    }
 
-        hunt_result
+    /// Update hunt backoff state after a hunt attempt
+    async fn update_hunt_backoff(&self, hunt_start: std::time::Instant, hunt_failed: bool) {
+        let mut conn_state = self.connection_state.write().await;
+        conn_state.last_hunt_attempt = Some(hunt_start);
+
+        if hunt_failed && conn_state.had_a_connection {
+            // Hunt failed - increase backoff for next attempt
+            conn_state.reopen_interval_multiplier *= self.config.hunt_interval_backoff;
+            if conn_state.reopen_interval_multiplier > self.config.hunt_interval_max_multiple {
+                conn_state.reopen_interval_multiplier = self.config.hunt_interval_max_multiple;
+            }
+            debug!(
+                "Hunt failed, increased backoff multiplier to {:.2}",
+                conn_state.reopen_interval_multiplier
+            );
+        }
     }
 
     /// Compute the backoff delay before the next hunt attempt.
