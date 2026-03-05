@@ -421,7 +421,7 @@ impl MonClient {
         drop(state);
 
         // Start tick loop for periodic keepalive and auth renewal
-        self.start_tick_loop();
+        self.start_tick_loop()?;
 
         // Start hunting process (connects to monitor)
         self.start_hunting().await?;
@@ -895,7 +895,7 @@ impl MonClient {
     }
 
     /// Start background tick loop for periodic maintenance
-    fn start_tick_loop(&self) {
+    fn start_tick_loop(&self) -> Result<()> {
         let state = Arc::clone(&self.state);
         let self_clone = self.clone();
         let tick_token = self.shutdown_token.clone();
@@ -949,8 +949,11 @@ impl MonClient {
                 info!("Tick loop terminated");
             });
             info!("Started tick loop");
+            Ok(())
         } else {
-            error!("Failed to acquire tasks lock during init - lock may be poisoned");
+            Err(MonClientError::Other(
+                "Failed to acquire tasks lock during init - lock may be poisoned".into(),
+            ))
         }
     }
 
