@@ -17,7 +17,6 @@ crc32c = { workspace = true }
 libc = "0.2"
 zerocopy = { version = "0.8", features = ["derive"] }
 dashmap = "5.5"
-parking_lot = { workspace = true }
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }
@@ -36,4 +35,8 @@ criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]
 name = "operations"
+harness = false
+
+[[bench]]
+name = "concurrent"
 harness = false
