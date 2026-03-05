@@ -23,6 +23,9 @@ use crate::messages::{MOSDOp, MOSDOpReply};
 use crate::types::{OpResult, RequestId, StripedPgId};
 
 /// Build an HObject from MOSDOp fields for backoff range checking
+///
+/// Note: This function clones strings because HObject owns its data.
+/// The clones only happen when checking backoff (rare) or during resend operations.
 fn hobj_from_op(op: &MOSDOp) -> denc::HObject {
     denc::HObject {
         key: op.object.key.clone(),
@@ -617,6 +620,8 @@ impl OSDSession {
         let (tx, rx) = oneshot::channel();
 
         // Track the operation
+        // Note: We store Arc<MOSDOp> to avoid cloning the entire operation on retries.
+        // The reqid and object_id are cloned here but only once per operation submission.
         {
             let mut pending = self.pending_ops.write().await;
             pending.insert(
@@ -769,13 +774,19 @@ impl OSDSession {
                     new_mosdop.object.pool = redirect.redirect_locator.pool_id;
                 }
                 if !redirect.redirect_locator.key.is_empty() {
-                    new_mosdop.object.key = redirect.redirect_locator.key.clone();
+                    new_mosdop
+                        .object
+                        .key
+                        .clone_from(&redirect.redirect_locator.key);
                 }
                 if !redirect.redirect_locator.namespace.is_empty() {
-                    new_mosdop.object.namespace = redirect.redirect_locator.namespace.clone();
+                    new_mosdop
+                        .object
+                        .namespace
+                        .clone_from(&redirect.redirect_locator.namespace);
                 }
                 if !redirect.redirect_object.is_empty() {
-                    new_mosdop.object.oid = redirect.redirect_object.clone();
+                    new_mosdop.object.oid.clone_from(&redirect.redirect_object);
                 }
 
                 // Set redirect flags (following Ceph Objecter.cc:3747-3749)
@@ -955,6 +966,7 @@ impl OSDSession {
     ///
     /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
     /// Used by OSDClient to determine which operations need rescanning.
+    /// Note: object_id is cloned here, but this is only called during OSDMap updates (infrequent).
     pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
         let pending = self.pending_ops.read().await;
         pending
