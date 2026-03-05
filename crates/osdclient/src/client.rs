@@ -597,7 +597,7 @@ impl OSDClient {
 
         // Calculate operation budget and acquire throttle permit
         let budget = calc_op_budget(&ops);
-        let _throttle_permit = self.throttle.acquire(budget).await;
+        let _throttle_permit = self.throttle.acquire(budget).await?;
         debug!(
             "Acquired throttle permit: budget={} bytes, current_ops={}, current_bytes={}",
             budget,
@@ -988,7 +988,7 @@ impl OSDClient {
             )?];
 
             // Acquire throttle permit
-            let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await;
+            let _throttle_permit = self.throttle.acquire(calc_op_budget(&ops)).await?;
 
             // Build request ID
             let tid = session.next_tid();

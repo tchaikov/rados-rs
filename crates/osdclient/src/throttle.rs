@@ -77,13 +77,14 @@ impl Throttle {
     ///
     /// # Returns
     /// A permit that releases the budget when dropped
-    pub async fn acquire(&self, bytes: usize) -> ThrottlePermit<'_> {
+    pub async fn acquire(
+        &self,
+        bytes: usize,
+    ) -> Result<ThrottlePermit<'_>, crate::error::OSDClientError> {
         // Acquire operation slot (blocks if at limit)
-        let op_permit = self
-            .ops_sem
-            .acquire()
-            .await
-            .expect("Semaphore should not be closed");
+        let op_permit = self.ops_sem.acquire().await.map_err(|_| {
+            crate::error::OSDClientError::Internal("Throttle semaphore closed unexpectedly".into())
+        })?;
 
         // Acquire byte budget (blocks if at limit)
         let bytes_permit = if bytes > 0 {
@@ -91,7 +92,11 @@ impl Throttle {
                 self.bytes_sem
                     .acquire_many(bytes as u32)
                     .await
-                    .expect("Semaphore should not be closed"),
+                    .map_err(|_| {
+                        crate::error::OSDClientError::Internal(
+                            "Throttle semaphore closed unexpectedly".into(),
+                        )
+                    })?,
             )
         } else {
             None
@@ -103,12 +108,12 @@ impl Throttle {
             self.current_bytes.fetch_add(bytes, Ordering::Relaxed);
         }
 
-        ThrottlePermit {
+        Ok(ThrottlePermit {
             throttle: self,
             op_permit,
             bytes_permit,
             bytes,
-        }
+        })
     }
 
     /// Try to acquire budget without blocking
@@ -193,12 +198,12 @@ mod tests {
         let throttle = Throttle::new(2, 1000);
 
         // Acquire first operation
-        let permit1 = throttle.acquire(100).await;
+        let permit1 = throttle.acquire(100).await.unwrap();
         assert_eq!(throttle.current_ops(), 1);
         assert_eq!(throttle.current_bytes(), 100);
 
         // Acquire second operation
-        let permit2 = throttle.acquire(200).await;
+        let permit2 = throttle.acquire(200).await.unwrap();
         assert_eq!(throttle.current_ops(), 2);
         assert_eq!(throttle.current_bytes(), 300);
 
@@ -218,8 +223,8 @@ mod tests {
         let throttle = Throttle::new(2, 1000);
 
         // Acquire two operations (at limit)
-        let _permit1 = throttle.acquire(100).await;
-        let _permit2 = throttle.acquire(100).await;
+        let _permit1 = throttle.acquire(100).await.unwrap();
+        let _permit2 = throttle.acquire(100).await.unwrap();
 
         // Try to acquire third - should fail
         let result = throttle.try_acquire(100);
@@ -231,7 +236,7 @@ mod tests {
         let throttle = Throttle::new(10, 1000);
 
         // Acquire 900 bytes
-        let _permit1 = throttle.acquire(900).await;
+        let _permit1 = throttle.acquire(900).await.unwrap();
         assert_eq!(throttle.current_bytes(), 900);
 
         // Try to acquire 200 bytes (would exceed limit) - should fail
@@ -249,7 +254,7 @@ mod tests {
         let throttle = Throttle::new(10, 1000);
 
         // Operations with zero bytes should not consume byte budget
-        let _permit = throttle.acquire(0).await;
+        let _permit = throttle.acquire(0).await.unwrap();
         assert_eq!(throttle.current_ops(), 1);
         assert_eq!(throttle.current_bytes(), 0);
     }
