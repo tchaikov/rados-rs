@@ -96,9 +96,17 @@ pub trait PaxosServiceMessage: Sized {
     /// Decode the message-specific fields (after paxos fields)
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self>;
 
+    /// Provide a size hint for message-specific fields (optional optimization)
+    fn encoded_size_hint(&self) -> Option<usize> {
+        None
+    }
+
     /// Encode the complete message (paxos fields + message fields)
     fn encode(&self) -> Result<Bytes> {
-        let mut buf = BytesMut::new();
+        // Pre-allocate buffer with estimated size
+        let paxos_size = PaxosFields::encoded_size();
+        let message_size = self.encoded_size_hint().unwrap_or(256);
+        let mut buf = BytesMut::with_capacity(paxos_size + message_size);
 
         // Encode paxos fields first
         self.paxos_fields().encode(&mut buf)?;

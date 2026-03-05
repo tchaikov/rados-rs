@@ -13,7 +13,7 @@ pub mod pg_nls_response;
 pub mod types;
 pub mod zero_copy;
 
-pub use denc::*;
+pub use denc::{encode_with_capacity, Denc, FixedSize, VersionedEncode};
 pub use encoding_metadata::*;
 pub use entity_addr::*;
 pub use error::*;

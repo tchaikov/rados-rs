@@ -16,7 +16,9 @@ fn bench_hello_frame_encode(c: &mut Criterion) {
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -47,8 +49,8 @@ fn bench_auth_request_frame_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("auth_request_frame");
 
     let frame = AuthRequestFrame::new(
-        2, // CEPHX
-        vec![1, 2], // preferred modes
+        2,                           // CEPHX
+        vec![1, 2],                  // preferred modes
         Bytes::from(vec![0u8; 256]), // 256-byte auth payload
     );
     let mut assembler = FrameAssembler::new(true);
@@ -56,7 +58,9 @@ fn bench_auth_request_frame_encode(c: &mut Criterion) {
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -67,11 +71,7 @@ fn bench_auth_request_frame_encode(c: &mut Criterion) {
 fn bench_auth_request_frame_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("auth_request_frame");
 
-    let frame = AuthRequestFrame::new(
-        2,
-        vec![1, 2],
-        Bytes::from(vec![0u8; 256]),
-    );
+    let frame = AuthRequestFrame::new(2, vec![1, 2], Bytes::from(vec![0u8; 256]));
     let mut assembler = FrameAssembler::new(true);
     let wire = assembler.to_wire(&frame, 0).unwrap();
 
@@ -89,8 +89,8 @@ fn bench_auth_done_frame_encode(c: &mut Criterion) {
     let mut group = c.benchmark_group("auth_done_frame");
 
     let frame = AuthDoneFrame::new(
-        12345, // global_id
-        1,     // con_mode
+        12345,                       // global_id
+        1,                           // con_mode
         Bytes::from(vec![0u8; 128]), // 128-byte auth payload
     );
     let mut assembler = FrameAssembler::new(true);
@@ -98,7 +98,9 @@ fn bench_auth_done_frame_encode(c: &mut Criterion) {
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -109,11 +111,7 @@ fn bench_auth_done_frame_encode(c: &mut Criterion) {
 fn bench_auth_done_frame_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("auth_done_frame");
 
-    let frame = AuthDoneFrame::new(
-        12345,
-        1,
-        Bytes::from(vec![0u8; 128]),
-    );
+    let frame = AuthDoneFrame::new(12345, 1, Bytes::from(vec![0u8; 128]));
     let mut assembler = FrameAssembler::new(true);
     let wire = assembler.to_wire(&frame, 0).unwrap();
 
@@ -136,19 +134,21 @@ fn bench_client_ident_frame_encode(c: &mut Criterion) {
     let frame = ClientIdentFrame::new(
         denc::EntityAddrvec::with_addr(entity_addr.clone()),
         target_addr,
-        12345,  // gid
-        100,    // global_seq
+        12345,              // gid
+        100,                // global_seq
         0xFFFFFFFFFFFFFFFF, // features_supported
-        0,      // features_required
-        0,      // flags
-        0xABCDEF, // cookie
+        0,                  // features_required
+        0,                  // flags
+        0xABCDEF,           // cookie
     );
     let mut assembler = FrameAssembler::new(true);
     let features = denc::CephFeatures::MSG_ADDR2.bits();
 
     group.bench_function("encode", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -199,7 +199,9 @@ fn bench_message_frame_encode(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(1024));
     group.bench_function("encode_1kb", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -244,7 +246,9 @@ fn bench_message_frame_large(c: &mut Criterion) {
 
     group.bench_function("encode_72kb", |b| {
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -271,7 +275,9 @@ fn bench_frame_assembly_rev0_vs_rev1(c: &mut Criterion) {
     group.bench_function("rev0", |b| {
         let mut assembler = FrameAssembler::new(false);
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });
@@ -279,7 +285,9 @@ fn bench_frame_assembly_rev0_vs_rev1(c: &mut Criterion) {
     group.bench_function("rev1", |b| {
         let mut assembler = FrameAssembler::new(true);
         b.iter(|| {
-            let wire = assembler.to_wire(black_box(&frame), black_box(features)).unwrap();
+            let wire = assembler
+                .to_wire(black_box(&frame), black_box(features))
+                .unwrap();
             black_box(wire);
         });
     });

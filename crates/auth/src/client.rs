@@ -105,7 +105,9 @@ impl CephXClientHandler {
         );
 
         // Initial request contains: auth_mode + entity_name + global_id
-        let mut payload = BytesMut::new();
+        // Pre-allocate: 1 byte (auth_mode) + entity_name size + 8 bytes (global_id)
+        let estimated_size = 1 + 16 + 8; // Conservative estimate
+        let mut payload = BytesMut::with_capacity(estimated_size);
         self.auth_mode.as_u8().encode(&mut payload, 0)?;
         self.entity_name.encode(&mut payload, 0)?;
         global_id.encode(&mut payload, 0)?;
@@ -155,7 +157,9 @@ impl CephXClientHandler {
         );
 
         // Encode header + authenticate (NO auth_mode for second request)
-        let mut payload = BytesMut::new();
+        // Pre-allocate: header + authenticate structure
+        let estimated_size = 256; // Conservative estimate for CephXAuthenticate
+        let mut payload = BytesMut::with_capacity(estimated_size);
         header.encode(&mut payload, 0)?;
         auth_request.encode(&mut payload, 0)?;
 
@@ -187,7 +191,8 @@ impl CephXClientHandler {
             },
         };
 
-        let mut bl = BytesMut::new();
+        let estimated_size = 32; // struct_v + magic + 2 u64s
+        let mut bl = BytesMut::with_capacity(estimated_size);
         envelope.encode(&mut bl, 0)?;
 
         // Encrypt the envelope using the client's secret key
@@ -195,7 +200,8 @@ impl CephXClientHandler {
 
         // In C++, encode_encrypt() adds a u32 length prefix to the encrypted data
         // before XOR folding. We need to replicate this behavior.
-        let mut folding_buffer = BytesMut::new();
+        let estimated_folding_size = 4 + ciphertext.len();
+        let mut folding_buffer = BytesMut::with_capacity(estimated_folding_size);
         ciphertext.encode(&mut folding_buffer, 0)?;
         let mut folding_data = folding_buffer.freeze();
 
@@ -718,7 +724,8 @@ impl CephXClientHandler {
         };
 
         // Encode authorize_a
-        let mut authorizer_buf = BytesMut::new();
+        let estimated_size = 128; // Conservative estimate for CephXAuthorizeA
+        let mut authorizer_buf = BytesMut::with_capacity(estimated_size);
         authorize_a.encode(&mut authorizer_buf, 0)?;
 
         trace!(
@@ -752,7 +759,8 @@ impl CephXClientHandler {
             payload: authorize_b.clone(),
         };
 
-        let mut envelope_buf = BytesMut::new();
+        let estimated_size = 64; // Conservative estimate for envelope
+        let mut envelope_buf = BytesMut::with_capacity(estimated_size);
         envelope.encode(&mut envelope_buf, 0)?;
 
         // Encrypt with AES-128-CBC using session key

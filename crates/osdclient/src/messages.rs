@@ -270,7 +270,10 @@ impl CephMessagePayload for MOSDOp {
         };
         use denc::denc::Denc;
 
-        let mut buf = BytesMut::new();
+        // Pre-allocate buffer with estimated size to avoid reallocations
+        // Estimate: fixed fields + ops + variable data
+        let estimated_size = 256 + (self.ops.len() * 64);
+        let mut buf = BytesMut::with_capacity(estimated_size);
 
         // Debug logging for MOSDOp message
 
@@ -356,7 +359,11 @@ impl CephMessagePayload for MOSDOp {
     fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         // Collect all indata from operations into a single buffer for the message data section.
         // This follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data()
-        let mut buf = BytesMut::new();
+
+        // Pre-calculate total size to avoid reallocations
+        let total_size: usize = self.ops.iter().map(|op| op.indata.len()).sum();
+        let mut buf = BytesMut::with_capacity(total_size);
+
         for op in &self.ops {
             if !op.indata.is_empty() {
                 buf.put_slice(&op.indata);
@@ -598,7 +605,8 @@ impl CephMessagePayload for MOSDBackoff {
     fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
         use denc::Denc;
 
-        let mut buf = BytesMut::new();
+        let size = self.encoded_size(features).unwrap_or(256);
+        let mut buf = BytesMut::with_capacity(size);
         Denc::encode(self, &mut buf, features)?;
         Ok(buf.freeze())
     }

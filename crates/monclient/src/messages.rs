@@ -46,7 +46,8 @@ macro_rules! impl_denc_ceph_message {
             }
 
             fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-                let mut buf = BytesMut::new();
+                let size = self.encoded_size(0).unwrap_or(256);
+                let mut buf = BytesMut::with_capacity(size);
                 self.encode(&mut buf, 0)?;
                 Ok(buf.freeze())
             }
@@ -81,7 +82,8 @@ macro_rules! impl_denc_ceph_message {
             }
 
             fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-                let mut buf = BytesMut::new();
+                let size = self.encoded_size(0).unwrap_or(256);
+                let mut buf = BytesMut::with_capacity(size);
                 self.encode(&mut buf, 0)?;
                 Ok(buf.freeze())
             }

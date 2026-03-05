@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use crush::{
-    pg_to_osds, BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep,
-    PgId, RuleOp, RuleType,
+    pg_to_osds, BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, PgId,
+    RuleOp, RuleType,
 };
 
 /// Create a simple test CRUSH map with the specified number of OSDs

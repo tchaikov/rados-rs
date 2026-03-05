@@ -172,8 +172,11 @@ fn bench_entity_addr_encode(c: &mut Criterion) {
     let entity_addr = EntityAddr::from_socket_addr(EntityAddrType::Msgr2, addr);
 
     // Test both legacy and msgr2 formats
-    for (name, features) in [("legacy", 0u64), ("msgr2", denc::CephFeatures::MSG_ADDR2.bits())]
-        .iter()
+    for (name, features) in [
+        ("legacy", 0u64),
+        ("msgr2", denc::CephFeatures::MSG_ADDR2.bits()),
+    ]
+    .iter()
     {
         let size = entity_addr.encoded_size(*features).unwrap();
         group.throughput(Throughput::Bytes(size as u64));
@@ -216,7 +219,9 @@ fn bench_composite_message(c: &mut Criterion) {
     let payload = Bytes::from(vec![0u8; 256]);
 
     let total_size = entity_name.encoded_size(0).unwrap()
-        + entity_addr.encoded_size(denc::CephFeatures::MSG_ADDR2.bits()).unwrap()
+        + entity_addr
+            .encoded_size(denc::CephFeatures::MSG_ADDR2.bits())
+            .unwrap()
         + timestamp.encoded_size(0).unwrap()
         + payload.encoded_size(0).unwrap();
 
