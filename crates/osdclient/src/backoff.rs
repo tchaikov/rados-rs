@@ -16,7 +16,7 @@
 //! - ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff(), _send_op()
 
 use crate::types::StripedPgId;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use tracing::{debug, warn};
 
 /// Composite key for backoff entries: (pgid, begin_hobject)
@@ -175,7 +175,7 @@ impl BackoffTracker {
 
     /// Get the number of PGs with active backoffs
     pub fn num_pgs(&self) -> usize {
-        let mut pgs = std::collections::HashSet::new();
+        let mut pgs = HashSet::new();
         for key in self.entries.keys() {
             pgs.insert(key.pgid);
         }
