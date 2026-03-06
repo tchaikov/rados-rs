@@ -1,0 +1,1333 @@
+   Compiling osdclient v0.1.0 (/home/kefu/dev/rados-rs/crates/osdclient)
+    Finished `bench` profile [optimized] target(s) in 0.52s
+     Running unittests src/lib.rs (target/release/deps/auth-87d8436a58f8996e)
+
+running 44 tests
+test client::tests::test_auth_result_equality ... ignored
+test client::tests::test_build_authenticate_request_without_secret_key ... ignored
+test client::tests::test_build_authenticate_request_without_server_challenge ... ignored
+test client::tests::test_build_initial_request ... ignored
+test client::tests::test_build_initial_request_authorizer_mode ... ignored
+test client::tests::test_client_handler_creation ... ignored
+test client::tests::test_client_handler_creation_with_authorizer_mode ... ignored
+test client::tests::test_crypto_key_decrypt_empty_ciphertext ... ignored
+test client::tests::test_crypto_key_decrypt_invalid_ciphertext ... ignored
+test client::tests::test_entity_name_parsing ... ignored
+test client::tests::test_get_session_mut_when_none ... ignored
+test client::tests::test_get_session_when_none ... ignored
+test client::tests::test_reset ... ignored
+test client::tests::test_set_secret_key ... ignored
+test client::tests::test_set_secret_key_from_base64 ... ignored
+test client::tests::test_set_secret_key_from_base64_invalid ... ignored
+test keyring::tests::test_parse_keyring ... ignored
+test protocol::tests::test_auth_mode_conversions ... ignored
+test protocol::tests::test_cephx_authenticate_encode_decode ... ignored
+test protocol::tests::test_cephx_authorize_a_encode_decode ... ignored
+test protocol::tests::test_cephx_authorize_b_no_challenge ... ignored
+test protocol::tests::test_cephx_authorize_b_rejects_pre_v2 ... ignored
+test protocol::tests::test_cephx_authorize_b_with_challenge ... ignored
+test protocol::tests::test_cephx_authorize_reply_encode_decode ... ignored
+test protocol::tests::test_cephx_authorize_reply_with_connection_secret ... ignored
+test protocol::tests::test_cephx_challenge_blob_encode_decode ... ignored
+test protocol::tests::test_cephx_encrypted_envelope_encode_decode ... ignored
+test protocol::tests::test_cephx_reply_construction ... ignored
+test protocol::tests::test_cephx_reply_encode_decode ... ignored
+test protocol::tests::test_cephx_reply_is_success ... ignored
+test protocol::tests::test_cephx_reply_with_session_key ... ignored
+test protocol::tests::test_cephx_reply_with_ticket ... ignored
+test protocol::tests::test_cephx_request_construction ... ignored
+test protocol::tests::test_cephx_request_encode_decode ... ignored
+test protocol::tests::test_cephx_request_header_encode_decode ... ignored
+test protocol::tests::test_cephx_response_header_encode_decode ... ignored
+test protocol::tests::test_cephx_server_challenge_encode_decode ... ignored
+test protocol::tests::test_encrypted_service_ticket_encode_decode ... ignored
+test protocol::tests::test_service_ticket_encode_decode ... ignored
+test protocol::tests::test_service_ticket_info_encode_decode ... ignored
+test protocol::tests::test_service_ticket_reply_encode_decode ... ignored
+test protocol::tests::test_service_ticket_request_encode_decode ... ignored
+test server::tests::test_global_id_allocation ... ignored
+test server::tests::test_server_handler_creation ... ignored
+
+test result: ok. 0 passed; 0 failed; 44 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/cephconfig-a60c4000ef607546)
+
+running 22 tests
+test config::tests::test_entity_name_default ... ignored
+test config::tests::test_first_v2_mon_addr ... ignored
+test config::tests::test_get_with_fallback ... ignored
+test config::tests::test_keyring ... ignored
+test config::tests::test_mon_addrs ... ignored
+test config::tests::test_mon_dns_srv_name_configured ... ignored
+test config::tests::test_mon_dns_srv_name_default ... ignored
+test config::tests::test_parse_config ... ignored
+test config::tests::test_sections ... ignored
+test tests::test_config_option_get ... ignored
+test tests::test_define_config_macro ... ignored
+test tests::test_define_options_macro ... ignored
+test tests::test_define_options_with_fallback ... ignored
+test types::tests::test_bool_config_value ... ignored
+test types::tests::test_config_option ... ignored
+test types::tests::test_count_config_value ... ignored
+test types::tests::test_duration_config_value ... ignored
+test types::tests::test_parse_duration ... ignored
+test types::tests::test_parse_size ... ignored
+test types::tests::test_ratio_config_value ... ignored
+test types::tests::test_size_config_value ... ignored
+test types::tests::test_string_config_value ... ignored
+
+test result: ok. 0 passed; 0 failed; 22 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/crush-bb35340c34b77f76)
+
+running 27 tests
+test bucket::tests::test_bucket_choose ... ignored
+test bucket::tests::test_crush_ln ... ignored
+test bucket::tests::test_straw2_choose ... ignored
+test bucket::tests::test_uniform_choose ... ignored
+test crush_ln_table::tests::test_rh_lh_table_approximate ... ignored
+test crush_ln_table::tests::test_table_sizes ... ignored
+test crush_ln_table::tests::test_table_values_are_from_ceph ... ignored
+test crush_ln_table::tests::test_tables_are_monotonic ... ignored
+test decode::tests::test_decode_crushmap_corpus ... ignored
+test decode::tests::test_device_class_methods ... ignored
+test hash::tests::test_ceph_str_hash_rjenkins ... ignored
+test hash::tests::test_crush_hash32_2 ... ignored
+test mapper::tests::test_crush_choose_firstn ... ignored
+test mapper::tests::test_crush_choose_indep ... ignored
+test mapper::tests::test_crush_choose_indep_stable_positions ... ignored
+test mapper::tests::test_crush_choose_indep_with_out_device ... ignored
+test mapper::tests::test_crush_do_rule_chooseleaf_indep ... ignored
+test mapper::tests::test_crush_do_rule_indep ... ignored
+test mapper::tests::test_crush_do_rule_simple ... ignored
+test mapper::tests::test_is_out ... ignored
+test placement::tests::test_object_locator ... ignored
+test placement::tests::test_object_to_osds ... ignored
+test placement::tests::test_object_to_pg ... ignored
+test placement::tests::test_object_to_pg_with_namespace ... ignored
+test placement::tests::test_pg_distribution ... ignored
+test placement::tests::test_pg_id ... ignored
+test placement::tests::test_pg_to_osds ... ignored
+
+test result: ok. 0 passed; 0 failed; 27 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/crush_mapping.rs (target/release/deps/crush_mapping-d434ddcf7ea6f4f6)
+Gnuplot not found, using plotters backend
+Benchmarking single_placement/replicas/1
+Benchmarking single_placement/replicas/1: Warming up for 3.0000 s
+Benchmarking single_placement/replicas/1: Collecting 100 samples in estimated 5.0048 s (3.0M iterations)
+Benchmarking single_placement/replicas/1: Analyzing
+single_placement/replicas/1
+                        time:   [1.6525 µs 1.6545 µs 1.6567 µs]
+                        change: [-0.2990% -0.1537% -0.0083%] (p = 0.05 < 0.05)
+                        Change within noise threshold.
+Benchmarking single_placement/replicas/3
+Benchmarking single_placement/replicas/3: Warming up for 3.0000 s
+Benchmarking single_placement/replicas/3: Collecting 100 samples in estimated 5.0047 s (1.0M iterations)
+Benchmarking single_placement/replicas/3: Analyzing
+single_placement/replicas/3
+                        time:   [4.8789 µs 4.8827 µs 4.8865 µs]
+                        change: [-0.3021% -0.1826% -0.0697%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking single_placement/replicas/5
+Benchmarking single_placement/replicas/5: Warming up for 3.0000 s
+Benchmarking single_placement/replicas/5: Collecting 100 samples in estimated 5.0323 s (616k iterations)
+Benchmarking single_placement/replicas/5: Analyzing
+single_placement/replicas/5
+                        time:   [8.1689 µs 8.1794 µs 8.1914 µs]
+                        change: [-0.3692% -0.1745% +0.0205%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  2 (2.00%) high mild
+  2 (2.00%) high severe
+Benchmarking single_placement/replicas/7
+Benchmarking single_placement/replicas/7: Warming up for 3.0000 s
+Benchmarking single_placement/replicas/7: Collecting 100 samples in estimated 5.1031 s (126k iterations)
+Benchmarking single_placement/replicas/7: Analyzing
+single_placement/replicas/7
+                        time:   [40.509 µs 40.679 µs 40.946 µs]
+                        change: [-0.9853% -0.3036% +0.3374%] (p = 0.36 > 0.05)
+                        No change in performance detected.
+Found 11 outliers among 100 measurements (11.00%)
+  6 (6.00%) high mild
+  5 (5.00%) high severe
+
+Benchmarking batch_placement/replicas/1
+Benchmarking batch_placement/replicas/1: Warming up for 3.0000 s
+Benchmarking batch_placement/replicas/1: Collecting 100 samples in estimated 5.1681 s (30k iterations)
+Benchmarking batch_placement/replicas/1: Analyzing
+batch_placement/replicas/1
+                        time:   [168.32 µs 168.73 µs 169.36 µs]
+                        change: [-2.2868% -1.5858% -0.9277%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+Benchmarking batch_placement/replicas/3
+Benchmarking batch_placement/replicas/3: Warming up for 3.0000 s
+Benchmarking batch_placement/replicas/3: Collecting 100 samples in estimated 8.4314 s (10k iterations)
+Benchmarking batch_placement/replicas/3: Analyzing
+batch_placement/replicas/3
+                        time:   [813.21 µs 815.57 µs 818.52 µs]
+                        change: [+0.1825% +0.8480% +1.6244%] (p = 0.02 < 0.05)
+                        Change within noise threshold.
+Found 17 outliers among 100 measurements (17.00%)
+  3 (3.00%) high mild
+  14 (14.00%) high severe
+Benchmarking batch_placement/replicas/5
+Benchmarking batch_placement/replicas/5: Warming up for 3.0000 s
+
+Warning: Unable to complete 100 samples in 5.0s. You may wish to increase target time to 7.1s, enable flat sampling, or reduce sample count to 50.
+Benchmarking batch_placement/replicas/5: Collecting 100 samples in estimated 7.1370 s (5050 iterations)
+Benchmarking batch_placement/replicas/5: Analyzing
+batch_placement/replicas/5
+                        time:   [1.4051 ms 1.4067 ms 1.4084 ms]
+                        change: [+0.3040% +0.4130% +0.5257%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+Benchmarking batch_placement/replicas/7
+Benchmarking batch_placement/replicas/7: Warming up for 3.0000 s
+Benchmarking batch_placement/replicas/7: Collecting 100 samples in estimated 5.0343 s (2300 iterations)
+Benchmarking batch_placement/replicas/7: Analyzing
+batch_placement/replicas/7
+                        time:   [2.2039 ms 2.2153 ms 2.2277 ms]
+                        change: [+0.6670% +1.2060% +1.7937%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 16 outliers among 100 measurements (16.00%)
+  5 (5.00%) high mild
+  11 (11.00%) high severe
+
+     Running unittests src/lib.rs (target/release/deps/denc-43577235fe201d15)
+
+running 51 tests
+test denc::tests::test_array_roundtrip ... ignored
+test denc::tests::test_bool_roundtrip ... ignored
+test denc::tests::test_bytes_roundtrip ... ignored
+test denc::tests::test_decode_versioned_consumes_remaining_content ... ignored
+test denc::tests::test_decode_versioned_rejects_struct_v_above_max ... ignored
+test denc::tests::test_duration_fixed_size ... ignored
+test denc::tests::test_duration_roundtrip ... ignored
+test denc::tests::test_duration_truncation ... ignored
+test denc::tests::test_encoded_size ... ignored
+test denc::tests::test_fixed_size_constants ... ignored
+test denc::tests::test_preallocation ... ignored
+test denc::tests::test_primitive_roundtrip ... ignored
+test denc::tests::test_string_roundtrip ... ignored
+test denc::tests::test_systemtime_before_epoch ... ignored
+test denc::tests::test_systemtime_fixed_size ... ignored
+test denc::tests::test_systemtime_roundtrip ... ignored
+test denc::tests::test_systemtime_year_2106_limit ... ignored
+test denc::tests::test_tuple_implementations ... ignored
+test denc::tests::test_vec_roundtrip ... ignored
+test denc::tests::test_zerocopy_integration ... ignored
+test encoding_metadata::tests::test_feature_dependent_encoding_metadata ... ignored
+test encoding_metadata::tests::test_simple_encoding_metadata ... ignored
+test encoding_metadata::tests::test_versioned_encoding_metadata ... ignored
+test entity_addr::tests::test_entity_addr_encoded_size ... ignored
+test entity_addr::tests::test_entity_addr_legacy_roundtrip ... ignored
+test entity_addr::tests::test_entity_addr_msgr2_roundtrip ... ignored
+test hobject::tests::test_corpus_file ... ignored
+test hobject::tests::test_decode_empty_cursor ... ignored
+test hobject::tests::test_empty_cursor_encoding ... ignored
+test ids::tests::test_epoch ... ignored
+test ids::tests::test_epoch_roundtrip ... ignored
+test ids::tests::test_global_id ... ignored
+test ids::tests::test_global_id_roundtrip ... ignored
+test ids::tests::test_osd_id ... ignored
+test ids::tests::test_osd_id_roundtrip ... ignored
+test ids::tests::test_pool_id ... ignored
+test ids::tests::test_pool_id_roundtrip ... ignored
+test monmap::tests::test_ceph_release_roundtrip ... ignored
+test monmap::tests::test_election_strategy_roundtrip ... ignored
+test monmap::tests::test_mon_feature_roundtrip ... ignored
+test monmap::tests::test_mon_info_roundtrip ... ignored
+test monmap::tests::test_monmap_roundtrip ... ignored
+test padding::tests::test_padding_basic ... ignored
+test padding::tests::test_padding_deref ... ignored
+test padding::tests::test_padding_serialization_with_skip ... ignored
+test padding::tests::test_padding_zero ... ignored
+test pg_nls_response::tests::test_empty_response ... ignored
+test pg_nls_response::tests::test_encoded_size ... ignored
+test pg_nls_response::tests::test_response_with_entries ... ignored
+test zero_copy::tests::test_arrays_are_zerocopy ... ignored
+test zero_copy::tests::test_u8_is_zerocopy ... ignored
+
+test result: ok. 0 passed; 0 failed; 51 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/encoding.rs (target/release/deps/encoding-0180148163b1cd31)
+Gnuplot not found, using plotters backend
+Benchmarking u32_encode/encode
+Benchmarking u32_encode/encode: Warming up for 3.0000 s
+Benchmarking u32_encode/encode: Collecting 100 samples in estimated 5.0000 s (2.2B iterations)
+Benchmarking u32_encode/encode: Analyzing
+u32_encode/encode       time:   [2.0096 ns 2.0288 ns 2.0530 ns]
+                        thrpt:  [1.8146 GiB/s 1.8362 GiB/s 1.8538 GiB/s]
+                 change:
+                        time:   [-4.4356% -1.9775% +0.6296%] (p = 0.13 > 0.05)
+                        thrpt:  [-0.6257% +2.0174% +4.6414%]
+                        No change in performance detected.
+Found 22 outliers among 100 measurements (22.00%)
+  22 (22.00%) high severe
+
+Benchmarking u32_decode/decode
+Benchmarking u32_decode/decode: Warming up for 3.0000 s
+Benchmarking u32_decode/decode: Collecting 100 samples in estimated 5.0000 s (576M iterations)
+Benchmarking u32_decode/decode: Analyzing
+u32_decode/decode       time:   [8.7291 ns 8.7661 ns 8.8135 ns]
+                        thrpt:  [432.82 MiB/s 435.16 MiB/s 437.01 MiB/s]
+                 change:
+                        time:   [+0.0654% +1.2834% +2.6214%] (p = 0.06 > 0.05)
+                        thrpt:  [-2.5544% -1.2672% -0.0653%]
+                        No change in performance detected.
+Found 16 outliers among 100 measurements (16.00%)
+  7 (7.00%) high mild
+  9 (9.00%) high severe
+
+Benchmarking u64_encode/encode
+Benchmarking u64_encode/encode: Warming up for 3.0000 s
+Benchmarking u64_encode/encode: Collecting 100 samples in estimated 5.0000 s (2.2B iterations)
+Benchmarking u64_encode/encode: Analyzing
+u64_encode/encode       time:   [2.0718 ns 2.1048 ns 2.1440 ns]
+                        thrpt:  [3.4750 GiB/s 3.5398 GiB/s 3.5962 GiB/s]
+                 change:
+                        time:   [-6.4418% -5.0088% -3.6026%] (p = 0.00 < 0.05)
+                        thrpt:  [+3.7373% +5.2729% +6.8853%]
+                        Performance has improved.
+
+Benchmarking u64_decode/decode
+Benchmarking u64_decode/decode: Warming up for 3.0000 s
+Benchmarking u64_decode/decode: Collecting 100 samples in estimated 5.0000 s (567M iterations)
+Benchmarking u64_decode/decode: Analyzing
+u64_decode/decode       time:   [8.8109 ns 8.8316 ns 8.8588 ns]
+                        thrpt:  [861.23 MiB/s 863.88 MiB/s 865.90 MiB/s]
+                 change:
+                        time:   [+1.5366% +1.7771% +1.9995%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.9603% -1.7461% -1.5134%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+
+     Running benches/message_encoding.rs (target/release/deps/message_encoding-f9973e974f1d2869)
+Gnuplot not found, using plotters backend
+Benchmarking primitives/u32/encode
+Benchmarking primitives/u32/encode: Warming up for 3.0000 s
+Benchmarking primitives/u32/encode: Collecting 100 samples in estimated 5.0000 s (2.4B iterations)
+Benchmarking primitives/u32/encode: Analyzing
+primitives/u32/encode   time:   [2.2511 ns 2.2969 ns 2.3402 ns]
+                        thrpt:  [1.5918 GiB/s 1.6219 GiB/s 1.6548 GiB/s]
+                 change:
+                        time:   [+7.0161% +8.9271% +10.775%] (p = 0.00 < 0.05)
+                        thrpt:  [-9.7267% -8.1954% -6.5561%]
+                        Performance has regressed.
+Found 10 outliers among 100 measurements (10.00%)
+  5 (5.00%) low severe
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking primitives/u32/decode
+Benchmarking primitives/u32/decode: Warming up for 3.0000 s
+Benchmarking primitives/u32/decode: Collecting 100 samples in estimated 5.0000 s (582M iterations)
+Benchmarking primitives/u32/decode: Analyzing
+primitives/u32/decode   time:   [8.5467 ns 8.5551 ns 8.5644 ns]
+                        thrpt:  [445.41 MiB/s 445.90 MiB/s 446.33 MiB/s]
+                 change:
+                        time:   [+0.0462% +0.1527% +0.2653%] (p = 0.01 < 0.05)
+                        thrpt:  [-0.2646% -0.1525% -0.0462%]
+                        Change within noise threshold.
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking primitives/string/encode/10
+Benchmarking primitives/string/encode/10: Warming up for 3.0000 s
+Benchmarking primitives/string/encode/10: Collecting 100 samples in estimated 5.0000 s (973M iterations)
+Benchmarking primitives/string/encode/10: Analyzing
+primitives/string/encode/10
+                        time:   [5.1412 ns 5.1519 ns 5.1692 ns]
+                        thrpt:  [2.5223 GiB/s 2.5308 GiB/s 2.5361 GiB/s]
+                 change:
+                        time:   [-0.2252% -0.0828% +0.1010%] (p = 0.36 > 0.05)
+                        thrpt:  [-0.1009% +0.0829% +0.2257%]
+                        No change in performance detected.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+Benchmarking primitives/string/decode/10
+Benchmarking primitives/string/decode/10: Warming up for 3.0000 s
+Benchmarking primitives/string/decode/10: Collecting 100 samples in estimated 5.0000 s (242M iterations)
+Benchmarking primitives/string/decode/10: Analyzing
+primitives/string/decode/10
+                        time:   [20.874 ns 20.915 ns 20.959 ns]
+                        thrpt:  [637.02 MiB/s 638.38 MiB/s 639.61 MiB/s]
+                 change:
+                        time:   [+1.3046% +1.7222% +2.1413%] (p = 0.00 < 0.05)
+                        thrpt:  [-2.0964% -1.6930% -1.2878%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) low mild
+  7 (7.00%) high mild
+Benchmarking primitives/string/encode/100
+Benchmarking primitives/string/encode/100: Warming up for 3.0000 s
+Benchmarking primitives/string/encode/100: Collecting 100 samples in estimated 5.0000 s (899M iterations)
+Benchmarking primitives/string/encode/100: Analyzing
+primitives/string/encode/100
+                        time:   [5.3792 ns 5.3839 ns 5.3895 ns]
+                        thrpt:  [17.972 GiB/s 17.990 GiB/s 18.006 GiB/s]
+                 change:
+                        time:   [-2.5744% -1.8979% -1.3155%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.3330% +1.9346% +2.6424%]
+                        Performance has improved.
+Found 12 outliers among 100 measurements (12.00%)
+  4 (4.00%) high mild
+  8 (8.00%) high severe
+Benchmarking primitives/string/decode/100
+Benchmarking primitives/string/decode/100: Warming up for 3.0000 s
+Benchmarking primitives/string/decode/100: Collecting 100 samples in estimated 5.0001 s (211M iterations)
+Benchmarking primitives/string/decode/100: Analyzing
+primitives/string/decode/100
+                        time:   [26.037 ns 26.078 ns 26.124 ns]
+                        thrpt:  [3.7076 GiB/s 3.7142 GiB/s 3.7200 GiB/s]
+                 change:
+                        time:   [+13.638% +13.857% +14.094%] (p = 0.00 < 0.05)
+                        thrpt:  [-12.353% -12.171% -12.001%]
+                        Performance has regressed.
+Benchmarking primitives/string/encode/1000
+Benchmarking primitives/string/encode/1000: Warming up for 3.0000 s
+Benchmarking primitives/string/encode/1000: Collecting 100 samples in estimated 5.0000 s (454M iterations)
+Benchmarking primitives/string/encode/1000: Analyzing
+primitives/string/encode/1000
+                        time:   [10.979 ns 11.021 ns 11.059 ns]
+                        thrpt:  [84.549 GiB/s 84.846 GiB/s 85.169 GiB/s]
+                 change:
+                        time:   [-9.4782% -9.1209% -8.7713%] (p = 0.00 < 0.05)
+                        thrpt:  [+9.6146% +10.036% +10.471%]
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking primitives/string/decode/1000
+Benchmarking primitives/string/decode/1000: Warming up for 3.0000 s
+Benchmarking primitives/string/decode/1000: Collecting 100 samples in estimated 5.0002 s (144M iterations)
+Benchmarking primitives/string/decode/1000: Analyzing
+primitives/string/decode/1000
+                        time:   [34.892 ns 34.988 ns 35.093 ns]
+                        thrpt:  [26.645 GiB/s 26.725 GiB/s 26.798 GiB/s]
+                 change:
+                        time:   [-1.5821% -1.3249% -1.0681%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0797% +1.3427% +1.6075%]
+                        Performance has improved.
+
+Benchmarking primitives/bytes/encode/64
+Benchmarking primitives/bytes/encode/64: Warming up for 3.0000 s
+Benchmarking primitives/bytes/encode/64: Collecting 100 samples in estimated 5.0000 s (974M iterations)
+Benchmarking primitives/bytes/encode/64: Analyzing
+primitives/bytes/encode/64
+                        time:   [5.1109 ns 5.1157 ns 5.1215 ns]
+                        thrpt:  [12.366 GiB/s 12.379 GiB/s 12.391 GiB/s]
+                 change:
+                        time:   [-1.7383% -1.1256% -0.6204%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.6242% +1.1384% +1.7691%]
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  4 (4.00%) high mild
+  5 (5.00%) high severe
+Benchmarking primitives/bytes/decode/64
+Benchmarking primitives/bytes/decode/64: Warming up for 3.0000 s
+Benchmarking primitives/bytes/decode/64: Collecting 100 samples in estimated 5.0000 s (348M iterations)
+Benchmarking primitives/bytes/decode/64: Analyzing
+primitives/bytes/decode/64
+                        time:   [14.089 ns 14.123 ns 14.162 ns]
+                        thrpt:  [4.4718 GiB/s 4.4841 GiB/s 4.4951 GiB/s]
+                 change:
+                        time:   [-1.5822% -1.4029% -1.2187%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.2337% +1.4228% +1.6076%]
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+Benchmarking primitives/bytes/encode/512
+Benchmarking primitives/bytes/encode/512: Warming up for 3.0000 s
+Benchmarking primitives/bytes/encode/512: Collecting 100 samples in estimated 5.0000 s (649M iterations)
+Benchmarking primitives/bytes/encode/512: Analyzing
+primitives/bytes/encode/512
+                        time:   [7.6758 ns 7.6828 ns 7.6894 ns]
+                        thrpt:  [62.497 GiB/s 62.551 GiB/s 62.607 GiB/s]
+                 change:
+                        time:   [-1.4759% -1.3354% -1.1980%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.2125% +1.3535% +1.4980%]
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) low mild
+  3 (3.00%) high mild
+  1 (1.00%) high severe
+Benchmarking primitives/bytes/decode/512
+Benchmarking primitives/bytes/decode/512: Warming up for 3.0000 s
+Benchmarking primitives/bytes/decode/512: Collecting 100 samples in estimated 5.0000 s (348M iterations)
+Benchmarking primitives/bytes/decode/512: Analyzing
+primitives/bytes/decode/512
+                        time:   [14.136 ns 14.163 ns 14.194 ns]
+                        thrpt:  [33.857 GiB/s 33.930 GiB/s 33.997 GiB/s]
+                 change:
+                        time:   [-1.6861% -1.3391% -1.0085%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0187% +1.3573% +1.7150%]
+                        Performance has improved.
+Found 11 outliers among 100 measurements (11.00%)
+  9 (9.00%) high mild
+  2 (2.00%) high severe
+Benchmarking primitives/bytes/encode/4096
+Benchmarking primitives/bytes/encode/4096: Warming up for 3.0000 s
+Benchmarking primitives/bytes/encode/4096: Collecting 100 samples in estimated 5.0001 s (265M iterations)
+Benchmarking primitives/bytes/encode/4096: Analyzing
+primitives/bytes/encode/4096
+                        time:   [19.150 ns 19.169 ns 19.194 ns]
+                        thrpt:  [198.94 GiB/s 199.20 GiB/s 199.39 GiB/s]
+                 change:
+                        time:   [-5.8305% -5.5533% -5.1490%] (p = 0.00 < 0.05)
+                        thrpt:  [+5.4286% +5.8798% +6.1915%]
+                        Performance has improved.
+Found 12 outliers among 100 measurements (12.00%)
+  7 (7.00%) low mild
+  5 (5.00%) high severe
+Benchmarking primitives/bytes/decode/4096
+Benchmarking primitives/bytes/decode/4096: Warming up for 3.0000 s
+Benchmarking primitives/bytes/decode/4096: Collecting 100 samples in estimated 5.0001 s (347M iterations)
+Benchmarking primitives/bytes/decode/4096: Analyzing
+primitives/bytes/decode/4096
+                        time:   [14.073 ns 14.099 ns 14.133 ns]
+                        thrpt:  [270.18 GiB/s 270.84 GiB/s 271.32 GiB/s]
+                 change:
+                        time:   [-1.5427% -1.4053% -1.2518%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.2677% +1.4253% +1.5669%]
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking complex/utime/encode
+Benchmarking complex/utime/encode: Warming up for 3.0000 s
+Benchmarking complex/utime/encode: Collecting 100 samples in estimated 5.0000 s (996M iterations)
+Benchmarking complex/utime/encode: Analyzing
+complex/utime/encode    time:   [5.0206 ns 5.0234 ns 5.0269 ns]
+                        thrpt:  [1.4821 GiB/s 1.4832 GiB/s 1.4840 GiB/s]
+                 change:
+                        time:   [-1.3187% -0.9151% -0.6132%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.6170% +0.9235% +1.3363%]
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+Benchmarking complex/utime/decode
+Benchmarking complex/utime/decode: Warming up for 3.0000 s
+Benchmarking complex/utime/decode: Collecting 100 samples in estimated 5.0000 s (577M iterations)
+Benchmarking complex/utime/decode: Analyzing
+complex/utime/decode    time:   [8.6756 ns 8.6861 ns 8.6980 ns]
+                        thrpt:  [877.14 MiB/s 878.35 MiB/s 879.41 MiB/s]
+                 change:
+                        time:   [+0.3379% +0.4916% +0.6752%] (p = 0.00 < 0.05)
+                        thrpt:  [-0.6706% -0.4892% -0.3368%]
+                        Change within noise threshold.
+Found 4 outliers among 100 measurements (4.00%)
+  1 (1.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking complex/entity_name/encode
+Benchmarking complex/entity_name/encode: Warming up for 3.0000 s
+Benchmarking complex/entity_name/encode: Collecting 100 samples in estimated 5.0000 s (728M iterations)
+Benchmarking complex/entity_name/encode: Analyzing
+complex/entity_name/encode
+                        time:   [6.8056 ns 6.8881 ns 6.9795 ns]
+                        thrpt:  [1.7347 GiB/s 1.7577 GiB/s 1.7790 GiB/s]
+                 change:
+                        time:   [-2.4431% -1.9147% -1.3053%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.3226% +1.9520% +2.5043%]
+                        Performance has improved.
+Found 15 outliers among 100 measurements (15.00%)
+  15 (15.00%) high severe
+Benchmarking complex/entity_name/decode
+Benchmarking complex/entity_name/decode: Warming up for 3.0000 s
+Benchmarking complex/entity_name/decode: Collecting 100 samples in estimated 5.0000 s (228M iterations)
+Benchmarking complex/entity_name/decode: Analyzing
+complex/entity_name/decode
+                        time:   [22.431 ns 22.454 ns 22.479 ns]
+                        thrpt:  [551.52 MiB/s 552.15 MiB/s 552.70 MiB/s]
+                 change:
+                        time:   [+3.8406% +4.0342% +4.2126%] (p = 0.00 < 0.05)
+                        thrpt:  [-4.0423% -3.8777% -3.6985%]
+                        Performance has regressed.
+Found 9 outliers among 100 measurements (9.00%)
+  8 (8.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking complex/entity_addr/encode/legacy
+Benchmarking complex/entity_addr/encode/legacy: Warming up for 3.0000 s
+Benchmarking complex/entity_addr/encode/legacy: Collecting 100 samples in estimated 5.0000 s (387M iterations)
+Benchmarking complex/entity_addr/encode/legacy: Analyzing
+complex/entity_addr/encode/legacy
+                        time:   [12.694 ns 12.743 ns 12.807 ns]
+                        thrpt:  [9.8897 GiB/s 9.9392 GiB/s 9.9779 GiB/s]
+                 change:
+                        time:   [+0.8040% +1.2573% +1.7933%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.7617% -1.2417% -0.7976%]
+                        Change within noise threshold.
+Found 14 outliers among 100 measurements (14.00%)
+  2 (2.00%) high mild
+  12 (12.00%) high severe
+Benchmarking complex/entity_addr/decode/legacy
+Benchmarking complex/entity_addr/decode/legacy: Warming up for 3.0000 s
+Benchmarking complex/entity_addr/decode/legacy: Collecting 100 samples in estimated 5.0001 s (204M iterations)
+Benchmarking complex/entity_addr/decode/legacy: Analyzing
+complex/entity_addr/decode/legacy
+                        time:   [23.994 ns 24.023 ns 24.053 ns]
+                        thrpt:  [5.2659 GiB/s 5.2723 GiB/s 5.2789 GiB/s]
+                 change:
+                        time:   [+1.6102% +1.7843% +1.9484%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.9112% -1.7530% -1.5847%]
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  5 (5.00%) high mild
+  1 (1.00%) high severe
+Benchmarking complex/entity_addr/encode/msgr2
+Benchmarking complex/entity_addr/encode/msgr2: Warming up for 3.0000 s
+Benchmarking complex/entity_addr/encode/msgr2: Collecting 100 samples in estimated 5.0000 s (292M iterations)
+Benchmarking complex/entity_addr/encode/msgr2: Analyzing
+complex/entity_addr/encode/msgr2
+                        time:   [17.075 ns 17.097 ns 17.125 ns]
+                        thrpt:  [7.9945 GiB/s 8.0077 GiB/s 8.0178 GiB/s]
+                 change:
+                        time:   [-0.7226% -0.5358% -0.3519%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.3532% +0.5387% +0.7279%]
+                        Change within noise threshold.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking complex/entity_addr/decode/msgr2
+Benchmarking complex/entity_addr/decode/msgr2: Warming up for 3.0000 s
+Benchmarking complex/entity_addr/decode/msgr2: Collecting 100 samples in estimated 5.0001 s (198M iterations)
+Benchmarking complex/entity_addr/decode/msgr2: Analyzing
+complex/entity_addr/decode/msgr2
+                        time:   [24.617 ns 24.715 ns 24.834 ns]
+                        thrpt:  [5.5128 GiB/s 5.5394 GiB/s 5.5614 GiB/s]
+                 change:
+                        time:   [+1.0785% +1.3416% +1.6198%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.5940% -1.3239% -1.0670%]
+                        Performance has regressed.
+Found 13 outliers among 100 measurements (13.00%)
+  1 (1.00%) low severe
+  1 (1.00%) low mild
+  5 (5.00%) high mild
+  6 (6.00%) high severe
+
+Benchmarking composite/message/encode
+Benchmarking composite/message/encode: Warming up for 3.0000 s
+Benchmarking composite/message/encode: Collecting 100 samples in estimated 5.0001 s (135M iterations)
+Benchmarking composite/message/encode: Analyzing
+composite/message/encode
+                        time:   [36.370 ns 36.426 ns 36.488 ns]
+                        thrpt:  [10.924 GiB/s 10.943 GiB/s 10.960 GiB/s]
+                 change:
+                        time:   [-1.7329% -1.4677% -1.0661%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0776% +1.4896% +1.7634%]
+                        Performance has improved.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking composite/message/decode
+Benchmarking composite/message/decode: Warming up for 3.0000 s
+Benchmarking composite/message/decode: Collecting 100 samples in estimated 5.0001 s (132M iterations)
+Benchmarking composite/message/decode: Analyzing
+composite/message/decode
+                        time:   [38.342 ns 38.503 ns 38.720 ns]
+                        thrpt:  [10.294 GiB/s 10.353 GiB/s 10.396 GiB/s]
+                 change:
+                        time:   [+3.0854% +3.5029% +3.9926%] (p = 0.00 < 0.05)
+                        thrpt:  [-3.8393% -3.3843% -2.9931%]
+                        Performance has regressed.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+
+     Running unittests src/lib.rs (target/release/deps/denc_macros-87a1e42526b74590)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/release/deps/dencoder-66dfbeb861d887bd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/monclient-7ce6408c1e9d4e6a)
+
+running 32 tests
+test client::tests::test_create_client ... ignored
+test client::tests::test_parse_duration_option ... ignored
+test client::tests::test_parse_option_generic ... ignored
+test client::tests::test_runtime_config_update_from_map ... ignored
+test client::tests::test_subscription ... ignored
+test dns_srv::tests::test_default_srv_name ... ignored
+test dns_srv::tests::test_parse_srv_name_simple ... ignored
+test dns_srv::tests::test_parse_srv_name_with_domain ... ignored
+test dns_srv::tests::test_parse_srv_name_with_subdomain ... ignored
+test dns_srv::tests::test_resolve_nonexistent_srv ... ignored
+test messages::tests::test_config_encode_decode ... ignored
+test messages::tests::test_mconfig_message_encoding ... ignored
+test messages::tests::test_mmon_get_version_message_encoding ... ignored
+test messages::tests::test_mmon_subscribe_message_encoding ... ignored
+test messages::tests::test_subscribe_encode_decode ... ignored
+test messages::tests::test_version_reply_encode_decode ... ignored
+test monmap::tests::test_build_initial_monmap ... ignored
+test monmap::tests::test_build_initial_monmap_groups_by_ip ... ignored
+test monmap::tests::test_monmap_lookup ... ignored
+test monmap::tests::test_parse_mon_addr ... ignored
+test paxos_service_message::tests::test_paxos_fields_default ... ignored
+test paxos_service_message::tests::test_paxos_fields_encode_decode ... ignored
+test subscription::tests::test_got_increments_epoch ... ignored
+test subscription::tests::test_got_updates_start_epoch ... ignored
+test subscription::tests::test_inc_want ... ignored
+test subscription::tests::test_onetime_subscription ... ignored
+test subscription::tests::test_subscription_lifecycle ... ignored
+test subscription::tests::test_subscription_renewal_needed ... ignored
+test wait_helper::tests::test_condition_already_met ... ignored
+test wait_helper::tests::test_condition_met_after_notification ... ignored
+test wait_helper::tests::test_spurious_wakeup ... ignored
+test wait_helper::tests::test_timeout ... ignored
+
+test result: ok. 0 passed; 0 failed; 32 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/lib.rs (target/release/deps/msgr2-cb89df3d9ae80b65)
+
+running 83 tests
+test ceph_message::tests::test_ping_ack_message_encoding ... ignored
+test ceph_message::tests::test_ping_message_encoding ... ignored
+test compression::tests::test_all_algorithms ... ignored
+test compression::tests::test_compression_context ... ignored
+test compression::tests::test_compression_stats_tracking ... ignored
+test compression::tests::test_compression_threshold ... ignored
+test compression::tests::test_large_data_compression ... ignored
+test compression::tests::test_lz4_compressor ... ignored
+test compression::tests::test_none_compressor ... ignored
+test compression::tests::test_snappy_compressor ... ignored
+test compression::tests::test_zlib_compressor ... ignored
+test compression::tests::test_zstd_compressor ... ignored
+test crypto::tests::test_aes_gcm_roundtrip ... ignored
+test crypto::tests::test_aes_gcm_sequence_numbers ... ignored
+test crypto::tests::test_parse_connection_secret ... ignored
+test crypto::tests::test_parse_connection_secret_too_short ... ignored
+test frames::tests::test_frame_assembler_rev0 ... ignored
+test frames::tests::test_frame_assembler_rev1 ... ignored
+test frames::tests::test_message_frame_from_wire_aborted ... ignored
+test frames::tests::test_message_frame_from_wire_roundtrip ... ignored
+test frames::tests::test_message_frame_rev1_multi_segment ... ignored
+test frames::tests::test_preamble_crc_calculation ... ignored
+test frames::tests::test_preamble_crc_validation_failure ... ignored
+test message::tests::test_message_decode_empty_payload ... ignored
+test message::tests::test_message_decode_segments ... ignored
+test message::tests::test_message_decode_segments_empty ... ignored
+test message::tests::test_message_roundtrip_front_only ... ignored
+test message::tests::test_message_roundtrip_with_middle_and_data ... ignored
+test message::tests::test_message_total_len ... ignored
+test protocol::tests::test_diagnostics_initial_state ... ignored
+test protocol::tests::test_priority_queue_clear ... ignored
+test protocol::tests::test_priority_queue_fifo_within_priority ... ignored
+test protocol::tests::test_priority_queue_front ... ignored
+test protocol::tests::test_priority_queue_iter ... ignored
+test protocol::tests::test_priority_queue_ordering ... ignored
+test protocol::tests::test_throttle_stats_none_without_config ... ignored
+test revocation::tests::test_clear ... ignored
+test revocation::tests::test_handle_is_revoked ... ignored
+test revocation::tests::test_mark_sending ... ignored
+test revocation::tests::test_multiple_messages ... ignored
+test revocation::tests::test_register_and_revoke ... ignored
+test revocation::tests::test_remove_message ... ignored
+test revocation::tests::test_revocation_signal ... ignored
+test revocation::tests::test_revoke_after_sent ... ignored
+test revocation::tests::test_revoke_not_found ... ignored
+test revocation::tests::test_stats ... ignored
+test revocation::tests::test_wait_completion ... ignored
+test split::tests::test_shared_state_ack_handling ... ignored
+test state_machine::tests::test_auth_method_config ... ignored
+test state_machine::tests::test_peer_compression_support_detection ... ignored
+test tests::test_connection_config_custom ... ignored
+test tests::test_connection_config_default ... ignored
+test tests::test_connection_config_minimal ... ignored
+test tests::test_connection_config_prefer_crc_mode ... ignored
+test tests::test_connection_config_prefer_secure_mode ... ignored
+test tests::test_connection_config_validate_auth_provider_mismatch ... ignored
+test tests::test_connection_config_validate_cephx_without_provider ... ignored
+test tests::test_connection_config_validate_empty_auth_methods ... ignored
+test tests::test_connection_config_validate_empty_modes ... ignored
+test tests::test_connection_config_validate_gss_not_implemented ... ignored
+test tests::test_connection_config_validate_invalid_service_id ... ignored
+test tests::test_connection_config_validate_required_features_not_supported ... ignored
+test tests::test_connection_config_validate_success ... ignored
+test tests::test_connection_config_validate_throttle_all_zeros ... ignored
+test tests::test_connection_config_validate_throttle_bytes_too_small ... ignored
+test tests::test_connection_config_validate_throttle_messages_too_small ... ignored
+test tests::test_connection_config_validate_throttle_queue_too_small ... ignored
+test tests::test_connection_config_validate_throttle_valid ... ignored
+test tests::test_connection_config_validate_unknown_auth_method ... ignored
+test tests::test_connection_config_validate_unknown_mode ... ignored
+test tests::test_connection_config_validate_valid_service_ids ... ignored
+test tests::test_connection_config_with_ceph_default_throttle ... ignored
+test tests::test_connection_config_with_compression ... ignored
+test tests::test_connection_config_with_throttle ... ignored
+test tests::test_connection_config_without_compression ... ignored
+test throttle::tests::test_byte_rate_limit ... ignored
+test throttle::tests::test_combined_limits ... ignored
+test throttle::tests::test_message_rate_limit ... ignored
+test throttle::tests::test_queue_depth_limit ... ignored
+test throttle::tests::test_rate_window_expiry ... ignored
+test throttle::tests::test_reset ... ignored
+test throttle::tests::test_unlimited_throttle ... ignored
+test throttle::tests::test_wait_for_send ... ignored
+
+test result: ok. 0 passed; 0 failed; 83 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/connection.rs (target/release/deps/connection-d5ec7850ec19b8a9)
+Gnuplot not found, using plotters backend
+Benchmarking hello_frame/encode
+Benchmarking hello_frame/encode: Warming up for 3.0000 s
+Benchmarking hello_frame/encode: Collecting 100 samples in estimated 5.0008 s (24M iterations)
+Benchmarking hello_frame/encode: Analyzing
+hello_frame/encode      time:   [208.43 ns 209.39 ns 210.55 ns]
+                        change: [+0.0563% +1.2183% +2.4805%] (p = 0.05 < 0.05)
+                        Change within noise threshold.
+Found 16 outliers among 100 measurements (16.00%)
+  3 (3.00%) low mild
+  3 (3.00%) high mild
+  10 (10.00%) high severe
+
+Benchmarking hello_frame/decode
+Benchmarking hello_frame/decode: Warming up for 3.0000 s
+Benchmarking hello_frame/decode: Collecting 100 samples in estimated 5.0003 s (67M iterations)
+Benchmarking hello_frame/decode: Analyzing
+hello_frame/decode      time:   [72.392 ns 72.553 ns 72.810 ns]
+                        change: [-0.3710% -0.2093% -0.0039%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  2 (2.00%) low mild
+  1 (1.00%) high severe
+
+Benchmarking auth_request_frame/encode
+Benchmarking auth_request_frame/encode: Warming up for 3.0000 s
+Benchmarking auth_request_frame/encode: Collecting 100 samples in estimated 5.0002 s (20M iterations)
+Benchmarking auth_request_frame/encode: Analyzing
+auth_request_frame/encode
+                        time:   [256.81 ns 258.02 ns 259.24 ns]
+                        change: [-7.4524% -6.7158% -5.9672%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking auth_request_frame/decode
+Benchmarking auth_request_frame/decode: Warming up for 3.0000 s
+Benchmarking auth_request_frame/decode: Collecting 100 samples in estimated 5.0002 s (63M iterations)
+Benchmarking auth_request_frame/decode: Analyzing
+auth_request_frame/decode
+                        time:   [80.523 ns 81.134 ns 81.840 ns]
+                        change: [-6.0022% -5.7014% -5.3415%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 9 outliers among 100 measurements (9.00%)
+  2 (2.00%) high mild
+  7 (7.00%) high severe
+
+Benchmarking auth_done_frame/encode
+Benchmarking auth_done_frame/encode: Warming up for 3.0000 s
+Benchmarking auth_done_frame/encode: Collecting 100 samples in estimated 5.0004 s (21M iterations)
+Benchmarking auth_done_frame/encode: Analyzing
+auth_done_frame/encode  time:   [226.59 ns 227.03 ns 227.52 ns]
+                        change: [-5.6323% -5.2086% -4.8150%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) low mild
+  2 (2.00%) high mild
+
+Benchmarking auth_done_frame/decode
+Benchmarking auth_done_frame/decode: Warming up for 3.0000 s
+Benchmarking auth_done_frame/decode: Collecting 100 samples in estimated 5.0001 s (69M iterations)
+Benchmarking auth_done_frame/decode: Analyzing
+auth_done_frame/decode  time:   [72.941 ns 73.027 ns 73.115 ns]
+                        change: [-0.7261% -0.5318% -0.3690%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking client_ident_frame/encode
+Benchmarking client_ident_frame/encode: Warming up for 3.0000 s
+Benchmarking client_ident_frame/encode: Collecting 100 samples in estimated 5.0010 s (9.7M iterations)
+Benchmarking client_ident_frame/encode: Analyzing
+client_ident_frame/encode
+                        time:   [510.53 ns 511.07 ns 511.59 ns]
+                        change: [-0.0603% +0.1429% +0.3389%] (p = 0.15 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high severe
+
+Benchmarking client_ident_frame/decode
+Benchmarking client_ident_frame/decode: Warming up for 3.0000 s
+Benchmarking client_ident_frame/decode: Collecting 100 samples in estimated 5.0002 s (40M iterations)
+Benchmarking client_ident_frame/decode: Analyzing
+client_ident_frame/decode
+                        time:   [125.82 ns 125.91 ns 126.00 ns]
+                        change: [-1.9011% -1.7349% -1.5967%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+
+Benchmarking message_frame/encode_1kb
+Benchmarking message_frame/encode_1kb: Warming up for 3.0000 s
+Benchmarking message_frame/encode_1kb: Collecting 100 samples in estimated 5.0001 s (19M iterations)
+Benchmarking message_frame/encode_1kb: Analyzing
+message_frame/encode_1kb
+                        time:   [262.63 ns 265.53 ns 268.68 ns]
+                        thrpt:  [3.5495 GiB/s 3.5916 GiB/s 3.6313 GiB/s]
+                 change:
+                        time:   [-1.3806% +0.2260% +1.7802%] (p = 0.77 > 0.05)
+                        thrpt:  [-1.7491% -0.2255% +1.4000%]
+                        No change in performance detected.
+
+Benchmarking message_frame/decode_1kb
+Benchmarking message_frame/decode_1kb: Warming up for 3.0000 s
+Benchmarking message_frame/decode_1kb: Collecting 100 samples in estimated 5.0001 s (42M iterations)
+Benchmarking message_frame/decode_1kb: Analyzing
+message_frame/decode_1kb
+                        time:   [116.04 ns 116.21 ns 116.41 ns]
+                        thrpt:  [8.1923 GiB/s 8.2067 GiB/s 8.2187 GiB/s]
+                 change:
+                        time:   [+0.1693% +0.3782% +0.5860%] (p = 0.00 < 0.05)
+                        thrpt:  [-0.5826% -0.3767% -0.1690%]
+                        Change within noise threshold.
+Found 9 outliers among 100 measurements (9.00%)
+  6 (6.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking message_frame_large/encode_72kb
+Benchmarking message_frame_large/encode_72kb: Warming up for 3.0000 s
+Benchmarking message_frame_large/encode_72kb: Collecting 100 samples in estimated 5.0004 s (667k iterations)
+Benchmarking message_frame_large/encode_72kb: Analyzing
+message_frame_large/encode_72kb
+                        time:   [7.4882 µs 7.4930 µs 7.4981 µs]
+                        thrpt:  [9.1575 GiB/s 9.1639 GiB/s 9.1697 GiB/s]
+                 change:
+                        time:   [-1.1192% -0.6885% -0.3091%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.3101% +0.6932% +1.1319%]
+                        Change within noise threshold.
+Benchmarking message_frame_large/decode_72kb
+Benchmarking message_frame_large/decode_72kb: Warming up for 3.0000 s
+Benchmarking message_frame_large/decode_72kb: Collecting 100 samples in estimated 5.0007 s (31M iterations)
+Benchmarking message_frame_large/decode_72kb: Analyzing
+message_frame_large/decode_72kb
+                        time:   [160.50 ns 161.60 ns 162.80 ns]
+                        thrpt:  [421.77 GiB/s 424.90 GiB/s 427.81 GiB/s]
+                 change:
+                        time:   [+0.7376% +1.2200% +1.7728%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.7419% -1.2053% -0.7322%]
+                        Change within noise threshold.
+Found 3 outliers among 100 measurements (3.00%)
+  3 (3.00%) high mild
+
+Benchmarking frame_assembly/rev0
+Benchmarking frame_assembly/rev0: Warming up for 3.0000 s
+Benchmarking frame_assembly/rev0: Collecting 100 samples in estimated 5.0005 s (24M iterations)
+Benchmarking frame_assembly/rev0: Analyzing
+frame_assembly/rev0     time:   [209.15 ns 209.59 ns 210.04 ns]
+                        change: [-3.5247% -3.2654% -2.9741%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) low mild
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking frame_assembly/rev1
+Benchmarking frame_assembly/rev1: Warming up for 3.0000 s
+Benchmarking frame_assembly/rev1: Collecting 100 samples in estimated 5.0007 s (25M iterations)
+Benchmarking frame_assembly/rev1: Analyzing
+frame_assembly/rev1     time:   [202.62 ns 203.48 ns 204.46 ns]
+                        change: [-4.0768% -3.4096% -2.6730%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 19 outliers among 100 measurements (19.00%)
+  2 (2.00%) low mild
+  5 (5.00%) high mild
+  12 (12.00%) high severe
+
+     Running unittests src/lib.rs (target/release/deps/osdclient-ec48aa9faeaa070f)
+
+running 117 tests
+test backoff::tests::test_clear ... ignored
+test backoff::tests::test_duplicate_registration ... ignored
+test backoff::tests::test_get_by_id ... ignored
+test backoff::tests::test_multiple_backoffs_same_pg ... ignored
+test backoff::tests::test_multiple_pgs ... ignored
+test backoff::tests::test_register_and_lookup ... ignored
+test backoff::tests::test_remove_by_id ... ignored
+test denc_types::tests::test_blkin_trace_info_roundtrip ... ignored
+test denc_types::tests::test_entity_name_roundtrip ... ignored
+test denc_types::tests::test_jspan_context_roundtrip ... ignored
+test denc_types::tests::test_object_locator_empty ... ignored
+test denc_types::tests::test_object_locator_roundtrip ... ignored
+test denc_types::tests::test_osd_op_extent_roundtrip ... ignored
+test denc_types::tests::test_osd_op_pgls_roundtrip ... ignored
+test denc_types::tests::test_osd_op_size_constant ... ignored
+test denc_types::tests::test_osd_op_with_indata ... ignored
+test denc_types::tests::test_osd_op_xattr_roundtrip ... ignored
+test denc_types::tests::test_osd_reqid_roundtrip ... ignored
+test denc_types::tests::test_osd_stat_data_roundtrip ... ignored
+test denc_types::tests::test_pgid_roundtrip ... ignored
+test denc_types::tests::test_request_redirect_empty ... ignored
+test denc_types::tests::test_request_redirect_roundtrip ... ignored
+test denc_types::tests::test_size_constants ... ignored
+test denc_types::tests::test_spgid_roundtrip ... ignored
+test denc_types::tests::test_utime_roundtrip ... ignored
+test ioctx::tests::test_ioctx_pool_id ... ignored
+test messages::tests::test_mosdop_encoding_v9 ... ignored
+test messages::tests::test_mosdop_encoding_v9_with_squid_features ... ignored
+test messages::tests::test_mosdop_message_encoding ... ignored
+test messages::tests::test_mosdop_with_write_data ... ignored
+test operation::tests::test_opbuilder_balance_reads ... ignored
+test operation::tests::test_opbuilder_chained ... ignored
+test operation::tests::test_opbuilder_compound ... ignored
+test operation::tests::test_opbuilder_custom_op ... ignored
+test operation::tests::test_opbuilder_delete ... ignored
+test operation::tests::test_opbuilder_into_ops ... ignored
+test operation::tests::test_opbuilder_localize_reads ... ignored
+test operation::tests::test_opbuilder_priority ... ignored
+test operation::tests::test_opbuilder_read ... ignored
+test operation::tests::test_opbuilder_sparse_read ... ignored
+test operation::tests::test_opbuilder_stat ... ignored
+test operation::tests::test_opbuilder_timeout ... ignored
+test operation::tests::test_opbuilder_write ... ignored
+test operation::tests::test_opbuilder_write_full ... ignored
+test osdmap::tests::test_exists_returns_false_for_out_of_range ... ignored
+test osdmap::tests::test_exists_returns_false_for_removed_osd ... ignored
+test osdmap::tests::test_exists_returns_true_for_existing_osd ... ignored
+test osdmap::tests::test_get_osd_addr_returns_addrvec ... ignored
+test osdmap::tests::test_get_osd_addr_returns_none_for_invalid_id ... ignored
+test osdmap::tests::test_is_down_is_inverse_of_is_up ... ignored
+test osdmap::tests::test_is_up_returns_false_for_down_osd ... ignored
+test osdmap::tests::test_is_up_returns_false_for_negative_osd_id ... ignored
+test osdmap::tests::test_is_up_returns_false_for_nonexistent_osd ... ignored
+test osdmap::tests::test_is_up_returns_false_for_out_of_range_osd ... ignored
+test osdmap::tests::test_is_up_returns_true_for_up_osd ... ignored
+test pgmap_types::pg_stat_support_tests::test_interval_set_empty ... ignored
+test pgmap_types::pg_stat_support_tests::test_interval_set_u64 ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_map_default ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_map_digest_default ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_map_digest_with_data ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_map_with_data ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_shard ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_shard_undefined ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_stat_default ... ignored
+test pgmap_types::pg_stat_support_tests::test_pg_stat_with_data ... ignored
+test pgmap_types::pg_stat_support_tests::test_shard_id ... ignored
+test pgmap_types::pg_stat_support_tests::test_shard_id_no_shard ... ignored
+test pgmap_types::tests::test_object_stat_collection_default ... ignored
+test pgmap_types::tests::test_object_stat_collection_roundtrip ... ignored
+test pgmap_types::tests::test_object_stat_sum_default ... ignored
+test pgmap_types::tests::test_object_stat_sum_roundtrip ... ignored
+test pgmap_types::tests::test_objectstore_perf_stat_default ... ignored
+test pgmap_types::tests::test_objectstore_perf_stat_roundtrip_v1 ... ignored
+test pgmap_types::tests::test_objectstore_perf_stat_roundtrip_v2 ... ignored
+test pgmap_types::tests::test_osd_stat_default ... ignored
+test pgmap_types::tests::test_osd_stat_interfaces_default ... ignored
+test pgmap_types::tests::test_osd_stat_interfaces_roundtrip ... ignored
+test pgmap_types::tests::test_osd_stat_roundtrip ... ignored
+test pgmap_types::tests::test_pg_count_decode_insufficient ... ignored
+test pgmap_types::tests::test_pg_count_default ... ignored
+test pgmap_types::tests::test_pg_count_insufficient_buffer ... ignored
+test pgmap_types::tests::test_pg_count_roundtrip ... ignored
+test pgmap_types::tests::test_pool_stat_default ... ignored
+test pgmap_types::tests::test_pool_stat_roundtrip ... ignored
+test pgmap_types::tests::test_pow2_hist_default ... ignored
+test pgmap_types::tests::test_pow2_hist_roundtrip ... ignored
+test pgmap_types::tests::test_store_statfs_default ... ignored
+test pgmap_types::tests::test_store_statfs_roundtrip ... ignored
+test session::tests::test_incarnation_increments_on_connect ... ignored
+test session::tests::test_incarnation_starts_at_zero ... ignored
+test session::tests::test_pending_op_captures_incarnation ... ignored
+test throttle::tests::test_throttle_basic ... ignored
+test throttle::tests::test_throttle_bytes_limit ... ignored
+test throttle::tests::test_throttle_ops_limit ... ignored
+test throttle::tests::test_throttle_zero_bytes ... ignored
+test types::tests::test_calc_op_budget_sparse_read ... ignored
+test types::tests::test_calc_op_budget_write_full ... ignored
+test types::tests::test_list_object_entry ... ignored
+test types::tests::test_object_id_creation ... ignored
+test types::tests::test_object_id_with_namespace ... ignored
+test types::tests::test_op_state_can_resend ... ignored
+test types::tests::test_op_state_default ... ignored
+test types::tests::test_op_state_is_in_flight ... ignored
+test types::tests::test_op_state_is_terminal ... ignored
+test types::tests::test_op_target_default ... ignored
+test types::tests::test_op_target_needs_update ... ignored
+test types::tests::test_op_target_new ... ignored
+test types::tests::test_op_target_update ... ignored
+test types::tests::test_opcode_from_u16_sparse_read ... ignored
+test types::tests::test_opcode_from_u16_write_full ... ignored
+test types::tests::test_opcode_sparse_read_encoding ... ignored
+test types::tests::test_opcode_write_full_encoding ... ignored
+test types::tests::test_osdop_sparse_read ... ignored
+test types::tests::test_osdop_write_full ... ignored
+test types::tests::test_sparse_extent_creation ... ignored
+test types::tests::test_sparse_extent_equality ... ignored
+test types::tests::test_sparse_read_result ... ignored
+
+test result: ok. 0 passed; 0 failed; 117 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running benches/concurrent.rs (target/release/deps/concurrent-436cc80d7d87c66c)
+Gnuplot not found, using plotters backend
+Benchmarking concurrent_ops/submit/1
+Benchmarking concurrent_ops/submit/1: Warming up for 3.0000 s
+Benchmarking concurrent_ops/submit/1: Collecting 100 samples in estimated 5.0336 s (530k iterations)
+Benchmarking concurrent_ops/submit/1: Analyzing
+concurrent_ops/submit/1 time:   [9.3849 µs 9.4872 µs 9.5976 µs]
+Found 6 outliers among 100 measurements (6.00%)
+  1 (1.00%) low mild
+  4 (4.00%) high mild
+  1 (1.00%) high severe
+Benchmarking concurrent_ops/submit/2
+Benchmarking concurrent_ops/submit/2: Warming up for 3.0000 s
+Benchmarking concurrent_ops/submit/2: Collecting 100 samples in estimated 5.0134 s (490k iterations)
+Benchmarking concurrent_ops/submit/2: Analyzing
+concurrent_ops/submit/2 time:   [10.158 µs 10.285 µs 10.419 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking concurrent_ops/submit/4
+Benchmarking concurrent_ops/submit/4: Warming up for 3.0000 s
+Benchmarking concurrent_ops/submit/4: Collecting 100 samples in estimated 5.0369 s (338k iterations)
+Benchmarking concurrent_ops/submit/4: Analyzing
+concurrent_ops/submit/4 time:   [14.777 µs 14.947 µs 15.114 µs]
+Found 1 outliers among 100 measurements (1.00%)
+  1 (1.00%) high mild
+Benchmarking concurrent_ops/submit/8
+Benchmarking concurrent_ops/submit/8: Warming up for 3.0000 s
+Benchmarking concurrent_ops/submit/8: Collecting 100 samples in estimated 5.0153 s (237k iterations)
+Benchmarking concurrent_ops/submit/8: Analyzing
+concurrent_ops/submit/8 time:   [21.034 µs 21.163 µs 21.290 µs]
+Found 2 outliers among 100 measurements (2.00%)
+  2 (2.00%) high mild
+
+     Running benches/operations.rs (target/release/deps/operations-ee6d9bc9ac49a71f)
+Gnuplot not found, using plotters backend
+Benchmarking osdop_build/read/4096
+Benchmarking osdop_build/read/4096: Warming up for 3.0000 s
+Benchmarking osdop_build/read/4096: Collecting 100 samples in estimated 5.0000 s (554M iterations)
+Benchmarking osdop_build/read/4096: Analyzing
+osdop_build/read/4096   time:   [8.6086 ns 8.6159 ns 8.6236 ns]
+                        change: [-0.2128% -0.0873% +0.0252%] (p = 0.16 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 100 measurements (4.00%)
+  4 (4.00%) high mild
+Benchmarking osdop_build/read/65536
+Benchmarking osdop_build/read/65536: Warming up for 3.0000 s
+Benchmarking osdop_build/read/65536: Collecting 100 samples in estimated 5.0000 s (551M iterations)
+Benchmarking osdop_build/read/65536: Analyzing
+osdop_build/read/65536  time:   [8.6121 ns 8.6229 ns 8.6347 ns]
+                        change: [-0.3865% -0.2633% -0.1444%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 8 outliers among 100 measurements (8.00%)
+  6 (6.00%) high mild
+  2 (2.00%) high severe
+Benchmarking osdop_build/read/1048576
+Benchmarking osdop_build/read/1048576: Warming up for 3.0000 s
+Benchmarking osdop_build/read/1048576: Collecting 100 samples in estimated 5.0000 s (548M iterations)
+Benchmarking osdop_build/read/1048576: Analyzing
+osdop_build/read/1048576
+                        time:   [8.7651 ns 8.8328 ns 8.9091 ns]
+                        change: [-0.1028% +0.7618% +1.5557%] (p = 0.08 > 0.05)
+                        No change in performance detected.
+Found 15 outliers among 100 measurements (15.00%)
+  3 (3.00%) high mild
+  12 (12.00%) high severe
+
+Benchmarking osdop_build/write/4096
+Benchmarking osdop_build/write/4096: Warming up for 3.0000 s
+Benchmarking osdop_build/write/4096: Collecting 100 samples in estimated 5.0000 s (413M iterations)
+Benchmarking osdop_build/write/4096: Analyzing
+osdop_build/write/4096  time:   [11.937 ns 11.977 ns 12.026 ns]
+                        change: [-0.1607% +0.3071% +0.8184%] (p = 0.23 > 0.05)
+                        No change in performance detected.
+Found 12 outliers among 100 measurements (12.00%)
+  1 (1.00%) high mild
+  11 (11.00%) high severe
+Benchmarking osdop_build/write/65536
+Benchmarking osdop_build/write/65536: Warming up for 3.0000 s
+Benchmarking osdop_build/write/65536: Collecting 100 samples in estimated 5.0000 s (412M iterations)
+Benchmarking osdop_build/write/65536: Analyzing
+osdop_build/write/65536 time:   [11.948 ns 11.966 ns 11.986 ns]
+                        change: [+0.6683% +1.3550% +2.2893%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 15 outliers among 100 measurements (15.00%)
+  1 (1.00%) high mild
+  14 (14.00%) high severe
+Benchmarking osdop_build/write/1048576
+Benchmarking osdop_build/write/1048576: Warming up for 3.0000 s
+Benchmarking osdop_build/write/1048576: Collecting 100 samples in estimated 5.0000 s (410M iterations)
+Benchmarking osdop_build/write/1048576: Analyzing
+osdop_build/write/1048576
+                        time:   [11.931 ns 11.954 ns 11.988 ns]
+                        change: [-1.0355% -0.6520% -0.3098%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+
+Benchmarking osdop_build/stat
+Benchmarking osdop_build/stat: Warming up for 3.0000 s
+Benchmarking osdop_build/stat: Collecting 100 samples in estimated 5.0000 s (775M iterations)
+Benchmarking osdop_build/stat: Analyzing
+osdop_build/stat        time:   [6.3738 ns 6.3788 ns 6.3849 ns]
+                        change: [+0.0924% +0.1906% +0.2842%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Found 5 outliers among 100 measurements (5.00%)
+  3 (3.00%) high mild
+  2 (2.00%) high severe
+
+Benchmarking mosdop_encode/read/4096
+Benchmarking mosdop_encode/read/4096: Warming up for 3.0000 s
+Benchmarking mosdop_encode/read/4096: Collecting 100 samples in estimated 5.0004 s (19M iterations)
+Benchmarking mosdop_encode/read/4096: Analyzing
+mosdop_encode/read/4096 time:   [267.06 ns 268.21 ns 269.92 ns]
+                        thrpt:  [14.133 GiB/s 14.223 GiB/s 14.284 GiB/s]
+                 change:
+                        time:   [+4.5252% +5.5454% +7.0167%] (p = 0.00 < 0.05)
+                        thrpt:  [-6.5566% -5.2540% -4.3292%]
+                        Performance has regressed.
+Found 12 outliers among 100 measurements (12.00%)
+  3 (3.00%) high mild
+  9 (9.00%) high severe
+Benchmarking mosdop_encode/read/65536
+Benchmarking mosdop_encode/read/65536: Warming up for 3.0000 s
+Benchmarking mosdop_encode/read/65536: Collecting 100 samples in estimated 5.0009 s (20M iterations)
+Benchmarking mosdop_encode/read/65536: Analyzing
+mosdop_encode/read/65536
+                        time:   [250.91 ns 251.43 ns 252.30 ns]
+                        thrpt:  [241.92 GiB/s 242.75 GiB/s 243.26 GiB/s]
+                 change:
+                        time:   [-1.1830% -0.9364% -0.5852%] (p = 0.00 < 0.05)
+                        thrpt:  [+0.5887% +0.9453% +1.1972%]
+                        Change within noise threshold.
+Found 2 outliers among 100 measurements (2.00%)
+  1 (1.00%) high mild
+  1 (1.00%) high severe
+Benchmarking mosdop_encode/read/1048576
+Benchmarking mosdop_encode/read/1048576: Warming up for 3.0000 s
+Benchmarking mosdop_encode/read/1048576: Collecting 100 samples in estimated 5.0001 s (20M iterations)
+Benchmarking mosdop_encode/read/1048576: Analyzing
+mosdop_encode/read/1048576
+                        time:   [251.56 ns 253.31 ns 255.49 ns]
+                        thrpt:  [3822.3 GiB/s 3855.2 GiB/s 3882.0 GiB/s]
+                 change:
+                        time:   [-2.0777% -1.6086% -1.0329%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.0437% +1.6349% +2.1218%]
+                        Performance has improved.
+Found 15 outliers among 100 measurements (15.00%)
+  7 (7.00%) high mild
+  8 (8.00%) high severe
+
+Benchmarking mosdop_encode/write/4096
+Benchmarking mosdop_encode/write/4096: Warming up for 3.0000 s
+Benchmarking mosdop_encode/write/4096: Collecting 100 samples in estimated 5.0003 s (20M iterations)
+Benchmarking mosdop_encode/write/4096: Analyzing
+mosdop_encode/write/4096
+                        time:   [251.06 ns 251.33 ns 251.64 ns]
+                        thrpt:  [15.160 GiB/s 15.178 GiB/s 15.194 GiB/s]
+                 change:
+                        time:   [-1.6444% -1.4499% -1.2817%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.2983% +1.4712% +1.6719%]
+                        Performance has improved.
+Found 11 outliers among 100 measurements (11.00%)
+  9 (9.00%) high mild
+  2 (2.00%) high severe
+Benchmarking mosdop_encode/write/65536
+Benchmarking mosdop_encode/write/65536: Warming up for 3.0000 s
+Benchmarking mosdop_encode/write/65536: Collecting 100 samples in estimated 5.0009 s (20M iterations)
+Benchmarking mosdop_encode/write/65536: Analyzing
+mosdop_encode/write/65536
+                        time:   [251.38 ns 252.24 ns 253.31 ns]
+                        thrpt:  [240.95 GiB/s 241.97 GiB/s 242.80 GiB/s]
+                 change:
+                        time:   [-3.8313% -2.7311% -1.6742%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.7027% +2.8077% +3.9840%]
+                        Performance has improved.
+Found 13 outliers among 100 measurements (13.00%)
+  6 (6.00%) high mild
+  7 (7.00%) high severe
+Benchmarking mosdop_encode/write/1048576
+Benchmarking mosdop_encode/write/1048576: Warming up for 3.0000 s
+Benchmarking mosdop_encode/write/1048576: Collecting 100 samples in estimated 5.0011 s (20M iterations)
+Benchmarking mosdop_encode/write/1048576: Analyzing
+mosdop_encode/write/1048576
+                        time:   [248.60 ns 248.90 ns 249.28 ns]
+                        thrpt:  [3917.5 GiB/s 3923.5 GiB/s 3928.2 GiB/s]
+                 change:
+                        time:   [-1.9186% -1.7180% -1.4992%] (p = 0.00 < 0.05)
+                        thrpt:  [+1.5221% +1.7480% +1.9561%]
+                        Performance has improved.
+Found 6 outliers among 100 measurements (6.00%)
+  3 (3.00%) high mild
+  3 (3.00%) high severe
+
+Benchmarking mosdop_encode/stat
+Benchmarking mosdop_encode/stat: Warming up for 3.0000 s
+Benchmarking mosdop_encode/stat: Collecting 100 samples in estimated 5.0003 s (19M iterations)
+Benchmarking mosdop_encode/stat: Analyzing
+mosdop_encode/stat      time:   [254.55 ns 256.17 ns 258.38 ns]
+                        change: [+1.3484% +2.9503% +5.0084%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 6 outliers among 100 measurements (6.00%)
+  2 (2.00%) high mild
+  4 (4.00%) high severe
+
+Benchmarking mosdop_full_message/write/4096
+Benchmarking mosdop_full_message/write/4096: Warming up for 3.0000 s
+Benchmarking mosdop_full_message/write/4096: Collecting 100 samples in estimated 5.0027 s (6.0M iterations)
+Benchmarking mosdop_full_message/write/4096: Analyzing
+mosdop_full_message/write/4096
+                        time:   [836.02 ns 843.54 ns 852.31 ns]
+                        thrpt:  [4.4757 GiB/s 4.5222 GiB/s 4.5629 GiB/s]
+                 change:
+                        time:   [+0.7812% +1.2315% +1.7836%] (p = 0.00 < 0.05)
+                        thrpt:  [-1.7523% -1.2166% -0.7751%]
+                        Change within noise threshold.
+Found 7 outliers among 100 measurements (7.00%)
+  2 (2.00%) high mild
+  5 (5.00%) high severe
+Benchmarking mosdop_full_message/write/65536
+Benchmarking mosdop_full_message/write/65536: Warming up for 3.0000 s
+Benchmarking mosdop_full_message/write/65536: Collecting 100 samples in estimated 5.0274 s (732k iterations)
+Benchmarking mosdop_full_message/write/65536: Analyzing
+mosdop_full_message/write/65536
+                        time:   [6.8982 µs 6.9264 µs 6.9616 µs]
+                        thrpt:  [8.7674 GiB/s 8.8120 GiB/s 8.8480 GiB/s]
+                 change:
+                        time:   [+1.2527% +1.9110% +2.5099%] (p = 0.00 < 0.05)
+                        thrpt:  [-2.4485% -1.8752% -1.2372%]
+                        Performance has regressed.
+Found 11 outliers among 100 measurements (11.00%)
+  7 (7.00%) high mild
+  4 (4.00%) high severe
+Benchmarking mosdop_full_message/write/1048576
+Benchmarking mosdop_full_message/write/1048576: Warming up for 3.0000 s
+Benchmarking mosdop_full_message/write/1048576: Collecting 100 samples in estimated 5.4770 s (50k iterations)
+Benchmarking mosdop_full_message/write/1048576: Analyzing
+mosdop_full_message/write/1048576
+                        time:   [108.10 µs 108.21 µs 108.33 µs]
+                        thrpt:  [9.0144 GiB/s 9.0245 GiB/s 9.0339 GiB/s]
+                 change:
+                        time:   [-0.1051% -0.0018% +0.0954%] (p = 0.97 > 0.05)
+                        thrpt:  [-0.0954% +0.0018% +0.1053%]
+                        No change in performance detected.
+Found 3 outliers among 100 measurements (3.00%)
+  1 (1.00%) high mild
+  2 (2.00%) high severe
+
+     Running unittests src/main.rs (target/release/deps/rados-639256d6afa40fb6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

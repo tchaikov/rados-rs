@@ -18,7 +18,6 @@ hostname = "0.3"
 rand = { workspace = true }
 futures = { workspace = true }
 dashmap = "6.0"
-parking_lot = { workspace = true }
 
 # Internal dependencies
 msgr2 = { path = "../msgr2" }

@@ -82,7 +82,7 @@ struct IoTaskContext {
     osd_id: i32,
     pending_ops: Arc<DashMap<u64, PendingOp>>,
     #[allow(dead_code)]
-    backoff_tracker: Arc<parking_lot::RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::client::OSDClient>,
     /// Session incarnation for this connection
@@ -91,7 +91,7 @@ struct IoTaskContext {
     #[allow(dead_code)]
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address)
-    session_info: Arc<parking_lot::RwLock<SessionInfo>>,
+    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -114,7 +114,7 @@ pub struct OSDSession {
     /// Global ID from monitor authentication (for AUTH_NONE authorizers)
     global_id: u64,
     /// Per-PG backoff tracker using efficient data structures
-    backoff_tracker: Arc<parking_lot::RwLock<BackoffTracker>>,
+    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
     /// Channel for routing MOSDMap messages to OSDClient
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
@@ -128,7 +128,7 @@ pub struct OSDSession {
     incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address combined)
     /// Using a single lock reduces lock acquisitions and simplifies the code.
-    session_info: Arc<parking_lot::RwLock<SessionInfo>>,
+    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -205,7 +205,7 @@ impl OSDSession {
             client_inc,
             auth_provider,
             global_id,
-            backoff_tracker: Arc::new(parking_lot::RwLock::new(BackoffTracker::new())),
+            backoff_tracker: Arc::new(tokio::sync::RwLock::new(BackoffTracker::new())),
             osdmap_tx,
             client,
             tracker,
@@ -213,7 +213,7 @@ impl OSDSession {
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
             // Start with no peer address and disconnected state
-            session_info: Arc::new(parking_lot::RwLock::new(SessionInfo {
+            session_info: Arc::new(tokio::sync::RwLock::new(SessionInfo {
                 conn_state: ConnectionState::Disconnected,
                 peer_addr: None,
             })),
@@ -252,13 +252,13 @@ impl OSDSession {
         let _lock = self.connecting_lock.lock().await;
 
         // Check if already connected (double-check after acquiring lock)
-        if self.session_info.read().conn_state == ConnectionState::Connected {
+        if self.session_info.read().await.conn_state == ConnectionState::Connected {
             info!("OSD {} already connected, skipping", self.osd_id);
             return Ok(());
         }
 
         // Transition to Connecting state
-        self.session_info.write().conn_state = ConnectionState::Connecting;
+        self.session_info.write().await.conn_state = ConnectionState::Connecting;
 
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
@@ -299,7 +299,7 @@ impl OSDSession {
 
         // Store peer address and transition to Connected state
         {
-            let mut info = self.session_info.write();
+            let mut info = self.session_info.write().await;
             info.peer_addr = Some(entity_addr.clone());
             info.conn_state = ConnectionState::Connected;
         }
@@ -430,7 +430,7 @@ impl OSDSession {
         } else {
             ConnectionState::Disconnected
         };
-        ctx.session_info.write().conn_state = final_state;
+        ctx.session_info.write().await.conn_state = final_state;
 
         // Leave pending ops in the session.
         // They are migrated eagerly by get_or_create_session() the next time any operation
@@ -462,7 +462,7 @@ impl OSDSession {
     }
 
     /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
-    pub fn backoff_tracker(&self) -> Arc<parking_lot::RwLock<BackoffTracker>> {
+    pub fn backoff_tracker(&self) -> Arc<tokio::sync::RwLock<BackoffTracker>> {
         Arc::clone(&self.backoff_tracker)
     }
 
@@ -688,151 +688,171 @@ impl OSDSession {
         pending_ops: &Arc<DashMap<u64, PendingOp>>,
         current_incarnation: u32,
     ) -> Option<(PendingOp, u32)> {
-        let pending_op = pending_ops.remove(&tid).map(|(_, v)| v);
+        let pending_op = pending_ops.remove(&tid).map(|(_, v)| v)?;
 
-        if let Some(pending_op) = pending_op {
-            // Check incarnation first - most important staleness check
-            // Following Ceph pattern: discard operations from previous connection incarnations
-            // Reference: ~/dev/linux/net/ceph/osd_client.c handle_reply()
-            if pending_op.sent_incarnation != current_incarnation {
-                warn!(
-                    "Ignoring stale reply for tid {}: sent in incarnation {} but current is {}",
-                    tid, pending_op.sent_incarnation, current_incarnation
-                );
-                debug!(
-                    "Stale operation details: tid={}, reqid={}, attempts={}, osdmap_epoch={}",
-                    tid, pending_op.reqid.tid, pending_op.attempts, pending_op.osdmap_epoch
-                );
-                return None;
-            }
+        // Validate operation staleness
+        if !Self::validate_reply_freshness(tid, &reply, &pending_op, current_incarnation) {
+            return None;
+        }
 
-            // Validate retry_attempt matches our attempt count
-            // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
-            if reply.retry_attempt >= 0 {
-                // retry_attempt is 0-based, but our attempts counter is 1-based
-                // So retry_attempt should equal (attempts - 1)
-                if reply.retry_attempt != pending_op.attempts - 1 {
-                    warn!(
-                        "Ignoring stale reply for tid {}: retry_attempt {} != expected {} (attempts={})",
-                        tid, reply.retry_attempt, pending_op.attempts - 1, pending_op.attempts
-                    );
-                    return None;
-                }
-            } else {
-                // Server doesn't support retry_attempt field
-                // This should only happen with very old Ceph versions (pre-v3, from 2012)
-                debug!(
-                    "Reply for tid {} has retry_attempt=-1 (old server or unset field)",
-                    tid
-                );
-            }
+        // Handle redirect if present
+        if let Some(redirect) = &reply.redirect {
+            return Self::handle_redirect(tid, pending_op, redirect);
+        }
 
-            // Check for redirect reply first
-            // Following Ceph Objecter pattern: handle redirects before other logic
-            // Reference: ~/dev/ceph/src/osdc/Objecter.cc:3734
-            if let Some(redirect) = &reply.redirect {
-                // Check for redirect loop
-                if pending_op.redirect_count >= MAX_REDIRECTS {
-                    error!(
-                        "Operation tid {} exceeded maximum redirects ({}), failing",
-                        tid, MAX_REDIRECTS
-                    );
-                    let _ = pending_op
-                        .result_tx
-                        .send(Err(crate::error::OSDClientError::Other(format!(
-                            "Exceeded maximum redirects ({})",
-                            MAX_REDIRECTS
-                        ))));
-                    return None;
-                }
-
-                debug!(
-                    "Got redirect reply for tid {} (redirect #{} of {}): pool={}, key={}, namespace={}, object={}",
-                    tid,
-                    pending_op.redirect_count + 1,
-                    MAX_REDIRECTS,
-                    redirect.redirect_locator.pool_id,
-                    redirect.redirect_locator.key,
-                    redirect.redirect_locator.namespace,
-                    redirect.redirect_object
-                );
-
-                // Apply redirect to operation's target object locator
-                // The redirect combines with existing locator (Ceph's combine_with_locator)
+        // Handle EAGAIN on replica reads
+        if reply.result == crate::error::EAGAIN {
+            if let Some((new_mosdop, new_flags)) =
+                Self::handle_eagain_retry(tid, &reply, &pending_op)
+            {
                 let mut updated_op = pending_op;
-
-                // Increment redirect counter
-                updated_op.redirect_count += 1;
-
-                // Create a new MOSDOp with updated fields (Arc requires creating new instance)
-                let mut new_mosdop = (*updated_op.op).clone();
-
-                // Update object locator with redirect information
-                if redirect.redirect_locator.pool_id != u64::MAX {
-                    new_mosdop.object.pool = redirect.redirect_locator.pool_id;
-                }
-                if !redirect.redirect_locator.key.is_empty() {
-                    new_mosdop
-                        .object
-                        .key
-                        .clone_from(&redirect.redirect_locator.key);
-                }
-                if !redirect.redirect_locator.namespace.is_empty() {
-                    new_mosdop
-                        .object
-                        .namespace
-                        .clone_from(&redirect.redirect_locator.namespace);
-                }
-                if !redirect.redirect_object.is_empty() {
-                    new_mosdop.object.oid.clone_from(&redirect.redirect_object);
-                }
-
-                // Set redirect flags (following Ceph Objecter.cc:3747-3749)
-                use crate::types::OsdOpFlags;
-                new_mosdop.flags |= OsdOpFlags::REDIRECTED.bits();
-                new_mosdop.flags |= OsdOpFlags::IGNORE_CACHE.bits();
-                new_mosdop.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
-
-                let new_flags = new_mosdop.flags;
-
-                // Replace the Arc with the updated operation
                 updated_op.op = Arc::new(new_mosdop);
-
-                // Return operation for resubmission with updated flags
-                // The caller (OSDClient) will recalculate target OSD via CRUSH
                 return Some((updated_op, new_flags));
             }
+        }
 
-            // Check for EAGAIN on replica reads
-            // See: ~/dev/ceph/src/osdc/Objecter.cc handle_reply()
-            if reply.result == crate::error::EAGAIN {
-                // Check if this was a replica read
-                use crate::types::OsdOpFlags;
-                let replica_flags = (OsdOpFlags::BALANCE_READS | OsdOpFlags::LOCALIZE_READS).bits();
+        // Normal completion
+        let result = reply.to_op_result();
+        let _ = pending_op.result_tx.send(Ok(result));
+        None
+    }
 
-                if pending_op.op.flags & replica_flags != 0 {
-                    debug!(
-                        "Got EAGAIN for replica read tid {}, resubmitting to primary",
-                        tid
-                    );
+    /// Validate that reply is not stale
+    fn validate_reply_freshness(
+        tid: u64,
+        reply: &MOSDOpReply,
+        pending_op: &PendingOp,
+        current_incarnation: u32,
+    ) -> bool {
+        // Check incarnation first
+        if pending_op.sent_incarnation != current_incarnation {
+            warn!(
+                "Ignoring stale reply for tid {}: sent in incarnation {} but current is {}",
+                tid, pending_op.sent_incarnation, current_incarnation
+            );
+            debug!(
+                "Stale operation details: tid={}, reqid={}, attempts={}, osdmap_epoch={}",
+                tid, pending_op.reqid.tid, pending_op.attempts, pending_op.osdmap_epoch
+            );
+            return false;
+        }
 
-                    // Create new MOSDOp with replica read flags removed
-                    let mut new_mosdop = (*pending_op.op).clone();
-                    new_mosdop.flags &= !replica_flags;
-                    let new_flags = new_mosdop.flags;
-
-                    // Update the Arc
-                    let mut updated_op = pending_op;
-                    updated_op.op = Arc::new(new_mosdop);
-
-                    return Some((updated_op, new_flags));
-                }
+        // Validate retry_attempt
+        if reply.retry_attempt >= 0 {
+            if reply.retry_attempt != pending_op.attempts - 1 {
+                warn!(
+                    "Ignoring stale reply for tid {}: retry_attempt {} != expected {} (attempts={})",
+                    tid, reply.retry_attempt, pending_op.attempts - 1, pending_op.attempts
+                );
+                return false;
             }
-
-            let result = reply.to_op_result();
-            let _ = pending_op.result_tx.send(Ok(result));
         } else {
-            warn!("Received reply for unknown tid: {}", tid);
+            debug!(
+                "Reply for tid {} has retry_attempt=-1 (old server or unset field)",
+                tid
+            );
+        }
+
+        true
+    }
+
+    /// Handle redirect reply
+    fn handle_redirect(
+        tid: u64,
+        mut pending_op: PendingOp,
+        redirect: &crate::types::RequestRedirect,
+    ) -> Option<(PendingOp, u32)> {
+        // Check for redirect loop
+        if pending_op.redirect_count >= MAX_REDIRECTS {
+            error!(
+                "Operation tid {} exceeded maximum redirects ({}), failing",
+                tid, MAX_REDIRECTS
+            );
+            let _ = pending_op
+                .result_tx
+                .send(Err(crate::error::OSDClientError::Other(format!(
+                    "Exceeded maximum redirects ({})",
+                    MAX_REDIRECTS
+                ))));
+            return None;
+        }
+
+        debug!(
+            "Got redirect reply for tid {} (redirect #{} of {}): pool={}, key={}, namespace={}, object={}",
+            tid,
+            pending_op.redirect_count + 1,
+            MAX_REDIRECTS,
+            redirect.redirect_locator.pool_id,
+            redirect.redirect_locator.key,
+            redirect.redirect_locator.namespace,
+            redirect.redirect_object
+        );
+
+        // Increment redirect counter
+        pending_op.redirect_count += 1;
+
+        // Apply redirect to operation
+        let new_mosdop = Self::apply_redirect_to_op(&pending_op.op, redirect);
+        let new_flags = new_mosdop.flags;
+        pending_op.op = Arc::new(new_mosdop);
+
+        Some((pending_op, new_flags))
+    }
+
+    /// Apply redirect information to operation
+    fn apply_redirect_to_op(op: &MOSDOp, redirect: &crate::types::RequestRedirect) -> MOSDOp {
+        let mut new_mosdop = op.clone();
+
+        // Update object locator with redirect information
+        if redirect.redirect_locator.pool_id != u64::MAX {
+            new_mosdop.object.pool = redirect.redirect_locator.pool_id;
+        }
+        if !redirect.redirect_locator.key.is_empty() {
+            new_mosdop
+                .object
+                .key
+                .clone_from(&redirect.redirect_locator.key);
+        }
+        if !redirect.redirect_locator.namespace.is_empty() {
+            new_mosdop
+                .object
+                .namespace
+                .clone_from(&redirect.redirect_locator.namespace);
+        }
+        if !redirect.redirect_object.is_empty() {
+            new_mosdop.object.oid.clone_from(&redirect.redirect_object);
+        }
+
+        // Set redirect flags
+        use crate::types::OsdOpFlags;
+        new_mosdop.flags |= OsdOpFlags::REDIRECTED.bits();
+        new_mosdop.flags |= OsdOpFlags::IGNORE_CACHE.bits();
+        new_mosdop.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
+
+        new_mosdop
+    }
+
+    /// Handle EAGAIN retry for replica reads
+    fn handle_eagain_retry(
+        tid: u64,
+        _reply: &MOSDOpReply,
+        pending_op: &PendingOp,
+    ) -> Option<(MOSDOp, u32)> {
+        use crate::types::OsdOpFlags;
+        let replica_flags = (OsdOpFlags::BALANCE_READS | OsdOpFlags::LOCALIZE_READS).bits();
+
+        if pending_op.op.flags & replica_flags != 0 {
+            debug!(
+                "Got EAGAIN for replica read tid {}, resubmitting to primary",
+                tid
+            );
+
+            // Create new MOSDOp with replica read flags removed
+            let mut new_mosdop = (*pending_op.op).clone();
+            new_mosdop.flags &= !replica_flags;
+            let new_flags = new_mosdop.flags;
+
+            return Some((new_mosdop, new_flags));
         }
 
         None
@@ -915,7 +935,7 @@ impl OSDSession {
     /// Check if connected to OSD
     pub async fn is_connected(&self) -> bool {
         // Check explicit connection state
-        self.session_info.read().conn_state == ConnectionState::Connected
+        self.session_info.read().await.conn_state == ConnectionState::Connected
     }
 
     /// Await the I/O task to ensure it has stopped
@@ -928,7 +948,7 @@ impl OSDSession {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
-        self.session_info.write().conn_state = ConnectionState::Closed;
+        self.session_info.write().await.conn_state = ConnectionState::Closed;
     }
 
     /// Get the peer address for this session
@@ -936,7 +956,7 @@ impl OSDSession {
     /// Returns the EntityAddr that was used to establish the current connection.
     /// Used to validate that the session's address matches the current OSDMap.
     pub async fn get_peer_address(&self) -> Option<denc::EntityAddr> {
-        self.session_info.read().peer_addr.clone()
+        self.session_info.read().await.peer_addr.clone()
     }
 
     /// Get the current connection state
@@ -944,7 +964,7 @@ impl OSDSession {
     /// Provides explicit state information for observability and debugging.
     /// Following Ceph pattern for explicit connection state tracking.
     pub async fn connection_state(&self) -> ConnectionState {
-        self.session_info.read().conn_state
+        self.session_info.read().await.conn_state
     }
 
     /// Check if an operation is blocked by an active backoff
@@ -952,7 +972,7 @@ impl OSDSession {
     /// Uses efficient range lookup matching Ceph's _send_op() logic
     /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _send_op()
     async fn is_blocked_by_backoff(&self, pgid: &StripedPgId, hobj: &denc::HObject) -> bool {
-        let tracker = self.backoff_tracker.read();
+        let tracker = self.backoff_tracker.read().await;
         tracker.is_blocked(pgid, hobj).is_some()
     }
 

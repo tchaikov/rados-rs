@@ -1369,44 +1369,17 @@ impl OSDClient {
     async fn scan_requests_on_map_change(&self, new_epoch: u32) -> Result<()> {
         let osdmap = self.get_osdmap().await?;
 
-        // Collect session metadata under read lock, then release immediately
-        // This minimizes lock contention by avoiding I/O operations while holding the lock
-        let session_snapshot: Vec<(i32, Arc<OSDSession>)> = {
-            let sessions = self.sessions.read().await;
-            sessions
-                .iter()
-                .map(|(id, sess)| (*id, Arc::clone(sess)))
-                .collect()
-        };
+        // Collect session snapshot
+        let session_snapshot = self.collect_session_snapshot().await;
 
         let mut need_resend = Vec::new();
-        // Sessions whose OSD is down or whose address changed need to be
-        // closed so that the next operation creates a fresh connection.
-        // Follows Ceph Objecter::_scan_requests() which closes sessions for
-        // down or address-changed OSDs.
         let mut sessions_to_close: Vec<i32> = Vec::new();
 
-        // Process sessions without holding the lock
+        // Process each session
         for (osd_id, session) in session_snapshot {
-            // --- Phase 1: Check session-level OSD health ---
-            // Reference: Ceph Objecter::_scan_requests() checks is_up() for
-            // every open session and closes sessions to down OSDs.
-            let should_close = if osdmap.is_down(osd_id) {
-                info!(
-                    "OSD {} is DOWN in epoch {}, closing session and migrating pending ops",
-                    osd_id, new_epoch
-                );
-                true
-            } else if session.is_connected().await {
-                // --- Phase 2: Check if the OSD address changed ---
-                // Reference: Ceph Objecter checks the OSD address in the OSDMap
-                // against the session's peer address and re-opens the session
-                // when they diverge (e.g. OSD restarted on a different port).
-                self.session_address_stale(&session, osd_id, &osdmap, new_epoch)
-                    .await
-            } else {
-                false
-            };
+            let should_close = self
+                .check_session_health(osd_id, &session, &osdmap, new_epoch)
+                .await;
 
             if should_close {
                 sessions_to_close.push(osd_id);
@@ -1415,54 +1388,119 @@ impl OSDClient {
                 continue;
             }
 
-            // --- Phase 3: Per-operation target check (existing logic) ---
-            let metadata = session.get_pending_ops_metadata().await;
-            for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
-                // Check if pool deleted
-                if !osdmap.pools.contains_key(&pool_id) {
-                    if let Some(pending_op) = session.remove_pending_op(tid).await {
-                        let _ = pending_op
-                            .result_tx
-                            .send(Err(OSDClientError::PoolNotFound(pool_id)));
-                    }
-                    continue;
+            // Check per-operation targets
+            self.scan_session_operations(osd_id, &session, &osdmap, new_epoch, &mut need_resend)
+                .await?;
+        }
+
+        // Close stale sessions
+        self.close_stale_sessions(sessions_to_close).await;
+
+        // Resend operations to new targets
+        self.resend_migrated_operations(need_resend, new_epoch)
+            .await?;
+
+        Ok(())
+    }
+
+    /// Collect snapshot of all sessions
+    async fn collect_session_snapshot(&self) -> Vec<(i32, Arc<OSDSession>)> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .iter()
+            .map(|(id, sess)| (*id, Arc::clone(sess)))
+            .collect()
+    }
+
+    /// Check if session should be closed due to OSD down or address change
+    async fn check_session_health(
+        &self,
+        osd_id: i32,
+        session: &Arc<OSDSession>,
+        osdmap: &Arc<crate::osdmap::OSDMap>,
+        new_epoch: u32,
+    ) -> bool {
+        if osdmap.is_down(osd_id) {
+            info!(
+                "OSD {} is DOWN in epoch {}, closing session and migrating pending ops",
+                osd_id, new_epoch
+            );
+            return true;
+        }
+
+        if session.is_connected().await {
+            return self
+                .session_address_stale(session, osd_id, osdmap, new_epoch)
+                .await;
+        }
+
+        false
+    }
+
+    /// Scan operations in a session and collect those needing resend
+    async fn scan_session_operations(
+        &self,
+        osd_id: i32,
+        session: &Arc<OSDSession>,
+        osdmap: &Arc<crate::osdmap::OSDMap>,
+        new_epoch: u32,
+        need_resend: &mut Vec<(i32, crate::session::PendingOp)>,
+    ) -> Result<()> {
+        let metadata = session.get_pending_ops_metadata().await;
+
+        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+            // Check if pool deleted
+            if !osdmap.pools.contains_key(&pool_id) {
+                if let Some(pending_op) = session.remove_pending_op(tid).await {
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::PoolNotFound(pool_id)));
                 }
+                continue;
+            }
 
-                // Check if target changed
-                let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
-                let new_primary = new_osds.first().copied().unwrap_or(-1);
+            // Check if target changed
+            let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
+            let new_primary = new_osds.first().copied().unwrap_or(-1);
 
-                if new_primary != osd_id {
-                    if let Some(mut op) = session.remove_pending_op(tid).await {
-                        // Mark as needing resend, then update target
-                        op.state = crate::types::OpState::NeedsResend;
-                        op.target.update(new_epoch, new_primary, new_osds.clone());
-                        // Transition back to Queued for resubmission
-                        op.state = crate::types::OpState::Queued;
-                        need_resend.push((new_primary, op));
-                    }
+            if new_primary != osd_id {
+                if let Some(mut op) = session.remove_pending_op(tid).await {
+                    op.state = crate::types::OpState::NeedsResend;
+                    op.target.update(new_epoch, new_primary, new_osds.clone());
+                    op.state = crate::types::OpState::Queued;
+                    need_resend.push((new_primary, op));
                 }
             }
         }
 
-        // Close sessions to down or address-changed OSDs.
-        // This ensures the next get_or_create_session() creates a fresh
-        // connection with the updated address.
-        if !sessions_to_close.is_empty() {
-            for osd_id in &sessions_to_close {
-                let session = {
-                    let mut sessions = self.sessions.write().await;
-                    sessions.remove(osd_id)
-                };
+        Ok(())
+    }
 
-                if let Some(session) = session {
-                    info!("Removing stale session for OSD {}", osd_id);
-                    session.close().await;
-                }
-            }
+    /// Close sessions that are stale
+    async fn close_stale_sessions(&self, sessions_to_close: Vec<i32>) {
+        if sessions_to_close.is_empty() {
+            return;
         }
 
-        // Resend to new targets
+        for osd_id in &sessions_to_close {
+            let session = {
+                let mut sessions = self.sessions.write().await;
+                sessions.remove(osd_id)
+            };
+
+            if let Some(session) = session {
+                info!("Removing stale session for OSD {}", osd_id);
+                session.close().await;
+            }
+        }
+    }
+
+    /// Resend migrated operations to their new target OSDs
+    async fn resend_migrated_operations(
+        &self,
+        need_resend: Vec<(i32, crate::session::PendingOp)>,
+        new_epoch: u32,
+    ) -> Result<()> {
         for (new_osd, pending_op) in need_resend {
             let session = self.get_or_create_session(new_osd).await?;
             if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
@@ -1934,122 +1972,168 @@ impl OSDClient {
         osd_id: i32,
         msg: msgr2::message::Message,
     ) -> Result<()> {
-        use crate::messages::{
-            MOSDBackoff, CEPH_OSD_BACKOFF_OP_ACK_BLOCK, CEPH_OSD_BACKOFF_OP_BLOCK,
-            CEPH_OSD_BACKOFF_OP_UNBLOCK,
-        };
+        use crate::messages::{CEPH_OSD_BACKOFF_OP_BLOCK, CEPH_OSD_BACKOFF_OP_UNBLOCK};
 
         // Decode the backoff message
-        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(MOSDBackoff::msg_type(), MOSDBackoff::msg_version(0));
-        let backoff = MOSDBackoff::decode_payload(&header, &msg.front, &[], &[]).map_err(|e| {
-            OSDClientError::Decoding(format!("Failed to decode MOSDBackoff: {}", e))
-        })?;
+        let backoff = Self::decode_backoff_message(&msg)?;
 
         debug!(
             "OSD {} sent backoff op={} for pgid={}:{}.{}",
             osd_id, backoff.op, backoff.pgid.pool, backoff.pgid.seed, backoff.pgid.shard
         );
 
-        // Get the session for this OSD (the one that sent the backoff)
-        // Clone Arc before releasing lock to avoid holding lock across await
-        let session = {
-            let sessions = self.sessions.read().await;
-            sessions.get(&osd_id).cloned().ok_or_else(|| {
-                OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
-            })?
-        };
+        // Get the session for this OSD
+        let session = self.get_session_for_osd(osd_id).await?;
 
         match backoff.op {
-            CEPH_OSD_BACKOFF_OP_BLOCK => {
-                info!(
-                    "OSD {} requests backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
-                    osd_id,
-                    backoff.pgid.pool,
-                    backoff.pgid.seed,
-                    backoff.pgid.shard,
-                    backoff.id,
-                    backoff.begin,
-                    backoff.end
-                );
-
-                // Register backoff in session
-                {
-                    let tracker = session.backoff_tracker();
-                    let mut tracker = tracker.write().await;
-                    let entry = BackoffEntry {
-                        pgid: backoff.pgid,
-                        id: backoff.id,
-                        begin: backoff.begin.clone(),
-                        end: backoff.end.clone(),
-                    };
-                    tracker.register(entry);
-                }
-
-                // Send ACK_BLOCK reply through session's send channel
-                let ack = MOSDBackoff::new(
-                    backoff.pgid,
-                    backoff.map_epoch,
-                    CEPH_OSD_BACKOFF_OP_ACK_BLOCK,
-                    backoff.id,
-                    backoff.begin,
-                    backoff.end,
-                );
-
-                use msgr2::ceph_message::CephMessagePayload;
-                match ack.encode_payload(0) {
-                    Ok(payload) => {
-                        let msg = msgr2::message::Message::new(
-                            crate::messages::CEPH_MSG_OSD_BACKOFF,
-                            payload,
-                        )
-                        .with_version(MOSDBackoff::VERSION);
-
-                        let send_tx = session.send_tx();
-                        if let Err(e) = send_tx.send(msg).await {
-                            error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
-                        } else {
-                            debug!("Sent ACK_BLOCK for backoff id={} to OSD {}", ack.id, osd_id);
-                        }
-                    }
-                    Err(e) => {
-                        error!("Failed to encode ACK_BLOCK message: {}", e);
-                    }
-                }
-            }
-
+            CEPH_OSD_BACKOFF_OP_BLOCK => self.handle_backoff_block(osd_id, &session, backoff).await,
             CEPH_OSD_BACKOFF_OP_UNBLOCK => {
-                info!(
-                    "OSD {} lifts backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
-                    osd_id,
-                    backoff.pgid.pool,
-                    backoff.pgid.seed,
-                    backoff.pgid.shard,
-                    backoff.id,
-                    backoff.begin,
-                    backoff.end
-                );
-
-                // Remove backoff from session
-                {
-                    let tracker = session.backoff_tracker();
-                    let mut tracker = tracker.write().await;
-                    tracker.remove_by_id(backoff.id, &backoff.begin, &backoff.end);
-                }
-
-                // Resend operations that were in the backoff range
-                session
-                    .resend_ops_in_range(&backoff.pgid, &backoff.begin, &backoff.end)
-                    .await;
+                self.handle_backoff_unblock(osd_id, &session, backoff).await
             }
-
             _ => {
                 warn!(
                     "Received unknown backoff operation {} from OSD {}",
                     backoff.op, osd_id
                 );
+                Ok(())
             }
         }
+    }
+
+    /// Decode backoff message from raw message
+    fn decode_backoff_message(
+        msg: &msgr2::message::Message,
+    ) -> Result<crate::messages::MOSDBackoff> {
+        use crate::messages::MOSDBackoff;
+        use msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+
+        let header = CephMsgHeader::new(MOSDBackoff::msg_type(), MOSDBackoff::msg_version(0));
+        MOSDBackoff::decode_payload(&header, &msg.front, &[], &[])
+            .map_err(|e| OSDClientError::Decoding(format!("Failed to decode MOSDBackoff: {}", e)))
+    }
+
+    /// Get session for OSD, returning error if not found
+    async fn get_session_for_osd(&self, osd_id: i32) -> Result<Arc<OSDSession>> {
+        let sessions = self.sessions.read().await;
+        sessions.get(&osd_id).cloned().ok_or_else(|| {
+            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
+        })
+    }
+
+    /// Handle BLOCK backoff operation
+    async fn handle_backoff_block(
+        &self,
+        osd_id: i32,
+        session: &Arc<OSDSession>,
+        backoff: crate::messages::MOSDBackoff,
+    ) -> Result<()> {
+        info!(
+            "OSD {} requests backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+            osd_id,
+            backoff.pgid.pool,
+            backoff.pgid.seed,
+            backoff.pgid.shard,
+            backoff.id,
+            backoff.begin,
+            backoff.end
+        );
+
+        // Register backoff in session
+        self.register_backoff(session, &backoff).await;
+
+        // Send ACK_BLOCK reply
+        self.send_backoff_ack(osd_id, session, backoff).await
+    }
+
+    /// Register backoff entry in session tracker
+    async fn register_backoff(
+        &self,
+        session: &Arc<OSDSession>,
+        backoff: &crate::messages::MOSDBackoff,
+    ) {
+        let tracker = session.backoff_tracker();
+        let mut tracker = tracker.write().await;
+        let entry = BackoffEntry {
+            pgid: backoff.pgid,
+            id: backoff.id,
+            begin: backoff.begin.clone(),
+            end: backoff.end.clone(),
+        };
+        tracker.register(entry);
+    }
+
+    /// Send ACK_BLOCK message to OSD
+    async fn send_backoff_ack(
+        &self,
+        osd_id: i32,
+        session: &Arc<OSDSession>,
+        backoff: crate::messages::MOSDBackoff,
+    ) -> Result<()> {
+        use crate::messages::{MOSDBackoff, CEPH_OSD_BACKOFF_OP_ACK_BLOCK};
+        use msgr2::ceph_message::CephMessagePayload;
+
+        let ack = MOSDBackoff::new(
+            backoff.pgid,
+            backoff.map_epoch,
+            CEPH_OSD_BACKOFF_OP_ACK_BLOCK,
+            backoff.id,
+            backoff.begin,
+            backoff.end,
+        );
+
+        match ack.encode_payload(0) {
+            Ok(payload) => {
+                let msg =
+                    msgr2::message::Message::new(crate::messages::CEPH_MSG_OSD_BACKOFF, payload)
+                        .with_version(MOSDBackoff::VERSION);
+
+                let send_tx = session.send_tx();
+                if let Err(e) = send_tx.send(msg).await {
+                    error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
+                } else {
+                    debug!("Sent ACK_BLOCK for backoff id={} to OSD {}", ack.id, osd_id);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                error!("Failed to encode ACK_BLOCK message: {}", e);
+                Err(OSDClientError::Encoding(format!(
+                    "Failed to encode ACK_BLOCK: {}",
+                    e
+                )))
+            }
+        }
+    }
+
+    /// Handle UNBLOCK backoff operation
+    async fn handle_backoff_unblock(
+        &self,
+        osd_id: i32,
+        session: &Arc<OSDSession>,
+        backoff: crate::messages::MOSDBackoff,
+    ) -> Result<()> {
+        info!(
+            "OSD {} lifts backoff: pgid={}:{}.{}, id={}, range=[{:?}, {:?})",
+            osd_id,
+            backoff.pgid.pool,
+            backoff.pgid.seed,
+            backoff.pgid.shard,
+            backoff.id,
+            backoff.begin,
+            backoff.end
+        );
+
+        // Remove backoff from session
+        {
+            let tracker = session.backoff_tracker();
+            let mut tracker = tracker.write().await;
+            tracker.remove_by_id(backoff.id, &backoff.begin, &backoff.end);
+        }
+
+        // Resend operations that were in the backoff range
+        session
+            .resend_ops_in_range(&backoff.pgid, &backoff.begin, &backoff.end)
+            .await;
 
         Ok(())
     }
