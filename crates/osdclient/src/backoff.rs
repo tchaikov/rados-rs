@@ -7,11 +7,8 @@
 //!
 //! # Design
 //!
-//! The backoff tracker maintains two data structures:
-//! - `backoffs`: Map from (pgid, begin_hobject) -> BackoffEntry for range lookups
-//! - `backoffs_by_id`: Map from backoff_id -> (pgid, begin_hobject) for O(1) removal
-//!
-//! This matches Ceph's Objecter::OSDSession backoff tracking.
+//! The backoff tracker uses a single BTreeMap with composite key (pgid, begin_hobject).
+//! This provides efficient range queries while maintaining simpler code than nested maps.
 //!
 //! # Reference
 //!
@@ -19,8 +16,18 @@
 //! - ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff(), _send_op()
 
 use crate::types::StripedPgId;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use tracing::{debug, warn};
+
+/// Composite key for backoff entries: (pgid, begin_hobject)
+///
+/// Ordered first by pgid, then by begin hobject. This allows efficient
+/// range queries for both PG-level and object-level lookups.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BackoffKey {
+    pgid: StripedPgId,
+    begin: denc::HObject,
+}
 
 /// A single backoff entry tracking a blocked object range
 #[derive(Debug, Clone)]
@@ -41,22 +48,20 @@ pub struct BackoffEntry {
 /// - Range checking when sending operations
 /// - Registration of new backoffs (BLOCK)
 /// - Removal of backoffs by ID (UNBLOCK)
+///
+/// Uses a single BTreeMap with composite key for simpler code and faster lookups.
 #[derive(Debug, Default)]
 pub struct BackoffTracker {
-    /// Map: pgid -> (begin_hobject -> BackoffEntry)
-    /// Using BTreeMap for begin_hobject to enable efficient range queries
-    backoffs: HashMap<StripedPgId, BTreeMap<denc::HObject, BackoffEntry>>,
-
-    /// Map: backoff_id -> (pgid, begin_hobject) for O(1) lookup during UNBLOCK
-    backoffs_by_id: HashMap<u64, (StripedPgId, denc::HObject)>,
+    /// Map: (pgid, begin_hobject) -> BackoffEntry
+    /// Single BTreeMap enables efficient range queries and simpler code
+    entries: BTreeMap<BackoffKey, BackoffEntry>,
 }
 
 impl BackoffTracker {
     /// Create a new empty backoff tracker
     pub fn new() -> Self {
         Self {
-            backoffs: HashMap::new(),
-            backoffs_by_id: HashMap::new(),
+            entries: BTreeMap::new(),
         }
     }
 
@@ -64,27 +69,20 @@ impl BackoffTracker {
     ///
     /// Returns true if this is a new backoff, false if it already existed
     pub fn register(&mut self, entry: BackoffEntry) -> bool {
-        let pgid = entry.pgid;
-        let id = entry.id;
-        let begin = entry.begin.clone();
+        let key = BackoffKey {
+            pgid: entry.pgid,
+            begin: entry.begin.clone(),
+        };
 
-        // Check if already registered
-        if self.backoffs_by_id.contains_key(&id) {
-            debug!("Backoff id={} already registered, updating", id);
-            // Update existing entry
-            if let Some(pg_backoffs) = self.backoffs.get_mut(&pgid) {
-                pg_backoffs.insert(begin.clone(), entry);
-            }
-            return false;
+        // Check if already registered by looking for existing entry with same ID
+        let is_new = !self.entries.values().any(|e| e.id == entry.id);
+
+        if !is_new {
+            debug!("Backoff id={} already registered, updating", entry.id);
         }
 
-        // Register in both maps
-        self.backoffs_by_id.insert(id, (pgid, begin.clone()));
-
-        let pg_backoffs = self.backoffs.entry(pgid).or_default();
-        pg_backoffs.insert(begin, entry);
-
-        true
+        self.entries.insert(key, entry);
+        is_new
     }
 
     /// Remove a backoff by ID (called on UNBLOCK message)
@@ -96,14 +94,15 @@ impl BackoffTracker {
         expected_begin: &denc::HObject,
         expected_end: &denc::HObject,
     ) -> Option<BackoffEntry> {
-        // Look up by ID for O(1) removal
-        let (pgid, begin) = self.backoffs_by_id.remove(&id)?;
-
-        // Get the PG's backoff map
-        let pg_backoffs = self.backoffs.get_mut(&pgid)?;
+        // Find the entry with matching ID
+        let key = self
+            .entries
+            .iter()
+            .find(|(_, entry)| entry.id == id)
+            .map(|(k, _)| k.clone())?;
 
         // Remove the entry
-        let entry = pg_backoffs.remove(&begin)?;
+        let entry = self.entries.remove(&key)?;
 
         // Warn if range doesn't match (but still remove, matching Ceph behavior)
         if entry.begin != *expected_begin || entry.end != *expected_end {
@@ -111,11 +110,6 @@ impl BackoffTracker {
                 "Backoff id={} unblock range [{:?}, {:?}) doesn't match registered [{:?}, {:?})",
                 id, expected_begin, expected_end, entry.begin, entry.end
             );
-        }
-
-        // Clean up empty PG entry
-        if pg_backoffs.is_empty() {
-            self.backoffs.remove(&pgid);
         }
 
         Some(entry)
@@ -127,11 +121,27 @@ impl BackoffTracker {
     /// 1. Find the backoff with begin <= hobj using lower_bound
     /// 2. Check if hobj falls within [begin, end)
     pub fn is_blocked(&self, pgid: &StripedPgId, hobj: &denc::HObject) -> Option<&BackoffEntry> {
-        let pg_backoffs = self.backoffs.get(pgid)?;
+        // Create range bounds for this PG
+        let start_key = BackoffKey {
+            pgid: *pgid,
+            begin: denc::HObject {
+                key: String::new(),
+                oid: String::new(),
+                snapid: 0,
+                hash: 0,
+                max: false,
+                nspace: String::new(),
+                pool: 0,
+            },
+        };
 
-        // Use range query to find potential blocking backoff
-        // We want the largest begin <= hobj
-        let mut iter = pg_backoffs.range(..=hobj.clone());
+        let end_key = BackoffKey {
+            pgid: *pgid,
+            begin: hobj.clone(),
+        };
+
+        // Find all entries in this PG with begin <= hobj
+        let mut iter = self.entries.range(start_key..=end_key);
 
         // Get the last entry with begin <= hobj
         if let Some((_, entry)) = iter.next_back() {
@@ -148,41 +158,33 @@ impl BackoffTracker {
         None
     }
 
-    /// Get all backoffs for a specific PG
-    ///
-    /// Used when resending operations after UNBLOCK
-    pub fn get_pg_backoffs(
-        &self,
-        pgid: &StripedPgId,
-    ) -> Option<&BTreeMap<denc::HObject, BackoffEntry>> {
-        self.backoffs.get(pgid)
-    }
-
     /// Get a backoff by ID
     pub fn get_by_id(&self, id: u64) -> Option<&BackoffEntry> {
-        let (pgid, begin) = self.backoffs_by_id.get(&id)?;
-        self.backoffs.get(pgid)?.get(begin)
+        self.entries.values().find(|e| e.id == id)
     }
 
     /// Check if there are any active backoffs
     pub fn is_empty(&self) -> bool {
-        self.backoffs_by_id.is_empty()
+        self.entries.is_empty()
     }
 
     /// Get the total number of active backoffs
     pub fn len(&self) -> usize {
-        self.backoffs_by_id.len()
+        self.entries.len()
     }
 
     /// Get the number of PGs with active backoffs
     pub fn num_pgs(&self) -> usize {
-        self.backoffs.len()
+        let mut pgs = std::collections::HashSet::new();
+        for key in self.entries.keys() {
+            pgs.insert(key.pgid);
+        }
+        pgs.len()
     }
 
     /// Clear all backoffs (used on session reset)
     pub fn clear(&mut self) {
-        self.backoffs.clear();
-        self.backoffs_by_id.clear();
+        self.entries.clear();
     }
 
     /// Iterate over all backoffs in a PG that overlap with a given range
@@ -194,22 +196,79 @@ impl BackoffTracker {
         begin: &'a denc::HObject,
         end: &'a denc::HObject,
     ) -> impl Iterator<Item = &'a BackoffEntry> {
-        self.backoffs
-            .get(pgid)
-            .into_iter()
-            .flat_map(move |pg_backoffs| {
-                // Get all entries that might overlap with [begin, end)
-                pg_backoffs
-                    .range(..end.clone())
-                    .filter_map(move |(_, entry)| {
-                        // Check for overlap: entry overlaps if entry.end > begin
-                        if entry.end > *begin {
-                            Some(entry)
-                        } else {
-                            None
-                        }
-                    })
+        // Create range bounds for this PG
+        let start_key = BackoffKey {
+            pgid: *pgid,
+            begin: denc::HObject {
+                key: String::new(),
+                oid: String::new(),
+                snapid: 0,
+                hash: 0,
+                max: false,
+                nspace: String::new(),
+                pool: 0,
+            },
+        };
+
+        let end_key = BackoffKey {
+            pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
+            begin: denc::HObject {
+                key: String::new(),
+                oid: String::new(),
+                snapid: 0,
+                hash: 0,
+                max: false,
+                nspace: String::new(),
+                pool: 0,
+            },
+        };
+
+        self.entries
+            .range(start_key..end_key)
+            .filter_map(move |(_, entry)| {
+                // Check for overlap: entry overlaps if entry.end > begin && entry.begin < end
+                if entry.end > *begin && entry.begin < *end {
+                    Some(entry)
+                } else {
+                    None
+                }
             })
+    }
+
+    /// Get all backoffs for a specific PG
+    ///
+    /// Used when resending operations after UNBLOCK
+    pub fn get_pg_backoffs(&self, pgid: &StripedPgId) -> impl Iterator<Item = &BackoffEntry> {
+        // Create range bounds for this PG
+        let start_key = BackoffKey {
+            pgid: *pgid,
+            begin: denc::HObject {
+                key: String::new(),
+                oid: String::new(),
+                snapid: 0,
+                hash: 0,
+                max: false,
+                nspace: String::new(),
+                pool: 0,
+            },
+        };
+
+        let end_key = BackoffKey {
+            pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
+            begin: denc::HObject {
+                key: String::new(),
+                oid: String::new(),
+                snapid: 0,
+                hash: 0,
+                max: false,
+                nspace: String::new(),
+                pool: 0,
+            },
+        };
+
+        self.entries
+            .range(start_key..end_key)
+            .map(|(_, entry)| entry)
     }
 }
 

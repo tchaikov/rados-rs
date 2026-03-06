@@ -252,7 +252,7 @@ impl ObjectId {
 pub use crush::PgId;
 
 /// Striped placement group ID (corresponds to spg_t in Ceph)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StripedPgId {
     /// Placement group ID
     pub pool: u64,
