@@ -1683,6 +1683,12 @@ impl OSDMapIncremental {
 
     /// Apply this incremental update to an OSDMap
     pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
+        // Invalidate CRUSH cache on any OSDMap update
+        {
+            let mut cache = base.crush_cache.lock().unwrap();
+            cache.clear();
+        }
+
         // Update epoch
         base.epoch = self.epoch;
         base.modified = self.modified;
@@ -2135,7 +2141,7 @@ impl VersionedEncode for OSDMapIncremental {
 
 /// OSDMap - the main OSD cluster map structure
 /// This is a simplified version that focuses on decoding the essential fields
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct OSDMap {
     // Meta-encoding wrapper (version 8, compat 7)
     // Client-usable data section
@@ -2162,6 +2168,10 @@ pub struct OSDMap {
     #[serde(skip)]
     pub crush: Option<CrushMap>,
     pub erasure_code_profiles: BTreeMap<String, BTreeMap<String, String>>,
+
+    // CRUSH calculation cache: (pool_id, pg_seed) -> Vec<i32> (OSD list)
+    #[serde(skip)]
+    crush_cache: std::sync::Mutex<lru::LruCache<(u64, u32), Vec<i32>>>,
 
     // Version 4+ fields
     pub pg_upmap: BTreeMap<PgId, Vec<i32>>,
@@ -2234,9 +2244,133 @@ const CEPH_OSD_EXISTS: u32 = 1 << 0;
 /// Reference: Ceph `include/ceph_fs.h` `CEPH_OSD_UP`
 const CEPH_OSD_UP: u32 = 1 << 1;
 
+impl Default for OSDMap {
+    fn default() -> Self {
+        Self {
+            fsid: UuidD::default(),
+            epoch: Epoch::default(),
+            created: UTime::default(),
+            modified: UTime::default(),
+            pools: BTreeMap::default(),
+            pool_name: BTreeMap::default(),
+            pool_max: 0,
+            flags: 0,
+            max_osd: 0,
+            osd_state: Vec::default(),
+            osd_weight: Vec::default(),
+            osd_addrs_client: Vec::default(),
+            pg_temp: BTreeMap::default(),
+            primary_temp: BTreeMap::default(),
+            osd_primary_affinity: Vec::default(),
+            crush: None,
+            erasure_code_profiles: BTreeMap::default(),
+            crush_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1000).unwrap(),
+            )),
+            pg_upmap: BTreeMap::default(),
+            pg_upmap_items: BTreeMap::default(),
+            crush_version: 0,
+            new_removed_snaps: BTreeMap::default(),
+            new_purged_snaps: BTreeMap::default(),
+            last_up_change: UTime::default(),
+            last_in_change: UTime::default(),
+            pg_upmap_primaries: BTreeMap::default(),
+            osd_addrs_hb_back: Vec::default(),
+            osd_info: Vec::default(),
+            blocklist: BTreeMap::default(),
+            osd_addrs_cluster: Vec::default(),
+            cluster_snapshot_epoch: Epoch::default(),
+            cluster_snapshot: String::default(),
+            osd_uuid: Vec::default(),
+            osd_xinfo: Vec::default(),
+            osd_addrs_hb_front: Vec::default(),
+            nearfull_ratio: 0.0,
+            full_ratio: 0.0,
+            backfillfull_ratio: 0.0,
+            require_min_compat_client: 0,
+            require_osd_release: 0,
+            removed_snaps_queue: Vec::default(),
+            crush_node_flags: BTreeMap::default(),
+            device_class_flags: BTreeMap::default(),
+            stretch_mode_enabled: false,
+            stretch_bucket_count: 0,
+            degraded_stretch_mode: 0,
+            recovering_stretch_mode: 0,
+            stretch_mode_bucket: 0,
+            range_blocklist: BTreeMap::default(),
+            allow_crimson: false,
+        }
+    }
+}
+
+impl Clone for OSDMap {
+    fn clone(&self) -> Self {
+        Self {
+            fsid: self.fsid,
+            epoch: self.epoch,
+            created: self.created,
+            modified: self.modified,
+            pools: self.pools.clone(),
+            pool_name: self.pool_name.clone(),
+            pool_max: self.pool_max,
+            flags: self.flags,
+            max_osd: self.max_osd,
+            osd_state: self.osd_state.clone(),
+            osd_weight: self.osd_weight.clone(),
+            osd_addrs_client: self.osd_addrs_client.clone(),
+            pg_temp: self.pg_temp.clone(),
+            primary_temp: self.primary_temp.clone(),
+            osd_primary_affinity: self.osd_primary_affinity.clone(),
+            crush: self.crush.clone(),
+            erasure_code_profiles: self.erasure_code_profiles.clone(),
+            // Create a new empty cache for the clone
+            crush_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1000).unwrap(),
+            )),
+            pg_upmap: self.pg_upmap.clone(),
+            pg_upmap_items: self.pg_upmap_items.clone(),
+            crush_version: self.crush_version,
+            new_removed_snaps: self.new_removed_snaps.clone(),
+            new_purged_snaps: self.new_purged_snaps.clone(),
+            last_up_change: self.last_up_change,
+            last_in_change: self.last_in_change,
+            pg_upmap_primaries: self.pg_upmap_primaries.clone(),
+            osd_addrs_hb_back: self.osd_addrs_hb_back.clone(),
+            osd_info: self.osd_info.clone(),
+            blocklist: self.blocklist.clone(),
+            osd_addrs_cluster: self.osd_addrs_cluster.clone(),
+            cluster_snapshot_epoch: self.cluster_snapshot_epoch,
+            cluster_snapshot: self.cluster_snapshot.clone(),
+            osd_uuid: self.osd_uuid.clone(),
+            osd_xinfo: self.osd_xinfo.clone(),
+            osd_addrs_hb_front: self.osd_addrs_hb_front.clone(),
+            nearfull_ratio: self.nearfull_ratio,
+            full_ratio: self.full_ratio,
+            backfillfull_ratio: self.backfillfull_ratio,
+            require_min_compat_client: self.require_min_compat_client,
+            require_osd_release: self.require_osd_release,
+            removed_snaps_queue: self.removed_snaps_queue.clone(),
+            crush_node_flags: self.crush_node_flags.clone(),
+            device_class_flags: self.device_class_flags.clone(),
+            stretch_mode_enabled: self.stretch_mode_enabled,
+            stretch_bucket_count: self.stretch_bucket_count,
+            degraded_stretch_mode: self.degraded_stretch_mode,
+            recovering_stretch_mode: self.recovering_stretch_mode,
+            stretch_mode_bucket: self.stretch_mode_bucket,
+            range_blocklist: self.range_blocklist.clone(),
+            allow_crimson: self.allow_crimson,
+        }
+    }
+}
+
 impl OSDMap {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            crush_cache: std::sync::Mutex::new(lru::LruCache::new(
+                std::num::NonZeroUsize::new(1000).unwrap(),
+            )),
+            ..Default::default()
+        }
     }
 
     /// Check if an OSD is marked UP in the OSDMap.
@@ -2344,6 +2478,16 @@ impl OSDMap {
     /// Calculate PG to OSD mapping using CRUSH
     /// Returns the ordered list of OSDs that should store replicas for this PG
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+        // Check cache first
+        let cache_key = (pg.pool, pg.seed);
+        {
+            let mut cache = self.crush_cache.lock().unwrap();
+            if let Some(cached_osds) = cache.get(&cache_key) {
+                return Ok(cached_osds.clone());
+            }
+        }
+
+        // Cache miss - calculate using CRUSH
         // Get the pool
         let pool = self
             .get_pool(pg.pool)
@@ -2376,6 +2520,12 @@ impl OSDMap {
             &self.osd_weight,
         )
         .map_err(|e| RadosError::Protocol(format!("CRUSH mapping failed: {:?}", e)))?;
+
+        // Store in cache
+        {
+            let mut cache = self.crush_cache.lock().unwrap();
+            cache.put(cache_key, result.clone());
+        }
 
         Ok(result)
     }
