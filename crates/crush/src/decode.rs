@@ -23,62 +23,6 @@ fn decode_n<T: Denc>(buf: &mut impl Buf, count: usize) -> Result<Vec<T>> {
     Ok(vec)
 }
 
-/// Decode a UTF-8 string whose length has already been read.
-fn decode_string_nohead(buf: &mut impl Buf, len: u32) -> Result<String> {
-    let len = len as usize;
-    if buf.remaining() < len {
-        return Err(CrushError::DecodeError(format!(
-            "Insufficient bytes for string content: need {}, have {}",
-            len,
-            buf.remaining()
-        )));
-    }
-
-    String::from_utf8(buf.copy_to_bytes(len).to_vec())
-        .map_err(|e| CrushError::DecodeError(format!("Invalid UTF-8: {}", e)))
-}
-
-/// Decode Ceph's legacy CRUSH string maps, tolerating the historical
-/// int-vs-int32 encoding bug in older maps.
-///
-/// Ceph's `CrushWrapper::decode()` accepts either a 32-bit key or a legacy
-/// 64-bit key by decoding the first 32 bits as the key and treating a zero
-/// string length as the high half of the widened key.
-fn decode_32_or_64_string_map_i32(buf: &mut impl Buf) -> Result<HashMap<i32, String>> {
-    let len = u32::decode(buf, 0)? as usize;
-    let mut map = HashMap::with_capacity(len);
-
-    for _ in 0..len {
-        let key = i32::decode(buf, 0)?;
-        let mut strlen = u32::decode(buf, 0)?;
-        if strlen == 0 {
-            strlen = u32::decode(buf, 0)?;
-        }
-        let value = decode_string_nohead(buf, strlen)?;
-        map.insert(key, value);
-    }
-
-    Ok(map)
-}
-
-/// Decode Ceph's legacy CRUSH rule-name map, tolerating widened keys.
-fn decode_32_or_64_string_map_u32(buf: &mut impl Buf) -> Result<HashMap<u32, String>> {
-    let len = u32::decode(buf, 0)? as usize;
-    let mut map = HashMap::with_capacity(len);
-
-    for _ in 0..len {
-        let key = u32::decode(buf, 0)?;
-        let mut strlen = u32::decode(buf, 0)?;
-        if strlen == 0 {
-            strlen = u32::decode(buf, 0)?;
-        }
-        let value = decode_string_nohead(buf, strlen)?;
-        map.insert(key, value);
-    }
-
-    Ok(map)
-}
-
 // ============= CrushMap Decoding =============
 
 impl CrushMap {
@@ -132,11 +76,17 @@ impl CrushMap {
             map.rules.push(Some(rule));
         }
 
-        // Decode name maps (always present — no version guard).
-        // Ceph tolerates a historical int-vs-int32 encoding bug here, so we do too.
-        map.type_names = decode_32_or_64_string_map_i32(data)?;
-        map.names = decode_32_or_64_string_map_i32(data)?;
-        map.rule_names = decode_32_or_64_string_map_u32(data)?;
+        // Decode name maps.
+        //
+        // We intentionally require the fixed int32_t encoding here. Ceph switched
+        // CrushWrapper::encode() to int32_t in 2012, and Octopus+ monitors only
+        // send that corrected form in live OSDMaps. The only incompatible inputs
+        // are historical serialized CRUSH blobs produced by pre-fix encoders on
+        // affected architectures; those artifacts are outside this project's
+        // supported compatibility scope.
+        map.type_names = HashMap::decode(data, 0)?;
+        map.names = HashMap::decode(data, 0)?;
+        map.rule_names = HashMap::decode(data, 0)?;
 
         // Decode tunables (optional fields)
         if data.remaining() >= 4 {
@@ -463,42 +413,5 @@ mod tests {
         assert!(map.device_has_class(1, "hdd"));
         assert!(!map.device_has_class(0, "hdd"));
         assert!(!map.device_has_class(999, "ssd"));
-    }
-
-    #[test]
-    fn test_decode_legacy_64bit_string_map_keys() {
-        let mut data = bytes::BytesMut::new();
-
-        CRUSH_MAGIC.encode(&mut data, 0).unwrap();
-        0i32.encode(&mut data, 0).unwrap();
-        0u32.encode(&mut data, 0).unwrap();
-        1i32.encode(&mut data, 0).unwrap();
-
-        1u32.encode(&mut data, 0).unwrap();
-        0i64.encode(&mut data, 0).unwrap();
-        3u32.encode(&mut data, 0).unwrap();
-        data.put_slice(b"osd");
-
-        1u32.encode(&mut data, 0).unwrap();
-        0i64.encode(&mut data, 0).unwrap();
-        5u32.encode(&mut data, 0).unwrap();
-        data.put_slice(b"osd.0");
-
-        1u32.encode(&mut data, 0).unwrap();
-        0u64.encode(&mut data, 0).unwrap();
-        11u32.encode(&mut data, 0).unwrap();
-        data.put_slice(b"legacy-rule");
-
-        let mut bytes = data.freeze();
-        let map = CrushMap::decode(&mut bytes).expect("legacy 64-bit keyed maps should decode");
-
-        assert_eq!(map.max_devices, 1);
-        assert_eq!(map.type_names.get(&0).map(String::as_str), Some("osd"));
-        assert_eq!(map.names.get(&0).map(String::as_str), Some("osd.0"));
-        assert_eq!(
-            map.rule_names.get(&0).map(String::as_str),
-            Some("legacy-rule")
-        );
-        assert_eq!(bytes.remaining(), 0, "decode should consume all bytes");
     }
 }

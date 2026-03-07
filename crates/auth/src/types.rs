@@ -245,6 +245,7 @@ impl Serialize for CryptoKey {
 #[derive(Debug, Clone, Serialize, denc::StructVDenc)]
 #[denc(struct_v = 1)]
 pub struct CephXTicketBlob {
+    #[serde(skip)]
     struct_v: u8,
     pub secret_id: u64,
     pub blob: Bytes, // Encrypted ticket data
@@ -455,5 +456,42 @@ impl CephXSession {
         self.ticket_handlers
             .get(&service_type)
             .is_some_and(|h| h.have_key && !h.is_expired())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_cephx_ticket_blob_json_omits_struct_v() {
+        let blob = CephXTicketBlob::new(7, Bytes::from_static(b"abc"));
+        let value = serde_json::to_value(blob).expect("ticket blob JSON should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "secret_id": 7u64,
+                "blob": [97, 98, 99]
+            })
+        );
+    }
+
+    #[test]
+    fn test_auth_caps_info_json_omits_struct_v() {
+        let mut caps = HashMap::new();
+        caps.insert("osd".to_string(), "allow rw".to_string());
+        let info = AuthCapsInfo { struct_v: 1, caps };
+        let value = serde_json::to_value(info).expect("caps info JSON should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "caps": {
+                    "osd": "allow rw"
+                }
+            })
+        );
     }
 }

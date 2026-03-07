@@ -293,6 +293,7 @@ pub struct CephXResponseHeader {
 #[derive(Debug, Clone, Serialize, denc::StructVDenc)]
 #[denc(struct_v = 3, min_struct_v = 2, ceph_release = "Luminous v12+")]
 pub struct CephXAuthenticate {
+    #[serde(skip)]
     struct_v: u8,
     pub client_challenge: u64,
     pub key: u64, // Encrypted session key (result of cephx_calc_client_server_challenge)
@@ -607,6 +608,7 @@ impl Denc for CephXAuthorizeReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::time::Duration;
 
     #[test]
@@ -808,6 +810,32 @@ mod tests {
         assert_eq!(decoded.key, 0xabcd);
         assert_eq!(decoded.other_keys, 0x0F);
         assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_cephx_authenticate_json_omits_struct_v() {
+        let auth = CephXAuthenticate::new(
+            0x1234567890abcdef,
+            0xabcd,
+            CephXTicketBlob::new(42, Bytes::from_static(b"ticket")),
+            0x0F,
+        );
+
+        let value =
+            serde_json::to_value(auth).expect("CephXAuthenticate JSON should serialize cleanly");
+
+        assert_eq!(
+            value,
+            json!({
+                "client_challenge": 0x1234567890abcdefu64,
+                "key": 0xabcdu64,
+                "old_ticket": {
+                    "secret_id": 42u64,
+                    "blob": [116, 105, 99, 107, 101, 116]
+                },
+                "other_keys": 0x0Fu32
+            })
+        );
     }
 
     #[test]

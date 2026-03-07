@@ -44,10 +44,14 @@ impl EVersion {
 ///
 /// Represents time with second and nanosecond precision.
 /// Wire format: u32 sec + u32 nsec
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, crate::Denc)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, crate::Denc,
+)]
 #[denc(crate = "crate")]
 pub struct UTime {
+    #[serde(rename = "seconds")]
     pub sec: u32,
+    #[serde(rename = "nanoseconds")]
     pub nsec: u32,
 }
 
@@ -60,20 +64,6 @@ impl UTime {
     /// Create a new UTime from seconds and nanoseconds
     pub const fn new(sec: u32, nsec: u32) -> Self {
         Self { sec, nsec }
-    }
-}
-
-// Custom Serialize implementation to match ceph-dencoder format
-impl Serialize for UTime {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("UTime", 2)?;
-        state.serialize_field("seconds", &self.sec)?;
-        state.serialize_field("nanoseconds", &self.nsec)?;
-        state.end()
     }
 }
 
@@ -268,5 +258,24 @@ impl FromStr for EntityName {
             .ok_or_else(|| RadosError::Protocol(format!("Invalid entity name format: {}", s)))?;
         let entity_type = type_str.parse()?;
         Ok(Self::new(entity_type, id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_utime_serializes_with_ceph_field_names() {
+        let value = serde_json::to_value(UTime::new(7, 9)).expect("UTime JSON should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "seconds": 7,
+                "nanoseconds": 9
+            })
+        );
     }
 }

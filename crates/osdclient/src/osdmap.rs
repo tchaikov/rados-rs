@@ -533,6 +533,7 @@ denc::impl_denc_for_versioned!(OsdXInfo);
 #[derive(Debug, Clone, Serialize, denc::StructVDenc)]
 #[denc(struct_v = 1)]
 pub struct OsdInfo {
+    #[serde(skip)]
     pub struct_v: u8,
     pub last_clean_begin: Epoch, // last interval that ended with a clean osd shutdown
     pub last_clean_end: Epoch,
@@ -2787,6 +2788,7 @@ mark_feature_dependent_encoding!(OSDMap);
 mod tests {
     use super::*;
     use bytes::Bytes;
+    use serde_json::json;
 
     fn make_osdmap_with_states(states: Vec<u32>) -> OSDMap {
         let max_osd = states.len() as i32;
@@ -2894,6 +2896,33 @@ mod tests {
         assert!(
             matches!(err, RadosError::Protocol(ref message) if message == "Legacy incremental encoding (v<7) not supported"),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_osd_info_json_omits_struct_v() {
+        let info = OsdInfo {
+            struct_v: 1,
+            last_clean_begin: Epoch::new(10),
+            last_clean_end: Epoch::new(11),
+            up_from: Epoch::new(12),
+            up_thru: Epoch::new(13),
+            down_at: Epoch::new(14),
+            lost_at: Epoch::new(15),
+        };
+
+        let value = serde_json::to_value(info).expect("osd_info JSON should serialize");
+
+        assert_eq!(
+            value,
+            json!({
+                "last_clean_begin": 10,
+                "last_clean_end": 11,
+                "up_from": 12,
+                "up_thru": 13,
+                "down_at": 14,
+                "lost_at": 15
+            })
         );
     }
 }

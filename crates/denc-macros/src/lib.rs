@@ -677,6 +677,9 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
 /// - `#[denc(strict_struct_v)]` (mutually exclusive with `min_struct_v`)
 ///
 /// The first struct field must be named `struct_v` and have type `u8`.
+/// When pairing this derive with `serde::Serialize` for Ceph-style `dump_json`
+/// output, annotate the `struct_v` field with `#[serde(skip)]` so the wire-only
+/// version byte is not emitted in JSON.
 #[proc_macro_derive(StructVDenc, attributes(denc))]
 pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
