@@ -15,9 +15,6 @@ bitflags = { workspace = true }
 
 [dev-dependencies]
 hex = "0.4"
-glob = "0.3"
-crush = { path = "../crush" }
-osdclient = { path = "../osdclient" }
 criterion = "0.5"
 
 [[bench]]
