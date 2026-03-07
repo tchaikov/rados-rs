@@ -9,7 +9,7 @@
 pub use crate::entity_addr::{EntityAddr, EntityAddrType};
 pub use crate::ids::{Epoch, GlobalId, OsdId, PoolId};
 
-use crate::denc::Denc;
+use crate::codec::Denc;
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
@@ -122,15 +122,15 @@ impl std::fmt::Display for UuidD {
     }
 }
 
-impl crate::denc::FixedSize for UuidD {
+impl crate::codec::FixedSize for UuidD {
     const SIZE: usize = 16;
 }
 
-impl crate::denc::FixedSize for EVersion {
+impl crate::codec::FixedSize for EVersion {
     const SIZE: usize = 12;
 }
 
-impl crate::denc::FixedSize for UTime {
+impl crate::codec::FixedSize for UTime {
     const SIZE: usize = 8;
 }
 

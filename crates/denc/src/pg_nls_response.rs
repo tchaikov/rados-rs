@@ -5,7 +5,7 @@
 //! This is the response type for PGLS (PG List) operations.
 //! In C++, it's defined as pg_nls_response_template<librados::ListObjectImpl>
 
-use crate::denc::{Denc, VersionedEncode};
+use crate::codec::{Denc, VersionedEncode};
 use crate::error::RadosError;
 use crate::hobject::HObject;
 use bytes::{Buf, BufMut};

@@ -803,7 +803,7 @@ impl OSDClient {
         // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
         // 2. Encoded bufferlist (actual data)
         use crate::types::{SparseExtent, SparseReadResult};
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let outdata = result
             .ops

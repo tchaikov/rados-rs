@@ -13,8 +13,8 @@
 //! The crate also re-exports common Ceph structures such as monitor maps,
 //! entity addresses, object identifiers, and feature flags.
 
+pub mod codec;
 pub mod constants;
-pub mod denc;
 pub mod encoding_metadata;
 pub mod entity_addr;
 pub mod error;
@@ -28,17 +28,30 @@ pub mod pg_nls_response;
 pub mod types;
 pub mod zero_copy;
 
-pub use denc::{encode_with_capacity, Denc, FixedSize, VersionedEncode};
-pub use encoding_metadata::*;
-pub use entity_addr::*;
-pub use error::*;
-pub use features::*;
-pub use hobject::*;
-pub use monmap::*;
-pub use padding::*;
-pub use pg_nls_response::*;
-pub use types::*;
-pub use zero_copy::*;
+// Core encode/decode traits
+pub use codec::{encode_with_capacity, Denc, FixedSize, VersionedEncode};
+
+// Error type
+pub use error::RadosError;
+
+// Common Ceph wire types
+pub use entity_addr::{EntityAddr, EntityAddrType, EntityAddrvec};
+pub use hobject::{HObject, SNAP_DIR, SNAP_HEAD};
+pub use ids::{Epoch, GlobalId, OsdId, PoolId};
+pub use monmap::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo, MonMap};
+pub use pg_nls_response::{ListObjectImpl, PgNlsResponse};
+pub use types::{EVersion, EntityName, EntityType, FsId, UTime, UuidD, Version};
+
+// Feature flags
+pub use features::{
+    get_significant_features, has_feature, has_significant_feature, CephFeatures,
+    SIGNIFICANT_FEATURES,
+};
+
+// Encoding metadata helpers
+pub use encoding_metadata::{EncodingMetadata, HasEncodingMetadata};
+pub use padding::Padding;
+pub use zero_copy::ZeroCopyDencode;
 
 // Re-export zerocopy crate for use in derived code
 pub use zerocopy;

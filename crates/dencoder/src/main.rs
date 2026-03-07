@@ -19,12 +19,12 @@
 //!   list_types         - List all available types
 
 use bytes::Bytes;
-use denc::denc::{Denc, VersionedEncode};
 use denc::entity_addr::EntityAddr;
 use denc::error::RadosError;
 use denc::hobject::HObject;
 use denc::monmap::*;
 use denc::pg_nls_response::PgNlsResponse;
+use denc::{Denc, VersionedEncode};
 use denc::{EVersion, UTime, UuidD};
 use osdclient::osdmap::*;
 use osdclient::{OSDMap, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};

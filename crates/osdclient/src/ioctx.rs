@@ -540,7 +540,7 @@ impl IoCtx {
     pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
         use crate::operation::OpBuilder;
         use crate::types::OSDOp;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let oid_str = oid.into();
         debug!(

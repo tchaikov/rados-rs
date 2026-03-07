@@ -4,8 +4,8 @@
 //! MOSDOp encoding, following Ceph's encoding patterns.
 
 use bytes::{Buf, BufMut};
-use denc::denc::{Denc, VersionedEncode};
 use denc::error::RadosError;
+use denc::{Denc, VersionedEncode};
 
 use crate::types::{
     OSDOp, ObjectLocator, OpCode, OpData, PackedEntityName, PgId, RequestRedirect, StripedPgId,

@@ -3,7 +3,7 @@
 //! This module provides newtype wrappers around primitive types to prevent
 //! accidental mixing of different ID types (e.g., OSD IDs vs Pool IDs).
 
-use crate::denc::Denc;
+use crate::codec::Denc;
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 use serde::Serialize;

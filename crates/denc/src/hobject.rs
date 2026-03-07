@@ -11,7 +11,7 @@
 //! - nspace: namespace
 //! - pool: pool ID
 
-use crate::denc::{Denc, VersionedEncode};
+use crate::codec::{Denc, VersionedEncode};
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 use serde::Serialize;

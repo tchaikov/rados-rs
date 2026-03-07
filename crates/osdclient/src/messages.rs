@@ -268,7 +268,7 @@ impl CephMessagePayload for MOSDOp {
         use crate::types::{
             BlkinTraceInfo, JaegerSpanContext, PackedEntityName, CEPH_ENTITY_TYPE_CLIENT,
         };
-        use denc::denc::Denc;
+        use denc::Denc;
 
         // Pre-allocate buffer with estimated size to avoid reallocations
         // Estimate: fixed fields + ops + variable data

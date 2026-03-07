@@ -3,8 +3,8 @@
 //! This is a migration from the old Denc trait to the new Denc trait,
 //! which provides zero-allocation encoding by writing directly to buffers.
 
+use crate::codec::Denc;
 use crate::constants::sockaddr::{AF_INET, AF_INET6, STORAGE_SIZE};
-use crate::denc::Denc;
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 use serde::{Deserialize, Serialize};
@@ -492,7 +492,7 @@ impl EntityAddrvec {
 }
 
 // Manual Denc implementation for EntityAddrvec
-impl crate::denc::Denc for EntityAddrvec {
+impl crate::codec::Denc for EntityAddrvec {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // Octopus+ peers always use the addrvec marker on encode.
         buf.put_u8(2);

@@ -20,17 +20,22 @@ pub mod split;
 pub mod state_machine;
 pub mod throttle;
 
-// Re-export working components
-pub use banner::*;
+// Re-export public API
+pub use banner::{Banner, ConnectMessage, ConnectReplyMessage, CEPH_BANNER, CEPH_BANNER_LEN};
 pub use compression::{CompressionAlgorithm, CompressionStats};
-pub use error::*;
-pub use frames::*;
-pub use header::*;
-pub use map_channel::*;
-pub use message::*;
-pub use revocation::*;
+pub use error::{Error, Result};
+pub use frames::{
+    EncodeWithFeatures, Frame, FrameAssembler, FrameTrait, MessageFrame, Tag, DEFAULT_ALIGNMENT,
+    MAX_NUM_SEGMENTS, PREAMBLE_SIZE,
+};
+pub use header::MsgHeader;
+pub use map_channel::{map_channel, MapMessage, MapReceiver, MapSender};
+pub use message::{Message, MessagePriority, MsgFooter};
+pub use revocation::{
+    MessageHandle, MessageId, MessageStatus, RevocationManager, RevocationResult, RevocationStats,
+};
 pub use split::{RecvHalf, SendHalf, SharedState};
-pub use throttle::*;
+pub use throttle::{MessageThrottle, ThrottleConfig, ThrottleStats};
 
 // Messenger configuration options from ceph.conf
 cephconfig::define_options! {

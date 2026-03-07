@@ -724,7 +724,7 @@ impl OSDOp {
         start_epoch: u32,
     ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         // Encode cursor (hobject_t) into indata
         let mut indata = BytesMut::new();
@@ -753,7 +753,7 @@ impl OSDOp {
         indata: Bytes,
     ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let class = class.into();
         let method = method.into();
@@ -865,7 +865,7 @@ impl OSDOp {
     /// * `name` - Attribute name
     pub fn get_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
@@ -894,7 +894,7 @@ impl OSDOp {
         value: Bytes,
     ) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
@@ -923,7 +923,7 @@ impl OSDOp {
     /// * `name` - Attribute name to remove
     pub fn remove_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
         use bytes::BytesMut;
-        use denc::denc::Denc;
+        use denc::Denc;
 
         let name = name.into();
         let mut extent_buf = BytesMut::new();
@@ -1068,14 +1068,14 @@ impl SparseExtent {
 }
 
 // Implement Denc for SparseExtent to enable direct decoding
-impl denc::denc::Denc for SparseExtent {
+impl denc::Denc for SparseExtent {
     fn encode<B: bytes::BufMut>(
         &self,
         buf: &mut B,
         features: u64,
     ) -> std::result::Result<(), denc::RadosError> {
         // Encode as tuple (offset, length)
-        denc::denc::Denc::encode(&(self.offset, self.length), buf, features)
+        denc::Denc::encode(&(self.offset, self.length), buf, features)
     }
 
     fn decode<B: bytes::Buf>(
@@ -1083,13 +1083,13 @@ impl denc::denc::Denc for SparseExtent {
         features: u64,
     ) -> std::result::Result<Self, denc::RadosError> {
         // Decode as tuple (offset, length)
-        let (offset, length) = <(u64, u64) as denc::denc::Denc>::decode(buf, features)?;
+        let (offset, length) = <(u64, u64) as denc::Denc>::decode(buf, features)?;
         Ok(Self::new(offset, length))
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
         // Size is same as tuple (offset, length)
-        denc::denc::Denc::encoded_size(&(self.offset, self.length), features)
+        denc::Denc::encoded_size(&(self.offset, self.length), features)
     }
 }
 

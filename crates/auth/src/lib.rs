@@ -33,12 +33,22 @@ pub mod provider;
 pub mod server;
 pub mod types;
 
-pub use client::*;
-pub use error::*;
-pub use keyring::*;
-pub use protocol::*;
-pub use provider::*;
-pub use server::*;
+// Client-facing auth handler and result
+pub use client::{AuthResult, CephXClientHandler};
+
+// Error types
+pub use error::{CephXError, Result};
+
+// Keyring management
+pub use keyring::Keyring;
+
+// Auth provider traits and built-in providers
+pub use provider::{AuthProvider, MonitorAuthProvider, ServiceAuthProvider};
+
+// Server-side auth handler
+pub use server::CephXServerHandler;
+
+// Common auth types
 pub use types::{
     AuthCapsInfo, AuthTicket, CephXServiceTicketInfo, CephXSession, CephXTicketBlob, CryptoKey,
     EntityType, TicketHandler, CEPH_CRYPTO_AES, CEPH_CRYPTO_NONE,

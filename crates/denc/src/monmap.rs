@@ -3,7 +3,7 @@
 //! This module implements the Ceph monitor map encoding/decoding.
 //! See MonMap.h and MonMap.cc in the Ceph source for the C++ implementation.
 
-use crate::denc::{Denc, VersionedEncode};
+use crate::codec::{Denc, VersionedEncode};
 use crate::entity_addr::EntityAddrvec;
 use crate::error::RadosError;
 use crate::features::CephFeatures;
@@ -159,7 +159,7 @@ impl Denc for MonCephRelease {
     }
 }
 
-impl crate::denc::FixedSize for MonCephRelease {
+impl crate::codec::FixedSize for MonCephRelease {
     const SIZE: usize = 1;
 }
 
@@ -209,7 +209,7 @@ impl Denc for ElectionStrategy {
     }
 }
 
-impl crate::denc::FixedSize for ElectionStrategy {
+impl crate::codec::FixedSize for ElectionStrategy {
     const SIZE: usize = 1;
 }
 
