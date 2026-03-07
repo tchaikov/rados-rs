@@ -5,7 +5,7 @@
 //!
 //! Reference: ~/dev/ceph/src/compressor/Compressor.h
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use bytes::Bytes;
 use std::cell::Cell;
 

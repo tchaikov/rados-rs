@@ -43,7 +43,7 @@ pub enum MonClientError {
     ShuttingDown,
 
     #[error("Message error: {0}")]
-    MessageError(#[from] msgr2::error::Error),
+    MessageError(#[from] msgr2::error::Msgr2Error),
 
     #[error("Encoding error")]
     EncodingError,

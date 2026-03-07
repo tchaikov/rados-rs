@@ -1,6 +1,6 @@
 //! Monitor map structures
 //!
-//! The MonMap contains information about all monitors in the cluster.
+//! The MonMapState contains information about all monitors in the cluster.
 
 use crate::error::{MonClientError, Result};
 use denc::{EntityAddr, EntityAddrType, EntityAddrvec};
@@ -15,11 +15,11 @@ const NSEC_PER_MSEC: u64 = 1_000_000;
 
 /// Monitor map
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MonMap {
+pub struct MonMapState {
     /// Cluster FSID
     pub fsid: Uuid,
 
-    /// MonMap epoch
+    /// MonMapState epoch
     pub epoch: u32,
 
     /// Creation time (Unix timestamp)
@@ -51,11 +51,11 @@ pub struct MonMap {
     #[serde(skip)]
     unranked_mon_info: BTreeMap<String, denc::MonInfo>,
 
-    /// Additional decoded MonMap state preserved for re-encoding
+    /// Additional decoded MonMapState state preserved for re-encoding
     #[serde(skip)]
     persistent_features: denc::MonFeature,
 
-    /// Additional decoded MonMap state preserved for re-encoding
+    /// Additional decoded MonMapState state preserved for re-encoding
     #[serde(skip)]
     optional_features: denc::MonFeature,
 
@@ -88,7 +88,7 @@ pub struct MonMap {
     stretch_marked_down_mons: Vec<String>,
 }
 
-impl MonMap {
+impl MonMapState {
     pub fn new(fsid: Uuid) -> Self {
         Self {
             fsid,
@@ -262,7 +262,7 @@ impl MonMap {
         use bytes::BytesMut;
         use denc::Denc;
 
-        // Convert to denc MonMap
+        // Convert to denc MonMapState
         let denc_monmap = self.to_denc_monmap();
 
         // Encode with full features
@@ -280,11 +280,11 @@ impl MonMap {
         let mut bytes = bytes::Bytes::from(data.to_vec());
         let denc_monmap = denc::MonMap::decode(&mut bytes, u64::MAX)?;
 
-        // Convert to monclient MonMap
+        // Convert to monclient MonMapState
         Self::from_denc_monmap(denc_monmap)
     }
 
-    /// Convert to denc MonMap for encoding
+    /// Convert to denc MonMapState for encoding
     fn to_denc_monmap(&self) -> denc::MonMap {
         use denc::UTime;
 
@@ -343,7 +343,7 @@ impl MonMap {
         }
     }
 
-    /// Convert from denc MonMap after decoding
+    /// Convert from denc MonMapState after decoding
     fn from_denc_monmap(denc_monmap: denc::MonMap) -> Result<Self> {
         let denc::MonMap {
             fsid,
@@ -377,7 +377,7 @@ impl MonMap {
         for (rank, name) in ranks.iter().enumerate() {
             let mon = mon_info.remove(name).ok_or_else(|| {
                 MonClientError::InvalidMonMap(format!(
-                    "MonMap ranks referenced missing monitor {}",
+                    "MonMapState ranks referenced missing monitor {}",
                     name
                 ))
             })?;
@@ -425,7 +425,7 @@ impl MonMap {
     }
 }
 
-impl Default for MonMap {
+impl Default for MonMapState {
     fn default() -> Self {
         Self::new(Uuid::nil())
     }
@@ -563,7 +563,7 @@ mod tests {
             "v2:127.0.0.3:3302".to_string(),
         ];
 
-        let monmap = MonMap::build_initial(&addrs).unwrap();
+        let monmap = MonMapState::build_initial(&addrs).unwrap();
         assert_eq!(monmap.size(), 3);
         assert_eq!(monmap.get_name(0), Some("mon.0"));
         assert!(monmap.get_addrs(0).is_some());
@@ -578,7 +578,7 @@ mod tests {
             "v1:192.168.1.2:6790".to_string(),
         ];
 
-        let monmap = MonMap::build_initial(&addrs).unwrap();
+        let monmap = MonMapState::build_initial(&addrs).unwrap();
 
         // Should create 2 monitors (one per unique IP)
         assert_eq!(monmap.size(), 2);
@@ -609,7 +609,8 @@ mod tests {
             "v1:192.168.1.43:40475".to_string(),
         ];
 
-        let monmap = MonMap::build_initial(&addrs).expect("same-IP monitor groups should parse");
+        let monmap =
+            MonMapState::build_initial(&addrs).expect("same-IP monitor groups should parse");
 
         assert_eq!(
             monmap.size(),
@@ -651,8 +652,8 @@ mod tests {
             "[v2:192.168.1.43:40474,v1:192.168.1.43:40475]".to_string(),
         ];
 
-        let monmap =
-            MonMap::build_initial(&addrs).expect("explicit monitor address groups should parse");
+        let monmap = MonMapState::build_initial(&addrs)
+            .expect("explicit monitor address groups should parse");
 
         assert_eq!(monmap.size(), 2);
         assert_eq!(monmap.get_rank_by_addr("v2:192.168.1.43:40472"), Some(0));
@@ -661,7 +662,7 @@ mod tests {
 
     #[test]
     fn test_monmap_lookup() {
-        let mut monmap = MonMap::new(Uuid::nil());
+        let mut monmap = MonMapState::new(Uuid::nil());
 
         let mon = MonInfo {
             name: "mon.a".to_string(),
@@ -680,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_rank_lookup_uses_rank_mapping() {
-        let mut monmap = MonMap::new(Uuid::nil());
+        let mut monmap = MonMapState::new(Uuid::nil());
 
         monmap.add_monitor(MonInfo {
             name: "mon.e".to_string(),
@@ -729,7 +730,7 @@ mod tests {
             },
         );
 
-        let monmap = MonMap::from_denc_monmap(denc::MonMap {
+        let monmap = MonMapState::from_denc_monmap(denc::MonMap {
             fsid: *Uuid::nil().as_bytes(),
             epoch: denc::Epoch::new(7),
             last_changed: denc::UTime::default(),
@@ -780,7 +781,7 @@ mod tests {
             },
         );
 
-        let monmap = MonMap::from_denc_monmap(denc::MonMap {
+        let monmap = MonMapState::from_denc_monmap(denc::MonMap {
             fsid: *Uuid::nil().as_bytes(),
             epoch: denc::Epoch::new(3),
             last_changed: denc::UTime { sec: 4, nsec: 5 },

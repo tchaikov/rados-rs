@@ -1636,9 +1636,10 @@ impl OSDMapIncremental {
 
         // Outer wrapper (version 8, legacy compat 7)
         if buf.remaining() < 6 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for version header".into(),
-            ));
+            return Err(RadosError::Codec(denc::CodecError::InsufficientData {
+                needed: 6,
+                available: buf.remaining(),
+            }));
         }
 
         // Save the original 6 header bytes for CRC calculation
@@ -1658,17 +1659,18 @@ impl OSDMapIncremental {
         let struct_len = buf.get_u32_le() as usize;
 
         if buf.remaining() < struct_len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes: need {}, have {}",
-                struct_len,
-                buf.remaining()
-            )));
+            return Err(RadosError::Codec(denc::CodecError::InsufficientData {
+                needed: struct_len,
+                available: buf.remaining(),
+            }));
         }
 
         if struct_v < 7 {
-            return Err(RadosError::Protocol(
-                "Legacy incremental encoding (v<7) not supported".into(),
-            ));
+            return Err(RadosError::Codec(denc::CodecError::VersionTooOld {
+                got: struct_v,
+                min: 7,
+                type_name: "OSDMapIncremental",
+            }));
         }
 
         // Extract outer content into Bytes
@@ -2882,7 +2884,7 @@ mod tests {
             .expect_err("empty input should fail through inherent decode-only API");
 
         assert!(
-            matches!(err, RadosError::Protocol(ref message) if message == "Insufficient bytes for version header"),
+            matches!(err, RadosError::Codec(ref ce) if matches!(ce, denc::CodecError::InsufficientData { needed: 6, .. })),
             "unexpected error: {err:?}"
         );
     }
@@ -2894,7 +2896,7 @@ mod tests {
             .expect_err("legacy incremental encoding should be rejected");
 
         assert!(
-            matches!(err, RadosError::Protocol(ref message) if message == "Legacy incremental encoding (v<7) not supported"),
+            matches!(err, RadosError::Codec(ref ce) if matches!(ce, denc::CodecError::VersionTooOld { type_name: "OSDMapIncremental", .. })),
             "unexpected error: {err:?}"
         );
     }

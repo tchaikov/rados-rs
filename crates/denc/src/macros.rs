@@ -28,10 +28,13 @@
 macro_rules! check_min_version {
     ($version:expr, $min:expr, $type_name:expr, $ceph_release:expr) => {
         if $version < $min {
-            return Err($crate::RadosError::Protocol(format!(
-                "{} version {} not supported (requires Ceph {}, minimum version {})",
-                $type_name, $version, $ceph_release, $min
-            )));
+            return Err($crate::RadosError::Codec(
+                $crate::CodecError::VersionTooOld {
+                    got: $version,
+                    min: $min,
+                    type_name: $type_name,
+                },
+            ));
         }
     };
 }
@@ -95,7 +98,7 @@ macro_rules! impl_ceph_message_payload {
             }
 
             fn encode_payload(&self, _features: u64) -> Result<bytes::Bytes, msgr2::Error> {
-                self.encode().map_err(|_| msgr2::Error::Serialization)
+                self.encode().map_err(|_| msgr2::Msgr2Error::Serialization)
             }
 
             fn decode_payload(
@@ -105,7 +108,7 @@ macro_rules! impl_ceph_message_payload {
                 _d: &[u8],
             ) -> Result<Self, msgr2::Error> {
                 Self::decode(front)
-                    .map_err(|_| msgr2::Error::Deserialization(stringify!($type).into()))
+                    .map_err(|_| msgr2::Msgr2Error::Deserialization(stringify!($type).into()))
             }
         }
     };

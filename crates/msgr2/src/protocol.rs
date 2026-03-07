@@ -11,7 +11,7 @@ use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
 use crate::banner::Banner;
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{Frame, MessageFrame, Preamble, Tag};
 use crate::header::MsgHeader;
 use crate::message::Message;
@@ -634,7 +634,7 @@ impl FrameIO {
                 if (late_status & crate::frames::FRAME_LATE_STATUS_ABORTED_MASK)
                     == crate::frames::FRAME_LATE_STATUS_ABORTED
                 {
-                    return Err(crate::Error::Protocol(
+                    return Err(crate::Msgr2Error::Protocol(
                         "Frame transmission aborted by sender".to_string(),
                     ));
                 }

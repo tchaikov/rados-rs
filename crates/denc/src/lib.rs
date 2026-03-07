@@ -14,6 +14,7 @@
 //! entity addresses, object identifiers, and feature flags.
 
 pub mod codec;
+pub mod codec_error;
 pub mod constants;
 pub mod encoding_metadata;
 pub mod entity_addr;
@@ -32,6 +33,7 @@ pub mod zero_copy;
 pub use codec::{encode_with_capacity, Denc, FixedSize, VersionedEncode};
 
 // Error type
+pub use codec_error::CodecError;
 pub use error::RadosError;
 
 // Common Ceph wire types

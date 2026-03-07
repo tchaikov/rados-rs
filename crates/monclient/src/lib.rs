@@ -60,6 +60,6 @@ pub use messages::{
     MAuth, MAuthReply, MConfig, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply,
     MMonMap, MMonSubscribe, MMonSubscribeAck, MOSDMap, MPoolOp, MPoolOpReply,
 };
-pub use monmap::{MonInfo, MonMap};
+pub use monmap::{MonInfo, MonMapState};
 pub use subscription::{MonService, MonSub, SubscribeItem, CEPH_SUBSCRIBE_ONETIME};
 pub use types::CommandResult;

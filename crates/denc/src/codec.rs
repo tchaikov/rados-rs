@@ -36,6 +36,7 @@
 //! }
 //! ```
 
+use crate::codec_error::CodecError;
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 
@@ -161,12 +162,10 @@ macro_rules! impl_denc_int {
         impl Denc for $type {
             fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
                 if buf.remaining_mut() < $size {
-                    return Err(RadosError::Protocol(format!(
-                        "Insufficient buffer space: need {} bytes for {}, have {}",
-                        $size,
-                        stringify!($type),
-                        buf.remaining_mut()
-                    )));
+                    return Err(RadosError::Codec(CodecError::InsufficientData {
+                        needed: $size,
+                        available: buf.remaining_mut(),
+                    }));
                 }
                 buf.$put_method(*self);
                 Ok(())
@@ -174,12 +173,10 @@ macro_rules! impl_denc_int {
 
             fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
                 if buf.remaining() < $size {
-                    return Err(RadosError::Protocol(format!(
-                        "Insufficient bytes: need {} for {}, have {}",
-                        $size,
-                        stringify!($type),
-                        buf.remaining()
-                    )));
+                    return Err(RadosError::Codec(CodecError::InsufficientData {
+                        needed: $size,
+                        available: buf.remaining(),
+                    }));
                 }
                 Ok(buf.$get_method())
             }
@@ -208,10 +205,10 @@ impl_denc_int!(i64, put_i64_le, get_i64_le, 8);
 impl Denc for bool {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         if buf.remaining_mut() < 1 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space: need 1 byte for bool, have {}",
-                buf.remaining_mut()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: 1,
+                available: buf.remaining_mut(),
+            }));
         }
         buf.put_u8(if *self { 1 } else { 0 });
         Ok(())
@@ -219,9 +216,10 @@ impl Denc for bool {
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for bool".to_string(),
-            ));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: 1,
+                available: buf.remaining(),
+            }));
         }
         Ok(buf.get_u8() != 0)
     }
@@ -251,10 +249,10 @@ impl<T: Denc + FixedSize, const N: usize> Denc for [T; N] {
 
         match items.try_into() {
             Ok(array) => Ok(array),
-            Err(items) => Err(RadosError::Protocol(format!(
-                "Failed to build fixed-size array: expected {N} elements, got {}",
-                items.len()
-            ))),
+            Err(items) => Err(RadosError::Codec(CodecError::ArraySizeMismatch {
+                expected: N,
+                got: items.len(),
+            })),
         }
     }
 
@@ -471,28 +469,25 @@ pub trait VersionedEncode: Sized {
         let struct_len = buf.get_u32_le() as usize;
 
         if struct_v > Self::MAX_DECODE_VERSION {
-            return Err(RadosError::Protocol(format!(
-                "{} cannot decode struct version {} (max supported: {})",
-                std::any::type_name::<Self>(),
-                struct_v,
-                Self::MAX_DECODE_VERSION
-            )));
+            return Err(RadosError::Codec(CodecError::VersionTooNew {
+                got: struct_v,
+                max: Self::MAX_DECODE_VERSION,
+                type_name: std::any::type_name::<Self>(),
+            }));
         }
         if struct_compat > struct_v {
-            return Err(RadosError::Protocol(format!(
-                "{} invalid version header: compat {} > version {}",
-                std::any::type_name::<Self>(),
-                struct_compat,
-                struct_v
-            )));
+            return Err(RadosError::Codec(CodecError::InvalidVersionHeader {
+                type_name: std::any::type_name::<Self>(),
+                compat: struct_compat,
+                version: struct_v,
+            }));
         }
 
         if buf.remaining() < struct_len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes: need {}, have {}",
-                struct_len,
-                buf.remaining()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: struct_len,
+                available: buf.remaining(),
+            }));
         }
 
         // Create a limited view of the content
@@ -622,11 +617,10 @@ impl Denc for Bytes {
 
         // Copy bytes
         if buf.remaining_mut() < self.len() {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space: need {} bytes, have {}",
-                self.len(),
-                buf.remaining_mut()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: self.len(),
+                available: buf.remaining_mut(),
+            }));
         }
         buf.put_slice(self);
 
@@ -637,11 +631,10 @@ impl Denc for Bytes {
         let len = <u32 as Denc>::decode(buf, features)? as usize;
 
         if buf.remaining() < len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for Bytes content: need {}, have {}",
-                len,
-                buf.remaining()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: len,
+                available: buf.remaining(),
+            }));
         }
 
         Ok(buf.copy_to_bytes(len))
@@ -661,11 +654,10 @@ impl Denc for String {
 
         // Copy string bytes
         if buf.remaining_mut() < self.len() {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space: need {} bytes, have {}",
-                self.len(),
-                buf.remaining_mut()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: self.len(),
+                available: buf.remaining_mut(),
+            }));
         }
         buf.put_slice(self.as_bytes());
 
@@ -676,17 +668,16 @@ impl Denc for String {
         let len = <u32 as Denc>::decode(buf, features)? as usize;
 
         if buf.remaining() < len {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for String content: need {}, have {}",
-                len,
-                buf.remaining()
-            )));
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: len,
+                available: buf.remaining(),
+            }));
         }
 
         let mut bytes = vec![0u8; len];
         buf.copy_to_slice(&mut bytes);
 
-        String::from_utf8(bytes).map_err(|e| RadosError::Protocol(format!("Invalid UTF-8: {}", e)))
+        String::from_utf8(bytes).map_err(|e| RadosError::Codec(CodecError::Utf8(e)))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -1269,8 +1260,13 @@ mod tests {
 
         let mut read_buf = buf.freeze();
         let err = TestVersionedType::decode(&mut read_buf, 0).unwrap_err();
-        let err_msg = err.to_string();
-        assert!(err_msg.contains("cannot decode struct version 3"));
+        assert!(
+            matches!(
+                err,
+                RadosError::Codec(CodecError::VersionTooNew { got: 3, .. })
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

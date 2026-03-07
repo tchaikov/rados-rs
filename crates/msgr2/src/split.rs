@@ -35,7 +35,7 @@
 //! # }
 //! ```
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{Frame, MessageFrame, Tag};
 use crate::header::MsgHeader;
 use crate::message::Message;

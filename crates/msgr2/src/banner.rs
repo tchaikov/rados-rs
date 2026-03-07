@@ -4,7 +4,7 @@
 //! connection. The banner carries the supported and required feature sets that
 //! peers use before entering the authenticated protocol state machine.
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use crate::FeatureSet;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt;

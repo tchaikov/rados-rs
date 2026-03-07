@@ -263,7 +263,7 @@ impl CephMessagePayload for MOSDOp {
         Self::COMPAT_VERSION
     }
 
-    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         use crate::denc_types::OsdReqId;
         use crate::types::{
             BlkinTraceInfo, JaegerSpanContext, PackedEntityName, CEPH_ENTITY_TYPE_CLIENT,
@@ -356,7 +356,7 @@ impl CephMessagePayload for MOSDOp {
         Ok(buf.freeze())
     }
 
-    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         // Collect all indata from operations into a single buffer for the message data section.
         // This follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data()
 
@@ -377,10 +377,10 @@ impl CephMessagePayload for MOSDOp {
         front: &[u8],
         _middle: &[u8],
         data: &[u8],
-    ) -> std::result::Result<Self, msgr2::Error> {
+    ) -> std::result::Result<Self, msgr2::Msgr2Error> {
         // MOSDOp decoding not implemented yet - this is typically only needed on the server side
         let _ = (front, data);
-        Err(msgr2::Error::Deserialization(
+        Err(msgr2::Msgr2Error::Deserialization(
             "MOSDOp decoding not implemented".into(),
         ))
     }
@@ -399,9 +399,9 @@ impl CephMessagePayload for MOSDOpReply {
         Self::COMPAT_VERSION
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         // MOSDOpReply encoding not implemented yet - this is typically only needed on the server side
-        Err(msgr2::Error::Serialization)
+        Err(msgr2::Msgr2Error::Serialization)
     }
 
     fn decode_payload(
@@ -409,12 +409,12 @@ impl CephMessagePayload for MOSDOpReply {
         front: &[u8],
         _middle: &[u8],
         data: &[u8],
-    ) -> std::result::Result<Self, msgr2::Error> {
+    ) -> std::result::Result<Self, msgr2::Msgr2Error> {
         use denc::Denc;
 
         let mut cursor = front;
         if cursor.remaining() < 16 {
-            return Err(msgr2::Error::Deserialization(
+            return Err(msgr2::Msgr2Error::Deserialization(
                 "Incomplete MOSDOpReply".into(),
             ));
         }
@@ -484,7 +484,7 @@ impl CephMessagePayload for MOSDOpReply {
         let mut payload_lens = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
             if cursor.remaining() < CEPH_OSD_OP_SIZE {
-                return Err(msgr2::Error::Deserialization(format!(
+                return Err(msgr2::Msgr2Error::Deserialization(format!(
                     "Incomplete osd_op {}: need {} bytes, have {}",
                     i,
                     CEPH_OSD_OP_SIZE,
@@ -556,7 +556,7 @@ impl CephMessagePayload for MOSDOpReply {
             let len = payload_lens[i];
             if len > 0 {
                 if data_offset + len > data.len() {
-                    return Err(msgr2::Error::Deserialization(format!(
+                    return Err(msgr2::Msgr2Error::Deserialization(format!(
                         "Insufficient data for op {}: need {} bytes at offset {}, have {} total",
                         i,
                         len,
@@ -602,7 +602,7 @@ impl CephMessagePayload for MOSDBackoff {
         Self::VERSION
     }
 
-    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         use denc::Denc;
 
         let size = self.encoded_size(features).unwrap_or(256);
@@ -616,7 +616,7 @@ impl CephMessagePayload for MOSDBackoff {
         front: &[u8],
         _middle: &[u8],
         _data: &[u8],
-    ) -> std::result::Result<Self, msgr2::Error> {
+    ) -> std::result::Result<Self, msgr2::Msgr2Error> {
         use denc::Denc;
 
         let mut cursor = front;

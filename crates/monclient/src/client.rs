@@ -6,7 +6,7 @@ use crate::connection::{KeepalivePolicy, MonConnection, MonConnectionParams};
 use crate::defaults;
 use crate::error::{MonClientError, Result};
 use crate::messages::*;
-use crate::monmap::MonMap;
+use crate::monmap::MonMapState;
 use crate::paxos_service_message::PaxosServiceMessage;
 use crate::subscription::{MonService, MonSub};
 use crate::types::CommandResult;
@@ -33,7 +33,7 @@ use tracing::{debug, error, info, trace, warn};
 /// just to call decode_payload on Denc-derived messages.
 fn decode_message<T: msgr2::ceph_message::CephMessagePayload>(
     msg: &msgr2::message::Message,
-) -> std::result::Result<T, msgr2::Error> {
+) -> std::result::Result<T, msgr2::Msgr2Error> {
     use msgr2::ceph_message::CephMsgHeader;
     let header = CephMsgHeader::new(T::msg_type(), T::msg_version(0));
     T::decode_payload(&header, &msg.front, &msg.middle, &msg.data)
@@ -133,8 +133,8 @@ pub struct MonClient {
     /// Connection state (active_con, pending_cons, hunting flags)
     connection_state: Arc<RwLock<ConnectionState>>,
 
-    /// MonMap state (monmap, want_monmap)
-    monmap_state: Arc<RwLock<MonMapState>>,
+    /// Tracked monitor map state (current map and subscription flag)
+    monmap_state: Arc<RwLock<MonMapHolder>>,
 
     /// Subscription state
     subscription_state: Arc<RwLock<MonSub>>,
@@ -234,10 +234,10 @@ struct ConnectionState {
     had_a_connection: bool,
 }
 
-/// MonMap state
-struct MonMapState {
+/// MonMap holder state
+struct MonMapHolder {
     /// Monitor map
-    monmap: MonMap,
+    monmap: MonMapState,
 
     /// Want monmap flag
     want_monmap: bool,
@@ -317,7 +317,7 @@ impl MonClient {
         // Build initial monmap from config or DNS SRV discovery
         let monmap = if !config.mon_addrs.is_empty() {
             info!("Building monmap from config");
-            MonMap::build_initial(&config.mon_addrs)?
+            MonMapState::build_initial(&config.mon_addrs)?
         } else {
             info!(
                 "No monitor addresses configured, trying DNS SRV discovery with service name: {}",
@@ -344,7 +344,7 @@ impl MonClient {
             had_a_connection: false,
         };
 
-        let monmap_state = MonMapState {
+        let monmap_state = MonMapHolder {
             monmap,
             want_monmap: true,
         };
@@ -551,7 +551,7 @@ impl MonClient {
     /// Select monitors by priority and apply weighted shuffling
     ///
     /// Returns a list of monitor ranks to try, ordered by weighted random selection.
-    fn select_monitors_by_priority(&self, monmap: &MonMap) -> Result<Vec<usize>> {
+    fn select_monitors_by_priority(&self, monmap: &MonMapState) -> Result<Vec<usize>> {
         // Get monitors grouped by priority (lowest priority first)
         let priority_groups = monmap.get_monitors_by_priority();
 
@@ -576,7 +576,7 @@ impl MonClient {
     ///
     /// If all weights are zero, uses uniform random shuffling.
     /// Otherwise, uses Fisher-Yates with weighted selection.
-    fn weighted_shuffle(&self, ranks: &[usize], monmap: &MonMap) -> Result<Vec<usize>> {
+    fn weighted_shuffle(&self, ranks: &[usize], monmap: &MonMapState) -> Result<Vec<usize>> {
         let mut selected_ranks = ranks.to_vec();
 
         if selected_ranks.len() <= 1 {
@@ -1304,16 +1304,16 @@ impl MonClient {
         Ok(())
     }
 
-    /// Handle MonMap message
+    /// Handle MonMapState message
     async fn handle_monmap(&self, msg: msgr2::message::Message) -> Result<()> {
         info!("Handling MonMap message ({} bytes)", msg.front.len());
         let mmonmap: MMonMap = decode_message(&msg)?;
         info!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
 
         // Decode the actual MonMap
-        let monmap = MonMap::decode(&mmonmap.monmap_bl)?;
+        let monmap = MonMapState::decode(&mmonmap.monmap_bl)?;
         info!(
-            "Decoded MonMap: epoch={}, fsid={}, {} monitors",
+            "Decoded MonMapState: epoch={}, fsid={}, {} monitors",
             monmap.epoch,
             monmap.fsid,
             monmap.size()
@@ -1643,17 +1643,17 @@ impl MonClient {
 
     /// Wait for MonMap to be received
     ///
-    /// This waits until the MonClient has received a MonMap from the monitor cluster.
-    /// The MonMap contains the cluster FSID and monitor addresses.
+    /// This waits until the MonClient has received a MonMapState from the monitor cluster.
+    /// The MonMapState contains the cluster FSID and monitor addresses.
     ///
-    /// Should be called after init() to ensure MonMap is available before
+    /// Should be called after init() to ensure MonMapState is available before
     /// creating service clients that need the FSID.
     pub async fn wait_for_monmap(&self, timeout: std::time::Duration) -> Result<()> {
         wait_for_condition(
             || async {
                 let monmap_state = self.monmap_state.read().await;
                 if !monmap_state.want_monmap && monmap_state.monmap.fsid != uuid::Uuid::nil() {
-                    info!("MonMap received via event notification");
+                    info!("MonMapState received via event notification");
                     Some(())
                 } else {
                     None
@@ -1862,10 +1862,10 @@ impl MonClient {
         }
     }
 
-    /// Get the current MonMap
+    /// Get the current MonMapState
     ///
-    /// Returns a cloned copy of the cached MonMap.
-    pub async fn get_monmap(&self) -> MonMap {
+    /// Returns a cloned copy of the cached MonMapState.
+    pub async fn get_monmap(&self) -> MonMapState {
         let monmap_state = self.monmap_state.read().await;
         monmap_state.monmap.clone()
     }

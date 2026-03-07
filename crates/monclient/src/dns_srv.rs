@@ -1,7 +1,7 @@
 //! DNS SRV record resolution for monitor discovery
 //!
 //! Implements DNS SRV-based monitor discovery as described in Ceph's
-//! `MonMap::build_initial()`. When no monitor addresses are configured,
+//! `MonMapState::build_initial()`. When no monitor addresses are configured,
 //! the client can discover monitors via DNS SRV records.
 //!
 //! The default SRV record name is `_ceph-mon._tcp`, which can be
@@ -11,7 +11,7 @@
 //! e.g., `ceph-mon_example.com` resolves `_ceph-mon._tcp.example.com`.
 
 use crate::error::{MonClientError, Result};
-use crate::monmap::MonMap;
+use crate::monmap::MonMapState;
 use hickory_resolver::TokioAsyncResolver;
 use std::net::SocketAddr;
 use tracing::{debug, warn};
@@ -34,9 +34,9 @@ const CEPH_MON_PORT_LEGACY: u16 = 6789;
 /// - `"ceph-mon"` → queries `_ceph-mon._tcp`
 /// - `"ceph-mon_example.com"` → queries `_ceph-mon._tcp.example.com`
 ///
-/// Returns a MonMap populated with the discovered monitors, or an error
+/// Returns a MonMapState populated with the discovered monitors, or an error
 /// if no monitors could be found.
-pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMap> {
+pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMapState> {
     let (service, domain) = parse_srv_name(srv_name);
 
     let query_name = if domain.is_empty() {
@@ -103,7 +103,7 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMap> {
     }
 
     debug!("Resolved {} monitor addresses via DNS SRV", mon_addrs.len());
-    MonMap::build_initial(&mon_addrs)
+    MonMapState::build_initial(&mon_addrs)
 }
 
 /// Parse DNS SRV service name into (service, domain) components.

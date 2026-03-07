@@ -23,7 +23,7 @@ pub mod throttle;
 // Re-export public API
 pub use banner::{Banner, ConnectMessage, ConnectReplyMessage, CEPH_BANNER, CEPH_BANNER_LEN};
 pub use compression::{CompressionAlgorithm, CompressionStats};
-pub use error::{Error, Result};
+pub use error::{Msgr2Error, Result};
 pub use frames::{
     EncodeWithFeatures, Frame, FrameAssembler, FrameTrait, MessageFrame, Tag, DEFAULT_ALIGNMENT,
     MAX_NUM_SEGMENTS, PREAMBLE_SIZE,
@@ -541,7 +541,7 @@ impl ConnectionConfig {
     /// ```
     pub fn from_ceph_conf(path: &str) -> Result<Self> {
         let ceph_config = cephconfig::CephConfig::from_file(path)
-            .map_err(|e| Error::config_error(&format!("Failed to read ceph.conf: {}", e)))?;
+            .map_err(|e| Msgr2Error::config_error(&format!("Failed to read ceph.conf: {}", e)))?;
 
         let mut config = Self::default();
 

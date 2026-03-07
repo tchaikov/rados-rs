@@ -10,7 +10,7 @@
 //!
 //! Reference: ~/dev/ceph/src/msg/Message.h and ~/dev/ceph/src/msg/Message.cc
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use bytes::{Buf, Bytes, BytesMut};
 use crc32c::crc32c;
 

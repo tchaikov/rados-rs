@@ -5,6 +5,7 @@
 //! I/O failures, and higher-level protocol issues so callers can propagate
 //! structured failures without flattening them into strings prematurely.
 
+use crate::CodecError;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -23,4 +24,8 @@ pub enum RadosError {
 
     #[error("Encoding/Decoding error: {0}")]
     Denc(String),
+
+    /// A wire-format encode or decode failure from a [`Denc`] implementation.
+    #[error(transparent)]
+    Codec(#[from] CodecError),
 }

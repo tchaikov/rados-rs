@@ -33,7 +33,7 @@ pub enum OSDClientError {
     Other(String),
 
     #[error("Msgr2 error: {0}")]
-    Msgr2(#[from] msgr2::Error),
+    Msgr2(#[from] msgr2::Msgr2Error),
 
     #[error("Denc error: {0}")]
     Denc(#[from] denc::RadosError),

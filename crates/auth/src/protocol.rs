@@ -1027,8 +1027,13 @@ mod tests {
 
         let mut read_buf = buf.freeze();
         let err = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap_err();
-        let err_msg = err.to_string();
-        assert!(err_msg.contains("Octopus v15+"));
+        assert!(
+            matches!(
+                err,
+                RadosError::Codec(denc::CodecError::VersionTooOld { type_name: "CephXAuthorizeB", .. })
+            ),
+            "unexpected error: {err:?}"
+        );
     }
 
     #[test]

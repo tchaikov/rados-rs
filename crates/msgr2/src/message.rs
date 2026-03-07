@@ -5,7 +5,7 @@
 //! framed msgr2 messages. It bridges higher-level Ceph payload structs and the
 //! lower-level frame and header code.
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use crate::header::MsgHeader;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use std::fmt;

@@ -1,6 +1,6 @@
 //! Error types used by the msgr2 transport, framing, and handshake layers.
 //!
-//! This module defines the shared `Error` enum returned by msgr2 components.
+//! This module defines the shared `Msgr2Error` enum returned by msgr2 components.
 //! The variants preserve distinctions between wire-format issues, authentication
 //! failures, I/O problems, and serialization errors so callers can react with
 //! more context than a generic protocol string would provide.
@@ -8,7 +8,7 @@
 use thiserror::Error;
 
 #[derive(Error, Debug)]
-pub enum Error {
+pub enum Msgr2Error {
     #[error("Protocol error: {0}")]
     Protocol(String),
     #[error("IO error: {0}")]
@@ -35,7 +35,7 @@ pub enum Error {
     ConfigError(String),
 }
 
-impl Error {
+impl Msgr2Error {
     pub fn protocol_error(msg: &str) -> Self {
         Self::Protocol(msg.to_string())
     }
@@ -67,7 +67,7 @@ impl Error {
     pub fn is_recoverable(&self) -> bool {
         match self {
             // Network errors that can be retried
-            Error::Io(io_err) => matches!(
+            Msgr2Error::Io(io_err) => matches!(
                 io_err.kind(),
                 std::io::ErrorKind::ConnectionReset
                     | std::io::ErrorKind::ConnectionAborted
@@ -77,9 +77,9 @@ impl Error {
                     | std::io::ErrorKind::Interrupted
             ),
             // Timeouts can be retried
-            Error::Timeout => true,
+            Msgr2Error::Timeout => true,
             // Connection errors might be retryable (depends on context)
-            Error::Connection(_) => true,
+            Msgr2Error::Connection(_) => true,
             // All other errors are not recoverable
             _ => false,
         }
@@ -93,29 +93,29 @@ impl Error {
         !self.is_recoverable()
             || matches!(
                 self,
-                Error::Protocol(_)
-                    | Error::Auth(_)
-                    | Error::CephX(_)
-                    | Error::ConfigError(_)
-                    | Error::InvalidData(_)
+                Msgr2Error::Protocol(_)
+                    | Msgr2Error::Auth(_)
+                    | Msgr2Error::CephX(_)
+                    | Msgr2Error::ConfigError(_)
+                    | Msgr2Error::InvalidData(_)
             )
     }
 
     /// Get a human-readable category for this error
     pub fn category(&self) -> &'static str {
         match self {
-            Error::Protocol(_) => "Protocol",
-            Error::Io(_) => "I/O",
-            Error::Denc(_) => "Encoding",
-            Error::Auth(_) | Error::CephX(_) => "Authentication",
-            Error::Connection(_) => "Connection",
-            Error::Timeout => "Timeout",
-            Error::InvalidData(_) => "InvalidData",
-            Error::Serialization | Error::Deserialization(_) => "Serialization",
-            Error::Compression(_) => "Compression",
-            Error::ConfigError(_) => "Configuration",
+            Msgr2Error::Protocol(_) => "Protocol",
+            Msgr2Error::Io(_) => "I/O",
+            Msgr2Error::Denc(_) => "Encoding",
+            Msgr2Error::Auth(_) | Msgr2Error::CephX(_) => "Authentication",
+            Msgr2Error::Connection(_) => "Connection",
+            Msgr2Error::Timeout => "Timeout",
+            Msgr2Error::InvalidData(_) => "InvalidData",
+            Msgr2Error::Serialization | Msgr2Error::Deserialization(_) => "Serialization",
+            Msgr2Error::Compression(_) => "Compression",
+            Msgr2Error::ConfigError(_) => "Configuration",
         }
     }
 }
 
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T> = std::result::Result<T, Msgr2Error>;

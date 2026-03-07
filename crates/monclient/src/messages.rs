@@ -45,7 +45,10 @@ macro_rules! impl_denc_ceph_message {
                 $version
             }
 
-            fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+            fn encode_payload(
+                &self,
+                _features: u64,
+            ) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
                 let size = self.encoded_size(0).unwrap_or(256);
                 let mut buf = BytesMut::with_capacity(size);
                 self.encode(&mut buf, 0)?;
@@ -57,10 +60,10 @@ macro_rules! impl_denc_ceph_message {
                 front: &[u8],
                 _middle: &[u8],
                 _data: &[u8],
-            ) -> std::result::Result<Self, msgr2::Error> {
+            ) -> std::result::Result<Self, msgr2::Msgr2Error> {
                 let mut data = front;
                 Self::decode(&mut data, 0).map_err(|_| {
-                    msgr2::Error::Deserialization(
+                    msgr2::Msgr2Error::Deserialization(
                         concat!(stringify!($type), " decode failed").into(),
                     )
                 })
@@ -81,7 +84,10 @@ macro_rules! impl_denc_ceph_message {
                 $compat
             }
 
-            fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+            fn encode_payload(
+                &self,
+                _features: u64,
+            ) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
                 let size = self.encoded_size(0).unwrap_or(256);
                 let mut buf = BytesMut::with_capacity(size);
                 self.encode(&mut buf, 0)?;
@@ -93,10 +99,10 @@ macro_rules! impl_denc_ceph_message {
                 front: &[u8],
                 _middle: &[u8],
                 _data: &[u8],
-            ) -> std::result::Result<Self, msgr2::Error> {
+            ) -> std::result::Result<Self, msgr2::Msgr2Error> {
                 let mut data = front;
                 Self::decode(&mut data, 0).map_err(|_| {
-                    msgr2::Error::Deserialization(
+                    msgr2::Msgr2Error::Deserialization(
                         concat!(stringify!($type), " decode failed").into(),
                     )
                 })
@@ -125,8 +131,11 @@ macro_rules! impl_paxos_ceph_message {
                 $version
             }
 
-            fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-                PaxosServiceMessage::encode(self).map_err(|_| msgr2::Error::Serialization)
+            fn encode_payload(
+                &self,
+                _features: u64,
+            ) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
+                PaxosServiceMessage::encode(self).map_err(|_| msgr2::Msgr2Error::Serialization)
             }
 
             fn decode_payload(
@@ -134,9 +143,9 @@ macro_rules! impl_paxos_ceph_message {
                 front: &[u8],
                 _middle: &[u8],
                 _data: &[u8],
-            ) -> std::result::Result<Self, msgr2::Error> {
+            ) -> std::result::Result<Self, msgr2::Msgr2Error> {
                 PaxosServiceMessage::decode(front).map_err(|_| {
-                    msgr2::Error::Deserialization(
+                    msgr2::Msgr2Error::Deserialization(
                         concat!(stringify!($type), " decode failed").into(),
                     )
                 })
@@ -157,8 +166,11 @@ macro_rules! impl_paxos_ceph_message {
                 $compat
             }
 
-            fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-                PaxosServiceMessage::encode(self).map_err(|_| msgr2::Error::Serialization)
+            fn encode_payload(
+                &self,
+                _features: u64,
+            ) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
+                PaxosServiceMessage::encode(self).map_err(|_| msgr2::Msgr2Error::Serialization)
             }
 
             fn decode_payload(
@@ -166,9 +178,9 @@ macro_rules! impl_paxos_ceph_message {
                 front: &[u8],
                 _middle: &[u8],
                 _data: &[u8],
-            ) -> std::result::Result<Self, msgr2::Error> {
+            ) -> std::result::Result<Self, msgr2::Msgr2Error> {
                 PaxosServiceMessage::decode(front).map_err(|_| {
-                    msgr2::Error::Deserialization(
+                    msgr2::Msgr2Error::Deserialization(
                         concat!(stringify!($type), " decode failed").into(),
                     )
                 })
@@ -340,9 +352,9 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
         Self::COMPAT_VERSION
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         // MOSDMap encoding not implemented - typically only needed on server side
-        Err(msgr2::Error::Serialization)
+        Err(msgr2::Msgr2Error::Serialization)
     }
 
     fn decode_payload(
@@ -350,7 +362,7 @@ impl msgr2::ceph_message::CephMessagePayload for MOSDMap {
         front: &[u8],
         _middle: &[u8],
         _data: &[u8],
-    ) -> std::result::Result<Self, msgr2::Error> {
+    ) -> std::result::Result<Self, msgr2::Msgr2Error> {
         let mut data = front;
         let fsid_denc = UuidD::decode(&mut data, 0)?;
         let fsid = fsid_denc.bytes;
@@ -462,11 +474,11 @@ impl msgr2::ceph_message::CephMessagePayload for MMonCommand {
         1
     }
 
-    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
-        PaxosServiceMessage::encode(self).map_err(|_| msgr2::Error::Serialization)
+    fn encode_payload(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
+        PaxosServiceMessage::encode(self).map_err(|_| msgr2::Msgr2Error::Serialization)
     }
 
-    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Error> {
+    fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, msgr2::Msgr2Error> {
         Ok(self.inbl.clone())
     }
 
@@ -475,9 +487,9 @@ impl msgr2::ceph_message::CephMessagePayload for MMonCommand {
         front: &[u8],
         _middle: &[u8],
         data: &[u8],
-    ) -> std::result::Result<Self, msgr2::Error> {
+    ) -> std::result::Result<Self, msgr2::Msgr2Error> {
         let mut cmd: MMonCommand = PaxosServiceMessage::decode(front)
-            .map_err(|_| msgr2::Error::Deserialization("MMonCommand decode failed".into()))?;
+            .map_err(|_| msgr2::Msgr2Error::Deserialization("MMonCommand decode failed".into()))?;
         cmd.inbl = Bytes::copy_from_slice(data);
         Ok(cmd)
     }

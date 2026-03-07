@@ -2,7 +2,7 @@
 //!
 //! Based on ~/dev/ceph/src/msg/async/ProtocolV2.h and msgr2.rst documentation
 
-use crate::error::{Error, Result};
+use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{
     AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, AuthSignatureFrame,
     CompressionDoneFrame, CompressionRequestFrame, Frame, FrameTrait, HelloFrame,
