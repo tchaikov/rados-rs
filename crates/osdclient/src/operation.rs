@@ -207,7 +207,7 @@ impl OpBuilder {
     ///
     /// # Arguments
     /// * `snap_id` - Snapshot ID to roll back to
-    pub fn rollback(mut self, snap_id: u64) -> Self {
+    pub fn rollback(mut self, snap_id: impl Into<crate::snapshot::SnapId>) -> Self {
         self.ops.push(crate::types::OSDOp::rollback(snap_id));
         self.flags |= OsdOpFlags::WRITE;
         self

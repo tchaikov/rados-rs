@@ -51,7 +51,7 @@ pub enum OSDClientError {
     InvalidOperation(String),
 
     #[error("MonClient error: {0}")]
-    MonClient(String),
+    MonClient(#[from] monclient::MonClientError),
 
     #[error("CRUSH error: {0}")]
     Crush(String),
@@ -68,7 +68,11 @@ pub type Result<T> = std::result::Result<T, OSDClientError>;
 
 impl From<OSDClientError> for denc::RadosError {
     fn from(e: OSDClientError) -> Self {
-        denc::RadosError::Protocol(format!("OSDClient error: {}", e))
+        match e {
+            OSDClientError::Denc(error) => error,
+            OSDClientError::MonClient(error) => error.into(),
+            other => denc::RadosError::Protocol(format!("OSDClient error: {}", other)),
+        }
     }
 }
 
@@ -107,5 +111,32 @@ impl OSDClientError {
     /// Check if error is retriable
     pub fn is_retriable(&self) -> bool {
         !matches!(self.category(), ErrorCategory::Permanent)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OSDClientError;
+
+    #[test]
+    fn converting_osdclient_denc_error_preserves_variant() {
+        let error = OSDClientError::Denc(denc::RadosError::InvalidData("bad pg".into()));
+
+        let converted: denc::RadosError = error.into();
+
+        assert!(matches!(converted, denc::RadosError::InvalidData(message) if message == "bad pg"));
+    }
+
+    #[test]
+    fn converting_osdclient_monclient_error_preserves_nested_rados_error() {
+        let error = OSDClientError::MonClient(monclient::MonClientError::RadosError(
+            denc::RadosError::InvalidData("bad mon command".into()),
+        ));
+
+        let converted: denc::RadosError = error.into();
+
+        assert!(
+            matches!(converted, denc::RadosError::InvalidData(message) if message == "bad mon command")
+        );
     }
 }

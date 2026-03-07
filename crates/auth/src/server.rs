@@ -60,7 +60,7 @@ impl CephXServerHandler {
     /// Add a service secret for generating tickets
     ///
     /// # Arguments
-    /// * `service_id` - Service ID (MON=1, OSD=2, MDS=4, MGR=8)
+    /// * `service_id` - Service bit from `EntityType` (MON=1, MDS=2, OSD=4, MGR=16)
     /// * `secret` - Service secret key
     pub fn add_service_secret(&mut self, service_id: u32, secret: CryptoKey) {
         self.service_secrets.insert(service_id, secret);
@@ -165,6 +165,10 @@ impl CephXServerHandler {
             "Server: Client challenge response: {}",
             authenticate.client_challenge
         );
+        debug!(
+            "Server: Requested extra service tickets: 0x{:08x}",
+            authenticate.other_keys
+        );
 
         // 3. Get client's secret key from keyring
         let client_secret = self
@@ -218,7 +222,7 @@ impl CephXServerHandler {
 
         // 6. Generate service tickets
         let service_tickets =
-            self.generate_service_tickets(entity_name, global_id, &session_key)?;
+            self.generate_service_tickets(entity_name, global_id, authenticate.other_keys)?;
 
         // 7. Build response with session key and tickets
         let mut response = BytesMut::new();
@@ -249,7 +253,7 @@ impl CephXServerHandler {
         &self,
         entity_name: &EntityName,
         global_id: u64,
-        _session_key: &CryptoKey,
+        requested_services: u32,
     ) -> Result<Vec<CephXTicketBlob>> {
         let mut tickets = Vec::new();
 
@@ -261,8 +265,16 @@ impl CephXServerHandler {
         let valid_from = now.as_secs();
         let valid_until = valid_from + self.ticket_ttl.as_secs();
 
-        // Generate tickets for each service we have secrets for
+        // Generate tickets only for the requested services we have secrets for.
         for (&service_id, service_secret) in &self.service_secrets {
+            if requested_services & service_id == 0 {
+                debug!(
+                    "Server: Skipping unrequested service_id: {} (requested=0x{:08x})",
+                    service_id, requested_services
+                );
+                continue;
+            }
+
             debug!("Server: Generating ticket for service_id: {}", service_id);
 
             // Generate service session key
@@ -340,6 +352,76 @@ impl CephXServerHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::EntityType;
+
+    const CLIENT_KEYRING: &str = r#"
+[client.admin]
+    key = AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==
+"#;
+
+    fn test_keyring() -> Keyring {
+        Keyring::from_string(CLIENT_KEYRING).expect("test keyring should parse")
+    }
+
+    fn test_secret(seed: u8) -> CryptoKey {
+        CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(vec![seed; AES_KEY_LEN]))
+    }
+
+    fn decode_ticket_services(
+        tickets: &[CephXTicketBlob],
+        service_secrets: &[(EntityType, CryptoKey)],
+    ) -> Vec<EntityType> {
+        let mut decoded_services = Vec::new();
+
+        for ticket in tickets {
+            let mut matched = None;
+
+            for (service_type, secret) in service_secrets {
+                let Ok(decrypted) = secret.decrypt(&ticket.blob) else {
+                    continue;
+                };
+                let mut decrypted_buf = decrypted.as_ref();
+                let Ok(ticket_info) = CephXServiceTicketInfo::decode(&mut decrypted_buf, 0) else {
+                    continue;
+                };
+
+                matched = Some(*service_type);
+                let decoded_global_id = ticket_info.ticket.global_id;
+                let decoded_name = ticket_info.ticket.name.to_string();
+                let decoded_service_key_len = ticket_info.session_key.len();
+                assert_eq!(decoded_global_id, 4242);
+                assert_eq!(decoded_name, "client.admin");
+                assert_eq!(decoded_service_key_len, AES_KEY_LEN);
+                break;
+            }
+
+            decoded_services
+                .push(matched.expect("ticket should decrypt with one configured secret"));
+        }
+
+        decoded_services.sort_by_key(|service| service.bits());
+        decoded_services
+    }
+
+    fn generate_and_decode_tickets(
+        requested_services: EntityType,
+        configured_services: &[(EntityType, CryptoKey)],
+    ) -> Vec<EntityType> {
+        let mut server = CephXServerHandler::new(test_keyring());
+        for (service_type, secret) in configured_services {
+            server.add_service_secret(service_type.bits(), secret.clone());
+        }
+
+        let tickets = server
+            .generate_service_tickets(
+                &"client.admin".parse().expect("entity name should parse"),
+                4242,
+                requested_services.bits(),
+            )
+            .expect("ticket generation should succeed");
+
+        decode_ticket_services(&tickets, configured_services)
+    }
 
     #[test]
     fn test_server_handler_creation() {
@@ -358,5 +440,32 @@ mod tests {
 
         assert_eq!(id1, DEFAULT_INITIAL_GLOBAL_ID);
         assert_eq!(id2, DEFAULT_INITIAL_GLOBAL_ID + 1);
+    }
+
+    #[test]
+    fn test_generate_service_tickets_only_issues_requested_services() {
+        let configured_services = vec![
+            (EntityType::MON, test_secret(0x11)),
+            (EntityType::OSD, test_secret(0x22)),
+            (EntityType::MGR, test_secret(0x33)),
+        ];
+
+        let decoded_services =
+            generate_and_decode_tickets(EntityType::MON | EntityType::MGR, &configured_services);
+
+        assert_eq!(decoded_services, vec![EntityType::MON, EntityType::MGR]);
+    }
+
+    #[test]
+    fn test_generate_service_tickets_omits_unrequested_services() {
+        let configured_services = vec![
+            (EntityType::MON, test_secret(0x44)),
+            (EntityType::OSD, test_secret(0x55)),
+        ];
+
+        let decoded_services =
+            generate_and_decode_tickets(EntityType::empty(), &configured_services);
+
+        assert!(decoded_services.is_empty());
     }
 }

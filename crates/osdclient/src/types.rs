@@ -971,11 +971,14 @@ impl OSDOp {
     ///
     /// # Arguments
     /// * `snap_id` - Snapshot ID to roll back to
-    pub fn rollback(snap_id: u64) -> Self {
+    pub fn rollback(snap_id: impl Into<crate::snapshot::SnapId>) -> Self {
+        let snap_id = snap_id.into();
         Self {
             op: OpCode::Rollback,
             flags: 0,
-            op_data: OpData::Snap { snapid: snap_id },
+            op_data: OpData::Snap {
+                snapid: snap_id.as_u64(),
+            },
             indata: Bytes::new(),
         }
     }

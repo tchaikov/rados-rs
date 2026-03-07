@@ -1015,13 +1015,9 @@ impl OSDSession {
     ) -> Result<()> {
         let tid = pending_op.tid;
 
-        // Create new MOSDOp with updated epoch
-        let mut new_mosdop = (*pending_op.op).clone();
-        new_mosdop.osdmap_epoch = new_osdmap_epoch;
-
-        // Update the operation's OSDMap epoch
+        // Update the operation's OSDMap epoch, cloning only if the Arc is shared.
+        Arc::make_mut(&mut pending_op.op).osdmap_epoch = new_osdmap_epoch;
         pending_op.osdmap_epoch = new_osdmap_epoch;
-        pending_op.op = Arc::new(new_mosdop);
 
         // Increment attempts counter (matching C++ Objecter behavior)
         pending_op.attempts += 1;

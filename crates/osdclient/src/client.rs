@@ -269,6 +269,25 @@ impl OSDClient {
         .map_err(|_| OSDClientError::Timeout(timeout))?
     }
 
+    /// Subscribe to OSDMap updates and wait until the monitor's current epoch arrives.
+    pub async fn wait_for_latest_osdmap(
+        &self,
+        timeout: std::time::Duration,
+    ) -> Result<Arc<crate::osdmap::OSDMap>> {
+        self.mon_client
+            .subscribe(monclient::MonService::OsdMap, 0, 0)
+            .await
+            .map_err(OSDClientError::MonClient)?;
+
+        let (epoch, _) = self
+            .mon_client
+            .get_version(monclient::MonService::OsdMap)
+            .await
+            .map_err(OSDClientError::MonClient)?;
+
+        self.wait_for_epoch(epoch as u32, timeout).await
+    }
+
     /// Get or create a session for an OSD
     async fn get_or_create_session(&self, osd_id: i32) -> Result<Arc<OSDSession>> {
         // Get OSD address early (before acquiring any locks)
@@ -413,7 +432,15 @@ impl OSDClient {
     /// Map an object to OSDs using CRUSH
     async fn object_to_osds(&self, pool: u64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
         let osdmap = self.get_osdmap().await?;
+        self.object_to_osds_in_map(&osdmap, pool, oid)
+    }
 
+    fn object_to_osds_in_map(
+        &self,
+        osdmap: &crate::osdmap::OSDMap,
+        pool: u64,
+        oid: &str,
+    ) -> Result<(StripedPgId, Vec<i32>)> {
         // Find pool info
         let pool_info = osdmap
             .pools
@@ -511,6 +538,23 @@ impl OSDClient {
         debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
 
         Ok((spgid, osds))
+    }
+
+    fn cached_rescan_osds(
+        &self,
+        cache: &mut HashMap<(u64, String), Vec<i32>>,
+        osdmap: &crate::osdmap::OSDMap,
+        pool_id: u64,
+        object_id: &str,
+    ) -> Result<Vec<i32>> {
+        let key = (pool_id, object_id.to_owned());
+        if let Some(osds) = cache.get(&key) {
+            return Ok(osds.clone());
+        }
+
+        let (_, osds) = self.object_to_osds_in_map(osdmap, pool_id, object_id)?;
+        cache.insert(key, osds.clone());
+        Ok(osds)
     }
 
     /// Apply redirect to an operation
@@ -912,11 +956,15 @@ impl OSDClient {
         max_entries: u64,
         pool_info: &crate::PgPool,
         osdmap: &Arc<crate::osdmap::OSDMap>,
-        crush_map: &crush::CrushMap,
-        hashpspool: bool,
     ) -> Result<(denc::PgNlsResponse, i32)> {
         // Create StripedPgId for the current PG
         let spgid = StripedPgId::from_pg(pool, current_pg);
+        let hashpspool =
+            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
+        let crush_map = osdmap
+            .crush
+            .as_ref()
+            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
 
         // Look up which OSDs handle this PG using CRUSH
         let pg = crush::placement::PgId {
@@ -1082,15 +1130,6 @@ impl OSDClient {
         let pg_num = pool_info.pg_num;
         let starting_pg = current_pg;
 
-        // Check if pool has hashpspool flag
-        let hashpspool =
-            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
-
-        let crush_map = osdmap
-            .crush
-            .as_ref()
-            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
-
         // Collect entries from PGs until we have enough or reach the end
         let mut all_entries = Vec::new();
 
@@ -1113,8 +1152,6 @@ impl OSDClient {
                     remaining,
                     pool_info,
                     &osdmap,
-                    crush_map,
-                    hashpspool,
                 )
                 .await
             {
@@ -1237,7 +1274,7 @@ impl OSDClient {
                 current_epoch, target_epoch
             );
             self.mon_client
-                .subscribe("osdmap", current_epoch as u64, 0)
+                .subscribe(monclient::MonService::OsdMap, current_epoch as u64, 0)
                 .await
                 .ok();
         }
@@ -1280,7 +1317,7 @@ impl OSDClient {
             .mon_client
             .send_poolop(msg)
             .await
-            .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
+            .map_err(OSDClientError::MonClient)?;
 
         if result.is_success() {
             debug!("Pool created successfully: {}", pool_name);
@@ -1350,7 +1387,7 @@ impl OSDClient {
             .mon_client
             .send_poolop(msg)
             .await
-            .map_err(|e| OSDClientError::Connection(format!("Pool operation failed: {}", e)))?;
+            .map_err(OSDClientError::MonClient)?;
 
         if result.is_success() {
             debug!("Pool deleted successfully: {}", pool_name);
@@ -1447,6 +1484,7 @@ impl OSDClient {
         need_resend: &mut Vec<(i32, crate::session::PendingOp)>,
     ) -> Result<()> {
         let metadata = session.get_pending_ops_metadata().await;
+        let mut placement_cache = HashMap::new();
 
         for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
             // Check if pool deleted
@@ -1460,7 +1498,8 @@ impl OSDClient {
             }
 
             // Check if target changed
-            let (_, new_osds) = self.object_to_osds(pool_id, &object_id).await?;
+            let new_osds =
+                self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
             let new_primary = new_osds.first().copied().unwrap_or(-1);
 
             if new_primary != osd_id {
@@ -1554,6 +1593,7 @@ impl OSDClient {
         need_resend: &mut Vec<(i32, crate::session::PendingOp)>,
     ) {
         let metadata = session.get_pending_ops_metadata().await;
+        let mut placement_cache = HashMap::new();
         for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
             if !osdmap.pools.contains_key(&pool_id) {
                 if let Some(pending_op) = session.remove_pending_op(tid).await {
@@ -1563,7 +1603,9 @@ impl OSDClient {
                 }
                 continue;
             }
-            if let Ok((_, new_osds)) = self.object_to_osds(pool_id, &object_id).await {
+            if let Ok(new_osds) =
+                self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)
+            {
                 let new_primary = new_osds.first().copied().unwrap_or(-1);
                 if let Some(mut op) = session.remove_pending_op(tid).await {
                     op.state = crate::types::OpState::NeedsResend;
@@ -1877,7 +1919,10 @@ impl OSDClient {
         // Notify MonClient that we received this osdmap epoch
         if let Err(e) = self
             .mon_client
-            .notify_map_received("osdmap", u64::from(u32::from(final_epoch)))
+            .notify_map_received(
+                monclient::MonService::OsdMap,
+                u64::from(u32::from(final_epoch)),
+            )
             .await
         {
             warn!(

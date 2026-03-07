@@ -197,16 +197,12 @@ async fn main() -> Result<()> {
 
     debug!("OSD client created");
 
-    // NOW subscribe to OSDMap - both MonClient and OSDClient are ready
-    mon_client
-        .subscribe("osdmap", 0, 0)
+    osd_client
+        .wait_for_latest_osdmap(tokio::time::Duration::from_secs(10))
         .await
-        .context("Failed to subscribe to OSDMap")?;
+        .context("Failed to receive latest OSDMap")?;
 
-    // Wait for OSDMap to arrive
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-    debug!("OSDMap received");
+    debug!("Latest OSDMap received");
 
     // Parse pool (try as ID first, then as name)
     let pool_id = parse_pool(&cli.pool, &osd_client).await?;

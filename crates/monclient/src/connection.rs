@@ -16,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 
 /// Send channel capacity for connection messages
 const CONNECTION_SEND_CHANNEL_CAPACITY: usize = 256;
+const CEPH_FEATURE_MON_STATEFUL_SUB: u64 = 1 << 57;
 
 /// Parameters for creating a monitor connection
 #[derive(Clone)]
@@ -76,6 +77,9 @@ pub struct MonConnection {
     /// Global ID assigned during authentication (immutable after connect)
     global_id: u64,
 
+    /// Ceph session features negotiated during the ident exchange.
+    peer_supported_features: u64,
+
     /// Authentication provider (stored for creating service auth providers)
     /// Wrapped in Mutex to allow mutable access for ticket renewal
     auth_provider: Option<Arc<Mutex<auth::MonitorAuthProvider>>>,
@@ -124,7 +128,13 @@ impl MonConnection {
 
         // Get the global_id from the connection
         let global_id = connection.global_id();
+        let peer_supported_features = connection.negotiated_features();
         tracing::debug!("Retrieved global_id {} from connection", global_id);
+        tracing::debug!(
+            "Negotiated monitor features 0x{:x} (stateful_sub={})",
+            peer_supported_features,
+            (peer_supported_features & CEPH_FEATURE_MON_STATEFUL_SUB) != 0
+        );
 
         // Get the authenticated auth provider from the connection
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
@@ -214,6 +224,7 @@ impl MonConnection {
         let mon_conn = Self {
             rank: params.rank,
             global_id,
+            peer_supported_features,
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
             send_tx,
             task_handle: Arc::new(Mutex::new(Some(handle))),
@@ -233,6 +244,11 @@ impl MonConnection {
     /// Get the global ID assigned during authentication
     pub fn global_id(&self) -> u64 {
         self.global_id
+    }
+
+    /// Whether the connected monitor supports stateful subscriptions.
+    pub fn supports_stateful_subscriptions(&self) -> bool {
+        (self.peer_supported_features & CEPH_FEATURE_MON_STATEFUL_SUB) != 0
     }
 
     /// Check if the background I/O task has finished

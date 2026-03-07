@@ -42,7 +42,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // 2. Subscribe to OSDMap
     println!("2️⃣  Subscribing to OSDMap...");
-    mon_client.subscribe("osdmap", 0, 0).await?;
+    mon_client
+        .subscribe(monclient::MonService::OsdMap, 0, 0)
+        .await?;
 
     // Wait a moment for OSDMap to arrive
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

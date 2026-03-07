@@ -4,7 +4,7 @@
 
 use crate::error::{MonClientError, Result};
 use crate::paxos_service_message::{PaxosFields, PaxosServiceMessage};
-use crate::subscription::SubscribeItem;
+use crate::subscription::{MonService, SubscribeItem};
 use bytes::{Buf, Bytes, BytesMut};
 use denc::{Denc, UuidD};
 use std::collections::HashMap;
@@ -195,8 +195,8 @@ impl MMonSubscribe {
         }
     }
 
-    pub fn add(&mut self, name: String, item: SubscribeItem) {
-        self.what.insert(name, item);
+    pub fn add(&mut self, service: MonService, item: SubscribeItem) {
+        self.what.insert(service.as_str().to_string(), item);
     }
 }
 
@@ -231,10 +231,10 @@ pub struct MMonGetVersion {
 }
 
 impl MMonGetVersion {
-    pub fn new(tid: u64, what: &str) -> Self {
+    pub fn new(tid: u64, service: MonService) -> Self {
         Self {
             tid,
-            what: what.to_string(),
+            what: service.as_str().to_string(),
         }
     }
 }
@@ -895,13 +895,13 @@ mod tests {
 
         let mut msg = MMonSubscribe::new();
         msg.add(
-            "osdmap".to_string(),
+            MonService::OsdMap,
             SubscribeItem {
                 start: 10,
                 flags: 0,
             },
         );
-        msg.add("monmap".to_string(), SubscribeItem { start: 5, flags: 1 });
+        msg.add(MonService::MonMap, SubscribeItem { start: 5, flags: 1 });
 
         let encoded = msg.encode_payload(0).unwrap();
         let header = CephMsgHeader::new(MMonSubscribe::msg_type(), MMonSubscribe::msg_version(0));
@@ -993,7 +993,7 @@ mod tests {
         use msgr2::ceph_message::{CephMessage, CephMessagePayload, CrcFlags};
 
         let mut subscribe = MMonSubscribe::new();
-        subscribe.add("osdmap".to_string(), SubscribeItem { start: 0, flags: 0 });
+        subscribe.add(MonService::OsdMap, SubscribeItem { start: 0, flags: 0 });
 
         // Create a complete message
         let msg = CephMessage::from_payload(&subscribe, 0, CrcFlags::ALL).unwrap();
@@ -1017,7 +1017,7 @@ mod tests {
     fn test_mmon_get_version_message_encoding() {
         use msgr2::ceph_message::{CephMessage, CephMessagePayload, CrcFlags};
 
-        let get_version = MMonGetVersion::new(1, "osdmap");
+        let get_version = MMonGetVersion::new(1, MonService::OsdMap);
 
         // Create a complete message
         let msg = CephMessage::from_payload(&get_version, 0, CrcFlags::ALL).unwrap();

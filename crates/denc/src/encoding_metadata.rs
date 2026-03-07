@@ -15,7 +15,9 @@
 //!
 //! // Feature-dependent type: uses versioning AND encoding depends on features
 //! mark_feature_dependent_encoding!(PgPool);
-//! mark_feature_dependent_encoding!(EntityAddr);
+//!
+//! // Versioned type with a fixed modern encode contract
+//! mark_versioned_encoding!(EntityAddr);
 //! ```
 
 use std::collections::HashMap;
@@ -119,9 +121,8 @@ macro_rules! mark_versioned_encoding {
 ///
 /// # Example
 /// ```rust
-/// mark_feature_dependent_encoding!(PgPool);      // Version depends on SERVER_TENTACLE, etc.
-/// mark_feature_dependent_encoding!(EntityAddr);  // Encoding depends on MSG_ADDR2
-/// mark_feature_dependent_encoding!(OsdXInfo);    // Version depends on SERVER_OCTOPUS
+/// mark_feature_dependent_encoding!(PgPool);    // Version depends on SERVER_TENTACLE, etc.
+/// mark_feature_dependent_encoding!(OSDMap);    // Version depends on multiple server feature masks
 /// ```
 #[macro_export]
 macro_rules! mark_feature_dependent_encoding {
@@ -143,10 +144,10 @@ macro_rules! mark_feature_dependent_encoding {
 ///     simple: [PgId, EVersion, UTime, UuidD, OsdInfo],
 ///
 ///     // Versioned types (Level 2)
-///     versioned: [PoolSnapInfo, PgMergeMeta],
+///     versioned: [PoolSnapInfo, PgMergeMeta, EntityAddr, OsdXInfo],
 ///
 ///     // Feature-dependent types (Level 2 & 3)
-///     feature_dependent: [EntityAddr, OsdXInfo, PgPool],
+///     feature_dependent: [PgPool],
 /// }
 /// ```
 #[macro_export]

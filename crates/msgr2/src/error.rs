@@ -1,3 +1,10 @@
+//! Error types used by the msgr2 transport, framing, and handshake layers.
+//!
+//! This module defines the shared `Error` enum returned by msgr2 components.
+//! The variants preserve distinctions between wire-format issues, authentication
+//! failures, I/O problems, and serialization errors so callers can react with
+//! more context than a generic protocol string would provide.
+
 use thiserror::Error;
 
 #[derive(Error, Debug)]

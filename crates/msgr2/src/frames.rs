@@ -1,12 +1,13 @@
-// This module implements the msgr2.1 frame protocol
-// The macros (define_frame, define_control_frame) are internal implementation details
-// Public API consists of:
-//   - Frame trait
-//   - FrameAssembler
-//   - Concrete frame types (HelloFrame, AuthRequestFrame, MessageFrame, etc.)
-//   - Tag enum and protocol constants
+//! Frame definitions and assembly logic for the msgr2.1 wire protocol.
+//!
+//! This module contains the concrete control and message frame types, their
+//! protocol tags, and the assembler logic that turns byte streams into frames
+//! and frames back into wire format. It is the main surface for msgr2 framing
+//! behavior above the encryption, compression, and socket layers.
 
 use crate::header::MsgHeader;
+#[cfg(test)]
+use bytes::BufMut;
 use bytes::{Buf, Bytes, BytesMut};
 use denc::Denc;
 use denc::RadosError;
@@ -118,7 +119,28 @@ impl TryFrom<u8> for Tag {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1..=22 => unsafe { Ok(std::mem::transmute::<u8, Tag>(value)) },
+            1 => Ok(Self::Hello),
+            2 => Ok(Self::AuthRequest),
+            3 => Ok(Self::AuthBadMethod),
+            4 => Ok(Self::AuthReplyMore),
+            5 => Ok(Self::AuthRequestMore),
+            6 => Ok(Self::AuthDone),
+            7 => Ok(Self::AuthSignature),
+            8 => Ok(Self::ClientIdent),
+            9 => Ok(Self::ServerIdent),
+            10 => Ok(Self::IdentMissingFeatures),
+            11 => Ok(Self::SessionReconnect),
+            12 => Ok(Self::SessionReset),
+            13 => Ok(Self::SessionRetry),
+            14 => Ok(Self::SessionRetryGlobal),
+            15 => Ok(Self::SessionReconnectOk),
+            16 => Ok(Self::Wait),
+            17 => Ok(Self::Message),
+            18 => Ok(Self::Keepalive2),
+            19 => Ok(Self::Keepalive2Ack),
+            20 => Ok(Self::Ack),
+            21 => Ok(Self::CompressionRequest),
+            22 => Ok(Self::CompressionDone),
             _ => Err(RadosError::Protocol(format!("Unknown tag: {}", value))),
         }
     }
@@ -190,7 +212,7 @@ impl Frame {
             } else {
                 let compressed = ctx
                     .compress(segment)
-                    .map_err(|e| RadosError::Protocol(format!("Compression failed: {}", e)))?;
+                    .map_err(|e| RadosError::Compression(e.to_string()))?;
 
                 new_preamble.segments[i].logical_len = compressed.len() as u32;
                 new_segments.push(compressed);
@@ -233,7 +255,7 @@ impl Frame {
             } else {
                 let decompressed = ctx
                     .decompress(segment)
-                    .map_err(|e| RadosError::Protocol(format!("Decompression failed: {}", e)))?;
+                    .map_err(|e| RadosError::Compression(e.to_string()))?;
 
                 new_preamble.segments[i].logical_len = decompressed.len() as u32;
                 new_segments.push(decompressed);
@@ -263,6 +285,45 @@ impl Frame {
             buf.extend_from_slice(segment);
         }
         buf.freeze()
+    }
+
+    /// Build the secure-mode payload body for focused layout tests.
+    #[cfg(test)]
+    pub(crate) fn encode_secure_payload(&self) -> Bytes {
+        let num_segments = self.segments.len().min(self.preamble.num_segments as usize);
+        let total_len = self.segments[..num_segments]
+            .iter()
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                let segment_len = segment.len();
+                (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1)
+            })
+            .sum::<usize>()
+            + if self.preamble.num_segments > 1 {
+                CRYPTO_BLOCK_SIZE
+            } else {
+                0
+            };
+
+        let mut payload = BytesMut::with_capacity(total_len);
+        for segment in &self.segments[..num_segments] {
+            if segment.is_empty() {
+                continue;
+            }
+
+            payload.extend_from_slice(segment);
+
+            let segment_len = segment.len();
+            let aligned_len = (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
+            payload.put_bytes(0, aligned_len - segment_len);
+        }
+
+        if self.preamble.num_segments > 1 {
+            payload.put_u8(FRAME_LATE_STATUS_COMPLETE);
+            payload.put_bytes(0, CRYPTO_BLOCK_SIZE - 1);
+        }
+
+        payload.freeze()
     }
 }
 
@@ -480,6 +541,14 @@ impl FrameAssembler {
                         "Missing CRC after first segment".to_string(),
                     ));
                 }
+                let received_crc = u32::from_le_bytes(buf[..FRAME_CRC_SIZE].try_into().unwrap());
+                let expected_crc = !crc32c::crc32c(&segments[0]);
+                if received_crc != expected_crc {
+                    return Err(RadosError::Protocol(format!(
+                        "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                        expected_crc, received_crc
+                    )));
+                }
                 buf.advance(FRAME_CRC_SIZE);
             }
         }
@@ -500,6 +569,26 @@ impl FrameAssembler {
                 return Err(RadosError::Protocol(
                     "Frame transmission aborted by sender".to_string(),
                 ));
+            }
+
+            let mut epilogue_offset = 1;
+            for seg_idx in 1..MAX_NUM_SEGMENTS {
+                let received_crc = u32::from_le_bytes(
+                    buf[epilogue_offset..epilogue_offset + FRAME_CRC_SIZE]
+                        .try_into()
+                        .unwrap(),
+                );
+                epilogue_offset += FRAME_CRC_SIZE;
+
+                if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
+                    let expected_crc = !crc32c::crc32c(&segments[seg_idx]);
+                    if received_crc != expected_crc {
+                        return Err(RadosError::Protocol(format!(
+                            "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                            seg_idx, expected_crc, received_crc
+                        )));
+                    }
+                }
             }
             buf.advance(epilogue_size);
         }
@@ -1226,6 +1315,153 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("aborted"), "Expected 'aborted' in '{}'", err);
+    }
+
+    #[test]
+    fn test_message_frame_from_wire_rejects_corrupted_epilogue_crc_for_front_segment() {
+        let frame = MessageFrame::new(
+            MsgHeader::new_default(1, 100),
+            Bytes::from("front"),
+            Bytes::from("middle"),
+            Bytes::from("data"),
+        );
+
+        let mut assembler = FrameAssembler::new(true);
+        let wire_bytes = assembler.to_wire(&frame, 0).unwrap();
+
+        let epilogue_offset = wire_bytes.len() - (1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE);
+        let mut corrupted = BytesMut::from(&wire_bytes[..]);
+        corrupted[epilogue_offset + 1] ^= 0xFF;
+
+        let result = MessageFrame::from_wire(corrupted.freeze());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Segment 1 CRC mismatch"),
+            "Expected segment 1 CRC mismatch in '{err}'"
+        );
+    }
+
+    #[test]
+    fn test_message_frame_from_wire_rejects_corrupted_epilogue_crc_for_data_segment() {
+        let frame = MessageFrame::new(
+            MsgHeader::new_default(1, 100),
+            Bytes::from("front"),
+            Bytes::from("middle"),
+            Bytes::from("data"),
+        );
+
+        let mut assembler = FrameAssembler::new(true);
+        let wire_bytes = assembler.to_wire(&frame, 0).unwrap();
+
+        let epilogue_offset = wire_bytes.len() - (1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE);
+        let data_crc_offset = epilogue_offset + 1 + 2 * FRAME_CRC_SIZE;
+        let mut corrupted = BytesMut::from(&wire_bytes[..]);
+        corrupted[data_crc_offset] ^= 0xFF;
+
+        let result = MessageFrame::from_wire(corrupted.freeze());
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Segment 3 CRC mismatch"),
+            "Expected segment 3 CRC mismatch in '{err}'"
+        );
+    }
+
+    #[test]
+    fn test_encode_secure_payload_single_segment_adds_alignment_padding_only() {
+        let frame = Frame::new(Tag::Keepalive2, Bytes::from_static(b"abc"));
+
+        let payload = frame.encode_secure_payload();
+
+        assert_eq!(payload.len(), CRYPTO_BLOCK_SIZE);
+        assert_eq!(&payload[..3], b"abc");
+        assert!(payload[3..].iter().all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn test_encode_secure_payload_multi_segment_includes_epilogue_block() {
+        let frame = Frame {
+            preamble: Preamble {
+                tag: Tag::Message,
+                num_segments: 3,
+                segments: [
+                    SegmentDescriptor {
+                        logical_len: 5,
+                        align: DEFAULT_ALIGNMENT,
+                    },
+                    SegmentDescriptor {
+                        logical_len: 0,
+                        align: DEFAULT_ALIGNMENT,
+                    },
+                    SegmentDescriptor {
+                        logical_len: 2,
+                        align: DEFAULT_ALIGNMENT,
+                    },
+                    SegmentDescriptor::default(),
+                ],
+                flags: 0,
+                reserved: 0,
+                crc: 0,
+            },
+            segments: vec![
+                Bytes::from_static(b"front"),
+                Bytes::new(),
+                Bytes::from_static(b"hi"),
+            ],
+        };
+
+        let payload = frame.encode_secure_payload();
+
+        assert_eq!(payload.len(), (2 * CRYPTO_BLOCK_SIZE) + CRYPTO_BLOCK_SIZE);
+        assert_eq!(&payload[..5], b"front");
+        assert!(payload[5..CRYPTO_BLOCK_SIZE].iter().all(|&byte| byte == 0));
+        assert_eq!(&payload[CRYPTO_BLOCK_SIZE..CRYPTO_BLOCK_SIZE + 2], b"hi");
+        assert!(payload[CRYPTO_BLOCK_SIZE + 2..(2 * CRYPTO_BLOCK_SIZE)]
+            .iter()
+            .all(|&byte| byte == 0));
+        assert_eq!(payload[2 * CRYPTO_BLOCK_SIZE], FRAME_LATE_STATUS_COMPLETE);
+        assert!(payload[(2 * CRYPTO_BLOCK_SIZE + 1)..]
+            .iter()
+            .all(|&byte| byte == 0));
+    }
+
+    #[test]
+    fn test_tag_try_from_covers_all_wire_values() {
+        let expected_tags = [
+            Tag::Hello,
+            Tag::AuthRequest,
+            Tag::AuthBadMethod,
+            Tag::AuthReplyMore,
+            Tag::AuthRequestMore,
+            Tag::AuthDone,
+            Tag::AuthSignature,
+            Tag::ClientIdent,
+            Tag::ServerIdent,
+            Tag::IdentMissingFeatures,
+            Tag::SessionReconnect,
+            Tag::SessionReset,
+            Tag::SessionRetry,
+            Tag::SessionRetryGlobal,
+            Tag::SessionReconnectOk,
+            Tag::Wait,
+            Tag::Message,
+            Tag::Keepalive2,
+            Tag::Keepalive2Ack,
+            Tag::Ack,
+            Tag::CompressionRequest,
+            Tag::CompressionDone,
+        ];
+
+        for (wire_value, expected_tag) in (1u8..=22).zip(expected_tags) {
+            assert_eq!(Tag::try_from(wire_value).unwrap(), expected_tag);
+        }
+    }
+
+    #[test]
+    fn test_tag_try_from_rejects_unknown_wire_value() {
+        let err = Tag::try_from(0).unwrap_err().to_string();
+        assert!(err.contains("Unknown tag: 0"), "unexpected error: {err}");
     }
 
     #[test]

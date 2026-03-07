@@ -9,6 +9,7 @@ use tracing::{debug, info};
 
 use crate::client::OSDClient;
 use crate::error::{OSDClientError, Result};
+use crate::snapshot::SnapId;
 use crate::types::{ReadResult, SparseReadResult, StatResult, WriteResult};
 
 /// Maximum entries per PGLS request for object listing pagination
@@ -580,7 +581,7 @@ impl IoCtx {
     /// Resolve a snapshot name to its snap_id.
     ///
     /// Returns an error if no snapshot with the given name exists in this pool.
-    pub async fn pool_snap_lookup(&self, name: &str) -> Result<u64> {
+    pub async fn pool_snap_lookup(&self, name: &str) -> Result<SnapId> {
         let osdmap = self.client.get_osdmap().await?;
         let pool = osdmap
             .get_pool(self.pool_id)
@@ -588,7 +589,7 @@ impl IoCtx {
         pool.snaps
             .values()
             .find(|s| s.name == name)
-            .map(|s| s.snapid)
+            .map(|s| SnapId::from(s.snapid))
             .ok_or_else(|| {
                 OSDClientError::Other(format!(
                     "snapshot '{}' not found in pool {}",
@@ -600,12 +601,16 @@ impl IoCtx {
     /// Resolve a snap_id to its [`PoolSnapInfo`](crate::osdmap::PoolSnapInfo).
     ///
     /// Returns an error if the snap_id does not exist in this pool.
-    pub async fn pool_snap_get_info(&self, snap_id: u64) -> Result<crate::osdmap::PoolSnapInfo> {
+    pub async fn pool_snap_get_info(
+        &self,
+        snap_id: impl Into<SnapId>,
+    ) -> Result<crate::osdmap::PoolSnapInfo> {
+        let snap_id = snap_id.into();
         let osdmap = self.client.get_osdmap().await?;
         let pool = osdmap
             .get_pool(self.pool_id)
             .ok_or(OSDClientError::PoolNotFound(self.pool_id))?;
-        pool.snaps.get(&snap_id).cloned().ok_or_else(|| {
+        pool.snaps.get(&snap_id.as_u64()).cloned().ok_or_else(|| {
             OSDClientError::Other(format!(
                 "snap_id {} not found in pool {}",
                 snap_id, self.pool_id
@@ -618,9 +623,14 @@ impl IoCtx {
     /// # Arguments
     /// * `oid` - Object name
     /// * `snap_id` - Snapshot ID to roll back to
-    pub async fn snap_rollback(&self, oid: impl Into<String>, snap_id: u64) -> Result<()> {
+    pub async fn snap_rollback(
+        &self,
+        oid: impl Into<String>,
+        snap_id: impl Into<SnapId>,
+    ) -> Result<()> {
         use crate::operation::OpBuilder;
 
+        let snap_id = snap_id.into();
         let oid_str = oid.into();
         debug!(
             "Rolling back object '{}' in pool {} to snap_id {}",

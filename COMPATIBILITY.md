@@ -180,7 +180,7 @@ These types have no dependencies on other custom types:
 | Reef | v18 | 2023 | **All types** | None |
 | Squid | v19 | 2024 | **All types** | None |
 
-**Recommendation**: rados-rs is fully compatible with **Ceph Nautilus v14.2.0 and later**. Limited compatibility with older versions is not guaranteed.
+**Recommendation**: rados-rs is supported on **Ceph Octopus v15 and later**. Some decoders still accept selected Nautilus-era wire formats, but Nautilus and older releases are outside the supported compatibility boundary.
 
 ## Version History Details
 
@@ -231,7 +231,7 @@ Some types have encoding that depends on feature flags negotiated during connect
 | `MonInfo` | `MASK_SERVER_NAUTILUS` | Version 2 vs version 6 encoding |
 | `PgPool` | `OSDENC` | Affects encoding of certain pool fields |
 
-**Note**: rados-rs always negotiates modern features when connecting to Nautilus+ clusters.
+**Note**: rados-rs always negotiates modern features when connecting to Octopus+ clusters.
 
 ## Known Limitations
 
@@ -302,17 +302,17 @@ When connecting to newer Ceph versions:
 
 ### Minimum Version Requirement
 
-As of 2025, rados-rs **requires Ceph Nautilus v14.2.0 or later**. Support for older versions has been removed to simplify the codebase and reduce maintenance burden.
+As of 2025, rados-rs is **supported on Ceph Octopus v15 or later**. Some decoders still intentionally accept selected Nautilus-era wire formats, but Nautilus and older releases are no longer part of the supported compatibility boundary.
 
 **Rationale**:
-- Nautilus (v14) was released in March 2019 (6+ years old)
-- Nautilus reached EOL in June 2021
-- All modern Ceph deployments use Nautilus or later (Pacific v16, Quincy v17, Reef v18, Squid v19)
-- Removing pre-v14 support eliminates ~135 lines of conditional decoding logic
+- Octopus (v15) was released in March 2020
+- Octopus is the oldest release line covered by the project support policy
+- All target deployments use Octopus or later (Pacific v16, Quincy v17, Reef v18, Squid v19)
+- Earlier simplification work still eliminated ~135 lines of pre-v14 conditional decoding logic
 
 ### Simplified Types
 
-The following types have been simplified by removing pre-Nautilus conditional decoding:
+The following types were simplified by removing pre-Nautilus conditional decoding before the project support floor was raised to Octopus+:
 
 | Type | Old Min Version | New Min Version | Lines Removed | Changes |
 |------|-----------------|-----------------|---------------|---------|
@@ -351,8 +351,8 @@ fn decode_content<B: Buf>(
     version: u8,
     _compat_version: u8,
 ) -> Result<Self, RadosError> {
-    // Reject versions older than Nautilus
-    crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
+    // Reject versions outside the supported floor
+    crate::check_min_version!(version, 6, "MonMap", "Octopus v15+");
 
     // All fields are now always present (no conditionals)
     let fsid = /* decode fsid */;
@@ -393,17 +393,17 @@ fn decode_content<B: Buf>(
 When encountering unsupported versions, users receive clear error messages:
 
 ```
-ObjectLocator version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
-HObject version 3 not supported (requires Ceph Nautilus v14+, minimum version 4)
-MonInfo version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
-MonMap version 5 not supported (requires Ceph Nautilus v14+, minimum version 6)
-AuthTicket version 1 not supported (requires Ceph Nautilus v14+, minimum version 2)
+ObjectLocator version 5 not supported (requires Ceph Octopus v15+, minimum version 6)
+HObject version 3 not supported (requires Ceph Octopus v15+, minimum version 4)
+MonInfo version 5 not supported (requires Ceph Octopus v15+, minimum version 6)
+MonMap version 5 not supported (requires Ceph Octopus v15+, minimum version 6)
+AuthTicket version 1 not supported (requires Ceph Octopus v15+, minimum version 2)
 CephXAuthenticate version 1 not supported (requires Ceph Luminous v12+, minimum version 2)
 ```
 
-### Post-Nautilus Conditionals
+### Octopus+ Conditionals
 
-The following version conditionals were **kept** for forward compatibility with post-Nautilus releases:
+The following version conditionals were **kept** for forward compatibility within the supported Octopus+ release range:
 
 - **MonMap v7+**: min_mon_release field (Octopus+)
 - **MonMap v8+**: removed_ranks, strategy, disallowed_leaders (Pacific+)
@@ -416,11 +416,11 @@ These conditionals are necessary for supporting newer Ceph versions and should b
 
 | Type | Previous Min | Current Min | Ceph Release | Status |
 |------|--------------|-------------|--------------|--------|
-| `ObjectLocator` | v2 | v6 | Nautilus v14+ | ✅ Simplified |
-| `HObject` | v1 | v4 | Nautilus v14+ | ✅ Simplified |
-| `MonInfo` | v1 | v6 | Nautilus v14+ | ✅ Simplified |
-| `MonMap` | v2 | v6 | Nautilus v14+ | ✅ Simplified |
-| `AuthTicket` | v1 | v2 | Nautilus v14+ | ✅ Simplified |
+| `ObjectLocator` | v2 | v6 | Octopus v15+ | ✅ Simplified |
+| `HObject` | v1 | v4 | Octopus v15+ | ✅ Simplified |
+| `MonInfo` | v1 | v6 | Octopus v15+ | ✅ Simplified |
+| `MonMap` | v2 | v6 | Octopus v15+ | ✅ Simplified |
+| `AuthTicket` | v1 | v2 | Octopus v15+ | ✅ Simplified |
 | `CephXAuthenticate` | v1 | v2 | Luminous v12+ | ✅ Simplified |
 
 ### Testing
@@ -429,7 +429,7 @@ All simplifications have been validated:
 - ✅ 117 unit tests pass
 - ✅ Code compiles without warnings
 - ✅ Net reduction: 63 lines of code (106 added for macro, 169 removed from conditionals)
-- ✅ All corpus tests pass for Nautilus+ data
+- ✅ All corpus tests pass for supported Octopus+ data
 
 ## References
 
@@ -445,5 +445,5 @@ All simplifications have been validated:
 - **2024-02-27**: Initial compatibility documentation
   - Documented all 56+ versioned types
   - Established dependency levels (0-5)
-  - Identified Nautilus (v14) as minimum fully-supported version
+  - Initially documented Nautilus (v14) as the minimum fully-supported version
   - Documented feature-dependent encoding patterns

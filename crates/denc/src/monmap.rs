@@ -14,6 +14,10 @@ use std::collections::BTreeMap;
 // Import specific types from types module
 use crate::types::{Epoch, FsId, UTime};
 
+const MONMAP_ENCODING_VERSION: u8 = 9;
+const MONMAP_COMPAT_VERSION: u8 = 3;
+const MONMAP_MIN_DECODE_VERSION: u8 = 6;
+
 /// Monitor feature flags (mon_feature_t in C++)
 /// Uses versioned encoding (ENCODE_START/DECODE_START)
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -282,10 +286,10 @@ impl VersionedEncode for MonInfo {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Minimum supported version check (Nautilus v14+)
-        // Version 5 is used by v18.2.7 and earlier (has all fields except time_added)
+        // Minimum supported project release boundary (Octopus v15+)
+        // Version 5 remains the wire-format floor we decode for MonInfo.
         // Version 6 adds time_added (added in Nov 2025, not in released versions yet)
-        crate::check_min_version!(version, 5, "MonInfo", "Nautilus v14+");
+        crate::check_min_version!(version, 5, "MonInfo", "Octopus v15+");
 
         // Decode fields present in v5+
         let name = <String as Denc>::decode(buf, features)?;
@@ -330,8 +334,8 @@ crate::impl_denc_for_versioned!(MonInfo);
 /// Version 9 encoding format
 ///
 /// ## Supported Versions
-/// - **Encoding**: v6-v9 (modern format with mon_info and ranks)
-/// - **Decoding**: v2-v9 (with limited legacy support)
+/// - **Encoding**: v9 (current Octopus+ layout)
+/// - **Decoding**: v6-v9 (modern format with ranks)
 ///
 /// ## Version History
 /// - v1: Legacy format with entity_inst_t (not supported)
@@ -343,7 +347,7 @@ crate::impl_denc_for_versioned!(MonInfo);
 /// - v9: Added stretch mode fields (stretch_mode_enabled, tiebreaker_mon, stretch_marked_down_mons)
 ///
 /// The implementation focuses on modern formats (v6+) as these are used in
-/// all actively supported Ceph releases (Nautilus and later).
+/// all actively supported Ceph releases (Octopus and later).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MonMap {
     pub fsid: FsId,
@@ -366,26 +370,12 @@ pub struct MonMap {
 impl VersionedEncode for MonMap {
     const FEATURE_DEPENDENT: bool = true;
 
-    fn encoding_version(&self, features: u64) -> u8 {
-        if (features & CephFeatures::MONENC.bits()) == 0 {
-            // Legacy encoding without MONENC
-            return 2;
-        }
-
-        if (features & CephFeatures::MASK_SERVER_NAUTILUS.bits()) == 0 {
-            5
-        } else {
-            9
-        }
+    fn encoding_version(&self, _features: u64) -> u8 {
+        MONMAP_ENCODING_VERSION
     }
 
-    fn compat_version(&self, features: u64) -> u8 {
-        const MONENC: u64 = 1 << 57;
-        if (features & MONENC) == 0 {
-            2
-        } else {
-            3
-        }
+    fn compat_version(&self, _features: u64) -> u8 {
+        MONMAP_COMPAT_VERSION
     }
 
     fn encode_content<B: BufMut>(
@@ -405,59 +395,22 @@ impl VersionedEncode for MonMap {
         // Encode epoch
         Denc::encode(&self.epoch, buf, features)?;
 
-        // For v1-v2, encode legacy mon_addr map
-        // For v3-v5, encode legacy_mon_addr
-        // For v6+, we don't encode legacy maps
+        debug_assert_eq!(version, MONMAP_ENCODING_VERSION);
 
-        if version < 6 {
-            // Build legacy mon_addr map from mon_info
-            // Note: We currently only support encoding version 6+ (modern format)
-            // Legacy versions 1-5 would require encoding old format maps
-            // which is not commonly needed for new implementations
-            return Err(RadosError::Protocol(format!(
-                "MonMap encoding version {} not supported (only v6+ supported)",
-                version
-            )));
-        }
-
-        // Encode timestamps
         Denc::encode(&self.last_changed, buf, features)?;
         Denc::encode(&self.created, buf, features)?;
 
-        // Encode features (v4+)
-        if version >= 4 {
-            Denc::encode(&self.persistent_features, buf, features)?;
-            Denc::encode(&self.optional_features, buf, features)?;
-        }
-
-        // Encode mon_info (v5+)
-        if version >= 5 {
-            Denc::encode(&self.mon_info, buf, features)?;
-        }
-
-        // Encode ranks (v6+)
-        if version >= 6 {
-            Denc::encode(&self.ranks, buf, features)?;
-        }
-
-        // Encode min_mon_release (v7+)
-        if version >= 7 {
-            Denc::encode(&self.min_mon_release, buf, features)?;
-        }
-
-        // Encode removed_ranks and strategy (v8+)
-        if version >= 8 {
-            Denc::encode(&self.removed_ranks, buf, features)?;
-            Denc::encode(&self.strategy, buf, features)?;
-            Denc::encode(&self.disallowed_leaders, buf, features)?;
-        }
-
-        // Encode stretch mode fields (v9+)
-        if version >= 9 {
-            Denc::encode(&self.stretch_mode_enabled, buf, features)?;
-            Denc::encode(&self.tiebreaker_mon, buf, features)?;
-            Denc::encode(&self.stretch_marked_down_mons, buf, features)?;
-        }
+        Denc::encode(&self.persistent_features, buf, features)?;
+        Denc::encode(&self.optional_features, buf, features)?;
+        Denc::encode(&self.mon_info, buf, features)?;
+        Denc::encode(&self.ranks, buf, features)?;
+        Denc::encode(&self.min_mon_release, buf, features)?;
+        Denc::encode(&self.removed_ranks, buf, features)?;
+        Denc::encode(&self.strategy, buf, features)?;
+        Denc::encode(&self.disallowed_leaders, buf, features)?;
+        Denc::encode(&self.stretch_mode_enabled, buf, features)?;
+        Denc::encode(&self.tiebreaker_mon, buf, features)?;
+        Denc::encode(&self.stretch_marked_down_mons, buf, features)?;
 
         Ok(())
     }
@@ -468,9 +421,9 @@ impl VersionedEncode for MonMap {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Minimum supported version check (Nautilus v14+)
-        // Version 6 added ranks field, which is required for modern Ceph
-        crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
+        // Minimum supported project release boundary (Octopus v15+)
+        // Version 6 remains the wire-format floor we decode for modern MonMap layouts.
+        crate::check_min_version!(version, MONMAP_MIN_DECODE_VERSION, "MonMap", "Octopus v15+");
 
         // Decode fsid (raw 16 bytes)
         if buf.remaining() < 16 {
@@ -547,59 +500,24 @@ impl VersionedEncode for MonMap {
     }
 
     fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
-        if version < 6 {
-            // Legacy versions not supported
-            return None;
-        }
+        debug_assert_eq!(version, MONMAP_ENCODING_VERSION);
 
-        let mut size = 0;
-
-        // fsid (raw 16 bytes)
-        size += 16;
-
-        // epoch (u32)
-        size += 4;
-
-        // timestamps (UTime each)
-        size += self.last_changed.encoded_size(features)?;
-        size += self.created.encoded_size(features)?;
-
-        // features (v4+)
-        if version >= 4 {
-            size += self.persistent_features.encoded_size(features)?;
-            size += self.optional_features.encoded_size(features)?;
-        }
-
-        // mon_info (v5+)
-        if version >= 5 {
-            size += self.mon_info.encoded_size(features)?;
-        }
-
-        // ranks (v6+)
-        if version >= 6 {
-            size += self.ranks.encoded_size(features)?;
-        }
-
-        // min_mon_release (v7+)
-        if version >= 7 {
-            size += 1; // MonCephRelease is u8
-        }
-
-        // removed_ranks and strategy (v8+)
-        if version >= 8 {
-            size += self.removed_ranks.encoded_size(features)?;
-            size += 1; // ElectionStrategy is u8
-            size += self.disallowed_leaders.encoded_size(features)?;
-        }
-
-        // stretch mode fields (v9+)
-        if version >= 9 {
-            size += 1; // bool
-            size += self.tiebreaker_mon.encoded_size(features)?;
-            size += self.stretch_marked_down_mons.encoded_size(features)?;
-        }
-
-        Some(size)
+        Some(
+            16 + 4
+                + self.last_changed.encoded_size(features)?
+                + self.created.encoded_size(features)?
+                + self.persistent_features.encoded_size(features)?
+                + self.optional_features.encoded_size(features)?
+                + self.mon_info.encoded_size(features)?
+                + self.ranks.encoded_size(features)?
+                + self.min_mon_release.encoded_size(features)?
+                + self.removed_ranks.encoded_size(features)?
+                + self.strategy.encoded_size(features)?
+                + self.disallowed_leaders.encoded_size(features)?
+                + self.stretch_mode_enabled.encoded_size(features)?
+                + self.tiebreaker_mon.encoded_size(features)?
+                + self.stretch_marked_down_mons.encoded_size(features)?,
+        )
     }
 }
 
@@ -669,5 +587,20 @@ mod tests {
         let decoded = MonMap::decode(&mut buf.freeze(), u64::MAX).unwrap();
         assert_eq!(monmap.epoch, decoded.epoch);
         assert_eq!(monmap.fsid, decoded.fsid);
+    }
+
+    #[test]
+    fn test_monmap_encode_ignores_legacy_feature_negotiation() {
+        let monmap = MonMap {
+            epoch: crate::ids::Epoch::new(1),
+            fsid: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            ..Default::default()
+        };
+
+        let mut buf = BytesMut::new();
+        monmap.encode(&mut buf, 0).unwrap();
+
+        assert_eq!(buf[0], MONMAP_ENCODING_VERSION);
+        assert_eq!(buf[1], MONMAP_COMPAT_VERSION);
     }
 }

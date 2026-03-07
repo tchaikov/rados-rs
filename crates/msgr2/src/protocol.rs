@@ -117,6 +117,78 @@ impl FrameIO {
         Self { stream }
     }
 
+    fn normalized_num_segments(frame: &Frame) -> usize {
+        let mut num_segments = frame.segments.len();
+        while num_segments > 1 && frame.segments[num_segments - 1].is_empty() {
+            num_segments -= 1;
+        }
+        num_segments
+    }
+
+    fn build_secure_preamble(frame: &Frame, num_segments: usize) -> Bytes {
+        let mut preamble = Preamble {
+            tag: frame.preamble.tag,
+            num_segments: num_segments as u8,
+            segments: [crate::frames::SegmentDescriptor::default();
+                crate::frames::MAX_NUM_SEGMENTS],
+            flags: frame.preamble.flags,
+            reserved: 0,
+            crc: 0,
+        };
+
+        for (index, segment) in frame.segments.iter().take(num_segments).enumerate() {
+            preamble.segments[index] = crate::frames::SegmentDescriptor {
+                logical_len: segment.len() as u32,
+                align: frame.preamble.segments[index].align,
+            };
+        }
+
+        preamble.encode()
+    }
+
+    fn build_secure_payload(frame: &Frame, num_segments: usize) -> BytesMut {
+        const FRAME_LATE_STATUS_COMPLETE: u8 = 0x0e;
+
+        let total_len = frame
+            .segments
+            .iter()
+            .take(num_segments)
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                (segment.len() + crate::frames::CRYPTO_BLOCK_SIZE - 1)
+                    & !(crate::frames::CRYPTO_BLOCK_SIZE - 1)
+            })
+            .sum::<usize>()
+            + if num_segments > 1 {
+                crate::frames::CRYPTO_BLOCK_SIZE
+            } else {
+                0
+            };
+
+        let mut payload_bytes = BytesMut::with_capacity(total_len);
+        for segment in frame.segments.iter().take(num_segments) {
+            let segment_len = segment.len();
+            if segment_len == 0 {
+                continue;
+            }
+
+            payload_bytes.extend_from_slice(segment);
+            let aligned_len = (segment_len + crate::frames::CRYPTO_BLOCK_SIZE - 1)
+                & !(crate::frames::CRYPTO_BLOCK_SIZE - 1);
+            let padding_needed = aligned_len - segment_len;
+            if padding_needed > 0 {
+                payload_bytes.extend_from_slice(&ZEROS[..padding_needed]);
+            }
+        }
+
+        if num_segments > 1 {
+            payload_bytes.extend_from_slice(&[FRAME_LATE_STATUS_COMPLETE]);
+            payload_bytes.extend_from_slice(&ZEROS[..crate::frames::CRYPTO_BLOCK_SIZE - 1]);
+        }
+
+        payload_bytes
+    }
+
     /// Send a frame with optional compression and encryption
     ///
     /// Processing order: compression → encryption
@@ -143,11 +215,12 @@ impl FrameIO {
                     );
                     Cow::Owned(compressed_frame)
                 }
-                Ok(_) | Err(_) => {
+                Ok(_) => {
                     // Compression didn't help or failed, borrow original
-                    if let Err(e) = frame.compress(ctx) {
-                        tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
-                    }
+                    Cow::Borrowed(frame)
+                }
+                Err(e) => {
+                    tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
                     Cow::Borrowed(frame)
                 }
             }
@@ -155,87 +228,67 @@ impl FrameIO {
             Cow::Borrowed(frame)
         };
 
-        // Step 2: Convert to wire format with proper preamble, segments, epilogue, and CRCs
-        // Use msgr2.1 (is_rev1 = true) to match the banner we sent
-        let wire_bytes = frame_to_send.to_wire(true)?;
-
-        tracing::debug!(
-            "Sending frame: tag={:?}, {} segments, {} wire bytes, compressed={}",
-            frame_to_send.preamble.tag,
-            frame_to_send.preamble.num_segments,
-            wire_bytes.len(),
-            (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
-        );
-
         // Print segment info
         for (i, seg) in frame_to_send.segments.iter().enumerate() {
             tracing::debug!("  Segment {}: {} bytes", i, seg.len());
         }
 
-        // Split into preamble (32 bytes) and payload (rest)
-        let preamble_bytes = &wire_bytes[..Self::PREAMBLE_SIZE];
-        let mut payload_bytes = wire_bytes[Self::PREAMBLE_SIZE..].to_vec();
-
-        tracing::trace!(
-            "send_frame: tag={:?}, has_encryption={}, num_segments={}, payload_len={}",
-            frame_to_send.preamble.tag,
-            state_machine.has_encryption(),
-            frame_to_send.preamble.num_segments,
-            payload_bytes.len()
-        );
-
         // Step 3: Apply encryption if enabled
         let final_bytes = if !state_machine.has_encryption() {
+            // Convert to wire format with proper preamble, segments, epilogue, and CRCs.
+            // Use msgr2.1 (is_rev1 = true) to match the banner we sent.
+            let wire_bytes = frame_to_send.to_wire(true)?;
+            let payload_len = wire_bytes.len().saturating_sub(Self::PREAMBLE_SIZE);
+            tracing::debug!(
+                "Sending frame: tag={:?}, {} segments, {} wire bytes, compressed={}",
+                frame_to_send.preamble.tag,
+                frame_to_send.preamble.num_segments,
+                wire_bytes.len(),
+                (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
+            );
+            tracing::trace!(
+                "send_frame: tag={:?}, has_encryption=false, num_segments={}, payload_len={}",
+                frame_to_send.preamble.tag,
+                frame_to_send.preamble.num_segments,
+                payload_len
+            );
             // No encryption - send as-is
             tracing::debug!(
                 "Frame payload: plaintext={} bytes (no encryption)",
-                payload_bytes.len()
+                payload_len
             );
             wire_bytes
         } else {
-            // SECURE mode with msgr2.1 inline optimization
+            let num_segments = Self::normalized_num_segments(&frame_to_send);
+            let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments);
+            let payload_bytes = Self::build_secure_payload(&frame_to_send, num_segments);
+
             tracing::debug!(
-                "SECURE mode: num_segments={}, payload_bytes.len()={}",
-                frame.preamble.num_segments,
+                "Sending frame: tag={:?}, {} segments, secure payload {} bytes, compressed={}",
+                frame_to_send.preamble.tag,
+                num_segments,
+                payload_bytes.len(),
+                (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
+            );
+            tracing::trace!(
+                "send_frame: tag={:?}, has_encryption=true, num_segments={}, payload_len={}",
+                frame_to_send.preamble.tag,
+                num_segments,
                 payload_bytes.len()
             );
 
-            // Rebuild payload from segments with proper alignment for secure mode
-            // Secure frames don't use CRC; they use GCM auth tags instead
-            const CRYPTO_BLOCK_SIZE: usize = 16;
-            const FRAME_LATE_STATUS_COMPLETE: u8 = 0x0e;
-
-            payload_bytes.clear();
-
-            // Add all segments with 16-byte alignment padding (skip empty segments)
-            for segment in &frame.segments {
-                let segment_len = segment.len();
-                if segment_len == 0 {
-                    continue; // Don't add or pad empty segments
-                }
-
-                payload_bytes.extend_from_slice(segment);
-
-                // Pad to 16-byte boundary
-                let aligned_len = (segment_len + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
-                let padding_needed = aligned_len - segment_len;
-                if padding_needed > 0 {
-                    payload_bytes.extend_from_slice(&ZEROS[..padding_needed]);
-                }
-            }
-
-            // For multi-segment frames, add epilogue
-            if frame.preamble.num_segments > 1 {
-                // epilogue_secure_rev1_block_t: 1 byte late_status + 15 bytes padding = 16 bytes
-                let mut epilogue = vec![FRAME_LATE_STATUS_COMPLETE];
-                epilogue.extend_from_slice(&[0u8; CRYPTO_BLOCK_SIZE - 1]);
-                payload_bytes.extend_from_slice(&epilogue);
-
+            // SECURE mode with msgr2.1 inline optimization
+            tracing::debug!(
+                "SECURE mode: num_segments={}, payload_bytes.len()={}",
+                num_segments,
+                payload_bytes.len()
+            );
+            if num_segments > 1 {
                 tracing::trace!(
                     "Secure multi-segment: num_segments={}, total_payload={} (includes {} byte epilogue)",
-                    frame.preamble.num_segments,
+                    num_segments,
                     payload_bytes.len(),
-                    CRYPTO_BLOCK_SIZE
+                    crate::frames::CRYPTO_BLOCK_SIZE
                 );
             } else {
                 tracing::trace!("Secure single-segment: payload_len={}", payload_bytes.len());
@@ -247,7 +300,7 @@ impl FrameIO {
             // Build preamble block (preamble + inline data + padding if needed)
             let mut preamble_block =
                 BytesMut::with_capacity(Self::PREAMBLE_SIZE + Self::INLINE_SIZE);
-            preamble_block.extend_from_slice(preamble_bytes);
+            preamble_block.extend_from_slice(&preamble_bytes);
             preamble_block.extend_from_slice(&payload_bytes[..inline_size]);
 
             // Pad to 48 bytes if inline data < 48 bytes
@@ -381,19 +434,19 @@ impl FrameIO {
             );
             decrypted
         } else {
-            Bytes::copy_from_slice(&preamble_block_buf)
+            Bytes::from(preamble_block_buf)
         };
 
         // Extract preamble (first 32 bytes)
-        let preamble_bytes = &preamble_and_inline[..Self::PREAMBLE_SIZE];
+        let preamble_bytes = preamble_and_inline.slice(..Self::PREAMBLE_SIZE);
         let inline_data = if has_encryption {
-            &preamble_and_inline[Self::PREAMBLE_SIZE..Self::PREAMBLE_SIZE + Self::INLINE_SIZE]
+            preamble_and_inline.slice(Self::PREAMBLE_SIZE..Self::PREAMBLE_SIZE + Self::INLINE_SIZE)
         } else {
-            &[]
+            Bytes::new()
         };
 
         // Parse preamble
-        let preamble = Preamble::decode(Bytes::copy_from_slice(preamble_bytes))?;
+        let preamble = Preamble::decode(preamble_bytes.clone())?;
 
         // Print raw preamble bytes for debugging
         let preamble_hex: String = preamble_bytes
@@ -516,15 +569,15 @@ impl FrameIO {
                 // Combine inline + decrypted remaining
                 let mut combined =
                     BytesMut::with_capacity(Self::INLINE_SIZE + decrypted_remaining.len());
-                combined.extend_from_slice(inline_data);
+                combined.extend_from_slice(&inline_data);
                 combined.extend_from_slice(&decrypted_remaining);
                 combined.freeze()
             } else {
-                Bytes::copy_from_slice(&remaining_buf)
+                Bytes::from(remaining_buf)
             }
         } else if has_encryption {
             // All data was inline
-            Bytes::copy_from_slice(&inline_data[..total_payload_size])
+            inline_data.slice(..total_payload_size)
         } else {
             Bytes::new()
         };
@@ -538,8 +591,8 @@ impl FrameIO {
             let segment_len = preamble.segments[i].logical_len as usize;
             if segment_len > 0 {
                 // Extract only the logical length of data (not the padding)
-                let segment_data = &full_payload[offset..offset + segment_len];
-                segments.push(Bytes::copy_from_slice(segment_data));
+                let segment_data = full_payload.slice(offset..offset + segment_len);
+                segments.push(segment_data.clone());
 
                 if has_encryption {
                     // Secure frames: skip 16-byte alignment padding
@@ -556,7 +609,7 @@ impl FrameIO {
                                     .try_into()
                                     .unwrap(),
                             );
-                            let expected_crc = !crc32c::crc32c(segment_data);
+                            let expected_crc = !crc32c::crc32c(&segment_data);
                             if received_crc != expected_crc {
                                 return Err(Error::Protocol(format!(
                                     "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
@@ -2125,6 +2178,11 @@ impl Connection {
     /// Returns 0 if authentication hasn't completed yet
     pub fn global_id(&self) -> u64 {
         self.state.state_machine.global_id()
+    }
+
+    /// Get the negotiated Ceph session features from the ident exchange.
+    pub fn negotiated_features(&self) -> u64 {
+        self.state.state_machine.negotiated_features()
     }
 
     /// Send a keepalive frame to the peer

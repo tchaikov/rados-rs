@@ -1,3 +1,9 @@
+//! Banner exchange types for the initial msgr2 feature-negotiation handshake.
+//!
+//! This module models the `ceph v2` banner exchanged at the start of an msgr2
+//! connection. The banner carries the supported and required feature sets that
+//! peers use before entering the authenticated protocol state machine.
+
 use crate::error::{Error, Result};
 use crate::FeatureSet;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

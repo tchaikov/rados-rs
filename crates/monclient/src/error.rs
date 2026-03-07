@@ -78,6 +78,37 @@ impl From<&str> for MonClientError {
 
 impl From<MonClientError> for denc::RadosError {
     fn from(e: MonClientError) -> Self {
-        denc::RadosError::Protocol(format!("MonClient error: {}", e))
+        match e {
+            MonClientError::RadosError(error) => error,
+            MonClientError::IoError(error) => error.into(),
+            other => denc::RadosError::Protocol(format!("MonClient error: {}", other)),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MonClientError;
+
+    #[test]
+    fn converting_monclient_rados_error_preserves_variant() {
+        let error = MonClientError::RadosError(denc::RadosError::InvalidData("bad monmap".into()));
+
+        let converted: denc::RadosError = error.into();
+
+        assert!(
+            matches!(converted, denc::RadosError::InvalidData(message) if message == "bad monmap")
+        );
+    }
+
+    #[test]
+    fn converting_monclient_io_error_preserves_variant() {
+        let error = MonClientError::IoError(std::io::Error::other("socket closed"));
+
+        let converted: denc::RadosError = error.into();
+
+        assert!(
+            matches!(converted, denc::RadosError::Io(io_error) if io_error.to_string() == "socket closed")
+        );
     }
 }

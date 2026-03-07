@@ -27,7 +27,7 @@ use denc::monmap::*;
 use denc::pg_nls_response::PgNlsResponse;
 use denc::{EVersion, UTime, UuidD};
 use osdclient::osdmap::*;
-use osdclient::{OSDMap, PgMergeMeta, PgPool};
+use osdclient::{OSDMap, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use serde::Serialize;
 use std::any::Any;
 use std::fmt;
@@ -201,6 +201,14 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // Dependencies: i64, String
         "object_locator_t" => Some(type_info_denc::<crush::ObjectLocator>()),
 
+        // objectstore_perf_stat_t (ObjectstorePerfStat) - OSD objectstore latency statistics
+        // Dependencies: u64, u64
+        "objectstore_perf_stat_t" => Some(type_info_denc::<ObjectstorePerfStat>()),
+
+        // pool_stat_t (PoolStat) - Aggregate per-pool statistics
+        // Dependencies: ObjectStatCollection, StoreStatfs, i64, i32
+        "pool_stat_t" => Some(type_info_denc::<PoolStat>()),
+
         // hobject_t (HObject) - Hashed object identifier
         // Dependencies: String, u64, u32, bool, i64
         "hobject_t" => Some(type_info_denc::<HObject>()),
@@ -248,14 +256,18 @@ fn list_types() {
     println!();
     println!("LEVEL 2: Types depending on Level 1");
     println!("  Test these ONLY after Level 1 is 100% validated");
-    println!("  entity_addr_t     - Entity address [versioned, feature-dependent: MSG_ADDR2]");
+    println!("  entity_addr_t     - Entity address [versioned, modern encode with legacy decode compatibility]");
     println!("  pool_snap_info_t  - Pool snapshot info [versioned]");
-    println!("  osd_xinfo_t       - Extended OSD info [versioned, feature-dependent: OCTOPUS]");
+    println!("  osd_xinfo_t       - Extended OSD info [versioned, Octopus+ encode contract]");
     println!();
     println!("LEVEL 3: Complex types");
     println!("  Test these ONLY after Level 1 & 2 are validated");
     println!("  pg_merge_meta_t   - PG merge metadata [versioned]");
     println!("  object_locator_t  - Object placement information [versioned]");
+    println!("  objectstore_perf_stat_t - Objectstore latency stats [versioned, Octopus+ encode contract]");
+    println!(
+        "  pool_stat_t       - Aggregate per-pool stats [versioned, Octopus+ encode contract]"
+    );
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");

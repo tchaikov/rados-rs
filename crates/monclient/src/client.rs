@@ -8,7 +8,7 @@ use crate::error::{MonClientError, Result};
 use crate::messages::*;
 use crate::monmap::MonMap;
 use crate::paxos_service_message::PaxosServiceMessage;
-use crate::subscription::MonSub;
+use crate::subscription::{MonService, MonSub};
 use crate::types::CommandResult;
 use crate::wait_helper::wait_for_condition;
 use bytes::Bytes;
@@ -151,9 +151,6 @@ pub struct MonClient {
     version_requests: Arc<DashMap<u64, VersionTracker>>,
     last_version_req_id: Arc<AtomicU64>,
 
-    /// Map version waiters
-    map_waiters: Arc<RwLock<HashMap<String, Vec<MapWaiter>>>>,
-
     /// Auth state (authenticated, global_id, initialized)
     auth_state: Arc<RwLock<AuthState>>,
 
@@ -257,11 +254,6 @@ struct AuthState {
 
     /// Initialized flag
     initialized: bool,
-}
-
-struct MapWaiter {
-    #[allow(dead_code)] // Consumed when sent through channel
-    tx: oneshot::Sender<()>,
 }
 
 struct CommandTracker {
@@ -378,7 +370,6 @@ impl MonClient {
             last_poolop_tid: Arc::new(AtomicU64::new(0)),
             version_requests: Arc::new(DashMap::new()),
             last_version_req_id: Arc::new(AtomicU64::new(0)),
-            map_waiters: Arc::new(RwLock::new(HashMap::new())),
             auth_state: Arc::new(RwLock::new(auth_state)),
             runtime_config: Arc::new(RwLock::new(runtime_config_init)),
             latest_osdmap: Arc::new(RwLock::new(None)),
@@ -458,9 +449,9 @@ impl MonClient {
 
         // Send initial subscriptions (monmap and config)
         info!("Subscribing to monmap...");
-        self.subscribe("monmap", 0, 0).await?;
+        self.subscribe(MonService::MonMap, 0, 0).await?;
         info!("Subscribing to config...");
-        self.subscribe("config", 0, 0).await?;
+        self.subscribe(MonService::Config, 0, 0).await?;
 
         // OSDMap subscription is handled by the application after OSDClient is ready
 
@@ -832,7 +823,9 @@ impl MonClient {
             auth_state.global_id = global_id; // Store global_id in MonClient
         }
 
-        // Move previously-acked subscriptions back to pending so they are resent on reconnect.
+        // Move previously-sent subscriptions back to pending so they are resent on reconnect.
+        // MON_STATEFUL_SUB suppresses periodic renewal churn, but a fresh monitor session still
+        // needs the current subscription set replayed.
         let should_send_subscriptions = {
             let mut sub_state = self.subscription_state.write().await;
             sub_state.reload()
@@ -850,7 +843,7 @@ impl MonClient {
     }
 
     /// Subscribe to a cluster map
-    pub async fn subscribe(&self, what: &str, start: u64, flags: u8) -> Result<()> {
+    pub async fn subscribe(&self, what: MonService, start: u64, flags: u8) -> Result<()> {
         let auth_state = self.auth_state.read().await;
         if !auth_state.initialized {
             return Err(MonClientError::NotInitialized);
@@ -874,7 +867,7 @@ impl MonClient {
     }
 
     /// Unsubscribe from a cluster map
-    pub async fn unsubscribe(&self, what: &str) -> Result<()> {
+    pub async fn unsubscribe(&self, what: MonService) -> Result<()> {
         let mut sub_state = self.subscription_state.write().await;
         debug!("Unsubscribing from {}", what);
         sub_state.unwant(what);
@@ -888,16 +881,36 @@ impl MonClient {
     ///
     /// # Arguments
     ///
-    /// * `what` - Map type (e.g., "osdmap", "monmap")
+    /// * `what` - Monitor service to update
     /// * `epoch` - Epoch of the received map
-    pub async fn notify_map_received(&self, what: &str, epoch: u64) -> Result<()> {
+    pub async fn notify_map_received(&self, what: MonService, epoch: u64) -> Result<()> {
         debug!("Map received: {} epoch {}", what, epoch);
 
-        // Update subscription tracking - this increments the start epoch
+        let supports_stateful_subscriptions = {
+            let conn_state = self.connection_state.read().await;
+            conn_state
+                .active_con
+                .as_ref()
+                .is_some_and(|con| con.supports_stateful_subscriptions())
+        };
+
+        // Update subscription tracking - this increments the start epoch.
+        // Modern monitors with MON_STATEFUL_SUB keep the subscription state server-side and
+        // do not require legacy renewal traffic after each map update.
         let need_renew = {
             let mut sub_state = self.subscription_state.write().await;
             sub_state.got(what, epoch);
-            sub_state.need_renew()
+            let legacy_renew_due = sub_state.need_renew();
+
+            if supports_stateful_subscriptions && legacy_renew_due {
+                debug!(
+                    "Skipping legacy subscription renewal after {} epoch {} because active monitor negotiated MON_STATEFUL_SUB",
+                    what,
+                    epoch
+                );
+            }
+
+            !supports_stateful_subscriptions && legacy_renew_due
         };
 
         // Check if subscriptions need renewal
@@ -931,8 +944,8 @@ impl MonClient {
 
             // Build subscription message
             let mut msg = MMonSubscribe::new();
-            for (what, item) in sub_state.get_subs() {
-                msg.add(what.clone(), *item);
+            for (&what, item) in sub_state.get_subs() {
+                msg.add(what, *item);
             }
 
             sub_state.renewed();
@@ -1318,7 +1331,7 @@ impl MonClient {
         // Mark subscription as received
         {
             let mut sub_state = self.subscription_state.write().await;
-            sub_state.got("monmap", monmap.epoch as u64);
+            sub_state.got(MonService::MonMap, monmap.epoch as u64);
         }
 
         // Broadcast MonMap update event
@@ -1334,7 +1347,10 @@ impl MonClient {
     /// Handle subscription ack
     async fn handle_subscribe_ack(&self, msg: msgr2::message::Message) -> Result<()> {
         let ack: MMonSubscribeAck = decode_message(&msg)?;
-        info!("Subscription acknowledged: interval={}", ack.interval);
+        info!(
+            "Subscription acknowledged by legacy monitor: interval={}",
+            ack.interval
+        );
 
         let mut sub_state = self.subscription_state.write().await;
         sub_state.acked(ack.interval);
@@ -1375,7 +1391,7 @@ impl MonClient {
         // Mark subscription as received
         {
             let mut sub_state = self.subscription_state.write().await;
-            sub_state.got("osdmap", epoch as u64);
+            sub_state.got(MonService::OsdMap, epoch as u64);
         }
 
         // Broadcast OSDMap update event
@@ -1475,7 +1491,7 @@ impl MonClient {
     }
 
     /// Get the latest version of a cluster map
-    pub async fn get_version(&self, what: &str) -> Result<(u64, u64)> {
+    pub async fn get_version(&self, what: MonService) -> Result<(u64, u64)> {
         let (tx, rx) = oneshot::channel();
 
         let active_con = self.require_active_con().await?;
@@ -1724,18 +1740,35 @@ impl MonClient {
     }
 
     /// Wait for a specific map version (async)
-    pub async fn wait_for_map(&self, what: &str, version: u64) -> Result<()> {
+    pub async fn wait_for_map(&self, what: MonService, version: u64) -> Result<()> {
         // Check if we already have this version
         {
             let monmap_state = self.monmap_state.read().await;
             match what {
-                "monmap" => {
+                MonService::MonMap => {
                     if monmap_state.monmap.epoch as u64 >= version {
                         return Ok(());
                     }
                 }
-                _ => {
-                    // For other maps, we'd check their versions here
+                MonService::OsdMap => {
+                    let latest_osdmap = self.latest_osdmap.read().await;
+                    if latest_osdmap
+                        .as_ref()
+                        .is_some_and(|osdmap| u64::from(osdmap.get_last()) >= version)
+                    {
+                        return Ok(());
+                    }
+                }
+                MonService::Config => {
+                    return Err(MonClientError::Other(
+                        "wait_for_map does not support config updates".into(),
+                    ));
+                }
+                MonService::MgrMap | MonService::MdsMap => {
+                    return Err(MonClientError::Other(format!(
+                        "wait_for_map does not yet support {}",
+                        what
+                    )));
                 }
             }
         }
@@ -1743,21 +1776,31 @@ impl MonClient {
         // Subscribe if not already subscribed
         self.subscribe(what, version, 0).await?;
 
-        // Create waiter
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut map_waiters = self.map_waiters.write().await;
-            map_waiters
-                .entry(what.to_string())
-                .or_default()
-                .push(MapWaiter { tx });
-        }
+        let mut events = self.subscribe_events();
+        let timeout_duration = self.command_timeout().await;
 
-        // Wait for notification
-        rx.await
-            .map_err(|_| MonClientError::Other("Waiter channel closed".into()))?;
-
-        Ok(())
+        tokio::time::timeout(timeout_duration, async move {
+            loop {
+                match events.recv().await {
+                    Ok(MapEvent::MonMapUpdated { epoch }) if what == MonService::MonMap => {
+                        if u64::from(epoch) >= version {
+                            return Ok(());
+                        }
+                    }
+                    Ok(MapEvent::OsdMapUpdated { epoch }) if what == MonService::OsdMap => {
+                        if epoch >= version {
+                            return Ok(());
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        return Err(MonClientError::Other(format!("Event channel error: {}", e)));
+                    }
+                }
+            }
+        })
+        .await
+        .map_err(|_| MonClientError::Timeout)?
     }
 
     /// Subscribe to map events
@@ -1777,10 +1820,10 @@ impl MonClient {
     /// Returns an error if not connected, subscription fails, or timeout occurs
     pub async fn get_osdmap(&self) -> Result<crate::MOSDMap> {
         // Subscribe to osdmap if not already subscribed
-        self.subscribe("osdmap", 0, 0).await?;
+        self.subscribe(MonService::OsdMap, 0, 0).await?;
 
         // Get current version
-        let (epoch, _) = self.get_version("osdmap").await?;
+        let (epoch, _) = self.get_version(MonService::OsdMap).await?;
 
         // Wait for that version via event channel
         let mut events = self.subscribe_events();
@@ -1867,7 +1910,7 @@ mod tests {
         let client = MonClient::new(config, None).await.unwrap();
 
         // Should fail before init
-        assert!(client.subscribe("osdmap", 0, 0).await.is_err());
+        assert!(client.subscribe(MonService::OsdMap, 0, 0).await.is_err());
     }
 
     #[test]

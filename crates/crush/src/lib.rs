@@ -26,9 +26,8 @@
 //! use bytes::Bytes;
 //!
 //! // Decode a CRUSH map from bytes
-//! let data = /* binary CRUSH map data */;
-//! # let data = Bytes::new();
-//! # let mut data_copy = data.clone();
+//! // let data = /* binary CRUSH map data */;
+//! # let mut data = Bytes::new();
 //! # if false {
 //! let crush_map = CrushMap::decode(&mut data)?;
 //!
@@ -39,7 +38,7 @@
 //!
 //! // Map a PG to OSDs using CRUSH rules
 //! let pg = PgId { pool: 1, seed: 0 };
-//! let osds = crush::pg_to_osds(&crush_map, &pg, 0, &[])?;
+//! let osds = crush::pg_to_osds(&crush_map, pg, 0, &[], 3, false)?;
 //! # }
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```

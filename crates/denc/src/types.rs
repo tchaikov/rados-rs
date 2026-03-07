@@ -1,3 +1,10 @@
+//! Reusable Ceph wire types shared across DENC implementations and clients.
+//!
+//! This module gathers small but widely reused types such as UUID wrappers,
+//! epochs, versions, timestamps, and other identifiers that appear throughout
+//! monitor, OSD, and messenger payloads. Keeping them here avoids duplicate
+//! definitions across crates and centralizes their DENC behavior.
+
 // Re-export types from other modules for consistency
 pub use crate::entity_addr::{EntityAddr, EntityAddrType};
 pub use crate::ids::{Epoch, GlobalId, OsdId, PoolId};

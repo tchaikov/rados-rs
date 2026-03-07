@@ -145,14 +145,10 @@ async fn create_osd_client(
     .await?;
     info!("✓ OSD client created");
 
-    // Subscribe to OSDMap - OSDClient is ready to receive
-    mon_client.subscribe("osdmap", 0, 0).await?;
-
-    // Wait for OSDMap to arrive - use event-driven wait
     osd_client
-        .wait_for_osdmap(std::time::Duration::from_secs(2))
+        .wait_for_latest_osdmap(std::time::Duration::from_secs(2))
         .await?;
-    info!("✓ OSDMap received");
+    info!("✓ Latest OSDMap received");
 
     Ok((osd_client, mon_client))
 }

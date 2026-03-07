@@ -1,4 +1,4 @@
-use denc::{features::CephFeatures, Denc, EntityAddr, EntityAddrType};
+use denc::{Denc, EntityAddr, EntityAddrType};
 use std::fs;
 use std::path::PathBuf;
 
@@ -71,41 +71,39 @@ fn test_entity_addr_decode_encode_roundtrip() {
                     entity_addr.sockaddr_data.len()
                 );
 
-                // Try to encode back with different feature combinations
-                let features_to_test = [0u64, CephFeatures::MSG_ADDR2.bits()]; // without and with MSG_ADDR2
+                let mut encoded_buf = bytes::BytesMut::new();
+                match entity_addr.encode(&mut encoded_buf, 0) {
+                    Ok(()) => {
+                        let encoded_bytes = encoded_buf.to_vec();
 
-                for features in features_to_test {
-                    let mut encoded_buf = bytes::BytesMut::new();
-                    match entity_addr.encode(&mut encoded_buf, features) {
-                        Ok(()) => {
-                            let encoded_bytes = encoded_buf.to_vec();
+                        if original_data.first() == Some(&0) {
+                            println!(
+                                "  ✓ Legacy sample decoded and modern re-encode succeeded (modern-only encode contract)"
+                            );
+                            success_count += 1;
+                        } else if encoded_bytes == original_data {
+                            println!("  ✓ Perfect roundtrip");
+                            success_count += 1;
+                        } else {
+                            println!("  ⚠ Roundtrip mismatch");
+                            println!(
+                                "    Original len: {}, Encoded len: {}",
+                                original_data.len(),
+                                encoded_bytes.len()
+                            );
 
-                            if encoded_bytes == original_data {
-                                println!("  ✓ Perfect roundtrip with features=0x{:x}", features);
-                                success_count += 1;
-                                break;
-                            } else {
-                                println!("  ⚠ Roundtrip mismatch with features=0x{:x}", features);
-                                println!(
-                                    "    Original len: {}, Encoded len: {}",
-                                    original_data.len(),
-                                    encoded_bytes.len()
-                                );
-
-                                // Show first few bytes for debugging
-                                let orig_hex = hex::encode(
-                                    &original_data[..std::cmp::min(32, original_data.len())],
-                                );
-                                let enc_hex = hex::encode(
-                                    &encoded_bytes[..std::cmp::min(32, encoded_bytes.len())],
-                                );
-                                println!("    Original: {}", orig_hex);
-                                println!("    Encoded:  {}", enc_hex);
-                            }
+                            let orig_hex = hex::encode(
+                                &original_data[..std::cmp::min(32, original_data.len())],
+                            );
+                            let enc_hex = hex::encode(
+                                &encoded_bytes[..std::cmp::min(32, encoded_bytes.len())],
+                            );
+                            println!("    Original: {}", orig_hex);
+                            println!("    Encoded:  {}", enc_hex);
                         }
-                        Err(e) => {
-                            println!("  ✗ Failed to encode with features=0x{:x}: {}", features, e);
-                        }
+                    }
+                    Err(e) => {
+                        println!("  ✗ Failed to encode: {}", e);
                     }
                 }
             }
@@ -150,7 +148,7 @@ fn test_specific_entity_addr_sample() {
     // Try encoding back
     let mut encoded_buf = bytes::BytesMut::new();
     entity_addr
-        .encode(&mut encoded_buf, CephFeatures::MSG_ADDR2.bits())
+        .encode(&mut encoded_buf, 0)
         .expect("Failed to encode");
     let encoded_bytes = encoded_buf.to_vec();
 
@@ -160,13 +158,5 @@ fn test_specific_entity_addr_sample() {
         println!("⚠ Sample roundtrip mismatch");
         println!("Original: {}", hex::encode(&sample_data));
         println!("Encoded:  {}", hex::encode(&encoded_bytes));
-
-        // Let's also try without MSG_ADDR2 feature
-        let mut encoded_legacy_buf = bytes::BytesMut::new();
-        entity_addr
-            .encode(&mut encoded_legacy_buf, 0)
-            .expect("Failed to encode legacy");
-        let encoded_legacy_bytes = encoded_legacy_buf.to_vec();
-        println!("Legacy:   {}", hex::encode(&encoded_legacy_bytes));
     }
 }

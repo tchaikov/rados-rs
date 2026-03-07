@@ -1,3 +1,10 @@
+//! Message wrappers and priorities for transporting Ceph payloads over msgr2.
+//!
+//! This module defines the message envelope types used by the transport layer,
+//! including queue priority metadata and helpers for converting payloads into
+//! framed msgr2 messages. It bridges higher-level Ceph payload structs and the
+//! lower-level frame and header code.
+
 use crate::error::{Error, Result};
 use crate::header::MsgHeader;
 use bytes::{Buf, BufMut, Bytes, BytesMut};

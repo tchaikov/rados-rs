@@ -2,10 +2,7 @@
 
 use crate::osdmap::PgId;
 use bytes::{Buf, BufMut};
-use denc::{
-    features::CephFeatures, Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version,
-    VersionedEncode,
-};
+use denc::{Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode};
 
 /// Wire size of ObjectStatSum at version 20: 36 × i64 + 4 × i32
 #[allow(dead_code)]
@@ -47,7 +44,7 @@ impl FixedSize for PgCount {
 /// Filesystem statistics from the object store
 /// C++ definition: store_statfs_t in osd/osd_types.h
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, denc::VersionedDenc, serde::Serialize)]
 #[denc(version = 1, compat = 1)]
 pub struct StoreStatfs {
     /// Total bytes
@@ -83,7 +80,7 @@ impl StoreStatfs {
 /// C++ definition: object_stat_sum_t in osd/osd_types.h
 /// Version 20, encodes 38 fields (34 i64 + 4 i32)
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct ObjectStatSum {
     pub num_bytes: i64,
     pub num_objects: i64,
@@ -92,9 +89,13 @@ pub struct ObjectStatSum {
     pub num_objects_missing_on_primary: i64,
     pub num_objects_degraded: i64,
     pub num_objects_unfound: i64,
+    #[serde(rename = "num_read")]
     pub num_rd: i64,
+    #[serde(rename = "num_read_kb")]
     pub num_rd_kb: i64,
+    #[serde(rename = "num_write")]
     pub num_wr: i64,
+    #[serde(rename = "num_write_kb")]
     pub num_wr_kb: i64,
     pub num_scrub_errors: i64,
     pub num_objects_recovered: i64,
@@ -430,7 +431,7 @@ impl Denc for ObjectStatCollection {
 
 /// Pool statistics
 /// C++ definition: pool_stat_t in osd/osd_types.h
-/// Version 7 (with features), feature-dependent
+/// Active encode always uses version 7 for Octopus+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub struct PoolStat {
@@ -457,15 +458,10 @@ impl PoolStat {
 }
 
 impl VersionedEncode for PoolStat {
-    const FEATURE_DEPENDENT: bool = true;
+    const MAX_DECODE_VERSION: u8 = 7;
 
-    fn encoding_version(&self, features: u64) -> u8 {
-        // Check if CephFeatures::OSDENC.bits() is present
-        if (features & CephFeatures::OSDENC.bits()) != 0 {
-            7 // Version 7 with ENCODE_START
-        } else {
-            4 // Legacy version without ENCODE_START
-        }
+    fn encoding_version(&self, _features: u64) -> u8 {
+        7
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
@@ -534,29 +530,23 @@ impl VersionedEncode for PoolStat {
 
 impl Denc for PoolStat {
     const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = true;
+    const FEATURE_DEPENDENT: bool = false;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        if (features & CephFeatures::OSDENC.bits()) == 0 {
-            // Legacy encoding without ENCODE_START - version 4 only has stats + 2 i64
-            buf.put_u8(4); // Version byte
-            self.stats.encode(buf, features)?;
-            buf.put_i64_le(self.log_size);
-            buf.put_i64_le(self.ondisk_log_size);
-            Ok(())
-        } else {
-            // Modern encoding with ENCODE_START
-            self.encode_versioned(buf, features)
-        }
+        self.encode_versioned(buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        if (features & CephFeatures::OSDENC.bits()) == 0 {
-            // Legacy decoding
+        if buf.remaining() < 1 {
+            return Err(RadosError::Protocol(
+                "Insufficient bytes for PoolStat version".into(),
+            ));
+        }
+
+        if buf.chunk()[0] < 5 {
             let version = buf.get_u8();
             Self::decode_content(buf, features, version, 0)
         } else {
-            // Modern decoding with DECODE_START
             Self::decode_versioned(buf, features)
         }
     }
@@ -564,15 +554,27 @@ impl Denc for PoolStat {
     fn encoded_size(&self, features: u64) -> Option<usize> {
         let stats_size = self.stats.encoded_size(features)?;
         let store_stats_size = self.store_stats.encoded_size(features)?;
-        let content_size = stats_size + 16 + 4 + 4 + store_stats_size + 4; // stats + 2*i64 + 2*i32 + store_stats + i32
+        let content_size = stats_size + 16 + 4 + 4 + store_stats_size + 4;
+        Some(6 + content_size)
+    }
+}
 
-        if (features & CephFeatures::OSDENC.bits()) == 0 {
-            // Legacy: version byte + content
-            Some(1 + content_size)
-        } else {
-            // Modern: ENCODE_START header + content
-            Some(6 + content_size)
-        }
+impl serde::Serialize for PoolStat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("PoolStat", 7)?;
+        state.serialize_field("stat_sum", &self.stats.sum)?;
+        state.serialize_field("store_stats", &self.store_stats)?;
+        state.serialize_field("log_size", &self.log_size)?;
+        state.serialize_field("ondisk_log_size", &self.ondisk_log_size)?;
+        state.serialize_field("up", &self.up)?;
+        state.serialize_field("acting", &self.acting)?;
+        state.serialize_field("num_store_stats", &self.num_store_stats)?;
+        state.end()
     }
 }
 
@@ -588,7 +590,7 @@ pub struct Pow2Hist {
 
 /// Object store performance statistics
 /// C++ definition: objectstore_perf_stat_t in osd/osd_types.h
-/// Version 2, feature-dependent (OS_PERF_STAT_NS)
+/// Active encode always uses version 2 nanosecond counters for Octopus+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub struct ObjectstorePerfStat {
@@ -598,50 +600,57 @@ pub struct ObjectstorePerfStat {
     pub os_apply_latency_ns: u64,
 }
 
-impl VersionedEncode for ObjectstorePerfStat {
-    const FEATURE_DEPENDENT: bool = true;
+impl serde::Serialize for ObjectstorePerfStat {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
 
-    fn encoding_version(&self, features: u64) -> u8 {
-        // Check if OS_PERF_STAT_NS feature is present
-        if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
-            2 // Version 2 with nanoseconds
-        } else {
-            1 // Version 1 with milliseconds
-        }
+        let mut state = serializer.serialize_struct("ObjectstorePerfStat", 4)?;
+        state.serialize_field(
+            "commit_latency_ms",
+            &(self.os_commit_latency_ns as f64 / 1_000_000.0),
+        )?;
+        state.serialize_field(
+            "apply_latency_ms",
+            &(self.os_apply_latency_ns as f64 / 1_000_000.0),
+        )?;
+        state.serialize_field("commit_latency_ns", &self.os_commit_latency_ns)?;
+        state.serialize_field("apply_latency_ns", &self.os_apply_latency_ns)?;
+        state.end()
+    }
+}
+
+impl VersionedEncode for ObjectstorePerfStat {
+    const MAX_DECODE_VERSION: u8 = 2;
+
+    fn encoding_version(&self, _features: u64) -> u8 {
+        2
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
-        1
+        2
     }
 
     fn encode_content<B: BufMut>(
         &self,
         buf: &mut B,
-        features: u64,
+        _features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
-            // Version 2: encode as u64 nanoseconds
-            buf.put_u64_le(self.os_commit_latency_ns);
-            buf.put_u64_le(self.os_apply_latency_ns);
-        } else {
-            // Version 1: encode as u32 milliseconds
-            let commit_ms = (self.os_commit_latency_ns / 1_000_000) as u32;
-            let apply_ms = (self.os_apply_latency_ns / 1_000_000) as u32;
-            buf.put_u32_le(commit_ms);
-            buf.put_u32_le(apply_ms);
-        }
+        buf.put_u64_le(self.os_commit_latency_ns);
+        buf.put_u64_le(self.os_apply_latency_ns);
         Ok(())
     }
 
     fn decode_content<B: Buf>(
         buf: &mut B,
-        features: u64,
+        _features: u64,
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if version == 2 || (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
-            // Version 2: decode from u64 nanoseconds
+        if version >= 2 {
             let os_commit_latency_ns = buf.get_u64_le();
             let os_apply_latency_ns = buf.get_u64_le();
             Ok(ObjectstorePerfStat {
@@ -649,7 +658,6 @@ impl VersionedEncode for ObjectstorePerfStat {
                 os_apply_latency_ns,
             })
         } else {
-            // Version 1: decode from u32 milliseconds
             let commit_ms = buf.get_u32_le();
             let apply_ms = buf.get_u32_le();
             Ok(ObjectstorePerfStat {
@@ -660,13 +668,13 @@ impl VersionedEncode for ObjectstorePerfStat {
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
+        Some(16)
     }
 }
 
 impl Denc for ObjectstorePerfStat {
     const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = true;
+    const FEATURE_DEPENDENT: bool = false;
 
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
@@ -677,12 +685,7 @@ impl Denc for ObjectstorePerfStat {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        let content_size = if (features & CephFeatures::OS_PERF_STAT_NS.bits()) != 0 {
-            16 // 2 * u64
-        } else {
-            8 // 2 * u32
-        };
-        Some(6 + content_size)
+        self.encoded_size_versioned(features)
     }
 }
 
@@ -1248,28 +1251,50 @@ mod tests {
             num_store_stats: 3,
         };
 
-        // Test with features (modern encoding)
         let mut buf = BytesMut::new();
-        original
-            .encode(&mut buf, CephFeatures::OSDENC.bits())
-            .unwrap();
+        original.encode(&mut buf, 0).unwrap();
+        assert_eq!(&buf[..2], &[7, 5]);
 
-        let decoded = PoolStat::decode(&mut buf, CephFeatures::OSDENC.bits()).unwrap();
+        let decoded = PoolStat::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, original);
+    }
 
-        // Test without features (legacy encoding - version 4 only has stats + 2 i64)
+    #[test]
+    fn test_pool_stat_legacy_decode_v4() {
+        let original = PoolStat {
+            stats: ObjectStatCollection {
+                sum: ObjectStatSum {
+                    num_bytes: 1024000,
+                    num_objects: 50,
+                    ..Default::default()
+                },
+            },
+            store_stats: StoreStatfs {
+                total: 1000000,
+                available: 500000,
+                ..Default::default()
+            },
+            log_size: 1000,
+            ondisk_log_size: 1200,
+            up: 3,
+            acting: 3,
+            num_store_stats: 3,
+        };
+
         let mut buf_legacy = BytesMut::new();
-        original.encode(&mut buf_legacy, 0).unwrap();
+        buf_legacy.put_u8(4);
+        original.stats.encode(&mut buf_legacy, 0).unwrap();
+        buf_legacy.put_i64_le(original.log_size);
+        buf_legacy.put_i64_le(original.ondisk_log_size);
 
         let decoded_legacy = PoolStat::decode(&mut buf_legacy, 0).unwrap();
-        // Version 4 doesn't include up, acting, store_stats, num_store_stats
         assert_eq!(decoded_legacy.stats, original.stats);
         assert_eq!(decoded_legacy.log_size, original.log_size);
         assert_eq!(decoded_legacy.ondisk_log_size, original.ondisk_log_size);
-        assert_eq!(decoded_legacy.up, 0); // Not in version 4
-        assert_eq!(decoded_legacy.acting, 0); // Not in version 4
-        assert!(decoded_legacy.store_stats.is_zero()); // Not in version 4
-        assert_eq!(decoded_legacy.num_store_stats, 0); // Not in version 4
+        assert_eq!(decoded_legacy.up, 0);
+        assert_eq!(decoded_legacy.acting, 0);
+        assert!(decoded_legacy.store_stats.is_zero());
+        assert_eq!(decoded_legacy.num_store_stats, 0);
     }
 
     #[test]
@@ -1279,6 +1304,7 @@ mod tests {
 
         let mut buf = BytesMut::new();
         pool_stat.encode(&mut buf, 0).unwrap();
+        assert_eq!(&buf[..2], &[7, 5]);
 
         let decoded = PoolStat::decode(&mut buf, 0).unwrap();
         assert!(decoded.is_zero());
@@ -1316,33 +1342,27 @@ mod tests {
             os_apply_latency_ns: 3_000_000,  // 3ms in ns
         };
 
-        // Test with feature flag (version 2, nanoseconds)
         let mut buf = BytesMut::new();
-        original
-            .encode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits())
-            .unwrap();
+        original.encode(&mut buf, 0).unwrap();
 
-        let decoded =
-            ObjectstorePerfStat::decode(&mut buf, CephFeatures::OS_PERF_STAT_NS.bits()).unwrap();
+        assert_eq!(buf.len(), 22);
+        assert_eq!(&buf[..6], &[2, 2, 16, 0, 0, 0]);
+
+        let decoded = ObjectstorePerfStat::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, original);
     }
 
     #[test]
-    fn test_objectstore_perf_stat_roundtrip_v1() {
-        let original = ObjectstorePerfStat {
-            os_commit_latency_ns: 5_000_000, // 5ms in ns
-            os_apply_latency_ns: 3_000_000,  // 3ms in ns
-        };
-
-        // Test without feature flag (version 1, milliseconds)
+    fn test_objectstore_perf_stat_legacy_decode_v1() {
         let mut buf = BytesMut::new();
-        original.encode(&mut buf, 0).unwrap();
-
-        // Should be 6 bytes header + 8 bytes (2*u32)
+        buf.put_u8(1);
+        buf.put_u8(1);
+        buf.put_u32_le(8);
+        buf.put_u32_le(5);
+        buf.put_u32_le(3);
         assert_eq!(buf.len(), 14);
 
         let decoded = ObjectstorePerfStat::decode(&mut buf, 0).unwrap();
-        // Values should match within millisecond precision
         assert_eq!(decoded.os_commit_latency_ns, 5_000_000);
         assert_eq!(decoded.os_apply_latency_ns, 3_000_000);
     }
@@ -1355,6 +1375,7 @@ mod tests {
 
         let mut buf = BytesMut::new();
         perf_stat.encode(&mut buf, 0).unwrap();
+        assert_eq!(&buf[..6], &[2, 2, 16, 0, 0, 0]);
 
         let decoded = ObjectstorePerfStat::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, perf_stat);

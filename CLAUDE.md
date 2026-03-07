@@ -44,9 +44,9 @@ A Rust implementation of librados for Ceph cluster communication.
 ### Goal
 Implement Ceph type encoding/decoding and librados functionality in Rust.
 
-**Minimum Ceph Version**: Nautilus (v14, March 2019)
+**Minimum Ceph Version**: Octopus (v15, March 2020)
 
-rados-rs requires Ceph Nautilus or later. Pre-Nautilus support has been removed to simplify the codebase. See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version information.
+rados-rs supports Ceph Octopus or later. Nautilus and older releases are outside the supported compatibility boundary. See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version information.
 
 ### Key Technologies
 - **Ceph Protocol**: msgr2 (messenger v2) for network communication
@@ -565,7 +565,7 @@ fn decode_content<B: Buf>(
     _compat_version: u8,
 ) -> Result<Self, RadosError> {
     // Reject unsupported versions with clear error message
-    crate::check_min_version!(version, 6, "MonMap", "Nautilus v14+");
+    crate::check_min_version!(version, 6, "MonMap", "Octopus v15+");
 
     let field1 = u32::decode(buf, 0)?;
     let field2 = String::decode(buf, 0)?;

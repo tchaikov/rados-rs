@@ -3,7 +3,8 @@
 /// Check minimum supported version for decoding
 ///
 /// This macro enforces minimum version requirements for types that no longer
-/// support pre-Nautilus (v14) Ceph versions. It provides a consistent error
+/// support pre-Octopus (v15) Ceph releases within the current project
+/// compatibility boundary. It provides a consistent error
 /// message format across all types.
 ///
 /// # Examples
@@ -17,8 +18,8 @@
 ///     version: u8,
 ///     _compat_version: u8,
 /// ) -> Result<Self, RadosError> {
-///     // Reject versions < 5 (Nautilus v14+)
-///     check_min_version!(version, 5, "ObjectLocator", "Nautilus v14");
+///     // Reject versions outside the supported floor (Octopus v15+)
+///     check_min_version!(version, 5, "ObjectLocator", "Octopus v15+");
 ///
 ///     // Continue with decoding...
 /// }

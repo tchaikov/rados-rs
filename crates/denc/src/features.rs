@@ -1,3 +1,10 @@
+//! Ceph feature bits and masks used to select or validate wire encodings.
+//!
+//! This module mirrors the feature definitions from Ceph's `ceph_features.h`
+//! and exposes them through the `CephFeatures` bitflags type. It also retains
+//! the release-incarnation mask behavior Ceph bakes into feature masks so
+//! encode/decode decisions stay aligned with the reference implementation.
+
 // Ceph feature flags used in encoding/decoding
 // Based on include/ceph_features.h
 

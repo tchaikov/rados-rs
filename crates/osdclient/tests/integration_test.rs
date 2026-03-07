@@ -162,17 +162,11 @@ async fn setup() -> (Arc<monclient::MonClient>, Arc<osdclient::OSDClient>, u64) 
     .await
     .expect("Failed to create OSDClient");
 
-    // NOW subscribe to OSDMap - OSDClient is ready to receive
-    mon_client
-        .subscribe("osdmap", 0, 0)
-        .await
-        .expect("Failed to subscribe to OSDMap");
-
-    // Wait for OSDMap to arrive with proper timeout (increased for slower systems)
+    // Wait for the monitor's current OSDMap epoch so pool resolution uses up-to-date state.
     osd_client
-        .wait_for_osdmap(tokio::time::Duration::from_secs(10))
+        .wait_for_latest_osdmap(tokio::time::Duration::from_secs(10))
         .await
-        .expect("Failed to receive OSDMap");
+        .expect("Failed to receive latest OSDMap");
 
     // Parse pool (name or ID) to pool ID using OSDClient
     let pool_id = parse_pool(&config.pool, &osd_client)

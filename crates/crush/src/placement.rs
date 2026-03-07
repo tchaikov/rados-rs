@@ -1,5 +1,10 @@
-// Object placement API for CRUSH
-// High-level interface for mapping objects to OSDs
+//! High-level CRUSH placement helpers for mapping objects and PGs onto OSD sets.
+//!
+//! This module exposes the public placement-facing domain types such as
+//! [`ObjectLocator`] and [`PgId`], plus the helper functions that translate an
+//! object identifier and pool context into placement groups and acting OSDs.
+//! It is the main API surface callers use once they already have a decoded
+//! [`CrushMap`](crate::types::CrushMap).
 
 use crate::error::Result;
 use crate::mapper::crush_do_rule;
@@ -185,8 +190,8 @@ impl denc::FixedSize for PgId {
 ///
 /// ## Version Support
 /// - **Encoding**: v6 (current)
-/// - **Decoding**: v6+ (Nautilus v14+)
-/// - **Minimum Ceph**: Nautilus (v14)
+/// - **Decoding**: v6+ (current project support floor: Octopus v15+)
+/// - **Minimum Ceph**: Octopus (v15)
 ///
 /// Versions < 6 are not supported and will return an error.
 impl VersionedEncode for ObjectLocator {
@@ -236,8 +241,8 @@ impl VersionedEncode for ObjectLocator {
         struct_v: u8,
         _compat_version: u8,
     ) -> std::result::Result<Self, RadosError> {
-        // Minimum supported version check (Nautilus v14+)
-        denc::check_min_version!(struct_v, 6, "ObjectLocator", "Nautilus v14+");
+        // Minimum supported project release boundary (Octopus v15+)
+        denc::check_min_version!(struct_v, 6, "ObjectLocator", "Octopus v15+");
 
         // Decode pool and preferred fields (v2+ format: i64 pool, i32 preferred)
         let pool = i64::decode(buf, features)?;

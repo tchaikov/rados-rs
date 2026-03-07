@@ -240,8 +240,8 @@ pub enum ConnectionMode {
 /// ```
 #[derive(Debug, Clone)]
 pub struct ConnectionConfig {
-    /// Features to advertise as supported in banner exchange
-    /// Default: MSGR2_ALL_FEATURES (REVISION_1 | COMPRESSION)
+    /// Features to advertise as supported in banner exchange.
+    /// Default: REVISION_1 only; compression must be explicitly enabled.
     pub supported_features: u64,
 
     /// Features to require from peer
@@ -302,7 +302,7 @@ impl Default for ConnectionConfig {
         let supported_auth_methods = vec![AuthMethod::None];
 
         Self {
-            supported_features: FeatureSet::ALL.bits(),
+            supported_features: FeatureSet::REVISION_1.bits(),
             required_features: 0,
             preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
             supported_auth_methods,
@@ -324,9 +324,12 @@ impl ConnectionConfig {
         }
     }
 
-    /// Create config with compression enabled (default)
+    /// Create config with compression enabled
     pub fn with_compression() -> Self {
-        Self::default()
+        Self {
+            supported_features: FeatureSet::ALL.bits(),
+            ..Default::default()
+        }
     }
 
     /// Create config preferring CRC mode (no encryption)
@@ -576,7 +579,7 @@ mod tests {
     #[test]
     fn test_connection_config_default() {
         let config = ConnectionConfig::default();
-        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
+        assert_eq!(config.supported_features, FeatureSet::REVISION_1.bits());
         assert_eq!(config.required_features, 0);
         assert_eq!(
             config.preferred_modes,
@@ -585,7 +588,7 @@ mod tests {
         assert!(config.throttle_config.is_none());
         let features = FeatureSet::from(config.supported_features);
         assert!(features.contains(FeatureSet::REVISION_1));
-        assert!(features.contains(FeatureSet::COMPRESSION));
+        assert!(!features.contains(FeatureSet::COMPRESSION));
     }
 
     #[test]
@@ -631,14 +634,14 @@ mod tests {
     fn test_connection_config_prefer_crc_mode() {
         let config = ConnectionConfig::prefer_crc_mode();
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Crc]);
-        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
+        assert_eq!(config.supported_features, FeatureSet::REVISION_1.bits());
     }
 
     #[test]
     fn test_connection_config_prefer_secure_mode() {
         let config = ConnectionConfig::prefer_secure_mode();
         assert_eq!(config.preferred_modes, vec![ConnectionMode::Secure]);
-        assert_eq!(config.supported_features, FeatureSet::ALL.bits());
+        assert_eq!(config.supported_features, FeatureSet::REVISION_1.bits());
     }
 
     #[test]

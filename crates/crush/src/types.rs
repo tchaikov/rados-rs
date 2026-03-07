@@ -1,3 +1,11 @@
+//! Core CRUSH map types describing buckets, rules, and placement metadata.
+//!
+//! This module defines the in-memory schema for decoded CRUSH maps, including
+//! bucket algorithms, rule steps, bucket payloads, and the top-level
+//! [`CrushMap`]. Higher-level placement code uses these types to inspect map
+//! structure and to drive rule execution without depending on Ceph's C++
+//! headers directly.
+
 use std::collections::HashMap;
 
 use num_enum::TryFromPrimitive;

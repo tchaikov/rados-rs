@@ -5,7 +5,7 @@
 use crate::error::{MonClientError, Result};
 use denc::{EntityAddr, EntityAddrType, EntityAddrvec};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use uuid::Uuid;
 
 /// Milliseconds per second for timestamp conversions
@@ -35,9 +35,57 @@ pub struct MonMap {
     #[serde(skip)]
     name_to_rank: HashMap<String, usize>,
 
+    /// Monitor rank to vector index mapping
+    #[serde(skip)]
+    rank_to_index: HashMap<usize, usize>,
+
     /// Address to monitor mapping
     #[serde(skip)]
     addr_to_rank: HashMap<String, usize>,
+
+    /// Decoded MonInfo fields that are not surfaced in MonInfo yet
+    #[serde(skip)]
+    mon_info_extras: HashMap<String, MonInfoExtras>,
+
+    /// Decoded mon_info entries that do not have an active rank
+    #[serde(skip)]
+    unranked_mon_info: BTreeMap<String, denc::MonInfo>,
+
+    /// Additional decoded MonMap state preserved for re-encoding
+    #[serde(skip)]
+    persistent_features: denc::MonFeature,
+
+    /// Additional decoded MonMap state preserved for re-encoding
+    #[serde(skip)]
+    optional_features: denc::MonFeature,
+
+    /// Minimum monitor release advertised by the cluster
+    #[serde(skip)]
+    min_mon_release: denc::MonCephRelease,
+
+    /// Removed monitor ranks
+    #[serde(skip)]
+    removed_ranks: Vec<u32>,
+
+    /// Election strategy
+    #[serde(skip)]
+    strategy: denc::ElectionStrategy,
+
+    /// Monitor names that are disallowed as leaders
+    #[serde(skip)]
+    disallowed_leaders: Vec<String>,
+
+    /// Stretch mode flag
+    #[serde(skip)]
+    stretch_mode_enabled: bool,
+
+    /// Stretch mode tiebreaker monitor
+    #[serde(skip)]
+    tiebreaker_mon: String,
+
+    /// Stretch mode marked down monitors
+    #[serde(skip)]
+    stretch_marked_down_mons: Vec<String>,
 }
 
 impl MonMap {
@@ -49,42 +97,43 @@ impl MonMap {
             modified: 0,
             monitors: Vec::new(),
             name_to_rank: HashMap::new(),
+            rank_to_index: HashMap::new(),
             addr_to_rank: HashMap::new(),
+            mon_info_extras: HashMap::new(),
+            unranked_mon_info: BTreeMap::new(),
+            persistent_features: denc::MonFeature::default(),
+            optional_features: denc::MonFeature::default(),
+            min_mon_release: denc::MonCephRelease::default(),
+            removed_ranks: Vec::new(),
+            strategy: denc::ElectionStrategy::default(),
+            disallowed_leaders: Vec::new(),
+            stretch_mode_enabled: false,
+            tiebreaker_mon: String::new(),
+            stretch_marked_down_mons: Vec::new(),
         }
     }
 
-    /// Build initial monmap from configuration
+    /// Build initial monmap from configuration.
     ///
-    /// Groups addresses by IP address (host), creating one monitor per unique IP.
-    /// Each monitor's EntityAddrVec contains all protocol versions (v1, v2) for that IP.
-    ///
-    /// This matches C++ Objecter behavior where monitor addresses in ceph.conf like:
-    ///   `[v2:192.168.1.43:40472,v1:192.168.1.43:40473] [v2:192.168.1.43:40474,v1:192.168.1.43:40475]`
-    /// are parsed as 2 monitors, each with both v1 and v2 addresses.
+    /// Preserves per-monitor grouping from `mon_host` entries, including cases
+    /// where multiple monitors share the same IP address. When callers provide a
+    /// flattened list of addresses, consecutive same-IP addresses are grouped
+    /// until the protocol type repeats, which matches the common
+    /// `[v2:IP:PORT,v1:IP:PORT] [v2:IP:PORT,v1:IP:PORT]` layout used by Ceph.
     pub fn build_initial(mon_addrs: &[String]) -> Result<Self> {
-        use std::net::IpAddr;
-
-        // Group addresses by IP address (host)
-        let mut ip_to_addrs: HashMap<IpAddr, Vec<EntityAddr>> = HashMap::new();
-
-        for addr_str in mon_addrs {
-            let addr = parse_mon_addr(addr_str)?;
-            let ip = addr
-                .to_socket_addr()
-                .ok_or_else(|| MonClientError::InvalidMonMap("Could not parse socket addr".into()))?
-                .ip();
-            ip_to_addrs.entry(ip).or_default().push(addr);
-        }
-
-        // Sort IPs for deterministic ordering
-        let mut ips: Vec<IpAddr> = ip_to_addrs.keys().copied().collect();
-        ips.sort();
+        let mut monitor_groups = collect_initial_monitor_groups(mon_addrs)?;
+        monitor_groups.sort_by_key(|group| {
+            group
+                .first()
+                .and_then(EntityAddr::to_socket_addr)
+                .map(|addr| addr.ip())
+        });
 
         let mut monmap = Self::new(Uuid::nil());
         monmap.epoch = 0;
 
-        for (rank, ip) in ips.iter().enumerate() {
-            let mut addrs = ip_to_addrs.remove(ip).unwrap();
+        for (rank, addrs) in monitor_groups.iter_mut().enumerate() {
+            let mut addrs = std::mem::take(addrs);
 
             // Sort addresses: v2 (Msgr2) first, then v1 (Legacy)
             // This ensures get_msgr2() finds v2 addresses first
@@ -108,6 +157,7 @@ impl MonMap {
     pub fn add_monitor(&mut self, mon: MonInfo) {
         let rank = mon.rank;
         let name = mon.name.clone();
+        let index = self.monitors.len();
 
         // Build address mapping
         for addr in &mon.addrs.addrs {
@@ -115,6 +165,8 @@ impl MonMap {
         }
 
         self.name_to_rank.insert(name, rank);
+        self.rank_to_index.insert(rank, index);
+        self.mon_info_extras.entry(mon.name.clone()).or_default();
         self.monitors.push(mon);
     }
 
@@ -125,17 +177,19 @@ impl MonMap {
 
     /// Get monitor by rank
     pub fn get_mon(&self, rank: usize) -> Option<&MonInfo> {
-        self.monitors.get(rank)
+        self.rank_to_index
+            .get(&rank)
+            .and_then(|&index| self.monitors.get(index))
     }
 
     /// Get monitor addresses by rank
     pub fn get_addrs(&self, rank: usize) -> Option<&EntityAddrvec> {
-        self.monitors.get(rank).map(|m| &m.addrs)
+        self.get_mon(rank).map(|m| &m.addrs)
     }
 
     /// Get monitor name by rank
     pub fn get_name(&self, rank: usize) -> Option<&str> {
-        self.monitors.get(rank).map(|m| m.name.as_str())
+        self.get_mon(rank).map(|m| m.name.as_str())
     }
 
     /// Get monitor rank by name
@@ -155,7 +209,9 @@ impl MonMap {
 
     /// Get all monitor ranks
     pub fn get_all_ranks(&self) -> Vec<usize> {
-        (0..self.monitors.len()).collect()
+        let mut ranks: Vec<_> = self.monitors.iter().map(|mon| mon.rank).collect();
+        ranks.sort_unstable();
+        ranks
     }
 
     /// Get monitors grouped by priority (lowest priority first)
@@ -172,22 +228,29 @@ impl MonMap {
                 .push(mon.rank);
         }
 
+        for ranks in priority_groups.values_mut() {
+            ranks.sort_unstable();
+        }
+
         // Return groups in priority order (lowest priority first)
         priority_groups.into_values().collect()
     }
 
     /// Get the weight of a monitor by rank
     pub fn get_weight(&self, rank: usize) -> u16 {
-        self.monitors.get(rank).map(|m| m.weight).unwrap_or(0)
+        self.get_mon(rank).map(|m| m.weight).unwrap_or(0)
     }
 
     /// Rebuild internal indices after deserialization
     pub fn rebuild_indices(&mut self) {
         self.name_to_rank.clear();
+        self.rank_to_index.clear();
         self.addr_to_rank.clear();
 
-        for mon in &self.monitors {
+        for (index, mon) in self.monitors.iter().enumerate() {
             self.name_to_rank.insert(mon.name.clone(), mon.rank);
+            self.rank_to_index.insert(mon.rank, index);
+            self.mon_info_extras.entry(mon.name.clone()).or_default();
             for addr in &mon.addrs.addrs {
                 self.addr_to_rank.insert(addr.to_string(), mon.rank);
             }
@@ -204,9 +267,7 @@ impl MonMap {
 
         // Encode with full features
         let mut buf = BytesMut::new();
-        denc_monmap
-            .encode(&mut buf, u64::MAX)
-            .map_err(|e| MonClientError::DecodingError(e.to_string()))?;
+        denc_monmap.encode(&mut buf, u64::MAX)?;
 
         Ok(buf.freeze())
     }
@@ -217,8 +278,7 @@ impl MonMap {
 
         // Decode using denc
         let mut bytes = bytes::Bytes::from(data.to_vec());
-        let denc_monmap = denc::MonMap::decode(&mut bytes, u64::MAX)
-            .map_err(|e| MonClientError::DecodingError(e.to_string()))?;
+        let denc_monmap = denc::MonMap::decode(&mut bytes, u64::MAX)?;
 
         // Convert to monclient MonMap
         Self::from_denc_monmap(denc_monmap)
@@ -227,27 +287,36 @@ impl MonMap {
     /// Convert to denc MonMap for encoding
     fn to_denc_monmap(&self) -> denc::MonMap {
         use denc::UTime;
-        use std::collections::BTreeMap;
 
         // Convert fsid from Uuid to [u8; 16]
         let fsid = *self.fsid.as_bytes();
 
-        // Convert monitors to mon_info BTreeMap
-        let mut mon_info = BTreeMap::new();
+        // Convert monitors to mon_info BTreeMap while preserving extra decoded fields.
+        let mut mon_info = self.unranked_mon_info.clone();
         for mon in &self.monitors {
+            let extras = self
+                .mon_info_extras
+                .get(&mon.name)
+                .cloned()
+                .unwrap_or_default();
             let denc_mon = denc::MonInfo {
                 name: mon.name.clone(),
                 public_addrs: mon.addrs.clone(),
                 priority: mon.priority as u16,
                 weight: mon.weight,
-                crush_loc: BTreeMap::new(),
-                time_added: UTime::default(),
+                crush_loc: extras.crush_loc,
+                time_added: extras.time_added,
             };
             mon_info.insert(mon.name.clone(), denc_mon);
         }
 
-        // Build ranks from monitors
-        let ranks: Vec<String> = self.monitors.iter().map(|m| m.name.clone()).collect();
+        // Build ranks from the stored rank values rather than monitor vector order.
+        let mut ranked_monitors: Vec<&MonInfo> = self.monitors.iter().collect();
+        ranked_monitors.sort_by_key(|mon| mon.rank);
+        let ranks: Vec<String> = ranked_monitors
+            .into_iter()
+            .map(|mon| mon.name.clone())
+            .collect();
 
         denc::MonMap {
             fsid,
@@ -260,38 +329,70 @@ impl MonMap {
                 sec: (self.created / MS_PER_SEC) as u32,
                 nsec: ((self.created % MS_PER_SEC) * NSEC_PER_MSEC) as u32,
             },
-            persistent_features: denc::MonFeature::default(),
-            optional_features: denc::MonFeature::default(),
+            persistent_features: self.persistent_features.clone(),
+            optional_features: self.optional_features.clone(),
             mon_info,
             ranks,
-            min_mon_release: denc::MonCephRelease::default(),
-            removed_ranks: Vec::new(),
-            strategy: denc::ElectionStrategy::default(),
-            disallowed_leaders: Vec::new(),
-            stretch_mode_enabled: false,
-            tiebreaker_mon: String::new(),
-            stretch_marked_down_mons: Vec::new(),
+            min_mon_release: self.min_mon_release,
+            removed_ranks: self.removed_ranks.clone(),
+            strategy: self.strategy,
+            disallowed_leaders: self.disallowed_leaders.clone(),
+            stretch_mode_enabled: self.stretch_mode_enabled,
+            tiebreaker_mon: self.tiebreaker_mon.clone(),
+            stretch_marked_down_mons: self.stretch_marked_down_mons.clone(),
         }
     }
 
     /// Convert from denc MonMap after decoding
     fn from_denc_monmap(denc_monmap: denc::MonMap) -> Result<Self> {
+        let denc::MonMap {
+            fsid,
+            epoch,
+            last_changed,
+            created,
+            persistent_features,
+            optional_features,
+            mut mon_info,
+            ranks,
+            min_mon_release,
+            removed_ranks,
+            strategy,
+            disallowed_leaders,
+            stretch_mode_enabled,
+            tiebreaker_mon,
+            stretch_marked_down_mons,
+        } = denc_monmap;
+
         // Convert fsid from [u8; 16] to Uuid
-        let fsid = uuid::Uuid::from_bytes(denc_monmap.fsid);
+        let fsid = uuid::Uuid::from_bytes(fsid);
 
         // Convert UTime to Unix timestamp (milliseconds)
-        let created = (denc_monmap.created.sec as u64) * MS_PER_SEC
-            + (denc_monmap.created.nsec as u64) / NSEC_PER_MSEC;
-        let modified = (denc_monmap.last_changed.sec as u64) * MS_PER_SEC
-            + (denc_monmap.last_changed.nsec as u64) / NSEC_PER_MSEC;
+        let created = (created.sec as u64) * MS_PER_SEC + (created.nsec as u64) / NSEC_PER_MSEC;
+        let modified =
+            (last_changed.sec as u64) * MS_PER_SEC + (last_changed.nsec as u64) / NSEC_PER_MSEC;
 
-        // Convert mon_info to monitors (addrs are already denc::EntityAddrvec)
-        let mut monitors = Vec::new();
-        for (rank, (name, mon)) in denc_monmap.mon_info.iter().enumerate() {
+        // Reconstruct monitor ranks from the ranks vector rather than map iteration order.
+        let mut monitors = Vec::with_capacity(ranks.len());
+        let mut mon_info_extras = HashMap::with_capacity(ranks.len());
+        for (rank, name) in ranks.iter().enumerate() {
+            let mon = mon_info.remove(name).ok_or_else(|| {
+                MonClientError::InvalidMonMap(format!(
+                    "MonMap ranks referenced missing monitor {}",
+                    name
+                ))
+            })?;
+
+            mon_info_extras.insert(
+                name.clone(),
+                MonInfoExtras {
+                    crush_loc: mon.crush_loc,
+                    time_added: mon.time_added,
+                },
+            );
             monitors.push(MonInfo {
                 name: name.clone(),
                 rank,
-                addrs: mon.public_addrs.clone(),
+                addrs: mon.public_addrs,
                 priority: mon.priority as i32,
                 weight: mon.weight,
             });
@@ -299,12 +400,24 @@ impl MonMap {
 
         let mut monmap = Self {
             fsid,
-            epoch: denc_monmap.epoch.as_u32(),
+            epoch: epoch.as_u32(),
             created,
             modified,
             monitors,
             name_to_rank: HashMap::new(),
+            rank_to_index: HashMap::new(),
             addr_to_rank: HashMap::new(),
+            mon_info_extras,
+            unranked_mon_info: mon_info,
+            persistent_features,
+            optional_features,
+            min_mon_release,
+            removed_ranks,
+            strategy,
+            disallowed_leaders,
+            stretch_mode_enabled,
+            tiebreaker_mon,
+            stretch_marked_down_mons,
         };
 
         monmap.rebuild_indices();
@@ -337,6 +450,12 @@ pub struct MonInfo {
     pub weight: u16,
 }
 
+#[derive(Debug, Clone, Default)]
+struct MonInfoExtras {
+    crush_loc: BTreeMap<String, String>,
+    time_added: denc::UTime,
+}
+
 /// Parse monitor address string
 fn parse_mon_addr(addr_str: &str) -> Result<EntityAddr> {
     use std::net::SocketAddr;
@@ -358,9 +477,82 @@ fn parse_mon_addr(addr_str: &str) -> Result<EntityAddr> {
     Ok(EntityAddr::from_socket_addr(addr_type, socket_addr))
 }
 
+fn collect_initial_monitor_groups(mon_addrs: &[String]) -> Result<Vec<Vec<EntityAddr>>> {
+    use std::collections::HashSet;
+
+    let mut monitor_groups = Vec::new();
+    let mut current_group = Vec::new();
+    let mut current_ip = None;
+    let mut current_types = HashSet::new();
+
+    for entry in mon_addrs {
+        let parsed_group = parse_mon_addr_group(entry)?;
+
+        if parsed_group.len() > 1 {
+            if !current_group.is_empty() {
+                monitor_groups.push(std::mem::take(&mut current_group));
+                current_ip = None;
+                current_types.clear();
+            }
+            monitor_groups.push(parsed_group);
+            continue;
+        }
+
+        let addr = parsed_group
+            .into_iter()
+            .next()
+            .ok_or_else(|| MonClientError::InvalidMonMap("Empty monitor address group".into()))?;
+        let ip = addr
+            .to_socket_addr()
+            .ok_or_else(|| MonClientError::InvalidMonMap("Could not parse socket addr".into()))?
+            .ip();
+
+        if current_group.is_empty() {
+            current_ip = Some(ip);
+            current_types.insert(addr.addr_type);
+            current_group.push(addr);
+            continue;
+        }
+
+        if current_ip == Some(ip) && !current_types.contains(&addr.addr_type) {
+            current_types.insert(addr.addr_type);
+            current_group.push(addr);
+            continue;
+        }
+
+        monitor_groups.push(std::mem::take(&mut current_group));
+        current_types.clear();
+        current_ip = Some(ip);
+        current_types.insert(addr.addr_type);
+        current_group.push(addr);
+    }
+
+    if !current_group.is_empty() {
+        monitor_groups.push(current_group);
+    }
+
+    Ok(monitor_groups)
+}
+
+fn parse_mon_addr_group(addr_str: &str) -> Result<Vec<EntityAddr>> {
+    let trimmed = addr_str.trim();
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(trimmed);
+
+    inner
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(parse_mon_addr)
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_build_initial_monmap() {
@@ -378,9 +570,7 @@ mod tests {
     }
 
     #[test]
-    fn test_build_initial_monmap_groups_by_ip() {
-        // Test that addresses with same IP are grouped into one monitor
-        // This matches Ceph's behavior: [v2:IP:PORT1,v1:IP:PORT2] = one monitor with 2 addrs
+    fn test_build_initial_monmap_groups_v1_v2_pairs_per_monitor() {
         let addrs = vec![
             "v2:192.168.1.1:6789".to_string(),
             "v1:192.168.1.1:6790".to_string(),
@@ -411,6 +601,65 @@ mod tests {
     }
 
     #[test]
+    fn test_build_initial_monmap_preserves_same_ip_monitor_groups() {
+        let addrs = vec![
+            "v2:192.168.1.43:40472".to_string(),
+            "v1:192.168.1.43:40473".to_string(),
+            "v2:192.168.1.43:40474".to_string(),
+            "v1:192.168.1.43:40475".to_string(),
+        ];
+
+        let monmap = MonMap::build_initial(&addrs).expect("same-IP monitor groups should parse");
+
+        assert_eq!(
+            monmap.size(),
+            2,
+            "distinct same-IP monitors must not collapse"
+        );
+
+        let mon0_addrs = monmap.get_addrs(0).expect("rank 0 should exist");
+        assert_eq!(mon0_addrs.addrs.len(), 2, "rank 0 should keep its pair");
+        assert_eq!(
+            monmap.get_rank_by_addr("v2:192.168.1.43:40472"),
+            Some(0),
+            "first v2 address should map to rank 0"
+        );
+        assert_eq!(
+            monmap.get_rank_by_addr("v1:192.168.1.43:40473"),
+            Some(0),
+            "first v1 address should map to rank 0"
+        );
+
+        let mon1_addrs = monmap.get_addrs(1).expect("rank 1 should exist");
+        assert_eq!(mon1_addrs.addrs.len(), 2, "rank 1 should keep its pair");
+        assert_eq!(
+            monmap.get_rank_by_addr("v2:192.168.1.43:40474"),
+            Some(1),
+            "second v2 address should map to rank 1"
+        );
+        assert_eq!(
+            monmap.get_rank_by_addr("v1:192.168.1.43:40475"),
+            Some(1),
+            "second v1 address should map to rank 1"
+        );
+    }
+
+    #[test]
+    fn test_build_initial_monmap_preserves_explicit_bracket_groups() {
+        let addrs = vec![
+            "[v2:192.168.1.43:40472,v1:192.168.1.43:40473]".to_string(),
+            "[v2:192.168.1.43:40474,v1:192.168.1.43:40475]".to_string(),
+        ];
+
+        let monmap =
+            MonMap::build_initial(&addrs).expect("explicit monitor address groups should parse");
+
+        assert_eq!(monmap.size(), 2);
+        assert_eq!(monmap.get_rank_by_addr("v2:192.168.1.43:40472"), Some(0));
+        assert_eq!(monmap.get_rank_by_addr("v2:192.168.1.43:40474"), Some(1));
+    }
+
+    #[test]
     fn test_monmap_lookup() {
         let mut monmap = MonMap::new(Uuid::nil());
 
@@ -427,6 +676,156 @@ mod tests {
         assert!(monmap.contains("mon.a"));
         assert_eq!(monmap.get_rank("mon.a"), Some(0));
         assert_eq!(monmap.get_name(0), Some("mon.a"));
+    }
+
+    #[test]
+    fn test_rank_lookup_uses_rank_mapping() {
+        let mut monmap = MonMap::new(Uuid::nil());
+
+        monmap.add_monitor(MonInfo {
+            name: "mon.e".to_string(),
+            rank: 5,
+            addrs: EntityAddrvec::new(),
+            priority: 1,
+            weight: 9,
+        });
+        monmap.add_monitor(MonInfo {
+            name: "mon.c".to_string(),
+            rank: 2,
+            addrs: EntityAddrvec::new(),
+            priority: 1,
+            weight: 7,
+        });
+
+        assert_eq!(monmap.get_name(5), Some("mon.e"));
+        assert_eq!(monmap.get_name(2), Some("mon.c"));
+        assert_eq!(monmap.get_weight(5), 9);
+        assert_eq!(monmap.get_all_ranks(), vec![2, 5]);
+    }
+
+    #[test]
+    fn test_from_denc_monmap_uses_ranks_vector() {
+        let mut mon_info = BTreeMap::new();
+        mon_info.insert(
+            "mon.a".to_string(),
+            denc::MonInfo {
+                name: "mon.a".to_string(),
+                public_addrs: EntityAddrvec::new(),
+                priority: 1,
+                weight: 2,
+                crush_loc: BTreeMap::new(),
+                time_added: denc::UTime::default(),
+            },
+        );
+        mon_info.insert(
+            "mon.b".to_string(),
+            denc::MonInfo {
+                name: "mon.b".to_string(),
+                public_addrs: EntityAddrvec::new(),
+                priority: 3,
+                weight: 4,
+                crush_loc: BTreeMap::new(),
+                time_added: denc::UTime::default(),
+            },
+        );
+
+        let monmap = MonMap::from_denc_monmap(denc::MonMap {
+            fsid: *Uuid::nil().as_bytes(),
+            epoch: denc::Epoch::new(7),
+            last_changed: denc::UTime::default(),
+            created: denc::UTime::default(),
+            persistent_features: denc::MonFeature::default(),
+            optional_features: denc::MonFeature::default(),
+            mon_info,
+            ranks: vec!["mon.b".to_string(), "mon.a".to_string()],
+            min_mon_release: denc::MonCephRelease::default(),
+            removed_ranks: Vec::new(),
+            strategy: denc::ElectionStrategy::default(),
+            disallowed_leaders: Vec::new(),
+            stretch_mode_enabled: false,
+            tiebreaker_mon: String::new(),
+            stretch_marked_down_mons: Vec::new(),
+        })
+        .unwrap();
+
+        assert_eq!(monmap.get_name(0), Some("mon.b"));
+        assert_eq!(monmap.get_name(1), Some("mon.a"));
+        assert_eq!(monmap.get_rank("mon.b"), Some(0));
+        assert_eq!(monmap.get_rank("mon.a"), Some(1));
+    }
+
+    #[test]
+    fn test_to_denc_monmap_preserves_decoded_fields() {
+        let mut mon_info = BTreeMap::new();
+        mon_info.insert(
+            "mon.a".to_string(),
+            denc::MonInfo {
+                name: "mon.a".to_string(),
+                public_addrs: EntityAddrvec::new(),
+                priority: 7,
+                weight: 8,
+                crush_loc: BTreeMap::from([("datacenter".to_string(), "dc1".to_string())]),
+                time_added: denc::UTime { sec: 11, nsec: 12 },
+            },
+        );
+        mon_info.insert(
+            "mon.orphan".to_string(),
+            denc::MonInfo {
+                name: "mon.orphan".to_string(),
+                public_addrs: EntityAddrvec::new(),
+                priority: 9,
+                weight: 10,
+                crush_loc: BTreeMap::from([("rack".to_string(), "r1".to_string())]),
+                time_added: denc::UTime { sec: 21, nsec: 22 },
+            },
+        );
+
+        let monmap = MonMap::from_denc_monmap(denc::MonMap {
+            fsid: *Uuid::nil().as_bytes(),
+            epoch: denc::Epoch::new(3),
+            last_changed: denc::UTime { sec: 4, nsec: 5 },
+            created: denc::UTime { sec: 6, nsec: 7 },
+            persistent_features: denc::MonFeature { features: 0x11 },
+            optional_features: denc::MonFeature { features: 0x22 },
+            mon_info,
+            ranks: vec!["mon.a".to_string()],
+            min_mon_release: denc::MonCephRelease::Reef,
+            removed_ranks: vec![4, 5],
+            strategy: denc::ElectionStrategy::Disallow,
+            disallowed_leaders: vec!["mon.a".to_string()],
+            stretch_mode_enabled: true,
+            tiebreaker_mon: "mon.a".to_string(),
+            stretch_marked_down_mons: vec!["mon.c".to_string()],
+        })
+        .unwrap();
+
+        let denc_monmap = monmap.to_denc_monmap();
+        let mon_a = denc_monmap.mon_info.get("mon.a").unwrap();
+        let mon_orphan = denc_monmap.mon_info.get("mon.orphan").unwrap();
+
+        assert_eq!(denc_monmap.persistent_features.features, 0x11);
+        assert_eq!(denc_monmap.optional_features.features, 0x22);
+        assert_eq!(denc_monmap.min_mon_release, denc::MonCephRelease::Reef);
+        assert_eq!(denc_monmap.removed_ranks, vec![4, 5]);
+        assert_eq!(denc_monmap.strategy, denc::ElectionStrategy::Disallow);
+        assert_eq!(denc_monmap.disallowed_leaders, vec!["mon.a".to_string()]);
+        assert!(denc_monmap.stretch_mode_enabled);
+        assert_eq!(denc_monmap.tiebreaker_mon, "mon.a");
+        assert_eq!(
+            denc_monmap.stretch_marked_down_mons,
+            vec!["mon.c".to_string()]
+        );
+        assert_eq!(denc_monmap.ranks, vec!["mon.a".to_string()]);
+        assert_eq!(
+            mon_a.crush_loc.get("datacenter").map(String::as_str),
+            Some("dc1")
+        );
+        assert_eq!(mon_a.time_added.sec, 11);
+        assert_eq!(
+            mon_orphan.crush_loc.get("rack").map(String::as_str),
+            Some("r1")
+        );
+        assert_eq!(mon_orphan.time_added.sec, 21);
     }
 
     #[test]

@@ -200,8 +200,8 @@ impl VersionedEncode for HObject {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Minimum supported version check (Nautilus v14+)
-        crate::check_min_version!(version, 4, "HObject", "Nautilus v14+");
+        // Minimum supported project release boundary (Octopus v15+)
+        crate::check_min_version!(version, 4, "HObject", "Octopus v15+");
 
         // All fields are present in v4+ (which we now require)
         let key = <String as Denc>::decode(buf, features)?;

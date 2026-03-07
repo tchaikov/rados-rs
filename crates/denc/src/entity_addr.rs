@@ -3,10 +3,9 @@
 //! This is a migration from the old Denc trait to the new Denc trait,
 //! which provides zero-allocation encoding by writing directly to buffers.
 
-use crate::constants::sockaddr::{AF_INET, AF_INET6, LEGACY_ENTITY_ADDR_SIZE, STORAGE_SIZE};
+use crate::constants::sockaddr::{AF_INET, AF_INET6, STORAGE_SIZE};
 use crate::denc::Denc;
 use crate::error::RadosError;
-use crate::features::CephFeatures;
 use bytes::{Buf, BufMut};
 use serde::{Deserialize, Serialize};
 
@@ -298,30 +297,8 @@ impl EntityAddr {
         })
     }
 
-    /// Encode in legacy format
-    fn encode_legacy<B: BufMut>(&self, buf: &mut B) -> Result<(), RadosError> {
-        // Check buffer space: marker (4) + nonce (4) + sockaddr (STORAGE_SIZE) = LEGACY_ENTITY_ADDR_SIZE
-        if buf.remaining_mut() < LEGACY_ENTITY_ADDR_SIZE {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for legacy EntityAddr: need {}, have {}",
-                LEGACY_ENTITY_ADDR_SIZE,
-                buf.remaining_mut()
-            )));
-        }
-
-        buf.put_u32_le(0); // marker
-        buf.put_u32_le(self.nonce);
-
-        // Pad sockaddr_storage to STORAGE_SIZE bytes
-        let mut sockaddr = self.sockaddr_data.clone();
-        sockaddr.resize(STORAGE_SIZE, 0);
-        buf.put_slice(&sockaddr);
-
-        Ok(())
-    }
-
     /// Encode in MSG_ADDR2 format
-    fn encode_msgr2<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+    fn encode_msgr2<B: BufMut>(&self, buf: &mut B) -> Result<(), RadosError> {
         // Calculate content size
         let content_size = 4 + 4 + 4 + self.sockaddr_data.len(); // addr_type + nonce + len + data
 
@@ -343,9 +320,9 @@ impl EntityAddr {
         buf.put_u32_le(content_size as u32); // struct length
 
         // Encode content
-        Denc::encode(&self.addr_type, buf, features)?;
-        Denc::encode(&self.nonce, buf, features)?;
-        Denc::encode(&(self.sockaddr_data.len() as u32), buf, features)?;
+        Denc::encode(&self.addr_type, buf, 0)?;
+        Denc::encode(&self.nonce, buf, 0)?;
+        Denc::encode(&(self.sockaddr_data.len() as u32), buf, 0)?;
 
         if !self.sockaddr_data.is_empty() {
             buf.put_slice(&self.sockaddr_data);
@@ -457,14 +434,8 @@ impl<'de> serde::Deserialize<'de> for EntityAddr {
 }
 
 impl Denc for EntityAddr {
-    const FEATURE_DEPENDENT: bool = true;
-
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        if (features & CephFeatures::MSG_ADDR2.bits()) == 0 {
-            self.encode_legacy(buf)
-        } else {
-            self.encode_msgr2(buf, features)
-        }
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        self.encode_msgr2(buf)
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
@@ -487,15 +458,10 @@ impl Denc for EntityAddr {
         }
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        if (features & CephFeatures::MSG_ADDR2.bits()) == 0 {
-            // Legacy: marker (4) + nonce (4) + sockaddr (STORAGE_SIZE) = LEGACY_ENTITY_ADDR_SIZE
-            Some(LEGACY_ENTITY_ADDR_SIZE)
-        } else {
-            // MSG_ADDR2: marker (1) + version (1) + compat (1) + len (4) + content
-            // Content: addr_type (4) + nonce (4) + len (4) + sockaddr_data
-            Some(1 + 1 + 1 + 4 + 4 + 4 + 4 + self.sockaddr_data.len())
-        }
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // MSG_ADDR2: marker (1) + version (1) + compat (1) + len (4) + content
+        // Content: addr_type (4) + nonce (4) + len (4) + sockaddr_data
+        Some(1 + 1 + 1 + 4 + 4 + 4 + 4 + self.sockaddr_data.len())
     }
 }
 
@@ -527,25 +493,13 @@ impl EntityAddrvec {
 
 // Manual Denc implementation for EntityAddrvec
 impl crate::denc::Denc for EntityAddrvec {
-    const FEATURE_DEPENDENT: bool = true;
+    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
+        // Octopus+ peers always use the addrvec marker on encode.
+        buf.put_u8(2);
+        buf.put_u32_le(self.addrs.len() as u32);
 
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        if (features & CephFeatures::MSG_ADDR2.bits()) == 0 {
-            // Legacy format: encode a single legacy entity_addr_t
-            if let Some(legacy_addr) = self.addrs.first() {
-                legacy_addr.encode(buf, 0)?;
-            }
-        } else {
-            // MSG_ADDR2 format: marker byte + vector
-            buf.put_u8(2); // Marker byte to indicate MSG_ADDR2 format
-
-            // Encode the number of addresses
-            buf.put_u32_le(self.addrs.len() as u32);
-
-            // Encode each address
-            for addr in &self.addrs {
-                addr.encode(buf, features)?;
-            }
+        for addr in &self.addrs {
+            addr.encode(buf, 0)?;
         }
 
         Ok(())
@@ -562,15 +516,12 @@ impl crate::denc::Denc for EntityAddrvec {
         let marker = buf.get_u8();
 
         match marker {
-            0 | 1 => {
-                // Legacy format - single address
-                // Put the marker byte back by creating a new buffer with it prepended
-                let mut temp = bytes::BytesMut::with_capacity(1 + buf.remaining());
-                temp.put_u8(marker);
-                temp.put(buf.chunk());
-                buf.advance(buf.remaining());
-
-                let addr = EntityAddr::decode(&mut temp, 0)?;
+            0 => {
+                let addr = EntityAddr::decode_legacy(buf)?;
+                Ok(EntityAddrvec { addrs: vec![addr] })
+            }
+            1 => {
+                let addr = EntityAddr::decode_msgr2(buf)?;
                 Ok(EntityAddrvec { addrs: vec![addr] })
             }
             2 => {
@@ -597,18 +548,13 @@ impl crate::denc::Denc for EntityAddrvec {
         }
     }
 
-    fn encoded_size(&self, features: u64) -> Option<usize> {
-        if (features & CephFeatures::MSG_ADDR2.bits()) == 0 {
-            // Legacy format
-            self.addrs.first().and_then(|addr| addr.encoded_size(0))
-        } else {
-            // MSG_ADDR2 format: marker (1) + count (4) + addresses
-            let mut size = 5;
-            for addr in &self.addrs {
-                size += addr.encoded_size(features)?;
-            }
-            Some(size)
+    fn encoded_size(&self, _features: u64) -> Option<usize> {
+        // MSG_ADDR2 format: marker (1) + count (4) + addresses
+        let mut size = 5;
+        for addr in &self.addrs {
+            size += addr.encoded_size(0)?;
         }
+        Some(size)
     }
 }
 
@@ -618,23 +564,17 @@ mod tests {
     use bytes::BytesMut;
 
     #[test]
-    fn test_entity_addr_legacy_roundtrip() {
+    fn test_entity_addr_legacy_decode_compatibility() {
         let mut buf = BytesMut::new();
+        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
+        sockaddr_data[..4].copy_from_slice(&[1, 2, 3, 4]);
 
-        let addr = EntityAddr {
-            addr_type: EntityAddrType::Legacy,
-            nonce: 0x12345678,
-            sockaddr_data: vec![1, 2, 3, 4],
-        };
+        buf.put_u32_le(0);
+        buf.put_u32_le(0x12345678);
+        buf.put_slice(&sockaddr_data);
 
-        // Encode with legacy features (no MSG_ADDR2)
-        Denc::encode(&addr, &mut buf, 0).unwrap();
-
-        // Should be LEGACY_ENTITY_ADDR_SIZE bytes (4 marker + 4 nonce + STORAGE_SIZE sockaddr)
-        assert_eq!(buf.len(), LEGACY_ENTITY_ADDR_SIZE);
-
-        // Decode
-        let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
+        let mut bytes = buf.freeze();
+        let decoded = <EntityAddr as Denc>::decode(&mut bytes, 0).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Legacy);
         assert_eq!(decoded.nonce, 0x12345678);
         assert_eq!(decoded.sockaddr_data.len(), STORAGE_SIZE);
@@ -651,15 +591,30 @@ mod tests {
             sockaddr_data: vec![10, 20, 30, 40, 50],
         };
 
-        // Encode with MSG_ADDR2 feature
-        Denc::encode(&addr, &mut buf, CephFeatures::MSG_ADDR2.bits()).unwrap();
+        Denc::encode(&addr, &mut buf, 0).unwrap();
 
         // Decode
-        let decoded =
-            <EntityAddr as Denc>::decode(&mut buf, CephFeatures::MSG_ADDR2.bits()).unwrap();
+        let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded.addr_type, EntityAddrType::Msgr2);
         assert_eq!(decoded.nonce, 0xABCDEF01);
         assert_eq!(decoded.sockaddr_data, vec![10, 20, 30, 40, 50]);
+    }
+
+    #[test]
+    fn test_entity_addr_encode_ignores_features() {
+        let addr = EntityAddr {
+            addr_type: EntityAddrType::Msgr2,
+            nonce: 0xABCDEF01,
+            sockaddr_data: vec![10, 20, 30, 40, 50],
+        };
+
+        let mut modern = BytesMut::new();
+        let mut with_msg_addr2 = BytesMut::new();
+        Denc::encode(&addr, &mut modern, 0).unwrap();
+        Denc::encode(&addr, &mut with_msg_addr2, u64::MAX).unwrap();
+
+        assert_eq!(modern, with_msg_addr2);
+        assert_eq!(modern[0], 1);
     }
 
     #[test]
@@ -670,16 +625,47 @@ mod tests {
             sockaddr_data: vec![1, 2, 3],
         };
 
-        // Legacy size: 4 + 4 + STORAGE_SIZE = LEGACY_ENTITY_ADDR_SIZE
-        assert_eq!(
-            <EntityAddr as Denc>::encoded_size(&addr, 0),
-            Some(LEGACY_ENTITY_ADDR_SIZE)
-        );
-
         // MSG_ADDR2 size: 1 + 1 + 1 + 4 + 4 + 4 + 4 + 3 = 22
+        assert_eq!(<EntityAddr as Denc>::encoded_size(&addr, 0), Some(22));
         assert_eq!(
-            <EntityAddr as Denc>::encoded_size(&addr, CephFeatures::MSG_ADDR2.bits()),
+            <EntityAddr as Denc>::encoded_size(&addr, u64::MAX),
             Some(22)
         );
+    }
+
+    #[test]
+    fn test_entity_addrvec_legacy_decode_compatibility() {
+        let mut buf = BytesMut::new();
+        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
+        sockaddr_data[..4].copy_from_slice(&[9, 8, 7, 6]);
+
+        buf.put_u32_le(0);
+        buf.put_u32_le(0x01020304);
+        buf.put_slice(&sockaddr_data);
+
+        let mut bytes = buf.freeze();
+        let decoded = <EntityAddrvec as Denc>::decode(&mut bytes, 0).unwrap();
+        assert_eq!(decoded.addrs.len(), 1);
+        assert_eq!(decoded.addrs[0].addr_type, EntityAddrType::Legacy);
+        assert_eq!(decoded.addrs[0].nonce, 0x01020304);
+        assert_eq!(&decoded.addrs[0].sockaddr_data[0..4], &[9, 8, 7, 6]);
+    }
+
+    #[test]
+    fn test_entity_addrvec_encode_ignores_features() {
+        let addr = EntityAddr {
+            addr_type: EntityAddrType::Msgr2,
+            nonce: 1,
+            sockaddr_data: vec![10, 20, 30, 40],
+        };
+        let addrvec = EntityAddrvec::with_addr(addr);
+
+        let mut modern = BytesMut::new();
+        let mut with_msg_addr2 = BytesMut::new();
+        Denc::encode(&addrvec, &mut modern, 0).unwrap();
+        Denc::encode(&addrvec, &mut with_msg_addr2, u64::MAX).unwrap();
+
+        assert_eq!(modern, with_msg_addr2);
+        assert_eq!(modern[0], 2);
     }
 }

@@ -18,7 +18,7 @@
 //! use auth::{CephXClientHandler, AuthMode};
 //!
 //! // Create a client handler
-//! let handler = CephXClientHandler::new("client.admin".to_string(), AuthMode::Mon)?;
+//! let handler = CephXClientHandler::new("client.admin", AuthMode::Mon)?;
 //!
 //! // Build initial authentication request
 //! let auth_request = handler.build_initial_request(0)?;

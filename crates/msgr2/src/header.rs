@@ -1,3 +1,10 @@
+//! Message-header structures used inside msgr2 control and data frames.
+//!
+//! This module wraps Ceph's msgr2 header layouts in zero-copy Rust types so
+//! frame encoding and decoding can operate efficiently on the wire format.
+//! These headers sit beneath higher-level Ceph messages and above the frame
+//! preamble and segment metadata.
+
 use crate::error::Result;
 use bytes::{Buf, BufMut};
 use std::mem::size_of;

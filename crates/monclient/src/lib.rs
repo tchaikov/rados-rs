@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```no_run
-//! use monclient::{AuthConfig, MonClient, MonClientConfig};
+//! use monclient::{AuthConfig, MonClient, MonClientConfig, MonService};
 //! use std::time::Duration;
 //!
 //! #[tokio::main]
@@ -29,10 +29,10 @@
 //!     client.init().await?;
 //!
 //!     // Subscribe to osdmap
-//!     client.subscribe("osdmap", 0, 0).await?;
+//!     client.subscribe(MonService::OsdMap, 0, 0).await?;
 //!
 //!     // Get version
-//!     let (newest, oldest) = client.get_version("osdmap").await?;
+//!     let (newest, oldest) = client.get_version(MonService::OsdMap).await?;
 //!     println!("OSDMap version: {} (oldest: {})", newest, oldest);
 //!
 //!     Ok(())
@@ -61,5 +61,5 @@ pub use messages::{
     MMonMap, MMonSubscribe, MMonSubscribeAck, MOSDMap, MPoolOp, MPoolOpReply,
 };
 pub use monmap::{MonInfo, MonMap};
-pub use subscription::{MonSub, SubscribeItem, CEPH_SUBSCRIBE_ONETIME};
+pub use subscription::{MonService, MonSub, SubscribeItem, CEPH_SUBSCRIBE_ONETIME};
 pub use types::CommandResult;

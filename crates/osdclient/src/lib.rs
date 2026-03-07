@@ -21,6 +21,7 @@ pub mod operation;
 pub mod osdmap;
 pub(crate) mod pgmap_types;
 pub mod session;
+pub mod snapshot;
 pub(crate) mod throttle;
 pub(crate) mod tracker;
 pub mod types;
@@ -32,6 +33,8 @@ pub use ioctx::IoCtx;
 pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use operation::{BuiltOp, OpBuilder};
 pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, PoolSnapInfo, UuidD};
+pub use pgmap_types::{ObjectstorePerfStat, PoolStat};
+pub use snapshot::SnapId;
 pub use types::{
     OSDOp, ObjectId, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult, SparseExtent,
     SparseReadResult, StatResult, StripedPgId, WriteResult,

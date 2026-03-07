@@ -9,7 +9,7 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 - **Messenger Protocol**: Complete implementation of Ceph's messenger protocol v2
 - **Type Safety**: Strong typing for all Ceph entities and operations
 - **Native Performance**: No C library dependencies
-- **Ceph Nautilus+**: Compatible with Ceph Nautilus (v14) and all later releases
+- **Ceph Octopus+**: Supported on Ceph Octopus (v15) and all later releases
 
 ## 🏗️ Current Implementation Status
 
@@ -155,12 +155,11 @@ This implementation is based on the Ceph messenger protocol as implemented in:
 
 ### Compatibility
 
-**Minimum Ceph Version**: Nautilus (v14, released March 2019)
+**Minimum Ceph Version**: Octopus (v15, released March 2020)
 
-rados-rs requires Ceph Nautilus or later. Support for older versions (Luminous, Mimic) has been removed to simplify the codebase and reduce maintenance burden. See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version compatibility information.
+rados-rs supports Ceph Octopus or later. Nautilus and older releases are outside the supported compatibility boundary. See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version compatibility information.
 
 **Supported Ceph Releases**:
-- ✅ Nautilus (v14) - March 2019
 - ✅ Octopus (v15) - March 2020
 - ✅ Pacific (v16) - March 2021
 - ✅ Quincy (v17) - April 2022

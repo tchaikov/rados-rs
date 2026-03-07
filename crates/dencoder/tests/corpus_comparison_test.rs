@@ -22,6 +22,7 @@
 //!
 //! Environment variables:
 //! - CEPH_DENCODER: Path to ceph-dencoder binary (default: search in PATH)
+//! - CEPH_LIB: Path to the local Ceph build's `lib/` directory when using an uninstalled ceph-dencoder build
 //! - CORPUS_VERSION: Version to test (default: test 18.2.0 and 19.2.0)
 //! - CORPUS_ROOT: Root directory of corpus (default: /tmp/ceph-object-corpus)
 //! - CORPUS_TYPE: Specific type to test (default: test all types)
@@ -30,7 +31,7 @@
 //!
 //! ```bash
 //! # Test with custom ceph-dencoder path
-//! CEPH_DENCODER=/path/to/ceph-dencoder cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
+//! CEPH_LIB=/path/to/ceph/build/lib CEPH_DENCODER=/path/to/ceph-dencoder cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
 //!
 //! # Test with specific version
 //! CORPUS_VERSION=18.2.0 cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
@@ -42,11 +43,65 @@
 //! cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
 //! ```
 
-use denc::features::CephFeatures;
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+#[derive(Debug, Clone, Copy)]
+struct TypeSpec {
+    name: &'static str,
+    features: Option<u64>,
+    is_exception: bool,
+}
+
+impl TypeSpec {
+    const fn new(name: &'static str, features: Option<u64>, is_exception: bool) -> Self {
+        Self {
+            name,
+            features,
+            is_exception,
+        }
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct TypeSummary {
+    matched: usize,
+    total: usize,
+    both_decoded: usize,
+    format_mismatch: usize,
+}
+
+#[derive(Debug)]
+struct VersionResult {
+    version: String,
+    matched: usize,
+    total: usize,
+    both_decoded: usize,
+    format_mismatch: usize,
+    exception_format_mismatch: usize,
+    format_diffs: Vec<&'static str>,
+    decode_fails: Vec<&'static str>,
+}
+
+const CORPUS_TYPES: &[TypeSpec] = &[
+    // Level 1: Primitive types
+    TypeSpec::new("pg_t", None, false),
+    TypeSpec::new("eversion_t", None, false),
+    TypeSpec::new("utime_t", None, false),
+    TypeSpec::new("uuid_d", None, false),
+    TypeSpec::new("osd_info_t", None, false),
+    // Level 2: Types depending on Level 1
+    TypeSpec::new("entity_addr_t", None, false),
+    TypeSpec::new("pool_snap_info_t", None, false),
+    TypeSpec::new("osd_xinfo_t", None, false),
+    // Level 3: Complex types
+    TypeSpec::new("pg_merge_meta_t", None, false),
+    TypeSpec::new("pg_pool_t", None, true), // ceph-dencoder adds computed fields
+    TypeSpec::new("mon_info_t", Some(u64::MAX), true), // different JSON format
+    TypeSpec::new("MonMap", Some(u64::MAX), true), // different JSON format
+];
 
 /// Get the corpus root directory from environment or default location
 fn get_corpus_root() -> PathBuf {
@@ -356,6 +411,10 @@ fn run_rust_dencoder_with_ops(
     Ok(full_output[json_start..].trim().to_string())
 }
 
+fn corpus_types() -> &'static [TypeSpec] {
+    CORPUS_TYPES
+}
+
 /// Compare two JSON outputs
 /// Performs strict comparison and reports differences
 fn compare_json_outputs(
@@ -363,7 +422,6 @@ fn compare_json_outputs(
     rust_json: &str,
     type_name: &str,
     file_name: &str,
-    is_exception: bool,
 ) -> Result<(), String> {
     let ceph_value: serde_json::Value =
         serde_json::from_str(ceph_json).map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
@@ -381,12 +439,6 @@ fn compare_json_outputs(
             "JSON output mismatch for {} in {}:\n\nCeph output:\n{}\n\nRust output:\n{}\n",
             type_name, file_name, ceph_pretty, rust_pretty
         );
-
-        // For exception types (like pg_pool_t), we report but don't fail
-        if is_exception {
-            return Err(error_msg);
-        }
-
         return Err(error_msg);
     }
 
@@ -452,7 +504,6 @@ fn test_rust_encode_ceph_decode(
     corpus_file: &Path,
     features: Option<u64>,
     original_rust_json: &str,
-    is_exception: bool,
 ) -> Result<(), String> {
     // Export Rust-encoded binary
     let rust_encoded_file = export_encoded_binary(rust_dencoder, type_name, corpus_file, features)
@@ -474,7 +525,6 @@ fn test_rust_encode_ceph_decode(
         &ceph_decoded_json,
         type_name,
         "rust→ceph",
-        is_exception,
     )
 }
 
@@ -487,7 +537,6 @@ fn test_ceph_encode_rust_decode(
     corpus_file: &Path,
     features: Option<u64>,
     original_ceph_json: &str,
-    is_exception: bool,
 ) -> Result<(), String> {
     // Export Ceph-encoded binary
     let ceph_encoded_file = export_encoded_binary(ceph_dencoder, type_name, corpus_file, features)
@@ -509,7 +558,6 @@ fn test_ceph_encode_rust_decode(
         &rust_decoded_json,
         type_name,
         "ceph→rust",
-        is_exception,
     )
 }
 
@@ -520,13 +568,12 @@ fn test_type(
     ceph_dencoder: &Path,
     rust_dencoder: &Path,
     features: Option<u64>,
-    is_exception: bool,
-) -> Result<(usize, usize, usize, usize), String> {
+) -> Result<TypeSummary, String> {
     let type_dir = corpus_base.join(type_name);
 
     if !type_dir.exists() {
         eprintln!("  ⚠ No corpus directory found for {}", type_name);
-        return Ok((0, 0, 0, 0));
+        return Ok(TypeSummary::default());
     }
 
     let entries: Vec<_> = fs::read_dir(&type_dir)
@@ -537,7 +584,7 @@ fn test_type(
 
     if entries.is_empty() {
         eprintln!("  ⚠ No corpus files found in {}", type_dir.display());
-        return Ok((0, 0, 0, 0));
+        return Ok(TypeSummary::default());
     }
 
     let mut matched = 0;
@@ -573,8 +620,7 @@ fn test_type(
 
         // Test 1: Compare decode outputs (decode correctness)
         let decode_matches =
-            compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name, is_exception)
-                .is_ok();
+            compare_json_outputs(&ceph_json, &rust_json, type_name, &file_name).is_ok();
 
         // Test 2: Roundtrip consistency (following Ceph's readable.sh)
         // Check if decode == decode→encode→decode for each implementation
@@ -587,24 +633,14 @@ fn test_type(
         ) {
             (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => {
                 // Check Ceph's roundtrip consistency
-                let ceph_consistent = compare_json_outputs(
-                    &ceph_json,
-                    &ceph_roundtrip_json,
-                    type_name,
-                    &file_name,
-                    is_exception,
-                )
-                .is_ok();
+                let ceph_consistent =
+                    compare_json_outputs(&ceph_json, &ceph_roundtrip_json, type_name, &file_name)
+                        .is_ok();
 
                 // Check Rust's roundtrip consistency
-                let rust_consistent = compare_json_outputs(
-                    &rust_json,
-                    &rust_roundtrip_json,
-                    type_name,
-                    &file_name,
-                    is_exception,
-                )
-                .is_ok();
+                let rust_consistent =
+                    compare_json_outputs(&rust_json, &rust_roundtrip_json, type_name, &file_name)
+                        .is_ok();
 
                 (ceph_consistent, rust_consistent)
             }
@@ -624,7 +660,6 @@ fn test_type(
             &corpus_file,
             features, // Rust needs features for encoding
             &rust_json,
-            is_exception,
         )
         .is_ok();
 
@@ -635,7 +670,6 @@ fn test_type(
             &corpus_file,
             None, // Don't pass features to Ceph - it loses version info
             &ceph_json,
-            is_exception,
         )
         .is_ok();
 
@@ -680,7 +714,12 @@ fn test_type(
         }
     }
 
-    Ok((matched, total, both_decoded, format_mismatch))
+    Ok(TypeSummary {
+        matched,
+        total,
+        both_decoded,
+        format_mismatch,
+    })
 }
 
 /// Main integration test
@@ -765,45 +804,21 @@ fn test_corpus_comparison() {
     }
     eprintln!();
 
-    // Define types to test with their feature requirements and exception status
-    let all_types: Vec<(&str, Option<u64>, bool)> = vec![
-        // Level 1: Primitive types
-        ("pg_t", None, false),
-        ("eversion_t", None, false),
-        ("utime_t", None, false),
-        ("uuid_d", None, false),
-        ("osd_info_t", None, false),
-        // Level 2: Types depending on Level 1
-        ("entity_addr_t", Some(CephFeatures::MSG_ADDR2.bits()), false),
-        ("pool_snap_info_t", None, false),
-        (
-            "osd_xinfo_t",
-            Some(CephFeatures::MASK_SERVER_OCTOPUS.bits()),
-            false,
-        ),
-        // Level 3: Complex types
-        ("pg_merge_meta_t", None, false),
-        ("pg_pool_t", None, true), // Exception: ceph-dencoder adds computed fields
-        ("mon_info_t", Some(u64::MAX), true), // Exception: different JSON format
-        ("MonMap", Some(u64::MAX), true), // Exception: different JSON format
-    ];
-
-    let types_to_test: Vec<(&str, Option<u64>, bool)> = if let Some(ref type_name) = requested_type
-    {
-        // Filter to specific type
-        all_types
-            .into_iter()
-            .filter(|(name, _, _)| *name == type_name)
+    let types_to_test: Vec<TypeSpec> = if let Some(ref type_name) = requested_type {
+        corpus_types()
+            .iter()
+            .copied()
+            .filter(|spec| spec.name == type_name)
             .collect()
     } else {
-        all_types
+        corpus_types().to_vec()
     };
 
     if types_to_test.is_empty() {
         panic!("❌ No types matched filter: {:?}", requested_type);
     }
 
-    let mut version_results = Vec::new();
+    let mut version_results: Vec<VersionResult> = Vec::new();
 
     for version in &versions_to_test {
         eprintln!("===========================================");
@@ -828,58 +843,56 @@ fn test_corpus_comparison() {
         let mut overall_format_mismatch = 0;
         let mut exception_format_mismatch = 0;
         let mut types_with_format_differences = Vec::new();
-        let mut exception_types_with_differences = Vec::new();
         let mut types_with_decode_failures = Vec::new();
 
-        for (type_name, features, is_exception) in &types_to_test {
-            let marker = if *is_exception { " (exception)" } else { "" };
-            eprintln!("Testing type: {}{}", type_name, marker);
-            if let Some(f) = features {
+        for spec in &types_to_test {
+            let marker = if spec.is_exception {
+                " (exception)"
+            } else {
+                ""
+            };
+            eprintln!("Testing type: {}{}", spec.name, marker);
+            if let Some(f) = spec.features {
                 eprintln!("  Features: 0x{:x}", f);
             }
 
             match test_type(
-                type_name,
+                spec.name,
                 &corpus_base,
                 &ceph_dencoder,
                 &rust_dencoder,
-                *features,
-                *is_exception,
+                spec.features,
             ) {
-                Ok((matched, total, both_decoded, format_mismatch)) => {
-                    overall_matched += matched;
-                    overall_total += total;
-                    overall_both_decoded += both_decoded;
-                    overall_format_mismatch += format_mismatch;
+                Ok(summary) => {
+                    overall_matched += summary.matched;
+                    overall_total += summary.total;
+                    overall_both_decoded += summary.both_decoded;
+                    overall_format_mismatch += summary.format_mismatch;
 
-                    if *is_exception && format_mismatch > 0 {
-                        exception_format_mismatch += format_mismatch;
+                    if spec.is_exception && summary.format_mismatch > 0 {
+                        exception_format_mismatch += summary.format_mismatch;
                     }
 
-                    if total > 0 {
+                    if summary.total > 0 {
                         eprintln!(
                             "  Result: {}/{} exact match, {} format differences, {} decode failures",
-                            matched,
-                            total,
-                            format_mismatch,
-                            total - both_decoded
+                            summary.matched,
+                            summary.total,
+                            summary.format_mismatch,
+                            summary.total - summary.both_decoded
                         );
 
-                        if format_mismatch > 0 {
-                            if *is_exception {
-                                exception_types_with_differences.push(*type_name);
-                            } else {
-                                types_with_format_differences.push(*type_name);
-                            }
+                        if summary.format_mismatch > 0 && !spec.is_exception {
+                            types_with_format_differences.push(spec.name);
                         }
-                        if both_decoded < total {
-                            types_with_decode_failures.push(*type_name);
+                        if summary.both_decoded < summary.total {
+                            types_with_decode_failures.push(spec.name);
                         }
                     }
                 }
                 Err(e) => {
-                    eprintln!("  ✗ Error testing {}: {}", type_name, e);
-                    types_with_decode_failures.push(*type_name);
+                    eprintln!("  ✗ Error testing {}: {}", spec.name, e);
+                    types_with_decode_failures.push(spec.name);
                 }
             }
             eprintln!();
@@ -916,16 +929,16 @@ fn test_corpus_comparison() {
         }
         eprintln!();
 
-        version_results.push((
-            version.clone(),
-            overall_matched,
-            overall_total,
-            overall_both_decoded,
-            overall_format_mismatch,
+        version_results.push(VersionResult {
+            version: version.clone(),
+            matched: overall_matched,
+            total: overall_total,
+            both_decoded: overall_both_decoded,
+            format_mismatch: overall_format_mismatch,
             exception_format_mismatch,
-            types_with_format_differences.clone(),
-            types_with_decode_failures.clone(),
-        ));
+            format_diffs: types_with_format_differences.clone(),
+            decode_fails: types_with_decode_failures.clone(),
+        });
     }
 
     // Overall summary across all versions
@@ -934,40 +947,30 @@ fn test_corpus_comparison() {
     eprintln!("===========================================");
 
     let mut total_passed_versions = 0;
-    for (
-        version,
-        matched,
-        total,
-        both_decoded,
-        format_mismatch,
-        exception_mismatch,
-        format_diffs,
-        decode_fails,
-    ) in &version_results
-    {
-        eprintln!("Version: {}", version);
-        if *total > 0 {
-            let non_exception_mismatch = format_mismatch - exception_mismatch;
-            let passed = non_exception_mismatch == 0 && *total == *both_decoded;
+    for result in &version_results {
+        eprintln!("Version: {}", result.version);
+        if result.total > 0 {
+            let non_exception_mismatch = result.format_mismatch - result.exception_format_mismatch;
+            let passed = non_exception_mismatch == 0 && result.total == result.both_decoded;
 
             eprintln!(
                 "  Status: {} - {}/{} exact match, {} non-exception format diffs, {} decode failures",
                 if passed { "✓ PASS" } else { "✗ FAIL" },
-                matched,
-                total,
+                result.matched,
+                result.total,
                 non_exception_mismatch,
-                total - both_decoded
+                result.total - result.both_decoded
             );
 
             if passed {
                 total_passed_versions += 1;
             }
 
-            if !format_diffs.is_empty() {
-                eprintln!("  Format differences: {:?}", format_diffs);
+            if !result.format_diffs.is_empty() {
+                eprintln!("  Format differences: {:?}", result.format_diffs);
             }
-            if !decode_fails.is_empty() {
-                eprintln!("  Decode failures: {:?}", decode_fails);
+            if !result.decode_fails.is_empty() {
+                eprintln!("  Decode failures: {:?}", result.decode_fails);
             }
         }
     }
@@ -979,35 +982,25 @@ fn test_corpus_comparison() {
     );
 
     // Fail if any non-exception types have issues
-    for (
-        version,
-        _matched,
-        total,
-        both_decoded,
-        format_mismatch,
-        exception_mismatch,
-        format_diffs,
-        decode_fails,
-    ) in &version_results
-    {
-        if *total == 0 {
+    for result in &version_results {
+        if result.total == 0 {
             continue;
         }
 
-        let non_exception_mismatch = format_mismatch - exception_mismatch;
+        let non_exception_mismatch = result.format_mismatch - result.exception_format_mismatch;
 
         assert!(
             non_exception_mismatch == 0,
             "Version {}: Format mismatches in non-exception types! Types: {:?}",
-            version,
-            format_diffs
+            result.version,
+            result.format_diffs
         );
 
         assert!(
-            *total == *both_decoded,
+            result.total == result.both_decoded,
             "Version {}: Decode failures detected! Types: {:?}",
-            version,
-            decode_fails
+            result.version,
+            result.decode_fails
         );
     }
 

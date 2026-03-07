@@ -275,7 +275,7 @@ impl Default for CephXTicketBlob {
 ///
 /// Corresponds to C++ `AuthTicket` struct in `/src/auth/Auth.h`
 #[derive(Debug, Clone, denc::StructVDenc)]
-#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Nautilus v14+")]
+#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Octopus v15+")]
 pub struct AuthTicket {
     struct_v: u8,
     pub name: EntityName,

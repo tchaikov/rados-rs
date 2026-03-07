@@ -171,37 +171,29 @@ fn bench_entity_addr_encode(c: &mut Criterion) {
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], 6789));
     let entity_addr = EntityAddr::from_socket_addr(EntityAddrType::Msgr2, addr);
 
-    // Test both legacy and msgr2 formats
-    for (name, features) in [
-        ("legacy", 0u64),
-        ("msgr2", denc::CephFeatures::MSG_ADDR2.bits()),
-    ]
-    .iter()
-    {
-        let size = entity_addr.encoded_size(*features).unwrap();
-        group.throughput(Throughput::Bytes(size as u64));
+    let size = entity_addr.encoded_size(0).unwrap();
+    group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_function(format!("encode/{}", name), |b| {
-            let mut buf = BytesMut::with_capacity(size);
+    group.bench_function("encode/modern", |b| {
+        let mut buf = BytesMut::with_capacity(size);
 
-            b.iter(|| {
-                buf.clear();
-                entity_addr.encode(&mut buf, *features).unwrap();
-                black_box(&buf);
-            });
+        b.iter(|| {
+            buf.clear();
+            entity_addr.encode(&mut buf, 0).unwrap();
+            black_box(&buf);
         });
+    });
 
-        group.bench_function(format!("decode/{}", name), |b| {
-            let mut buf = BytesMut::with_capacity(size);
-            entity_addr.encode(&mut buf, *features).unwrap();
-            let encoded = buf.freeze();
+    group.bench_function("decode/modern", |b| {
+        let mut buf = BytesMut::with_capacity(size);
+        entity_addr.encode(&mut buf, 0).unwrap();
+        let encoded = buf.freeze();
 
-            b.iter(|| {
-                let mut data = encoded.clone();
-                black_box(EntityAddr::decode(&mut data, *features).unwrap());
-            });
+        b.iter(|| {
+            let mut data = encoded.clone();
+            black_box(EntityAddr::decode(&mut data, 0).unwrap());
         });
-    }
+    });
 
     group.finish();
 }

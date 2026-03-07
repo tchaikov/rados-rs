@@ -501,7 +501,7 @@ impl CephXAuthorizeA {
 /// This is the second part of the authorizer (encrypted with session key)
 /// Contains a nonce and optionally a server challenge response
 #[derive(Debug, Clone, denc::StructVDenc)]
-#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Nautilus v14.2+")]
+#[denc(struct_v = 2, min_struct_v = 2, ceph_release = "Octopus v15+")]
 pub struct CephXAuthorizeB {
     struct_v: u8,
     pub nonce: u64,
@@ -1000,7 +1000,7 @@ mod tests {
         let mut read_buf = buf.freeze();
         let err = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap_err();
         let err_msg = err.to_string();
-        assert!(err_msg.contains("Nautilus v14.2+"));
+        assert!(err_msg.contains("Octopus v15+"));
     }
 
     #[test]

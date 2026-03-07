@@ -1971,6 +1971,26 @@ impl CompressionAccepting {
     pub fn new() -> Self {
         Self
     }
+
+    fn select_compression_algorithm(
+        request: &CompressionRequestFrame,
+    ) -> Option<crate::compression::CompressionAlgorithm> {
+        use crate::compression::CompressionAlgorithm;
+
+        if !request.is_compress {
+            return None;
+        }
+
+        if request.preferred_methods.is_empty() {
+            return Some(CompressionAlgorithm::Snappy);
+        }
+
+        request.preferred_methods.iter().find_map(|method| {
+            CompressionAlgorithm::try_from(*method)
+                .ok()
+                .filter(|algorithm| *algorithm != CompressionAlgorithm::None)
+        })
+    }
 }
 
 impl State for CompressionAccepting {
@@ -1984,19 +2004,46 @@ impl State for CompressionAccepting {
         match frame.preamble.tag {
             Tag::CompressionRequest => {
                 tracing::debug!("Server: Received COMPRESSION_REQUEST from client");
-
-                // For now, respond with no compression (COMP_ALG_NONE)
-                // TODO: Implement actual compression method selection
-                let compression_done = CompressionDoneFrame::new(false, 0u32);
+                if frame.segments.is_empty() {
+                    return Err(Error::protocol_error(
+                        "COMPRESSION_REQUEST frame missing payload",
+                    ));
+                }
+                let mut payload = frame.segments[0].clone();
+                let request = CompressionRequestFrame {
+                    is_compress: bool::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!(
+                            "Failed to decode COMPRESSION_REQUEST is_compress: {:?}",
+                            e
+                        ))
+                    })?,
+                    preferred_methods: Vec::<u32>::decode(&mut payload, 0).map_err(|e| {
+                        Error::protocol_error(&format!(
+                            "Failed to decode COMPRESSION_REQUEST preferred_methods: {:?}",
+                            e
+                        ))
+                    })?,
+                };
+                let compression_algorithm = Self::select_compression_algorithm(&request);
+                let compression_done = match compression_algorithm {
+                    Some(algorithm) => CompressionDoneFrame::new(true, algorithm.into()),
+                    None => CompressionDoneFrame::new(false, 0u32),
+                };
                 let response_frame =
                     create_frame_from_trait(&compression_done, Tag::CompressionDone)?;
 
-                tracing::debug!("Server: Sending COMPRESSION_DONE (no compression)");
+                tracing::debug!(
+                    "Server: Sending COMPRESSION_DONE (enabled={}, method={})",
+                    compression_done.is_compress,
+                    compression_done.method
+                );
 
                 // After sending COMPRESSION_DONE, transition to SessionAccepting
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
-                    next_state: Some(Box::new(SessionAccepting::new())),
+                    next_state: Some(Box::new(SessionAccepting::with_compression(
+                        compression_algorithm,
+                    ))),
                 })
             }
             _ => Err(Error::protocol_error(&format!(
@@ -2008,7 +2055,9 @@ impl State for CompressionAccepting {
 }
 
 #[derive(Debug)]
-pub struct SessionAccepting;
+pub struct SessionAccepting {
+    compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
+}
 
 impl Default for SessionAccepting {
     fn default() -> Self {
@@ -2018,7 +2067,17 @@ impl Default for SessionAccepting {
 
 impl SessionAccepting {
     pub fn new() -> Self {
-        Self
+        Self {
+            compression_algorithm: None,
+        }
+    }
+
+    pub fn with_compression(
+        compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
+    ) -> Self {
+        Self {
+            compression_algorithm,
+        }
     }
 }
 
@@ -2166,6 +2225,8 @@ pub struct StateMachine {
     /// Global ID assigned by the server during authentication
     /// Used to uniquely identify this client session
     global_id: u64,
+    /// Ceph session features negotiated during the ident exchange.
+    negotiated_features: u64,
     // Session state for reconnection
     /// Client cookie - generated on first connection
     client_cookie: u64,
@@ -2192,8 +2253,8 @@ impl StateMachine {
         let preserved_auth_provider = auth_provider.clone();
         Self {
             current_state: Box::new(BannerConnecting {
-                local_supported_features: 3, // MSGR2 | REVISION_1
-                local_required_features: 0,
+                local_supported_features: config.supported_features,
+                local_required_features: config.required_features,
                 preferred_modes: preferred_modes.clone(),
                 supported_auth_methods,
                 auth_provider,
@@ -2216,8 +2277,9 @@ impl StateMachine {
             preserved_auth_provider,
             server_auth_handler: None, // Client doesn't use server auth handler
             global_id: 0,              // Will be set during authentication
+            negotiated_features: 0,
             client_cookie: rand::random(), // Generate random client cookie
-            server_cookie: 0,          // Will be assigned by server
+            server_cookie: 0,              // Will be assigned by server
             global_seq: 0,
             connect_seq: 0,
             in_seq: 0,
@@ -2291,6 +2353,11 @@ impl StateMachine {
         self.global_id
     }
 
+    /// Get the negotiated Ceph session features from the ident exchange.
+    pub fn negotiated_features(&self) -> u64 {
+        self.negotiated_features
+    }
+
     /// Get the last keepalive ACK timestamp
     /// Returns None if no keepalive ACK has been received yet
     pub fn last_keepalive_ack(&self) -> Option<std::time::Instant> {
@@ -2309,6 +2376,7 @@ impl StateMachine {
         self.frame_encryptor = None;
         self.compression_ctx = None;
         self.session_key = None;
+        self.negotiated_features = 0;
         self.pre_auth_rxbuf.clear();
         self.pre_auth_txbuf.clear();
         self.pre_auth_enabled = true; // re-enable for next connection attempt
@@ -2338,7 +2406,8 @@ impl StateMachine {
             preserved_auth_provider: None, // Server doesn't use auth provider
             server_auth_handler: auth_handler,
             global_id: 0, // Server doesn't have a global_id (it assigns them to clients)
-            client_cookie: 0, // Will be received from client
+            negotiated_features: 0,
+            client_cookie: 0,              // Will be received from client
             server_cookie: rand::random(), // Generate random server cookie
             global_seq: 0,
             connect_seq: 0,
@@ -2864,10 +2933,9 @@ impl StateMachine {
                     // If compression is supported, redirect to CompressionAccepting instead
                     if self.current_state.kind() == StateKind::AuthAcceptingSign {
                         // Check if peer supports compression
-                        let peer_features = crate::FeatureSet::from(self.peer_supported_features);
-                        if peer_features.contains(crate::FeatureSet::COMPRESSION) {
+                        if self.compression_negotiation_needed() {
                             tracing::debug!(
-                                "Server: Peer supports compression, transitioning to COMPRESSION_ACCEPTING"
+                                "Server: Compression advertised by both sides, transitioning to COMPRESSION_ACCEPTING"
                             );
                             self.current_state = Box::new(CompressionAccepting::new());
                             let enter_result = self.current_state.enter()?;
@@ -2887,9 +2955,11 @@ impl StateMachine {
                         })?;
 
                     self.global_id = session_state.our_global_id;
+                    self.negotiated_features = session_state.negotiated_features;
                     tracing::debug!(
-                        "Stored global_id {} in StateMachine (from SessionConnecting)",
-                        session_state.our_global_id
+                        "Stored global_id {} and negotiated features 0x{:x} in StateMachine (from SessionConnecting)",
+                        session_state.our_global_id,
+                        session_state.negotiated_features
                     );
 
                     // If addresses are default, fix them up with actual addresses
@@ -3033,6 +3103,27 @@ impl StateMachine {
                         ));
 
                         self.current_state = new_state_with_sig;
+                    } else if new_state.kind() == StateKind::SessionAccepting
+                        && self.current_state.kind() == StateKind::CompressionAccepting
+                    {
+                        let session_accepting = new_state
+                            .as_any()
+                            .downcast_ref::<SessionAccepting>()
+                            .ok_or_else(|| {
+                                Error::Protocol(
+                                    "State machine error: expected SESSION_ACCEPTING state but downcast failed".into()
+                                )
+                            })?;
+
+                        if let Some(algorithm) = session_accepting.compression_algorithm {
+                            tracing::debug!(
+                                "Server: Installing negotiated compression algorithm {:?}",
+                                algorithm
+                            );
+                            self.setup_compression(algorithm);
+                        }
+
+                        self.current_state = new_state;
                     } else {
                         self.current_state = new_state;
                     }
@@ -3055,6 +3146,14 @@ impl StateMachine {
                 Ok(StateResult::Continue)
             }
             StateResult::Ready => {
+                if let Some(session_state) = self
+                    .current_state
+                    .as_any()
+                    .downcast_ref::<SessionConnecting>()
+                {
+                    self.negotiated_features = session_state.negotiated_features;
+                }
+
                 // Transition to Ready state
                 self.current_state = Box::new(Ready);
                 Ok(StateResult::Ready)
@@ -3103,6 +3202,136 @@ mod tests {
         assert!(
             sm.peer_supports_compression(),
             "Should support compression with features=0x2"
+        );
+    }
+
+    #[test]
+    fn test_default_config_does_not_support_compression() {
+        let sm = StateMachine::new_client(crate::ConnectionConfig::default());
+        assert!(
+            !sm.we_support_compression(),
+            "Default msgr2 config should not advertise compression"
+        );
+    }
+
+    #[test]
+    fn test_server_only_enters_compression_accepting_when_we_support_it() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(AuthAcceptingSign::new(0, None, None));
+        sm.set_peer_supported_features(crate::FeatureSet::ALL.bits());
+
+        let result = sm
+            .apply_result(StateResult::Transition(Box::new(SessionAccepting::new())))
+            .expect("server transition should succeed");
+
+        assert!(
+            matches!(result, StateResult::Continue),
+            "server should not emit extra actions when compression is not negotiated"
+        );
+        assert_eq!(
+            sm.current_state_kind(),
+            StateKind::SessionAccepting,
+            "server should skip COMPRESSION_ACCEPTING when compression is disabled locally"
+        );
+    }
+
+    #[test]
+    fn test_server_enters_compression_accepting_when_both_sides_support_it() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(AuthAcceptingSign::new(0, None, None));
+        sm.config.supported_features = crate::FeatureSet::ALL.bits();
+        sm.set_peer_supported_features(crate::FeatureSet::ALL.bits());
+
+        let result = sm
+            .apply_result(StateResult::Transition(Box::new(SessionAccepting::new())))
+            .expect("server transition should succeed");
+
+        assert!(
+            matches!(result, StateResult::Continue),
+            "compression-accepting transition should not emit extra actions"
+        );
+        assert_eq!(
+            sm.current_state_kind(),
+            StateKind::CompressionAccepting,
+            "server should only enter COMPRESSION_ACCEPTING when both sides advertise compression"
+        );
+    }
+
+    #[test]
+    fn test_server_negotiates_requested_compression_method() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(CompressionAccepting::new());
+
+        let request = CompressionRequestFrame::new(
+            true,
+            vec![
+                crate::compression::CompressionAlgorithm::Zstd.into(),
+                crate::compression::CompressionAlgorithm::Snappy.into(),
+            ],
+        );
+        let frame =
+            create_frame_from_trait(&request, Tag::CompressionRequest).expect("request frame");
+
+        let result = sm
+            .handle_frame(frame)
+            .expect("compression negotiation should succeed");
+        let response = match result {
+            StateResult::SendFrame { frame, .. } => frame,
+            other => panic!("expected SendFrame, got {:?}", other),
+        };
+
+        let mut payload = response.segments[0].clone();
+        let done = CompressionDoneFrame {
+            is_compress: bool::decode(&mut payload, 0).expect("decode is_compress"),
+            method: u32::decode(&mut payload, 0).expect("decode method"),
+        };
+        assert!(done.is_compress, "server should enable compression");
+        assert_eq!(
+            done.method,
+            u32::from(crate::compression::CompressionAlgorithm::Zstd),
+            "server should honor the first mutually supported preferred method"
+        );
+        assert_eq!(sm.current_state_kind(), StateKind::SessionAccepting);
+
+        let compression_ctx = sm
+            .compression_ctx()
+            .expect("server should install compression context after negotiating it");
+        assert_eq!(
+            compression_ctx.algorithm(),
+            crate::compression::CompressionAlgorithm::Zstd
+        );
+    }
+
+    #[test]
+    fn test_server_declines_unknown_compression_methods() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(CompressionAccepting::new());
+
+        let request = CompressionRequestFrame::new(true, vec![999]);
+        let frame =
+            create_frame_from_trait(&request, Tag::CompressionRequest).expect("request frame");
+
+        let result = sm
+            .handle_frame(frame)
+            .expect("compression negotiation should succeed");
+        let response = match result {
+            StateResult::SendFrame { frame, .. } => frame,
+            other => panic!("expected SendFrame, got {:?}", other),
+        };
+
+        let mut payload = response.segments[0].clone();
+        let done = CompressionDoneFrame {
+            is_compress: bool::decode(&mut payload, 0).expect("decode is_compress"),
+            method: u32::decode(&mut payload, 0).expect("decode method"),
+        };
+        assert!(
+            !done.is_compress,
+            "server should decline compression when no mutually supported method exists"
+        );
+        assert_eq!(done.method, 0);
+        assert!(
+            sm.compression_ctx().is_none(),
+            "server should not install compression context when negotiation fails"
         );
     }
 

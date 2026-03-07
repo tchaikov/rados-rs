@@ -245,18 +245,17 @@ impl<T: Denc + FixedSize, const N: usize> Denc for [T; N] {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        // This is tricky because we need to initialize an array
-        // We'll use MaybeUninit for safety
-        use std::mem::MaybeUninit;
+        let items = (0..N)
+            .map(|_| T::decode(buf, features))
+            .collect::<Result<Vec<_>, _>>()?;
 
-        let mut array: [MaybeUninit<T>; N] = unsafe { MaybeUninit::uninit().assume_init() };
-
-        for elem in &mut array {
-            *elem = MaybeUninit::new(T::decode(buf, features)?);
+        match items.try_into() {
+            Ok(array) => Ok(array),
+            Err(items) => Err(RadosError::Protocol(format!(
+                "Failed to build fixed-size array: expected {N} elements, got {}",
+                items.len()
+            ))),
         }
-
-        // SAFETY: All elements have been initialized
-        Ok(unsafe { std::mem::transmute_copy::<_, [T; N]>(&array) })
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

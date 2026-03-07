@@ -138,14 +138,10 @@ async fn create_osd_client(
     .await?;
     info!("✓ OSD client created");
 
-    // Subscribe to OSDMap - OSDClient is ready to receive
-    mon_client.subscribe("osdmap", 0, 0).await?;
-
-    // Wait for OSDMap to arrive - use event-driven wait
     osd_client
-        .wait_for_osdmap(std::time::Duration::from_secs(2))
+        .wait_for_latest_osdmap(std::time::Duration::from_secs(2))
         .await?;
-    info!("✓ OSDMap received");
+    info!("✓ Latest OSDMap received");
 
     Ok((osd_client, mon_client))
 }
@@ -324,7 +320,7 @@ async fn test_delete_pool_requires_confirmation() {
     // Wait for osdmap to be updated with the new pool
     info!("Waiting for osdmap update...");
     _mon_client
-        .get_version("osdmap")
+        .get_version(monclient::MonService::OsdMap)
         .await
         .expect("Failed to get osdmap version");
 
@@ -385,7 +381,7 @@ async fn test_list_pools() {
     // Wait for osdmap to be updated with the new pool
     info!("Waiting for osdmap update...");
     _mon_client
-        .get_version("osdmap")
+        .get_version(monclient::MonService::OsdMap)
         .await
         .expect("Failed to get osdmap version");
 
@@ -441,7 +437,7 @@ async fn test_pool_workflow() {
     // Wait for osdmap to be updated with the new pool
     info!("   Waiting for osdmap update...");
     _mon_client
-        .get_version("osdmap")
+        .get_version(monclient::MonService::OsdMap)
         .await
         .expect("Failed to get osdmap version");
 

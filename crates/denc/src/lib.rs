@@ -1,3 +1,18 @@
+//! Ceph DENC encoding and decoding primitives for modern Rust monitor and OSD types.
+//!
+//! This crate provides the core [`Denc`] trait plus supporting types for encoding,
+//! decoding, and version-gating Ceph wire structures. Most users consume the
+//! re-exported traits, derive macros, and common Ceph data types directly from
+//! this crate rather than importing individual modules.
+//!
+//! The main entry points are:
+//! - [`Denc`] for general encode/decode support
+//! - [`VersionedEncode`] for versioned wire formats
+//! - derive macros such as [`Denc`] and [`ZeroCopyDencode`] for concise implementations
+//!
+//! The crate also re-exports common Ceph structures such as monitor maps,
+//! entity addresses, object identifiers, and feature flags.
+
 pub mod constants;
 pub mod denc;
 pub mod encoding_metadata;

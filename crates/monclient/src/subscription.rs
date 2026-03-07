@@ -12,22 +12,62 @@ pub const CEPH_SUBSCRIBE_ONETIME: u8 = 1;
 /// Subscription renewal is scheduled at this fraction of the ack interval
 const SUBSCRIPTION_RENEWAL_RATIO: f64 = 0.5;
 
+/// Monitor-managed subscription and version-query services.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MonService {
+    MonMap,
+    OsdMap,
+    Config,
+    MgrMap,
+    MdsMap,
+}
+
+impl MonService {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::MonMap => "monmap",
+            Self::OsdMap => "osdmap",
+            Self::Config => "config",
+            Self::MgrMap => "mgrmap",
+            Self::MdsMap => "mdsmap",
+        }
+    }
+}
+
+impl std::fmt::Display for MonService {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Subscription renewal mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RenewalMode {
+    /// Modern monitors advertising MON_STATEFUL_SUB keep subscription state without renew acks.
+    StatefulOrUnknown,
+    /// Legacy monitors send subscribe ACKs with a renewal interval.
+    LegacyAcked,
+}
+
 /// Subscription manager
 ///
 /// Tracks which maps we want to subscribe to and manages the subscription lifecycle.
 #[derive(Debug)]
 pub struct MonSub {
     /// Pending subscriptions to send
-    sub_new: HashMap<String, SubscribeItem>,
+    sub_new: HashMap<MonService, SubscribeItem>,
 
     /// Sent subscriptions waiting for ack
-    sub_sent: HashMap<String, SubscribeItem>,
+    sub_sent: HashMap<MonService, SubscribeItem>,
 
     /// When we last sent a renewal
     renew_sent: Option<Instant>,
 
     /// When we should renew subscriptions
     renew_after: Option<Instant>,
+
+    /// Whether renewals are needed for this session.
+    renewal_mode: RenewalMode,
 }
 
 impl MonSub {
@@ -37,6 +77,7 @@ impl MonSub {
             sub_sent: HashMap::new(),
             renew_sent: None,
             renew_after: None,
+            renewal_mode: RenewalMode::StatefulOrUnknown,
         }
     }
 
@@ -47,17 +88,20 @@ impl MonSub {
 
     /// Check if subscriptions need renewal
     pub fn need_renew(&self) -> bool {
-        self.renew_after
-            .is_some_and(|renew_after| Instant::now() > renew_after)
+        self.renewal_mode == RenewalMode::LegacyAcked
+            && self
+                .renew_after
+                .is_some_and(|renew_after| Instant::now() > renew_after)
     }
 
     /// Get the new subscriptions to send
-    pub fn get_subs(&self) -> &HashMap<String, SubscribeItem> {
+    pub fn get_subs(&self) -> &HashMap<MonService, SubscribeItem> {
         &self.sub_new
     }
 
     /// Mark subscriptions as sent
     pub fn renewed(&mut self) {
+        self.renew_after = None;
         if self.renew_sent.is_none() {
             self.renew_sent = Some(Instant::now());
         }
@@ -70,33 +114,34 @@ impl MonSub {
 
     /// Handle subscription ack from monitor
     pub fn acked(&mut self, interval_secs: u32) {
+        self.renewal_mode = RenewalMode::LegacyAcked;
         if let Some(renew_sent) = self.renew_sent {
             // Schedule renewal for half the interval
             let interval = std::time::Duration::from_secs(
                 (interval_secs as f64 * SUBSCRIPTION_RENEWAL_RATIO) as u64,
             );
             self.renew_after = Some(renew_sent + interval);
-            self.renew_sent = None;
         }
+        self.renew_sent = None;
     }
 
     /// Mark that we received a map update
-    pub fn got(&mut self, what: &str, version: u64) {
+    pub fn got(&mut self, what: MonService, version: u64) {
         // Check sub_new first
-        if let Some(item) = self.sub_new.get_mut(what) {
+        if let Some(item) = self.sub_new.get_mut(&what) {
             if item.start <= version {
                 if item.flags & CEPH_SUBSCRIBE_ONETIME != 0 {
-                    self.sub_new.remove(what);
+                    self.sub_new.remove(&what);
                 } else {
                     item.start = version + 1;
                 }
             }
         }
         // Then check sub_sent
-        else if let Some(item) = self.sub_sent.get_mut(what) {
+        else if let Some(item) = self.sub_sent.get_mut(&what) {
             if item.start <= version {
                 if item.flags & CEPH_SUBSCRIBE_ONETIME != 0 {
-                    self.sub_sent.remove(what);
+                    self.sub_sent.remove(&what);
                 } else {
                     item.start = version + 1;
                 }
@@ -106,10 +151,8 @@ impl MonSub {
 
     /// Reload sent subscriptions back to new (for reconnection)
     pub fn reload(&mut self) -> bool {
-        for (what, item) in &self.sub_sent {
-            if !self.sub_new.contains_key(what) {
-                self.sub_new.insert(what.clone(), *item);
-            }
+        for (&what, item) in &self.sub_sent {
+            self.sub_new.entry(what).or_insert(*item);
         }
         self.have_new()
     }
@@ -117,8 +160,7 @@ impl MonSub {
     /// Add a new subscription
     ///
     /// Returns true if this is a new or changed subscription
-    pub fn want(&mut self, what: &str, start: u64, flags: u8) -> bool {
-        let what = what.to_string();
+    pub fn want(&mut self, what: MonService, start: u64, flags: u8) -> bool {
         let new_item = SubscribeItem { start, flags };
 
         // Check if already in sub_new with same params
@@ -141,9 +183,7 @@ impl MonSub {
     /// Increment subscription start version
     ///
     /// Only updates if the new start is greater than current
-    pub fn inc_want(&mut self, what: &str, start: u64, flags: u8) -> bool {
-        let what = what.to_string();
-
+    pub fn inc_want(&mut self, what: MonService, start: u64, flags: u8) -> bool {
         // Check sub_new first
         if let Some(item) = self.sub_new.get_mut(&what) {
             if item.start >= start {
@@ -167,9 +207,9 @@ impl MonSub {
     }
 
     /// Remove a subscription
-    pub fn unwant(&mut self, what: &str) {
-        self.sub_new.remove(what);
-        self.sub_sent.remove(what);
+    pub fn unwant(&mut self, what: MonService) {
+        self.sub_new.remove(&what);
+        self.sub_sent.remove(&what);
     }
 
     /// Clear all subscriptions
@@ -178,6 +218,7 @@ impl MonSub {
         self.sub_sent.clear();
         self.renew_sent = None;
         self.renew_after = None;
+        self.renewal_mode = RenewalMode::StatefulOrUnknown;
     }
 }
 
@@ -208,18 +249,18 @@ mod tests {
         assert!(!sub.have_new());
 
         // Add a subscription
-        assert!(sub.want("osdmap", 0, 0));
+        assert!(sub.want(MonService::OsdMap, 0, 0));
         assert!(sub.have_new());
 
         // Adding same subscription returns false
-        assert!(!sub.want("osdmap", 0, 0));
+        assert!(!sub.want(MonService::OsdMap, 0, 0));
 
         // Mark as sent
         sub.renewed();
         assert!(!sub.have_new());
 
         // Got an update
-        sub.got("osdmap", 5);
+        sub.got(MonService::OsdMap, 5);
 
         // Reload after disconnect
         assert!(sub.reload());
@@ -231,11 +272,11 @@ mod tests {
         let mut sub = MonSub::new();
 
         // Subscribe with ONETIME flag
-        sub.want("osdmap", 0, CEPH_SUBSCRIBE_ONETIME);
+        sub.want(MonService::OsdMap, 0, CEPH_SUBSCRIBE_ONETIME);
         sub.renewed();
 
         // After receiving update, subscription is removed
-        sub.got("osdmap", 1);
+        sub.got(MonService::OsdMap, 1);
         assert!(!sub.reload());
     }
 
@@ -244,13 +285,13 @@ mod tests {
         let mut sub = MonSub::new();
 
         // Initial subscription
-        assert!(sub.inc_want("osdmap", 10, 0));
+        assert!(sub.inc_want(MonService::OsdMap, 10, 0));
 
         // Lower version doesn't update
-        assert!(!sub.inc_want("osdmap", 5, 0));
+        assert!(!sub.inc_want(MonService::OsdMap, 5, 0));
 
         // Higher version updates
-        assert!(sub.inc_want("osdmap", 15, 0));
+        assert!(sub.inc_want(MonService::OsdMap, 15, 0));
     }
 
     #[test]
@@ -258,11 +299,11 @@ mod tests {
         let mut sub = MonSub::new();
 
         // Subscribe to osdmap starting from epoch 0
-        sub.want("osdmap", 0, 0);
+        sub.want(MonService::OsdMap, 0, 0);
         sub.renewed();
 
         // Receive epoch 5
-        sub.got("osdmap", 5);
+        sub.got(MonService::OsdMap, 5);
 
         // After got(), the subscription should be updated to start from epoch 6
         // This is verified by checking that reload brings it back with updated epoch
@@ -270,7 +311,7 @@ mod tests {
 
         // The subscription should now want epoch 6 onwards (5 + 1)
         let subs = sub.get_subs();
-        assert_eq!(subs.get("osdmap").unwrap().start, 6);
+        assert_eq!(subs.get(&MonService::OsdMap).unwrap().start, 6);
     }
 
     #[test]
@@ -281,7 +322,7 @@ mod tests {
         assert!(!sub.need_renew());
 
         // Subscribe and mark as sent
-        sub.want("osdmap", 0, 0);
+        sub.want(MonService::OsdMap, 0, 0);
         sub.renewed();
 
         // Still no renewal needed (no ack received yet)
@@ -301,29 +342,71 @@ mod tests {
     }
 
     #[test]
+    fn test_stateful_subscriptions_do_not_trigger_renewal_from_stale_deadline() {
+        let mut sub = MonSub::new();
+        sub.want(MonService::OsdMap, 0, 0);
+        sub.renewed();
+
+        sub.renew_after = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(
+            !sub.need_renew(),
+            "modern/stateful subscriptions should ignore legacy renewal deadlines until an ack arrives"
+        );
+    }
+
+    #[test]
+    fn test_legacy_ack_enables_renewal_checks() {
+        let mut sub = MonSub::new();
+        sub.want(MonService::OsdMap, 0, 0);
+        sub.renewed();
+        sub.acked(60);
+
+        sub.renew_after = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(
+            sub.need_renew(),
+            "legacy subscribe acks should re-enable renewal checks"
+        );
+    }
+
+    #[test]
+    fn test_clear_resets_legacy_renewal_mode() {
+        let mut sub = MonSub::new();
+        sub.want(MonService::OsdMap, 0, 0);
+        sub.renewed();
+        sub.acked(60);
+        sub.clear();
+
+        sub.renew_after = Some(Instant::now() - std::time::Duration::from_secs(1));
+        assert!(
+            !sub.need_renew(),
+            "clearing subscriptions should drop legacy renewal state"
+        );
+    }
+
+    #[test]
     fn test_got_increments_epoch() {
         let mut sub = MonSub::new();
 
         // Subscribe starting from epoch 10
-        sub.want("osdmap", 10, 0);
+        sub.want(MonService::OsdMap, 10, 0);
         sub.renewed();
 
         // Simulate receiving epochs 10, 11, 12
-        sub.got("osdmap", 10);
+        sub.got(MonService::OsdMap, 10);
         sub.reload();
         let subs = sub.get_subs();
-        assert_eq!(subs.get("osdmap").unwrap().start, 11);
+        assert_eq!(subs.get(&MonService::OsdMap).unwrap().start, 11);
 
         sub.renewed();
-        sub.got("osdmap", 11);
+        sub.got(MonService::OsdMap, 11);
         sub.reload();
         let subs = sub.get_subs();
-        assert_eq!(subs.get("osdmap").unwrap().start, 12);
+        assert_eq!(subs.get(&MonService::OsdMap).unwrap().start, 12);
 
         sub.renewed();
-        sub.got("osdmap", 12);
+        sub.got(MonService::OsdMap, 12);
         sub.reload();
         let subs = sub.get_subs();
-        assert_eq!(subs.get("osdmap").unwrap().start, 13);
+        assert_eq!(subs.get(&MonService::OsdMap).unwrap().start, 13);
     }
 }

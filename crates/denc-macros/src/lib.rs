@@ -1,3 +1,10 @@
+//! Procedural macros for deriving Ceph DENC implementations.
+//!
+//! This crate provides the derive macros re-exported by `denc`, including
+//! `Denc`, `DencMut`, `StructVDenc`, `VersionedDenc`, and `ZeroCopyDencode`.
+//! Most downstream crates should depend on `denc` and use these macros through
+//! its public re-exports instead of importing `denc-macros` directly.
+
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;

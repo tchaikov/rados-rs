@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "concurrent"
 harness = false
+
+[[bench]]
+name = "placement"
+harness = false

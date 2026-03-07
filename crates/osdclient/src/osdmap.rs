@@ -1,9 +1,16 @@
+//! OSD map types, decoding, and placement helpers for OSD-facing cluster state.
+//!
+//! This module models Ceph's `OSDMap` and related pool and OSD metadata types,
+//! including the versioned decode logic needed to ingest monitor-provided maps.
+//! It also provides placement helpers used by the client to map objects and PGs
+//! onto OSD sets, plus serialization helpers that keep `dencoder` JSON output
+//! aligned with ceph-dencoder where practical.
+
 use bytes::{Buf, BufMut, Bytes};
 use crush::CrushMap;
 use denc::{
-    features::CephFeatures, mark_feature_dependent_encoding, mark_simple_encoding,
-    mark_versioned_encoding, Denc, EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError,
-    VersionedEncode,
+    mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding, Denc,
+    EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
 };
 use libc;
 use serde::Serialize;
@@ -436,16 +443,11 @@ impl Serialize for OsdXInfo {
 }
 
 impl VersionedEncode for OsdXInfo {
-    // OsdXInfo encoding is feature-dependent: version 4 if SERVER_OCTOPUS features, else 3
-    const FEATURE_DEPENDENT: bool = true;
+    // Octopus+ peers always use version 4 on encode. Older versions remain decode-compatible.
+    const FEATURE_DEPENDENT: bool = false;
 
-    fn encoding_version(&self, features: u64) -> u8 {
-        // Match C++ logic: version 4 if SERVER_OCTOPUS features, else 3
-        if (features & CephFeatures::MASK_SERVER_OCTOPUS.bits()) != 0 {
-            4
-        } else {
-            3
-        }
+    fn encoding_version(&self, _features: u64) -> u8 {
+        4
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
@@ -456,34 +458,18 @@ impl VersionedEncode for OsdXInfo {
         &self,
         buf: &mut B,
         features: u64,
-        version: u8,
+        _version: u8,
     ) -> Result<(), RadosError> {
-        // Write directly to buf parameter
-
-        // Version 1+ fields
         self.down_stamp.encode(buf, features)?;
 
         // Convert laggy_probability to u32 as in C++
         let lp = (self.laggy_probability * 0xffffffffu32 as f32) as u32;
         buf.put_u32_le(lp);
-
         buf.put_u32_le(self.laggy_interval);
-
-        // Version 2+ fields
-        if version >= 2 {
-            buf.put_u64_le(self.features);
-        }
-
-        // Version 3+ fields
-        if version >= 3 {
-            buf.put_u32_le(self.old_weight);
-        }
-
-        // Version 4+ fields
-        if version >= 4 {
-            self.last_purged_snaps_scrub.encode(buf, features)?;
-            buf.put_u32_le(self.dead_epoch.as_u32());
-        }
+        buf.put_u64_le(self.features);
+        buf.put_u32_le(self.old_weight);
+        self.last_purged_snaps_scrub.encode(buf, features)?;
+        buf.put_u32_le(self.dead_epoch.as_u32());
 
         Ok(())
     }
@@ -528,31 +514,16 @@ impl VersionedEncode for OsdXInfo {
         Ok(xinfo)
     }
 
-    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
-        let mut size = 0;
-
-        // Version 1+ fields
-        size += self.down_stamp.encoded_size(features)?; // UTime
-        size += 4; // laggy_probability (u32)
-        size += 4; // laggy_interval (u32)
-
-        // Version 2+ fields
-        if version >= 2 {
-            size += 8; // features (u64)
-        }
-
-        // Version 3+ fields
-        if version >= 3 {
-            size += 4; // old_weight (u32)
-        }
-
-        // Version 4+ fields
-        if version >= 4 {
-            size += self.last_purged_snaps_scrub.encoded_size(features)?; // UTime
-            size += 4; // dead_epoch (u32)
-        }
-
-        Some(size)
+    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
+        Some(
+            self.down_stamp.encoded_size(features)?
+                + 4
+                + 4
+                + 8
+                + 4
+                + self.last_purged_snaps_scrub.encoded_size(features)?
+                + 4,
+        )
     }
 }
 
@@ -945,46 +916,40 @@ impl PgPool {
     // Version constants from Ceph
     const VERSION_CURRENT: u8 = 32; // Latest
     const COMPAT_VERSION: u8 = 5;
+    const VERSION_OCTOPUS: u8 = 29;
+    const VERSION_OCTOPUS_STRETCH: u8 = 30;
 
     pub fn is_stretch_pool(&self) -> bool {
         // For now, assume no stretch pools (like the default case in Ceph)
         // This would be based on crush rules and other pool configuration
         false
     }
+
+    fn canonical_last_force_op_resend(&self) -> Epoch {
+        if self.last_force_op_resend.as_u32() != 0 {
+            self.last_force_op_resend
+        } else if self.last_force_op_resend_prenautilus.as_u32() != 0 {
+            self.last_force_op_resend_prenautilus
+        } else {
+            self.last_force_op_resend_preluminous
+        }
+    }
 }
 
 impl VersionedEncode for PgPool {
-    // PgPool encoding is feature-dependent: version changes based on
-    // SERVER_TENTACLE, NEW_OSDOP_ENCODING, SERVER_LUMINOUS, SERVER_MIMIC,
-    // SERVER_NAUTILUS features (see encoding_version below)
+    // Octopus+ peers only need the modern 29/30/32 encode variants.
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
         use denc::features::{has_significant_feature, CephFeatures};
 
-        // Implement the same logic as Ceph's pg_pool_t::encode
-        let mut v = Self::VERSION_CURRENT; // Default to latest
-
-        // NOTE: any new encoding dependencies must be reflected by SIGNIFICANT_FEATURES
-        if !has_significant_feature(features, CephFeatures::MASK_SERVER_TENTACLE) {
-            if !has_significant_feature(features, CephFeatures::MASK_NEW_OSDOP_ENCODING) {
-                // this was the first post-hammer thing we added; if it's missing, encode
-                // like hammer.
-                v = 21;
-            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_LUMINOUS) {
-                v = 24;
-            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_MIMIC) {
-                v = 26;
-            } else if !has_significant_feature(features, CephFeatures::MASK_SERVER_NAUTILUS) {
-                v = 27;
-            } else if !self.is_stretch_pool() {
-                v = 29;
-            } else {
-                v = 30;
-            }
+        if has_significant_feature(features, CephFeatures::MASK_SERVER_TENTACLE) {
+            Self::VERSION_CURRENT
+        } else if self.is_stretch_pool() {
+            Self::VERSION_OCTOPUS_STRETCH
+        } else {
+            Self::VERSION_OCTOPUS
         }
-
-        v
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
@@ -997,7 +962,11 @@ impl VersionedEncode for PgPool {
         features: u64,
         version: u8,
     ) -> Result<(), RadosError> {
-        // Write directly to buf parameter
+        debug_assert!(matches!(
+            version,
+            Self::VERSION_OCTOPUS | Self::VERSION_OCTOPUS_STRETCH | Self::VERSION_CURRENT
+        ));
+        let canonical_last_force_op_resend = self.canonical_last_force_op_resend();
 
         // Basic fields (always present in ENCODE_START format)
         buf.put_u8(self.pool_type);
@@ -1053,64 +1022,42 @@ impl VersionedEncode for PgPool {
 
         self.erasure_code_profile.encode(buf, features)?;
 
-        buf.put_u32_le(self.last_force_op_resend_preluminous.as_u32());
+        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
         buf.put_i32_le(self.min_read_recency_for_promote);
         buf.put_u64_le(self.expected_num_objects);
 
-        // Version-dependent fields
-        if version >= 19 {
-            buf.put_u32_le(self.cache_target_dirty_high_ratio_micro);
-        }
-        if version >= 20 {
-            buf.put_i32_le(self.min_write_recency_for_promote);
-        }
-        if version >= 21 {
-            buf.put_u8(if self.use_gmt_hitset { 1 } else { 0 });
-        }
-        if version >= 22 {
-            buf.put_u8(if self.fast_read { 1 } else { 0 });
-        }
-        if version >= 23 {
-            buf.put_i32_le(self.hit_set_grade_decay_rate);
-            buf.put_u32_le(self.hit_set_search_last_n);
-        }
-        if version >= 24 {
-            // Pool opts - encoded with version header
-            buf.put_u8(2); // opts version
-            buf.put_u8(1); // opts compat_version
-            let opts_len = self.opts_data.len() as u32;
-            buf.put_u32_le(opts_len);
-            buf.put_slice(&self.opts_data);
-        }
-        if version >= 25 {
-            buf.put_u32_le(self.last_force_op_resend_prenautilus.as_u32());
-        }
-        if version >= 26 {
-            // Application metadata using generic BTreeMap implementation
-            self.application_metadata.encode(buf, features)?;
-        }
-        if version >= 27 {
-            self.create_time.encode(buf, features)?;
-        }
-        if version >= 28 {
-            buf.put_u32_le(self.pg_num_target);
-            buf.put_u32_le(self.pgp_num_target);
-            buf.put_u32_le(self.pg_num_pending);
-            buf.put_u32_le(0); // pg_num_dec_last_epoch_started (always 0)
-            buf.put_u32_le(0); // pg_num_dec_last_epoch_clean (always 0)
-            buf.put_u32_le(self.last_force_op_resend.as_u32());
-            buf.put_u8(self.pg_autoscale_mode);
-        }
-        if version >= 29 {
-            self.last_pg_merge_meta.encode(buf, features)?;
-        }
-        if version == 30 {
+        buf.put_u32_le(self.cache_target_dirty_high_ratio_micro);
+        buf.put_i32_le(self.min_write_recency_for_promote);
+        buf.put_u8(if self.use_gmt_hitset { 1 } else { 0 });
+        buf.put_u8(if self.fast_read { 1 } else { 0 });
+        buf.put_i32_le(self.hit_set_grade_decay_rate);
+        buf.put_u32_le(self.hit_set_search_last_n);
+
+        // Pool opts - encoded with version header
+        buf.put_u8(2); // opts version
+        buf.put_u8(1); // opts compat_version
+        let opts_len = self.opts_data.len() as u32;
+        buf.put_u32_le(opts_len);
+        buf.put_slice(&self.opts_data);
+
+        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
+        self.application_metadata.encode(buf, features)?;
+        self.create_time.encode(buf, features)?;
+        buf.put_u32_le(self.pg_num_target);
+        buf.put_u32_le(self.pgp_num_target);
+        buf.put_u32_le(self.pg_num_pending);
+        buf.put_u32_le(0); // pg_num_dec_last_epoch_started (always 0)
+        buf.put_u32_le(0); // pg_num_dec_last_epoch_clean (always 0)
+        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
+        buf.put_u8(self.pg_autoscale_mode);
+        self.last_pg_merge_meta.encode(buf, features)?;
+
+        if version == Self::VERSION_OCTOPUS_STRETCH {
             buf.put_u32_le(self.peering_crush_bucket_count);
             buf.put_u32_le(self.peering_crush_bucket_target);
             buf.put_u32_le(self.peering_crush_bucket_barrier);
             buf.put_i32_le(self.peering_crush_mandatory_member);
-        }
-        if version >= 31 {
+        } else if version == Self::VERSION_CURRENT {
             // Encode optional peering_crush_data (only if stretch pool)
             if self.is_stretch_pool() {
                 buf.put_u8(1); // Some
@@ -1121,8 +1068,6 @@ impl VersionedEncode for PgPool {
             } else {
                 buf.put_u8(0); // None
             }
-        }
-        if version >= 32 {
             self.nonprimary_shards.encode(buf, features)?;
         }
 
@@ -1681,145 +1626,11 @@ impl OSDMapIncremental {
         }
     }
 
-    /// Apply this incremental update to an OSDMap
-    pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
-        // Invalidate CRUSH cache on any OSDMap update
-        {
-            let mut cache = base.crush_cache.lock().unwrap();
-            cache.clear();
-        }
-
-        // Update epoch
-        base.epoch = self.epoch;
-        base.modified = self.modified;
-
-        // Update pool max
-        if self.new_pool_max >= 0 {
-            base.pool_max = self.new_pool_max as i32;
-        }
-
-        // Update flags
-        if self.new_flags >= 0 {
-            base.flags = self.new_flags as u32;
-        }
-
-        // Update max_osd
-        if self.new_max_osd >= 0 {
-            base.max_osd = self.new_max_osd;
-            // Resize vectors if needed
-            if base.max_osd as usize > base.osd_state.len() {
-                base.osd_state.resize(base.max_osd as usize, 0);
-                base.osd_weight.resize(base.max_osd as usize, 0);
-            }
-        }
-
-        // Apply pool changes
-        for pool_id in &self.old_pools {
-            base.pools.remove(pool_id);
-            base.pool_name.remove(pool_id);
-        }
-
-        for (pool_id, pool) in &self.new_pools {
-            base.pools.insert(*pool_id, pool.clone());
-        }
-
-        for (pool_id, name) in &self.new_pool_names {
-            base.pool_name.insert(*pool_id, name.clone());
-        }
-
-        // Apply OSD state changes
-        for (osd, addrvec) in &self.new_up_client {
-            let idx = *osd as usize;
-            if idx >= base.osd_addrs_client.len() {
-                base.osd_addrs_client
-                    .resize(idx + 1, EntityAddrvec::default());
-            }
-            base.osd_addrs_client[idx] = addrvec.clone();
-        }
-
-        for (osd, state) in &self.new_state {
-            let idx = *osd as usize;
-            if idx < base.osd_state.len() {
-                base.osd_state[idx] ^= state; // XOR the state
-            }
-        }
-
-        for (osd, weight) in &self.new_weight {
-            let idx = *osd as usize;
-            if idx < base.osd_weight.len() {
-                base.osd_weight[idx] = *weight;
-            }
-        }
-
-        // Apply pg_temp changes
-        for (pgid, osds) in &self.new_pg_temp {
-            if osds.is_empty() {
-                base.pg_temp.remove(pgid);
-            } else {
-                base.pg_temp.insert(*pgid, osds.clone());
-            }
-        }
-
-        // Apply primary_temp changes
-        for (pgid, osd) in &self.new_primary_temp {
-            if *osd == -1 {
-                base.primary_temp.remove(pgid);
-            } else {
-                base.primary_temp.insert(*pgid, *osd);
-            }
-        }
-
-        // Update timestamps
-        if self.new_last_up_change.sec != 0 {
-            base.last_up_change = self.new_last_up_change;
-        }
-
-        if self.new_last_in_change.sec != 0 {
-            base.last_in_change = self.new_last_in_change;
-        }
-
-        Ok(())
-    }
-}
-
-impl VersionedEncode for OSDMapIncremental {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        8 // Current version
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        7 // Minimum compatible version
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        // Not implemented yet
-        Err(RadosError::Protocol(
-            "OSDMapIncremental encoding not implemented".into(),
-        ))
-    }
-
-    fn decode_content<B: Buf>(
-        _buf: &mut B,
-        _features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        // Not used - we override decode_versioned for nested versioning
-        Err(RadosError::Protocol(
-            "Use decode_versioned for OSDMapIncremental".into(),
-        ))
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
-    }
-
-    fn decode_versioned<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+    /// Decodes a versioned incremental OSDMap update from Ceph wire data.
+    ///
+    /// `OSDMapIncremental` is intentionally decode-only for now because the
+    /// encoder has not been implemented yet.
+    pub fn decode_versioned<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         use bytes::Bytes;
 
         // Outer wrapper (version 8, legacy compat 7)
@@ -2131,11 +1942,104 @@ impl VersionedEncode for OSDMapIncremental {
         Ok(inc)
     }
 
-    fn encode_versioned<B: BufMut>(&self, _buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        // Not implemented yet
-        Err(RadosError::Protocol(
-            "OSDMapIncremental encoding not implemented".into(),
-        ))
+    /// Apply this incremental update to an OSDMap
+    pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
+        // Invalidate CRUSH cache on any OSDMap update
+        {
+            let mut cache = base.crush_cache.lock().unwrap();
+            cache.clear();
+        }
+
+        // Update epoch
+        base.epoch = self.epoch;
+        base.modified = self.modified;
+
+        // Update pool max
+        if self.new_pool_max >= 0 {
+            base.pool_max = self.new_pool_max as i32;
+        }
+
+        // Update flags
+        if self.new_flags >= 0 {
+            base.flags = self.new_flags as u32;
+        }
+
+        // Update max_osd
+        if self.new_max_osd >= 0 {
+            base.max_osd = self.new_max_osd;
+            // Resize vectors if needed
+            if base.max_osd as usize > base.osd_state.len() {
+                base.osd_state.resize(base.max_osd as usize, 0);
+                base.osd_weight.resize(base.max_osd as usize, 0);
+            }
+        }
+
+        // Apply pool changes
+        for pool_id in &self.old_pools {
+            base.pools.remove(pool_id);
+            base.pool_name.remove(pool_id);
+        }
+
+        for (pool_id, pool) in &self.new_pools {
+            base.pools.insert(*pool_id, pool.clone());
+        }
+
+        for (pool_id, name) in &self.new_pool_names {
+            base.pool_name.insert(*pool_id, name.clone());
+        }
+
+        // Apply OSD state changes
+        for (osd, addrvec) in &self.new_up_client {
+            let idx = *osd as usize;
+            if idx >= base.osd_addrs_client.len() {
+                base.osd_addrs_client
+                    .resize(idx + 1, EntityAddrvec::default());
+            }
+            base.osd_addrs_client[idx] = addrvec.clone();
+        }
+
+        for (osd, state) in &self.new_state {
+            let idx = *osd as usize;
+            if idx < base.osd_state.len() {
+                base.osd_state[idx] ^= state; // XOR the state
+            }
+        }
+
+        for (osd, weight) in &self.new_weight {
+            let idx = *osd as usize;
+            if idx < base.osd_weight.len() {
+                base.osd_weight[idx] = *weight;
+            }
+        }
+
+        // Apply pg_temp changes
+        for (pgid, osds) in &self.new_pg_temp {
+            if osds.is_empty() {
+                base.pg_temp.remove(pgid);
+            } else {
+                base.pg_temp.insert(*pgid, osds.clone());
+            }
+        }
+
+        // Apply primary_temp changes
+        for (pgid, osd) in &self.new_primary_temp {
+            if *osd == -1 {
+                base.primary_temp.remove(pgid);
+            } else {
+                base.primary_temp.insert(*pgid, *osd);
+            }
+        }
+
+        // Update timestamps
+        if self.new_last_up_change.sec != 0 {
+            base.last_up_change = self.new_last_up_change;
+        }
+
+        if self.new_last_in_change.sec != 0 {
+            base.last_in_change = self.new_last_in_change;
+        }
+
+        Ok(())
     }
 }
 
@@ -2873,14 +2777,16 @@ mark_versioned_encoding!(ExplicitObjectHitSetParams);
 mark_versioned_encoding!(BloomHitSetParams);
 mark_versioned_encoding!(HitSetParams);
 
+// Level 1/2: Versioned but not feature-dependent under the Octopus+ encode contract
+mark_versioned_encoding!(OsdXInfo);
 // Level 2/3: Feature-dependent types (encoding changes based on features)
-mark_feature_dependent_encoding!(OsdXInfo);
 mark_feature_dependent_encoding!(PgPool);
 mark_feature_dependent_encoding!(OSDMap);
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     fn make_osdmap_with_states(states: Vec<u32>) -> OSDMap {
         let max_osd = states.len() as i32;
@@ -2965,5 +2871,29 @@ mod tests {
             addrs: vec![EntityAddr::default()],
         }];
         assert!(map.get_osd_addr(0).is_some());
+    }
+
+    #[test]
+    fn test_osdmap_incremental_decode_versioned_is_inherent_decode_only_api() {
+        let mut bytes = Bytes::new();
+        let err = OSDMapIncremental::decode_versioned(&mut bytes, 0)
+            .expect_err("empty input should fail through inherent decode-only API");
+
+        assert!(
+            matches!(err, RadosError::Protocol(ref message) if message == "Insufficient bytes for version header"),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_osdmap_incremental_decode_versioned_rejects_legacy_versions() {
+        let mut bytes = Bytes::from_static(&[6, 6, 0, 0, 0, 0]);
+        let err = OSDMapIncremental::decode_versioned(&mut bytes, 0)
+            .expect_err("legacy incremental encoding should be rejected");
+
+        assert!(
+            matches!(err, RadosError::Protocol(ref message) if message == "Legacy incremental encoding (v<7) not supported"),
+            "unexpected error: {err:?}"
+        );
     }
 }
