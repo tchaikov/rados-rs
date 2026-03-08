@@ -112,17 +112,12 @@ impl MonConnection {
         };
 
         // Connect using msgr2 (banner exchange only)
-        let mut connection = Msgr2Connection::connect(params.addr, config)
-            .await
-            .map_err(MonClientError::MessageError)?;
+        let mut connection = Msgr2Connection::connect(params.addr, config).await?;
 
         tracing::debug!("Banner exchange complete, establishing session...");
 
         // Complete the full handshake (HELLO, AUTH, SESSION)
-        connection
-            .establish_session()
-            .await
-            .map_err(MonClientError::MessageError)?;
+        connection.establish_session().await?;
 
         tracing::info!("Session established with monitor rank {}", params.rank);
 
@@ -183,34 +178,19 @@ impl MonConnection {
                     let osdmap_tx = osdmap_tx_for_task.clone();
                     let mon_msg_tx = mon_msg_tx_for_task.clone();
                     async move {
-                        let msg_type = msg.msg_type();
-                        match msg_type {
-                            CEPH_MSG_OSD_MAP => {
-                                // Send to OSDClient if configured
-                                if let Some(ref tx) = osdmap_tx {
-                                    if let Err(e) = tx.send(msg.clone()).await {
-                                        tracing::error!(
-                                            "Failed to send MOSDMap to OSDClient: {:?}",
-                                            e
-                                        );
-                                    }
-                                }
-                                // Also send to MonClient for caching
-                                if let Err(e) = mon_msg_tx.send(msg).await {
-                                    tracing::error!("Failed to send MOSDMap to MonClient: {}", e);
-                                    return false;
+                        // Forward OSDMap messages to OSDClient if configured
+                        if msg.msg_type() == CEPH_MSG_OSD_MAP {
+                            if let Some(ref tx) = osdmap_tx {
+                                if let Err(e) = tx.send(msg.clone()).await {
+                                    tracing::error!("Failed to send MOSDMap to OSDClient: {:?}", e);
                                 }
                             }
-                            _ => {
-                                if let Err(e) = mon_msg_tx.send(msg).await {
-                                    tracing::error!(
-                                        "Failed to send message 0x{:04x} to MonClient: {}",
-                                        msg_type,
-                                        e
-                                    );
-                                    return false;
-                                }
-                            }
+                        }
+
+                        // All messages (including OSDMap) are sent to MonClient
+                        if let Err(e) = mon_msg_tx.send(msg).await {
+                            tracing::error!("Failed to send message to MonClient: {}", e);
+                            return false;
                         }
                         true
                     }

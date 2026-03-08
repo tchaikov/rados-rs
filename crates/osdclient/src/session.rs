@@ -295,7 +295,7 @@ impl OSDSession {
             OSDClientError::Connection(format!("Failed to establish session: {}", e))
         })?;
 
-        info!("✓ Session established with OSD {}", self.osd_id);
+        info!("Session established with OSD {}", self.osd_id);
 
         // Store peer address and transition to Connected state
         {
@@ -343,7 +343,7 @@ impl OSDSession {
         // Store the handle for graceful shutdown
         *self.io_task_handle.lock().await = Some(handle);
 
-        info!("✓ I/O task started for OSD {}", self.osd_id);
+        info!("I/O task started for OSD {}", self.osd_id);
 
         Ok(())
     }

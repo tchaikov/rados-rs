@@ -112,9 +112,7 @@ impl AuthClient {
                     .auth_provider
                     .as_mut()
                     .ok_or_else(|| Error::protocol_error("No auth provider for CephX"))?;
-                let payload = provider
-                    .build_auth_payload(0, self.service_id)
-                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                let payload = provider.build_auth_payload(0, self.service_id)?;
                 (AuthMethod::Cephx.into(), payload)
             }
             _ => {
@@ -227,9 +225,7 @@ impl Phase for AuthClient {
                     .first()
                     .ok_or_else(|| Error::protocol_error("AUTH_REPLY_MORE missing payload"))?;
                 provider.handle_auth_response(payload.clone(), 0, 0)?;
-                let response_payload = provider
-                    .build_auth_payload(0, self.service_id)
-                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                let response_payload = provider.build_auth_payload(0, self.service_id)?;
                 let more = AuthRequestMoreFrame::new(response_payload);
                 let resp = create_frame_from_trait(&more, Tag::AuthRequestMore)?;
                 Ok(Step::Next {
@@ -338,9 +334,8 @@ impl Phase for AuthServer {
             self.connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
 
             if let Some(ref mut handler) = self.auth_handler {
-                let (entity_name, global_id, challenge) = handler
-                    .handle_initial_request(&auth_request.auth_payload)
-                    .map_err(|e| Error::protocol_error(&format!("Auth failed: {e}")))?;
+                let (entity_name, global_id, challenge) =
+                    handler.handle_initial_request(&auth_request.auth_payload)?;
                 tracing::debug!("Server auth phase 0: entity={entity_name}, gid={global_id}");
                 self.entity_name = Some(entity_name);
                 self.global_id = Some(global_id);
@@ -383,20 +378,17 @@ impl Phase for AuthServer {
             .global_id
             .ok_or_else(|| Error::protocol_error("Missing global_id in phase 1"))?;
 
-        let (session_key, connection_secret, auth_payload) = handler
-            .handle_authenticate(entity_name, global_id, &auth_request.auth_payload)
-            .map_err(|e| Error::protocol_error(&format!("Auth failed: {e}")))?;
+        let (session_key, connection_secret, auth_payload) =
+            handler.handle_authenticate(entity_name, global_id, &auth_request.auth_payload)?;
         tracing::info!("Server: {entity_name} authenticated successfully");
 
-        let done_payload = handler
-            .build_auth_done_response(
-                global_id,
-                self.connection_mode as u8,
-                &session_key,
-                &connection_secret,
-                auth_payload,
-            )
-            .map_err(|e| Error::protocol_error(&format!("Failed to build AUTH_DONE: {e}")))?;
+        let done_payload = handler.build_auth_done_response(
+            global_id,
+            self.connection_mode as u8,
+            &session_key,
+            &connection_secret,
+            auth_payload,
+        )?;
 
         let done = AuthDoneFrame::new(global_id, self.connection_mode, done_payload);
         let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;

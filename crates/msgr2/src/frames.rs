@@ -931,14 +931,10 @@ impl MessageFrame {
     }
 
     fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
+        let mut buf = BytesMut::new();
+        <MsgHeader as Denc>::encode(&self.header, &mut buf, 0)?;
         Ok(vec![
-            {
-                let mut buf = BytesMut::new();
-                self.header
-                    .encode(&mut buf)
-                    .map_err(|e| RadosError::Protocol(e.to_string()))?;
-                buf.freeze()
-            },
+            buf.freeze(),
             self.front.clone(),
             self.middle.clone(),
             self.data.clone(),
@@ -955,8 +951,7 @@ impl MessageFrame {
             segments.push(Bytes::new());
         }
 
-        let header = MsgHeader::decode(&mut segments[0])
-            .map_err(|e| RadosError::Denc(e.to_string()))?;
+        let header = <MsgHeader as Denc>::decode(&mut segments[0], 0)?;
 
         Ok(Self {
             header,

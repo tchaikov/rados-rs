@@ -171,7 +171,7 @@ impl CephMessage {
     pub fn from_payload<T: CephMessagePayload>(
         payload: &T,
         features: u64,
-        _crc_flags: CrcFlags,
+        crc_flags: CrcFlags,
     ) -> Result<Self> {
         // Encode payload sections
         let front = payload.encode_payload(features)?;
@@ -192,7 +192,7 @@ impl CephMessage {
             ..Default::default()
         };
 
-        if _crc_flags.contains(CrcFlags::DATA) {
+        if crc_flags.contains(CrcFlags::DATA) {
             footer.front_crc = denc::zerocopy::little_endian::U32::new(crc32c(&front));
             footer.middle_crc = denc::zerocopy::little_endian::U32::new(crc32c(&middle));
             footer.data_crc = denc::zerocopy::little_endian::U32::new(crc32c(&data));
@@ -200,7 +200,7 @@ impl CephMessage {
             footer.flags |= MsgFooterFlags::NOCRC.bits();
         }
 
-        if _crc_flags.contains(CrcFlags::HEADER) {
+        if crc_flags.contains(CrcFlags::HEADER) {
             header.crc = denc::zerocopy::little_endian::U32::new(header.calc_crc());
         }
 
@@ -269,35 +269,19 @@ impl CephMessage {
         src.copy_to_slice(&mut data);
 
         // Verify CRCs if not disabled
-        let flags = footer.flags;
-        if flags & MsgFooterFlags::NOCRC.bits() == 0 {
-            let front_crc_expected = footer.front_crc.get();
-            let middle_crc_expected = footer.middle_crc.get();
-            let data_crc_expected = footer.data_crc.get();
-
-            let front_crc = crc32c(&front);
-            if front_crc != front_crc_expected {
-                return Err(Error::Deserialization(format!(
-                    "Front CRC mismatch: got {}, expected {}",
-                    front_crc, front_crc_expected
-                )));
+        if footer.flags & MsgFooterFlags::NOCRC.bits() == 0 {
+            fn verify_crc(data: &[u8], expected: u32, section: &str) -> Result<()> {
+                let actual = crc32c(data);
+                if actual != expected {
+                    return Err(Error::Deserialization(format!(
+                        "{section} CRC mismatch: got {actual}, expected {expected}"
+                    )));
+                }
+                Ok(())
             }
-
-            let middle_crc = crc32c(&middle);
-            if middle_crc != middle_crc_expected {
-                return Err(Error::Deserialization(format!(
-                    "Middle CRC mismatch: got {}, expected {}",
-                    middle_crc, middle_crc_expected
-                )));
-            }
-
-            let data_crc = crc32c(&data);
-            if data_crc != data_crc_expected {
-                return Err(Error::Deserialization(format!(
-                    "Data CRC mismatch: got {}, expected {}",
-                    data_crc, data_crc_expected
-                )));
-            }
+            verify_crc(&front, footer.front_crc.get(), "Front")?;
+            verify_crc(&middle, footer.middle_crc.get(), "Middle")?;
+            verify_crc(&data, footer.data_crc.get(), "Data")?;
         }
 
         Ok(Self {

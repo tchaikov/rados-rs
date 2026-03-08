@@ -636,30 +636,24 @@ impl MonClient {
         };
 
         if n == 1 {
-            // Simple case: try one monitor
-            self.connect_to_mon(selected_ranks[0]).await
-        } else {
-            // Parallel case: try multiple monitors, first one to succeed wins
-            use futures::future::select_ok;
-
-            let futures: Vec<_> = selected_ranks
-                .iter()
-                .take(n)
-                .map(|&rank| {
-                    let client = self.clone();
-                    Box::pin(async move { client.connect_to_mon(rank).await })
-                })
-                .collect();
-
-            // Wait for the first successful connection
-            match select_ok(futures).await {
-                Ok((_, _)) => {
-                    info!("Successfully connected to a monitor");
-                    Ok(())
-                }
-                Err(e) => Err(e),
-            }
+            return self.connect_to_mon(selected_ranks[0]).await;
         }
+
+        // Parallel case: try multiple monitors, first one to succeed wins
+        use futures::future::select_ok;
+
+        let futures: Vec<_> = selected_ranks
+            .iter()
+            .take(n)
+            .map(|&rank| {
+                let client = self.clone();
+                Box::pin(async move { client.connect_to_mon(rank).await })
+            })
+            .collect();
+
+        select_ok(futures).await.map(|_| {
+            info!("Successfully connected to a monitor");
+        })
     }
 
     /// Update hunt backoff state after a hunt attempt
@@ -739,7 +733,7 @@ impl MonClient {
         let auth_provider = auth_config.clone_provider();
 
         // Create keepalive policy from config
-        let keepalive_policy = if runtime_config.mon_client_ping_interval.as_secs() > 0 {
+        let keepalive_policy = if runtime_config.mon_client_ping_interval > Duration::ZERO {
             KeepalivePolicy::new(
                 runtime_config.mon_client_ping_interval,
                 runtime_config.mon_client_ping_timeout,
@@ -769,7 +763,7 @@ impl MonClient {
         debug!("Retrieved global_id {} from MonConnection", global_id);
 
         // Store as active connection (but check if we won the race)
-        let (should_close_connection, mon_con_to_close) = {
+        let won_race = {
             let mut conn_state = self.connection_state.write().await;
 
             // If we're no longer hunting, another connection won the race
@@ -778,16 +772,12 @@ impl MonClient {
                     "Connection to mon.{} succeeded but another monitor already won the hunt",
                     rank
                 );
-                (true, Some(mon_con))
+                false
             } else {
                 // We won the race - set this as the active connection
-                conn_state.active_con = Some(mon_con);
+                conn_state.active_con = Some(Arc::clone(&mon_con));
                 conn_state.hunting = false;
-
-                // Clear any pending connections (from parallel hunt)
                 conn_state.pending_cons.clear();
-
-                // Mark that we've had a successful connection
                 conn_state.had_a_connection = true;
 
                 // Un-backoff: reduce the backoff multiplier on successful connection
@@ -803,15 +793,12 @@ impl MonClient {
                     );
                 }
 
-                (false, None)
+                true
             }
         };
 
-        if should_close_connection {
-            // Close this connection since we don't need it
-            if let Some(con) = mon_con_to_close {
-                con.close().await?;
-            }
+        if !won_race {
+            mon_con.close().await?;
             return Ok(());
         }
 
@@ -1027,17 +1014,18 @@ impl MonClient {
                 loop {
                     // Adaptive tick interval: hunt faster when hunting, ping when connected.
                     // Matches C++ MonClient::schedule_tick() adaptive logic.
-                    let interval = if let Some(explicit) = explicit_tick_interval {
-                        explicit
-                    } else {
-                        let conn_state = connection_state.read().await;
-                        let runtime_cfg = runtime_config.read().await;
-                        if conn_state.hunting {
-                            runtime_cfg
-                                .mon_client_hunt_interval
-                                .mul_f64(conn_state.reopen_interval_multiplier)
-                        } else {
-                            runtime_cfg.mon_client_ping_interval
+                    let interval = match explicit_tick_interval {
+                        Some(explicit) => explicit,
+                        None => {
+                            let conn_state = connection_state.read().await;
+                            let runtime_cfg = runtime_config.read().await;
+                            if conn_state.hunting {
+                                runtime_cfg
+                                    .mon_client_hunt_interval
+                                    .mul_f64(conn_state.reopen_interval_multiplier)
+                            } else {
+                                runtime_cfg.mon_client_ping_interval
+                            }
                         }
                     };
 
@@ -1122,106 +1110,98 @@ impl MonClient {
 
         // Check if auth tickets need renewal
         // This matches the official MonClient::_check_auth_tickets() behavior
-        if let Some(auth_provider_arc) = active_con.get_auth_provider() {
-            // Lock the auth provider to get the handler reference
+        if let Err(e) = self.check_auth_tickets(&active_con).await {
+            warn!("Auth ticket renewal check failed: {:?}", e);
+        }
+
+        trace!("Tick completed");
+        Ok(())
+    }
+
+    /// Check if auth tickets need renewal and send renewal requests if so.
+    ///
+    /// This matches the official MonClient::_check_auth_tickets() behavior.
+    async fn check_auth_tickets(&self, active_con: &MonConnection) -> Result<()> {
+        let auth_provider_arc = match active_con.get_auth_provider() {
+            Some(p) => p,
+            None => return Ok(()),
+        };
+
+        // Get the handler reference, releasing the tokio mutex early
+        let handler_arc = {
             let auth_provider = auth_provider_arc.lock().await;
-            let handler_arc = std::sync::Arc::clone(auth_provider.handler());
-            drop(auth_provider); // Release the tokio mutex early
+            std::sync::Arc::clone(auth_provider.handler())
+        };
 
-            // Check if tickets need renewal and collect needed keys
-            let renewal_info = {
-                // Lock the handler to check if tickets need renewal
-                let handler = handler_arc
-                    .lock()
-                    .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
+        // Check if tickets need renewal and collect needed keys
+        let renewal_info = {
+            let handler = handler_arc
+                .lock()
+                .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
 
-                if let Some(session) = handler.get_session() {
-                    // Check each ticket handler to see if any need renewal
-                    let mut needs_renewal = false;
+            match handler.get_session() {
+                Some(session) => {
                     let mut needed_keys = auth::EntityType::empty();
-
                     for (service_type, ticket_handler) in &session.ticket_handlers {
                         if ticket_handler.need_key() {
                             debug!(
                                 "Service ticket for {:?} needs renewal (renew_after reached)",
                                 *service_type
                             );
-                            needs_renewal = true;
                             needed_keys |= *service_type;
                         }
                     }
-
-                    if needs_renewal {
-                        Some((session.global_id, needed_keys))
-                    } else {
+                    if needed_keys.is_empty() {
                         None
-                    }
-                } else {
-                    None
-                }
-                // handler guard is dropped here
-            };
-
-            // If renewal is needed, build and send the request
-            if let Some((global_id, needed_keys)) = renewal_info {
-                debug!(
-                    "Building ticket renewal request for services: {:?}",
-                    needed_keys
-                );
-
-                // Lock the handler again (mutably) to build the ticket renewal request
-                let auth_payload = {
-                    let mut handler_mut = handler_arc.lock().map_err(|e| {
-                        MonClientError::Other(format!("Failed to lock handler: {}", e))
-                    })?;
-
-                    handler_mut.build_ticket_renewal_request(global_id, needed_keys)
-                    // handler_mut guard is dropped here
-                };
-
-                match auth_payload {
-                    Ok(auth_payload) => {
-                        debug!("Built ticket renewal request: {} bytes", auth_payload.len());
-
-                        // Create MAuth message with CephX protocol
-                        let mauth = crate::messages::MAuth::new(
-                            auth::protocol::CEPH_AUTH_CEPHX,
-                            auth_payload,
-                        );
-
-                        // Convert to CephMessage and then to Message
-                        let ceph_msg = msgr2::ceph_message::CephMessage::from_payload(
-                            &mauth,
-                            0, // features
-                            msgr2::ceph_message::CrcFlags::ALL,
-                        )
-                        .map_err(|e| {
-                            MonClientError::Other(format!(
-                                "Failed to create MAuth message: {:?}",
-                                e
-                            ))
-                        })?;
-
-                        let msg = msgr2::message::Message::from_ceph_message(ceph_msg);
-
-                        // Send the MAuth message to the monitor
-                        if let Err(e) = active_con.send_message(msg).await {
-                            warn!("Failed to send ticket renewal request: {:?}", e);
-                        } else {
-                            info!(
-                                "Sent ticket renewal request for services: 0x{:x}",
-                                needed_keys
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        warn!("Failed to build ticket renewal request: {:?}", e);
+                    } else {
+                        Some((session.global_id, needed_keys))
                     }
                 }
+                None => None,
             }
+        };
+
+        let (global_id, needed_keys) = match renewal_info {
+            Some(info) => info,
+            None => return Ok(()),
+        };
+
+        debug!(
+            "Building ticket renewal request for services: {:?}",
+            needed_keys
+        );
+
+        // Lock the handler again (mutably) to build the ticket renewal request
+        let auth_payload = {
+            let mut handler_mut = handler_arc
+                .lock()
+                .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
+            handler_mut.build_ticket_renewal_request(global_id, needed_keys)
+        };
+
+        let auth_payload = match auth_payload {
+            Ok(payload) => payload,
+            Err(e) => {
+                warn!("Failed to build ticket renewal request: {:?}", e);
+                return Ok(());
+            }
+        };
+
+        debug!("Built ticket renewal request: {} bytes", auth_payload.len());
+
+        let mauth = crate::messages::MAuth::new(auth::protocol::CEPH_AUTH_CEPHX, auth_payload);
+        let ceph_msg = CephMessage::from_payload(&mauth, 0, CrcFlags::ALL)?;
+        let msg = msgr2::message::Message::from_ceph_message(ceph_msg);
+
+        if let Err(e) = active_con.send_message(msg).await {
+            warn!("Failed to send ticket renewal request: {:?}", e);
+        } else {
+            info!(
+                "Sent ticket renewal request for services: 0x{:x}",
+                needed_keys
+            );
         }
 
-        trace!("Tick completed");
         Ok(())
     }
 
@@ -1273,17 +1253,11 @@ impl MonClient {
                 self.handle_version_reply(msg).await?;
             }
             msgr2::message::CEPH_MSG_MON_COMMAND_ACK => {
-                debug!(
-                    "Received CEPH_MSG_MON_COMMAND_ACK (0x{:04x})",
-                    msgr2::message::CEPH_MSG_MON_COMMAND_ACK
-                );
+                debug!("Received CEPH_MSG_MON_COMMAND_ACK");
                 self.handle_command_ack(msg).await?;
             }
             msgr2::message::CEPH_MSG_POOLOP_REPLY => {
-                debug!(
-                    "Received CEPH_MSG_POOLOP_REPLY (0x{:04x})",
-                    msgr2::message::CEPH_MSG_POOLOP_REPLY
-                );
+                debug!("Received CEPH_MSG_POOLOP_REPLY");
                 self.handle_poolop_reply(msg).await?;
             }
             msgr2::message::CEPH_MSG_CONFIG => {
@@ -1321,17 +1295,17 @@ impl MonClient {
 
         let epoch = monmap.epoch;
 
-        // Update monmap state
-        {
-            let mut monmap_state = self.monmap_state.write().await;
-            monmap_state.monmap = monmap.clone();
-            monmap_state.want_monmap = false;
-        }
-
         // Mark subscription as received
         {
             let mut sub_state = self.subscription_state.write().await;
-            sub_state.got(MonService::MonMap, monmap.epoch as u64);
+            sub_state.got(MonService::MonMap, epoch as u64);
+        }
+
+        // Update monmap state (moves monmap, so must be after epoch/subscription extraction)
+        {
+            let mut monmap_state = self.monmap_state.write().await;
+            monmap_state.monmap = monmap;
+            monmap_state.want_monmap = false;
         }
 
         // Broadcast MonMap update event
@@ -1378,14 +1352,13 @@ impl MonClient {
     /// Handle OSDMap message
     async fn handle_osdmap(&self, msg: msgr2::message::Message) -> Result<()> {
         let osdmap: MOSDMap = decode_message(&msg)?;
-
         let epoch = osdmap.get_last();
         debug!("Received OSDMap: epoch={}", epoch);
 
         // Cache the latest OSDMap
         {
             let mut latest_osdmap = self.latest_osdmap.write().await;
-            *latest_osdmap = Some(osdmap.clone());
+            *latest_osdmap = Some(osdmap);
         }
 
         // Mark subscription as received
@@ -1562,6 +1535,19 @@ impl MonClient {
         self.send_and_wait(&active_con, &msg, tid, rx).await
     }
 
+    /// Send a pool operation and return an error if the reply indicates failure.
+    async fn send_poolop_checked(&self, msg: MPoolOp, operation: &str) -> Result<()> {
+        let result = self.send_poolop(msg).await?;
+        if result.is_success() {
+            Ok(())
+        } else {
+            Err(MonClientError::Other(format!(
+                "{} failed with code {}",
+                operation, result.reply_code
+            )))
+        }
+    }
+
     /// Create a pool-level snapshot.
     ///
     /// # Arguments
@@ -1573,15 +1559,7 @@ impl MonClient {
     pub async fn snap_create(&self, pool_id: u32, name: &str) -> Result<()> {
         let fsid = self.get_fsid().await;
         let msg = MPoolOp::create_snap(fsid.bytes, pool_id, name.to_string(), 0);
-        let result = self.send_poolop(msg).await?;
-        if result.is_success() {
-            Ok(())
-        } else {
-            Err(MonClientError::Other(format!(
-                "snap_create failed with code {}",
-                result.reply_code
-            )))
-        }
+        self.send_poolop_checked(msg, "snap_create").await
     }
 
     /// Remove a pool-level snapshot by name.
@@ -1593,15 +1571,7 @@ impl MonClient {
         let fsid = self.get_fsid().await;
         // snap_id = 0 here; the monitor resolves it from the name
         let msg = MPoolOp::delete_snap(fsid.bytes, pool_id, 0, name.to_string(), 0);
-        let result = self.send_poolop(msg).await?;
-        if result.is_success() {
-            Ok(())
-        } else {
-            Err(MonClientError::Other(format!(
-                "snap_remove failed with code {}",
-                result.reply_code
-            )))
-        }
+        self.send_poolop_checked(msg, "snap_remove").await
     }
 
     /// Check if connected to a monitor

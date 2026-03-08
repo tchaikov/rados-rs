@@ -29,6 +29,19 @@ struct BackoffKey {
     begin: denc::HObject,
 }
 
+/// Create a minimal HObject suitable for use as the lower bound in BTreeMap range queries.
+fn min_hobject() -> denc::HObject {
+    denc::HObject {
+        key: String::new(),
+        oid: String::new(),
+        snapid: 0,
+        hash: 0,
+        max: false,
+        nspace: String::new(),
+        pool: 0,
+    }
+}
+
 /// A single backoff entry tracking a blocked object range
 #[derive(Debug, Clone)]
 pub struct BackoffEntry {
@@ -124,15 +137,7 @@ impl BackoffTracker {
         // Create range bounds for this PG
         let start_key = BackoffKey {
             pgid: *pgid,
-            begin: denc::HObject {
-                key: String::new(),
-                oid: String::new(),
-                snapid: 0,
-                hash: 0,
-                max: false,
-                nspace: String::new(),
-                pool: 0,
-            },
+            begin: min_hobject(),
         };
 
         let end_key = BackoffKey {
@@ -199,28 +204,12 @@ impl BackoffTracker {
         // Create range bounds for this PG
         let start_key = BackoffKey {
             pgid: *pgid,
-            begin: denc::HObject {
-                key: String::new(),
-                oid: String::new(),
-                snapid: 0,
-                hash: 0,
-                max: false,
-                nspace: String::new(),
-                pool: 0,
-            },
+            begin: min_hobject(),
         };
 
         let end_key = BackoffKey {
             pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
-            begin: denc::HObject {
-                key: String::new(),
-                oid: String::new(),
-                snapid: 0,
-                hash: 0,
-                max: false,
-                nspace: String::new(),
-                pool: 0,
-            },
+            begin: min_hobject(),
         };
 
         self.entries
@@ -242,28 +231,12 @@ impl BackoffTracker {
         // Create range bounds for this PG
         let start_key = BackoffKey {
             pgid: *pgid,
-            begin: denc::HObject {
-                key: String::new(),
-                oid: String::new(),
-                snapid: 0,
-                hash: 0,
-                max: false,
-                nspace: String::new(),
-                pool: 0,
-            },
+            begin: min_hobject(),
         };
 
         let end_key = BackoffKey {
             pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
-            begin: denc::HObject {
-                key: String::new(),
-                oid: String::new(),
-                snapid: 0,
-                hash: 0,
-                max: false,
-                nspace: String::new(),
-                pool: 0,
-            },
+            begin: min_hobject(),
         };
 
         self.entries

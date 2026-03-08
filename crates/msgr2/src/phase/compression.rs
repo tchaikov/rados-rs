@@ -111,16 +111,8 @@ impl Phase for CompressionServer {
                 }
                 let mut p = frame.segments[0].clone();
                 let request = CompressionRequestFrame {
-                    is_compress: bool::decode(&mut p, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode COMPRESSION_REQUEST is_compress: {e:?}"
-                        ))
-                    })?,
-                    preferred_methods: Vec::<u32>::decode(&mut p, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode COMPRESSION_REQUEST preferred_methods: {e:?}"
-                        ))
-                    })?,
+                    is_compress: bool::decode(&mut p, 0)?,
+                    preferred_methods: Vec::<u32>::decode(&mut p, 0)?,
                 };
 
                 let algorithm = Self::select_algorithm(&request);

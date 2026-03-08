@@ -401,12 +401,8 @@ impl State for HelloConnecting {
 
                 // Deserialize HELLO frame from segment data
                 let mut payload = frame.segments[0].clone();
-                let entity_type = u8::decode(&mut payload, 0).map_err(|e| {
-                    Error::protocol_error(&format!("Failed to decode entity_type: {:?}", e))
-                })?;
-                let _peer_addr = denc::EntityAddr::decode(&mut payload, 0).map_err(|e| {
-                    Error::protocol_error(&format!("Failed to decode peer_addr: {:?}", e))
-                })?;
+                let entity_type = u8::decode(&mut payload, 0)?;
+                let _peer_addr = denc::EntityAddr::decode(&mut payload, 0)?;
 
                 tracing::debug!("Received HELLO from entity_type={}", entity_type);
 
@@ -874,9 +870,7 @@ impl State for AuthConnecting {
                     .auth_provider
                     .as_mut()
                     .ok_or_else(|| Error::protocol_error("No auth provider available"))?;
-                let payload = provider
-                    .build_auth_payload(0, self.service_id) // Initial request uses global_id=0
-                    .map_err(|e| Error::protocol_error(&e.to_string()))?;
+                let payload = provider.build_auth_payload(0, self.service_id)?;
                 (crate::AuthMethod::Cephx.into(), payload)
             }
             _ => {
@@ -1113,7 +1107,7 @@ impl State for AuthConnectingSign {
                             );
                         } else {
                             tracing::error!(
-                                "✗ Server AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
+                                "Server AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
                                 expected_sig.len(),
                                 server_signature.len()
                             );
@@ -1347,34 +1341,14 @@ impl State for SessionConnecting {
                 // Parse SERVER_IDENT frame
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let addrvec = denc::EntityAddrvec::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode addrs: {:?}", e))
-                    })?;
+                    let addrvec = denc::EntityAddrvec::decode(&mut payload, 0)?;
                     let addrs = addrvec.addrs;
-                    let gid = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode gid: {:?}", e))
-                    })?;
-                    let global_seq = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode global_seq: {:?}", e))
-                    })?;
-                    let features_supported = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode features_supported: {:?}",
-                            e
-                        ))
-                    })?;
-                    let features_required = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode features_required: {:?}",
-                            e
-                        ))
-                    })?;
-                    let flags = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode flags: {:?}", e))
-                    })?;
-                    let cookie = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode cookie: {:?}", e))
-                    })?;
+                    let gid = u64::decode(&mut payload, 0)?;
+                    let global_seq = u64::decode(&mut payload, 0)?;
+                    let features_supported = u64::decode(&mut payload, 0)?;
+                    let features_required = u64::decode(&mut payload, 0)?;
+                    let flags = u64::decode(&mut payload, 0)?;
+                    let cookie = u64::decode(&mut payload, 0)?;
 
                     tracing::debug!(
                         "Received SERVER_IDENT - addrs: {:?}, gid: {}, global_seq: {}, features_supported: 0x{:x}, features_required: 0x{:x}, flags: 0x{:x}, cookie: {}",
@@ -1441,12 +1415,7 @@ impl State for SessionConnecting {
                     // Extract server's signature from frame payload
                     if let Some(segment) = frame.segments.first() {
                         let mut payload = segment.clone();
-                        let server_signature = Bytes::decode(&mut payload, 0).map_err(|e| {
-                            Error::protocol_error(&format!(
-                                "Failed to decode server AUTH_SIGNATURE: {:?}",
-                                e
-                            ))
-                        })?;
+                        let server_signature = Bytes::decode(&mut payload, 0)?;
 
                         // Verify signature matches expected
                         if server_signature == *expected_sig {
@@ -1457,7 +1426,7 @@ impl State for SessionConnecting {
                             Ok(StateResult::Continue)
                         } else {
                             tracing::error!(
-                                "✗ Server AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
+                                "Server AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
                                 expected_sig.len(),
                                 server_signature.len()
                             );
@@ -1482,9 +1451,7 @@ impl State for SessionConnecting {
                 // Server accepted our reconnection
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let msg_seq = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode msg_seq: {:?}", e))
-                    })?;
+                    let msg_seq = u64::decode(&mut payload, 0)?;
 
                     tracing::info!(
                         "Reconnection successful! Server acknowledged up to msg_seq={}",
@@ -1503,9 +1470,7 @@ impl State for SessionConnecting {
                 // Server wants us to retry with a new connect_seq
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let server_connect_seq = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode connect_seq: {:?}", e))
-                    })?;
+                    let server_connect_seq = u64::decode(&mut payload, 0)?;
 
                     tracing::warn!(
                         "Server sent SESSION_RETRY: server_connect_seq={}, our_connect_seq={}. Incrementing and retrying.",
@@ -1529,9 +1494,7 @@ impl State for SessionConnecting {
                 // Server wants us to retry with a new global_seq
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let server_global_seq = u64::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode global_seq: {:?}", e))
-                    })?;
+                    let server_global_seq = u64::decode(&mut payload, 0)?;
 
                     tracing::warn!(
                         "Server sent SESSION_RETRY_GLOBAL: server_global_seq={}, our_global_seq={}. Updating and retrying.",
@@ -1557,9 +1520,7 @@ impl State for SessionConnecting {
                 // Server wants us to reset the session and start fresh
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let full = bool::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode full flag: {:?}", e))
-                    })?;
+                    let full = bool::decode(&mut payload, 0)?;
 
                     tracing::warn!(
                         "Server sent SESSION_RESET (full={}). Resetting session and sending CLIENT_IDENT",
@@ -1831,9 +1792,8 @@ impl State for AuthAccepting {
                     // Server responds with: server_challenge
 
                     if let Some(ref mut handler) = self.auth_handler {
-                        let (entity_name, global_id, challenge_payload) = handler
-                            .handle_initial_request(&auth_request.auth_payload)
-                            .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
+                        let (entity_name, global_id, challenge_payload) =
+                            handler.handle_initial_request(&auth_request.auth_payload)?;
 
                         tracing::debug!(
                             "Server: Initial auth request from {}, assigned global_id {}",
@@ -1893,23 +1853,22 @@ impl State for AuthAccepting {
                         (&mut self.auth_handler, &self.entity_name, self.global_id)
                     {
                         let (session_key, connection_secret, auth_payload) = handler
-                            .handle_authenticate(entity_name, global_id, &auth_request.auth_payload)
-                            .map_err(|e| Error::protocol_error(&format!("Auth failed: {}", e)))?;
+                            .handle_authenticate(
+                                entity_name,
+                                global_id,
+                                &auth_request.auth_payload,
+                            )?;
 
                         tracing::info!("Server: Client {} authenticated successfully", entity_name);
 
                         // Build AUTH_DONE response with negotiated connection mode
-                        let auth_done_payload = handler
-                            .build_auth_done_response(
-                                global_id,
-                                self.connection_mode as u8,
-                                &session_key,
-                                &connection_secret,
-                                auth_payload,
-                            )
-                            .map_err(|e| {
-                                Error::protocol_error(&format!("Failed to build AUTH_DONE: {}", e))
-                            })?;
+                        let auth_done_payload = handler.build_auth_done_response(
+                            global_id,
+                            self.connection_mode as u8,
+                            &session_key,
+                            &connection_secret,
+                            auth_payload,
+                        )?;
 
                         let auth_done =
                             AuthDoneFrame::new(global_id, self.connection_mode, auth_done_payload);
@@ -2020,7 +1979,7 @@ impl State for AuthAcceptingSign {
                             );
                         } else {
                             tracing::error!(
-                                "✗ Client AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
+                                "Client AUTH_SIGNATURE verification failed - expected {} bytes, got {} bytes",
                                 expected_sig.len(),
                                 client_signature.len()
                             );
@@ -2127,18 +2086,8 @@ impl State for CompressionAccepting {
                 }
                 let mut payload = frame.segments[0].clone();
                 let request = CompressionRequestFrame {
-                    is_compress: bool::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode COMPRESSION_REQUEST is_compress: {:?}",
-                            e
-                        ))
-                    })?,
-                    preferred_methods: Vec::<u32>::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!(
-                            "Failed to decode COMPRESSION_REQUEST preferred_methods: {:?}",
-                            e
-                        ))
-                    })?,
+                    is_compress: bool::decode(&mut payload, 0)?,
+                    preferred_methods: Vec::<u32>::decode(&mut payload, 0)?,
                 };
                 let compression_algorithm = Self::select_compression_algorithm(&request);
                 let compression_done = match compression_algorithm {
@@ -2670,20 +2619,15 @@ impl StateMachine {
     pub fn setup_encryption(&mut self, connection_secret: &[u8]) -> Result<()> {
         use crate::crypto::{parse_connection_secret, Aes128GcmDecryptor, Aes128GcmEncryptor};
 
-        let (key, rx_nonce, tx_nonce) =
-            parse_connection_secret(connection_secret).map_err(|e| {
-                Error::protocol_error(&format!("Failed to parse connection_secret: {}", e))
-            })?;
+        let (key, rx_nonce, tx_nonce) = parse_connection_secret(connection_secret)?;
 
         // Setup decryptor and encryptor with nonces
         // Client uses crossed=false (no swap): rx_nonce for RX, tx_nonce for TX
         // Server uses crossed=true (swapped): tx_nonce for RX, rx_nonce for TX
-        let decryptor = Aes128GcmDecryptor::new(key.clone(), rx_nonce)
-            .map_err(|e| Error::protocol_error(&format!("Failed to create decryptor: {}", e)))?;
+        let decryptor = Aes128GcmDecryptor::new(key.clone(), rx_nonce)?;
         self.frame_decryptor = Some(Box::new(decryptor));
 
-        let encryptor = Aes128GcmEncryptor::new(key, tx_nonce)
-            .map_err(|e| Error::protocol_error(&format!("Failed to create encryptor: {}", e)))?;
+        let encryptor = Aes128GcmEncryptor::new(key, tx_nonce)?;
         self.frame_encryptor = Some(Box::new(encryptor));
 
         tracing::info!("Frame encryption/decryption handlers initialized for SECURE mode");
@@ -2874,10 +2818,6 @@ impl StateMachine {
                             self.pre_auth_rxbuf.len(),
                             self.pre_auth_txbuf.len()
                         );
-
-                        // Save buffers for offline debugging.
-                        std::fs::write("/tmp/pre_auth_rxbuf.bin", &self.pre_auth_rxbuf[..]).ok();
-                        std::fs::write("/tmp/pre_auth_txbuf.bin", &self.pre_auth_txbuf[..]).ok();
 
                         self.complete_pre_auth(session_key.clone());
                         if let Some(ref secret) = connection_secret {

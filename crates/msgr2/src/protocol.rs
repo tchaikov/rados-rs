@@ -228,34 +228,18 @@ impl FrameIO {
             Cow::Borrowed(frame)
         };
 
-        // Print segment info
-        for (i, seg) in frame_to_send.segments.iter().enumerate() {
-            tracing::debug!("  Segment {}: {} bytes", i, seg.len());
-        }
-
-        // Step 3: Apply encryption if enabled
+        // Step 2: Apply encryption if enabled
+        let is_compressed = frame_to_send.preamble.is_compressed();
         let final_bytes = if !state_machine.has_encryption() {
             // Convert to wire format with proper preamble, segments, epilogue, and CRCs.
             // Use msgr2.1 (is_rev1 = true) to match the banner we sent.
             let wire_bytes = frame_to_send.to_wire(true)?;
-            let payload_len = wire_bytes.len().saturating_sub(Self::PREAMBLE_SIZE);
             tracing::debug!(
-                "Sending frame: tag={:?}, {} segments, {} wire bytes, compressed={}",
+                "Sending frame: tag={:?}, {} segments, {} wire bytes, encrypted=false, compressed={}",
                 frame_to_send.preamble.tag,
                 frame_to_send.preamble.num_segments,
                 wire_bytes.len(),
-                (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
-            );
-            tracing::trace!(
-                "send_frame: tag={:?}, has_encryption=false, num_segments={}, payload_len={}",
-                frame_to_send.preamble.tag,
-                frame_to_send.preamble.num_segments,
-                payload_len
-            );
-            // No encryption - send as-is
-            tracing::debug!(
-                "Frame payload: plaintext={} bytes (no encryption)",
-                payload_len
+                is_compressed,
             );
             wire_bytes
         } else {
@@ -268,31 +252,8 @@ impl FrameIO {
                 frame_to_send.preamble.tag,
                 num_segments,
                 payload_bytes.len(),
-                (frame_to_send.preamble.flags & crate::frames::FRAME_EARLY_DATA_COMPRESSED) != 0
+                is_compressed,
             );
-            tracing::trace!(
-                "send_frame: tag={:?}, has_encryption=true, num_segments={}, payload_len={}",
-                frame_to_send.preamble.tag,
-                num_segments,
-                payload_bytes.len()
-            );
-
-            // SECURE mode with msgr2.1 inline optimization
-            tracing::debug!(
-                "SECURE mode: num_segments={}, payload_bytes.len()={}",
-                num_segments,
-                payload_bytes.len()
-            );
-            if num_segments > 1 {
-                tracing::trace!(
-                    "Secure multi-segment: num_segments={}, total_payload={} (includes {} byte epilogue)",
-                    num_segments,
-                    payload_bytes.len(),
-                    crate::frames::CRYPTO_BLOCK_SIZE
-                );
-            } else {
-                tracing::trace!("Secure single-segment: payload_len={}", payload_bytes.len());
-            }
 
             let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
             let remaining_size = payload_bytes.len().saturating_sub(Self::INLINE_SIZE);
@@ -303,19 +264,13 @@ impl FrameIO {
             preamble_block.extend_from_slice(&preamble_bytes);
             preamble_block.extend_from_slice(&payload_bytes[..inline_size]);
 
-            // Pad to 48 bytes if inline data < 48 bytes
+            // Pad to INLINE_SIZE if inline data is shorter
             if inline_size < Self::INLINE_SIZE {
                 preamble_block.extend_from_slice(&ZEROS[..Self::INLINE_SIZE - inline_size]);
             }
 
-            // Encrypt preamble block (32 + 48 = 80 bytes → 96 bytes with GCM tag)
+            // Encrypt preamble block (32 + 48 = 80 bytes -> 96 bytes with GCM tag)
             let encrypted_preamble = state_machine.encrypt_frame_data(&preamble_block)?;
-            tracing::debug!(
-                "Encrypted preamble block: {} bytes → {} bytes (includes {} inline)",
-                preamble_block.len(),
-                encrypted_preamble.len(),
-                inline_size
-            );
 
             let mut result =
                 BytesMut::with_capacity(encrypted_preamble.len() + remaining_size + 16);
@@ -324,19 +279,12 @@ impl FrameIO {
             // Encrypt remaining payload if any (starts after first 48 bytes)
             if remaining_size > 0 {
                 let remaining_data = &payload_bytes[Self::INLINE_SIZE..];
-                tracing::trace!(
-                    "About to encrypt remaining: remaining_data.len()={}, payload_bytes.len()={}, inline_size={}, remaining_size={}",
-                    remaining_data.len(),
-                    payload_bytes.len(),
-                    inline_size,
-                    remaining_size
-                );
                 let encrypted_remaining = state_machine.encrypt_frame_data(remaining_data)?;
                 result.extend_from_slice(&encrypted_remaining);
             }
 
-            tracing::debug!(
-                "Total encrypted frame: {} bytes (preamble_block={}, remaining={})",
+            tracing::trace!(
+                "Encrypted frame: {} bytes (preamble_block={}, remaining={})",
                 result.len(),
                 encrypted_preamble.len(),
                 if remaining_size > 0 {
@@ -349,24 +297,13 @@ impl FrameIO {
             result.freeze()
         };
 
-        // Print first 128 bytes in hex for debugging
-        let preview_len = final_bytes.len().min(128);
-        let hex_str: String = final_bytes[..preview_len]
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join("");
-        tracing::trace!("Wire bytes (hex): {}", hex_str);
-
-        // Record ENCRYPTED data for AUTH_SIGNATURE computation (after encryption)
+        // Record data for AUTH_SIGNATURE computation (after encryption)
         state_machine.record_sent(&final_bytes);
-        if state_machine.is_pre_auth_enabled() {
-            tracing::debug!(
-                "Pre-auth: recorded sent frame tag={:?}, {} bytes (encrypted)",
-                frame.preamble.tag,
-                final_bytes.len()
-            );
-        }
+        tracing::trace!(
+            "Recorded sent frame tag={:?}, {} bytes",
+            frame.preamble.tag,
+            final_bytes.len()
+        );
 
         self.stream.write_all(&final_bytes).await?;
         self.stream.flush().await?;
@@ -383,9 +320,7 @@ impl FrameIO {
     /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
     /// - Reads remaining encrypted payload if needed
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
-        tracing::debug!("recv_frame called");
         let has_encryption = state_machine.has_encryption();
-        tracing::debug!("recv_frame: has_encryption={}", has_encryption);
 
         // Read preamble block
         let preamble_block_size = if has_encryption {
@@ -395,34 +330,10 @@ impl FrameIO {
         };
 
         let mut preamble_block_buf = vec![0u8; preamble_block_size];
+        self.stream.read_exact(&mut preamble_block_buf).await?;
 
-        match self.stream.read_exact(&mut preamble_block_buf).await {
-            Ok(_) => {
-                tracing::debug!("Successfully read preamble block");
-                tracing::trace!(
-                    "recv_frame read {} bytes, has_encryption={}, first 32 bytes: {}",
-                    preamble_block_buf.len(),
-                    has_encryption,
-                    preamble_block_buf
-                        .iter()
-                        .take(32)
-                        .map(|b| format!("{:02x}", b))
-                        .collect::<Vec<_>>()
-                        .join("")
-                );
-            }
-            Err(e) => {
-                tracing::error!("Failed to read preamble block: {:?}", e);
-                return Err(e.into());
-            }
-        }
-
-        // Record ENCRYPTED data for AUTH_SIGNATURE computation (before decryption)
+        // Record data for AUTH_SIGNATURE computation (before decryption)
         state_machine.record_received(&preamble_block_buf);
-        tracing::debug!(
-            "Pre-auth: recorded received preamble block {} bytes (encrypted)",
-            preamble_block_buf.len()
-        );
 
         // Decrypt preamble block if encrypted
         let preamble_and_inline = if has_encryption {
@@ -448,23 +359,9 @@ impl FrameIO {
         // Parse preamble
         let preamble = Preamble::decode(preamble_bytes.clone())?;
 
-        // Print raw preamble bytes for debugging
-        let preamble_hex: String = preamble_bytes
-            .iter()
-            .map(|b| format!("{:02x}", b))
-            .collect::<Vec<_>>()
-            .join("");
-        tracing::trace!("Raw preamble hex: {}", preamble_hex);
         tracing::debug!(
-            "Decoded preamble: tag={:?} (raw=0x{:02x}), num_segments={}",
+            "Received preamble: tag={:?}, num_segments={}, segments={:?}",
             preamble.tag,
-            preamble_bytes[0],
-            preamble.num_segments
-        );
-        tracing::debug!(
-            "Preamble: tag={:?} (raw={}), num_segments={}, segments={:?}",
-            preamble.tag,
-            preamble_bytes[0],
             preamble.num_segments,
             &preamble.segments[0..preamble.num_segments as usize]
         );
@@ -480,14 +377,7 @@ impl FrameIO {
         let total_payload_size = if has_encryption && total_segment_size > 0 {
             if preamble.num_segments == 1 {
                 // Secure mode single segment: align to 16-byte boundary
-                let aligned_len =
-                    (total_segment_size + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1);
-                tracing::debug!(
-                    "Secure single-segment RX: logical={}, aligned={}",
-                    total_segment_size,
-                    aligned_len
-                );
-                aligned_len
+                (total_segment_size + CRYPTO_BLOCK_SIZE - 1) & !(CRYPTO_BLOCK_SIZE - 1)
             } else {
                 // Secure mode multi-segment: pad each segment + add epilogue
                 let mut padded_size = 0;
@@ -498,14 +388,7 @@ impl FrameIO {
                         padded_size += aligned;
                     }
                 }
-                // Add epilogue for multi-segment frames
-                padded_size += CRYPTO_BLOCK_SIZE;
-                tracing::debug!(
-                    "Secure multi-segment RX: logical={}, padded={}",
-                    total_segment_size,
-                    padded_size
-                );
-                padded_size
+                padded_size + CRYPTO_BLOCK_SIZE // epilogue
             }
         } else {
             // Plaintext (CRC mode)
@@ -550,21 +433,12 @@ impl FrameIO {
             let mut remaining_buf = vec![0u8; remaining_needed];
             self.stream.read_exact(&mut remaining_buf).await?;
 
-            // Record ENCRYPTED data for AUTH_SIGNATURE computation (before decryption)
+            // Record data for AUTH_SIGNATURE computation (before decryption)
             state_machine.record_received(&remaining_buf);
-            tracing::debug!(
-                "Pre-auth: recorded received remaining {} bytes (encrypted)",
-                remaining_buf.len()
-            );
 
             if has_encryption {
                 // Decrypt remaining data
                 let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
-                tracing::debug!(
-                    "Decrypted remaining: {} bytes → {} bytes",
-                    remaining_buf.len(),
-                    decrypted_remaining.len()
-                );
 
                 // Combine inline + decrypted remaining
                 let mut combined =
@@ -675,30 +549,19 @@ impl FrameIO {
             }
         }
 
-        tracing::debug!("Parsed {} segments", segments.len());
-
         let mut frame = Frame { preamble, segments };
 
-        // Step 4: Apply decompression if frame is compressed
+        // Apply decompression if frame is compressed
         if frame.preamble.is_compressed() {
             if let Some(ctx) = state_machine.compression_ctx() {
-                match frame.decompress(ctx) {
-                    Ok(decompressed_frame) => {
-                        tracing::debug!(
-                            "Frame decompressed: tag={:?}, algorithm={:?}",
-                            frame.preamble.tag,
-                            ctx.algorithm()
-                        );
-                        frame = decompressed_frame;
-                    }
-                    Err(e) => {
-                        tracing::error!("Decompression failed: {:?}", e);
-                        return Err(Error::protocol_error(&format!(
-                            "Decompression failed: {:?}",
-                            e
-                        )));
-                    }
-                }
+                frame = frame.decompress(ctx).map_err(|e| {
+                    Error::protocol_error(&format!("Decompression failed: {:?}", e))
+                })?;
+                tracing::debug!(
+                    "Frame decompressed: tag={:?}, algorithm={:?}",
+                    frame.preamble.tag,
+                    ctx.algorithm()
+                );
             } else {
                 tracing::warn!(
                     "Frame has FRAME_EARLY_DATA_COMPRESSED flag but no compression context"
@@ -1033,61 +896,7 @@ impl Connection {
             addr,
             target_entity_addr.nonce
         );
-
-        // Validate config
-        if let Err(e) = config.validate() {
-            return Err(Error::Protocol(format!("Invalid config: {}", e)));
-        }
-
-        tracing::debug!("About to TcpStream::connect({})", addr);
-        // Establish TCP connection
-        let mut stream = TcpStream::connect(addr).await?;
-        let peer_addr = stream.peer_addr()?;
-        tracing::debug!(
-            "TCP connection established - peer: {}, local: {}",
-            peer_addr,
-            stream.local_addr()?
-        );
-        tracing::info!("TCP connection established to {}", addr);
-
-        // Get our local address from the connection
-        let local_addr = stream.local_addr()?;
-        tracing::debug!("Local address: {}", local_addr);
-
-        // Create state machine for client BEFORE banner exchange
-        // This is important because we need to track banner bytes in pre-auth buffers
-        let mut state_machine = StateMachine::new_client(config.clone());
-
-        // Configure addresses
-        Self::configure_state_machine_addresses(
-            &mut state_machine,
-            addr,
-            local_addr,
-            Some(&target_entity_addr),
-        );
-
-        tracing::debug!("Created client state machine");
-
-        // Perform msgr2 banner exchange and record bytes in pre-auth buffers
-        Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
-
-        let state = ConnectionState::new(stream, state_machine);
-        let mut state = state;
-        state.session.max_sent_messages = config.max_replay_queue_len;
-
-        // Initialize throttle from config if present
-        let throttle = config
-            .throttle_config
-            .as_ref()
-            .map(|cfg| crate::throttle::MessageThrottle::new(cfg.clone()));
-
-        Ok(Self {
-            state,
-            server_addr: addr,
-            target_entity_addr: Some(target_entity_addr),
-            config,
-            throttle,
-        })
+        Self::connect_inner(addr, Some(target_entity_addr), config).await
     }
 
     /// Connect to a Ceph server at the given address
@@ -1099,35 +908,40 @@ impl Connection {
     /// * `config` - Connection configuration (features and connection modes)
     pub async fn connect(addr: SocketAddr, config: crate::ConnectionConfig) -> Result<Self> {
         tracing::debug!("Connection::connect() called with addr: {}", addr);
+        Self::connect_inner(addr, None, config).await
+    }
 
+    /// Shared implementation for `connect()` and `connect_with_target()`.
+    async fn connect_inner(
+        addr: SocketAddr,
+        target_entity_addr: Option<denc::EntityAddr>,
+        config: crate::ConnectionConfig,
+    ) -> Result<Self> {
         // Validate config
         if let Err(e) = config.validate() {
             return Err(Error::Protocol(format!("Invalid config: {}", e)));
         }
 
-        tracing::debug!("About to TcpStream::connect({})", addr);
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
-        let peer_addr = stream.peer_addr()?;
-        tracing::debug!(
-            "TCP connection established - peer: {}, local: {}",
-            peer_addr,
-            stream.local_addr()?
-        );
-        tracing::info!("TCP connection established to {}", addr);
-
-        // Get our local address from the connection
         let local_addr = stream.local_addr()?;
-        tracing::debug!("Local address: {}", local_addr);
+        tracing::info!(
+            "TCP connection established to {} (local: {})",
+            addr,
+            local_addr
+        );
 
         // Create state machine for client BEFORE banner exchange
         // This is important because we need to track banner bytes in pre-auth buffers
         let mut state_machine = StateMachine::new_client(config.clone());
 
         // Configure addresses
-        Self::configure_state_machine_addresses(&mut state_machine, addr, local_addr, None);
-
-        tracing::debug!("Created client state machine");
+        Self::configure_state_machine_addresses(
+            &mut state_machine,
+            addr,
+            local_addr,
+            target_entity_addr.as_ref(),
+        );
 
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
@@ -1144,7 +958,7 @@ impl Connection {
         Ok(Self {
             state,
             server_addr: addr,
-            target_entity_addr: None,
+            target_entity_addr,
             config,
             throttle,
         })
@@ -1167,26 +981,20 @@ impl Connection {
         let mut buf = BytesMut::with_capacity(64);
         banner.encode(&mut buf)?;
 
-        // Record sent banner bytes for pre-auth signature
+        // Record and send banner bytes (pre-auth signature tracking)
         state_machine.record_sent(&buf);
-        tracing::debug!("Pre-auth: recorded sent banner {} bytes", buf.len());
-
         stream.write_all(&buf).await?;
         stream.flush().await?;
         tracing::info!(
-            "Sent msgr2 banner with features: supported={:x}, required={:x}",
+            "Sent msgr2 banner: supported={:x}, required={:x}",
             u64::from(banner.supported_features),
             u64::from(banner.required_features)
         );
 
-        // Read server banner response
-        // Banner is "ceph v2\n" (8 bytes) + length (2 bytes) + payload (16 bytes) = 26 bytes total
+        // Read server banner response (26 bytes: 8 prefix + 2 length + 16 payload)
         let mut buf = vec![0u8; 26];
         stream.read_exact(&mut buf).await?;
-
-        // Record received banner bytes for pre-auth signature
         state_machine.record_received(&buf);
-        tracing::debug!("Pre-auth: recorded received banner {} bytes", buf.len());
 
         let mut bytes = BytesMut::from(&buf[..]);
         let server_banner = Banner::decode(&mut bytes)?;
@@ -1221,14 +1029,10 @@ impl Connection {
         state_machine: &mut StateMachine,
         config: &crate::ConnectionConfig,
     ) -> Result<()> {
-        // Read client banner first
-        // Banner is "ceph v2\n" (8 bytes) + length (2 bytes) + payload (16 bytes) = 26 bytes total
+        // Read client banner (26 bytes: 8 prefix + 2 length + 16 payload)
         let mut buf = vec![0u8; 26];
         stream.read_exact(&mut buf).await?;
-
-        // Record received banner bytes for pre-auth signature
         state_machine.record_received(&buf);
-        tracing::debug!("Pre-auth: recorded received banner {} bytes", buf.len());
 
         let mut bytes = BytesMut::from(&buf[..]);
         let client_banner = Banner::decode(&mut bytes)?;
@@ -1261,14 +1065,11 @@ impl Connection {
         let mut buf = BytesMut::with_capacity(64);
         banner.encode(&mut buf)?;
 
-        // Record sent banner bytes for pre-auth signature
         state_machine.record_sent(&buf);
-        tracing::debug!("Pre-auth: recorded sent banner {} bytes", buf.len());
-
         stream.write_all(&buf).await?;
         stream.flush().await?;
         tracing::info!(
-            "Sent msgr2 banner with features: supported={:x}, required={:x}",
+            "Sent msgr2 banner: supported={:x}, required={:x}",
             u64::from(banner.supported_features),
             u64::from(banner.required_features)
         );
@@ -1307,55 +1108,9 @@ impl Connection {
         // This is important because we need to track banner bytes in pre-auth buffers
         let mut state_machine = StateMachine::new_server_with_auth(auth_handler);
 
-        // Set the client address (peer) for SERVER_IDENT
-        let mut client_entity_addr = denc::EntityAddr::new();
-        client_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        match peer_addr {
-            SocketAddr::V4(v4) => {
-                // IPv4: ss_family (2 bytes, little-endian) + port (2 bytes, big-endian) + IP (4 bytes) + padding (8 bytes)
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
-                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
-                data.extend_from_slice(&v4.ip().octets()); // IP address
-                data.extend_from_slice(&[0u8; 8]); // padding
-                client_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                // IPv6: ss_family (2 bytes, little-endian) + port (2 bytes) + flowinfo (4 bytes) + IP (16 bytes) + scope_id (4 bytes)
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                client_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_client_addr(client_entity_addr);
-
-        // Set our local server address for SERVER_IDENT
-        let mut server_entity_addr = denc::EntityAddr::new();
-        server_entity_addr.addr_type = denc::EntityAddrType::Msgr2;
-        match local_addr {
-            SocketAddr::V4(v4) => {
-                let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
-                data.extend_from_slice(&v4.port().to_be_bytes());
-                data.extend_from_slice(&v4.ip().octets());
-                data.extend_from_slice(&[0u8; 8]); // padding
-                server_entity_addr.sockaddr_data = data;
-            }
-            SocketAddr::V6(v6) => {
-                let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
-                data.extend_from_slice(&v6.port().to_be_bytes());
-                data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
-                data.extend_from_slice(&v6.ip().octets());
-                data.extend_from_slice(&v6.scope_id().to_be_bytes());
-                server_entity_addr.sockaddr_data = data;
-            }
-        }
-        state_machine.set_server_addr(server_entity_addr);
+        // Set addresses using the shared conversion helper
+        state_machine.set_client_addr(Self::socket_to_entity_addr(peer_addr));
+        state_machine.set_server_addr(Self::socket_to_entity_addr(local_addr));
 
         tracing::debug!("Created server state machine");
 
@@ -1836,60 +1591,41 @@ impl Connection {
     /// Internal implementation of send_message without reconnection logic
     async fn send_message_inner(&mut self, mut msg: Message) -> Result<()> {
         let msg_type = msg.msg_type();
-
-        // Calculate message size for throttling
         let msg_size = msg.total_size() as usize;
 
         // Wait for throttle if configured
         if let Some(throttle) = &self.throttle {
             throttle.wait_for_send(msg_size).await;
-            tracing::trace!("Throttle check passed for message size {}", msg_size);
         }
 
-        // Increment sequence number (pre-increment, like C++ does with ++out_seq)
+        // Assign sequence numbers (pre-increment, like C++ does with ++out_seq)
         self.state.out_seq += 1;
         msg.header.set_seq(self.state.out_seq);
-
-        // Piggyback ACK in message header (like Ceph does)
         msg.header.set_ack_seq(self.state.in_seq);
 
         let seq = msg.seq();
-        let ack_seq = msg.header.get_ack_seq(); // Safe accessor for packed field
-        let version = msg.header.get_version();
-        let compat_version = msg.header.get_compat_version();
+        let ack_seq = msg.header.get_ack_seq();
         tracing::debug!(
-            "send_message() type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}, version={}, compat_version={}",
+            "Sending message: type=0x{:04x}, seq={}, ack_seq={}, front={}, middle={}, data={}",
             msg_type,
             seq,
             ack_seq,
             msg.front.len(),
             msg.middle.len(),
             msg.data.len(),
-            version,
-            compat_version
         );
 
         // Record message in sent queue for potential replay (before sending)
-        // This follows Ceph's practice of recording before transmission
         self.state.record_sent_message(msg.clone())?;
 
-        // Convert Message to MessageFrame
+        // Convert Message to MessageFrame and send
         let msg_frame = MessageFrame::new(
             msg.header,
             msg.front.clone(),
             msg.middle.clone(),
             msg.data.clone(),
         );
-
-        // Create Frame from MessageFrame
         let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-
-        tracing::debug!("Created frame with {} segments", frame.segments.len());
-        for (i, seg) in frame.segments.iter().enumerate() {
-            tracing::debug!("  Segment {}: {} bytes", i, seg.len());
-        }
-
-        // Send the frame
         self.state.send_frame(&frame).await?;
 
         // Record send with throttle
@@ -1897,13 +1633,6 @@ impl Connection {
             throttle.record_send(msg_size).await;
         }
 
-        tracing::debug!(
-            "Sent message: type={}, seq={}, ack_seq={}, size={}",
-            msg_type,
-            seq,
-            ack_seq,
-            msg_size
-        );
         Ok(())
     }
 

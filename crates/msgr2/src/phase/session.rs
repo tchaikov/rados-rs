@@ -144,9 +144,7 @@ impl Phase for SessionClient {
                     .first()
                     .ok_or_else(|| Error::protocol_error("SERVER_IDENT missing payload"))?;
                 let mut p = segment.clone();
-                let _addrs = denc::EntityAddrvec::decode(&mut p, 0).map_err(|e| {
-                    Error::protocol_error(&format!("Failed to decode addrs: {e:?}"))
-                })?;
+                let _addrs = denc::EntityAddrvec::decode(&mut p, 0)?;
                 let _gid = u64::decode(&mut p, 0)?;
                 let _global_seq = u64::decode(&mut p, 0)?;
                 let features_supported = u64::decode(&mut p, 0)?;

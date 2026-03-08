@@ -1319,15 +1319,9 @@ impl OSDClient {
             .await
             .map_err(OSDClientError::MonClient)?;
 
-        if result.is_success() {
-            debug!("Pool created successfully: {}", pool_name);
-            self.handle_pool_op_result(&result).await
-        } else {
-            Err(OSDClientError::Other(format!(
-                "Pool operation failed with code {}",
-                result.reply_code
-            )))
-        }
+        self.handle_pool_op_result(&result).await?;
+        debug!("Pool created successfully: {}", pool_name);
+        Ok(())
     }
 
     /// Delete a pool
@@ -1389,15 +1383,9 @@ impl OSDClient {
             .await
             .map_err(OSDClientError::MonClient)?;
 
-        if result.is_success() {
-            debug!("Pool deleted successfully: {}", pool_name);
-            self.handle_pool_op_result(&result).await
-        } else {
-            Err(OSDClientError::Other(format!(
-                "Pool operation failed with code {}",
-                result.reply_code
-            )))
-        }
+        self.handle_pool_op_result(&result).await?;
+        debug!("Pool deleted successfully: {}", pool_name);
+        Ok(())
     }
 
     /// Scan pending ops after OSDMap update, resend if target changed

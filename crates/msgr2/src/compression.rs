@@ -292,36 +292,25 @@ impl std::fmt::Debug for CompressionContext {
 }
 
 impl CompressionContext {
-    /// Create a new compression context with the specified algorithm
-    pub fn new(algorithm: CompressionAlgorithm) -> Self {
-        let compressor: Box<dyn Compressor> = match algorithm {
+    fn make_compressor(algorithm: CompressionAlgorithm) -> Box<dyn Compressor> {
+        match algorithm {
             CompressionAlgorithm::None => Box::new(NoneCompressor),
             CompressionAlgorithm::Snappy => Box::new(SnappyCompressor),
             CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new()),
             CompressionAlgorithm::Lz4 => Box::new(Lz4Compressor),
             CompressionAlgorithm::Zlib => Box::new(ZlibCompressor::new()),
-        };
-
-        Self {
-            compressor,
-            threshold: 512, // Default: compress frames >= 512 bytes
-            algorithm,
-            stats: StatsCell::default(),
         }
+    }
+
+    /// Create a new compression context with the specified algorithm
+    pub fn new(algorithm: CompressionAlgorithm) -> Self {
+        Self::with_threshold(algorithm, 512)
     }
 
     /// Create context with custom threshold
     pub fn with_threshold(algorithm: CompressionAlgorithm, threshold: usize) -> Self {
-        let compressor: Box<dyn Compressor> = match algorithm {
-            CompressionAlgorithm::None => Box::new(NoneCompressor),
-            CompressionAlgorithm::Snappy => Box::new(SnappyCompressor),
-            CompressionAlgorithm::Zstd => Box::new(ZstdCompressor::new()),
-            CompressionAlgorithm::Lz4 => Box::new(Lz4Compressor),
-            CompressionAlgorithm::Zlib => Box::new(ZlibCompressor::new()),
-        };
-
         Self {
-            compressor,
+            compressor: Self::make_compressor(algorithm),
             threshold,
             algorithm,
             stats: StatsCell::default(),

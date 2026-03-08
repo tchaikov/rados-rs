@@ -93,14 +93,6 @@ impl Msgr2Error {
     /// and configuration errors that won't be fixed by retrying.
     pub fn is_fatal(&self) -> bool {
         !self.is_recoverable()
-            || matches!(
-                self,
-                Msgr2Error::Protocol(_)
-                    | Msgr2Error::Auth(_)
-                    | Msgr2Error::CephX(_)
-                    | Msgr2Error::ConfigError(_)
-                    | Msgr2Error::InvalidData(_)
-            )
     }
 
     /// Get a human-readable category for this error

@@ -37,9 +37,7 @@ impl Phase for HelloClient {
                     return Err(Error::protocol_error("HELLO frame missing payload"));
                 }
                 let mut payload = frame.segments[0].clone();
-                let entity_type = u8::decode(&mut payload, 0).map_err(|e| {
-                    Error::protocol_error(&format!("Failed to decode entity_type: {e:?}"))
-                })?;
+                let entity_type = u8::decode(&mut payload, 0)?;
                 tracing::debug!("Received server HELLO: entity_type={entity_type}");
                 Ok(Step::Done((), None))
             }
@@ -68,9 +66,7 @@ impl Phase for HelloServer {
                     return Err(Error::protocol_error("HELLO frame missing payload"));
                 }
                 let mut payload = frame.segments[0].clone();
-                let entity_type = u8::decode(&mut payload, 0).map_err(|e| {
-                    Error::protocol_error(&format!("Failed to decode entity_type: {e:?}"))
-                })?;
+                let entity_type = u8::decode(&mut payload, 0)?;
                 tracing::debug!("Received client HELLO: entity_type={entity_type}");
 
                 let response = HelloFrame::new(

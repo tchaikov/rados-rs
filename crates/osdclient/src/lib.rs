@@ -40,4 +40,5 @@ pub use types::{
     SparseReadResult, StatResult, StripedPgId, WriteResult,
 };
 
-pub type Result<T> = std::result::Result<T, OSDClientError>;
+// Re-export Result type alias from error module
+pub use error::Result;

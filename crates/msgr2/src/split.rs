@@ -41,7 +41,7 @@ use crate::header::MsgHeader;
 use crate::message::Message;
 use crate::state_machine::create_frame_from_trait;
 use crate::throttle::MessageThrottle;
-use bytes::Bytes;
+use denc::Denc;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex, Notify};
@@ -425,29 +425,18 @@ async fn io_task(
                     Ok(frame) => {
                         match frame.preamble.tag {
                             Tag::Ack => {
-                                // Handle ACK frame
+                                // Handle ACK frame - decode sequence number
                                 if let Some(payload) = frame.segments.first() {
-                                    if payload.len() >= 8 {
-                                        let ack_seq = u64::from_le_bytes([
-                                            payload[0], payload[1], payload[2], payload[3],
-                                            payload[4], payload[5], payload[6], payload[7],
-                                        ]);
-
+                                    let mut buf = payload.as_ref();
+                                    if let Ok(ack_seq) = u64::decode(&mut buf, 0) {
                                         tracing::debug!("I/O task: received ACK seq={}", ack_seq);
+                                        shared.lock().await.discard_acknowledged_messages(ack_seq);
 
-                                        // Update shared state
-                                        {
-                                            let mut state = shared.lock().await;
-                                            state.discard_acknowledged_messages(ack_seq);
-                                        }
-
-                                        // Record ACK with throttle
                                         if let Some(ref throttle) = throttle {
                                             throttle.record_ack().await;
                                         }
                                     }
                                 }
-                                // Don't send ACK to message channel, continue loop
                             }
                             Tag::Message => {
                                 // Parse message
@@ -494,9 +483,9 @@ async fn parse_message_frame(frame: &Frame, shared: &Arc<Mutex<SharedState>>) ->
     let mut header_buf = frame.segments[0].clone();
     let header = MsgHeader::decode(&mut header_buf)?;
 
-    let front = frame.segments.get(1).cloned().unwrap_or_else(Bytes::new);
-    let middle = frame.segments.get(2).cloned().unwrap_or_else(Bytes::new);
-    let data = frame.segments.get(3).cloned().unwrap_or_else(Bytes::new);
+    let front = frame.segments.get(1).cloned().unwrap_or_default();
+    let middle = frame.segments.get(2).cloned().unwrap_or_default();
+    let data = frame.segments.get(3).cloned().unwrap_or_default();
 
     let msg_seq = header.get_seq();
     let ack_seq = header.get_ack_seq();
@@ -583,6 +572,7 @@ impl SplitBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::Bytes;
 
     #[test]
     fn test_shared_state_ack_handling() {
