@@ -11,7 +11,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{watch, Mutex};
 
 /// Throttle configuration for message sending
 #[derive(Debug, Clone)]
@@ -181,6 +181,59 @@ impl ThrottleState {
         true
     }
 
+    fn next_ready_in(&mut self, byte_count: usize) -> Option<Duration> {
+        let now = Instant::now();
+        self.cleanup_old_records(now);
+
+        let queue_depth_blocked = self.config.max_dispatch_queue_depth > 0
+            && self.in_flight_count >= self.config.max_dispatch_queue_depth;
+
+        let message_rate_wait = if self.config.max_messages_per_sec > 0
+            && self.send_history.len() as u64 >= self.config.max_messages_per_sec
+        {
+            self.send_history.front().map(|record| {
+                (record.timestamp + self.config.rate_window).saturating_duration_since(now)
+            })
+        } else {
+            None
+        };
+
+        let byte_rate_wait = if self.config.max_bytes_per_sec > 0 {
+            let limit = self.config.max_bytes_per_sec as usize;
+            let recent_bytes: usize = self
+                .send_history
+                .iter()
+                .map(|record| record.byte_count)
+                .sum();
+            if recent_bytes + byte_count > limit {
+                let bytes_to_free = recent_bytes + byte_count - limit;
+                let mut freed_bytes = 0usize;
+                self.send_history
+                    .iter()
+                    .find_map(|record| {
+                        freed_bytes += record.byte_count;
+                        (freed_bytes >= bytes_to_free).then(|| {
+                            (record.timestamp + self.config.rate_window)
+                                .saturating_duration_since(now)
+                        })
+                    })
+                    .or(Some(self.config.rate_window))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let rate_wait = match (message_rate_wait, byte_rate_wait) {
+            (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
+            (Some(wait), None) | (None, Some(wait)) => Some(wait),
+            (None, None) => None,
+        };
+
+        rate_wait.or_else(|| queue_depth_blocked.then_some(Duration::ZERO))
+    }
+
     /// Record a message send
     fn record_send(&mut self, byte_count: usize) {
         self.send_history.push_back(SendRecord {
@@ -272,14 +325,22 @@ pub struct ThrottleStats {
 #[derive(Debug, Clone)]
 pub struct MessageThrottle {
     state: Arc<Mutex<ThrottleState>>,
+    updates: watch::Sender<u64>,
 }
 
 impl MessageThrottle {
     /// Create a new message throttle with the given configuration
     pub fn new(config: ThrottleConfig) -> Self {
+        let (updates, _rx) = watch::channel(0);
         Self {
             state: Arc::new(Mutex::new(ThrottleState::new(config))),
+            updates,
         }
+    }
+
+    fn notify_waiters(&self) {
+        let next = (*self.updates.borrow()).wrapping_add(1);
+        let _ = self.updates.send(next);
     }
 
     /// Create an unlimited throttle (no limits)
@@ -292,17 +353,34 @@ impl MessageThrottle {
     /// This will block until throttle limits allow the send.
     /// Returns immediately if no limits are configured.
     pub async fn wait_for_send(&self, byte_count: usize) {
+        let mut updates = self.updates.subscribe();
         loop {
-            {
+            let wait_duration = {
                 let mut state = self.state.lock().await;
                 if state.can_send(byte_count) {
                     return;
                 }
-            }
+                state.next_ready_in(byte_count)
+            };
 
-            // Wait a bit before checking again
-            // Use a small delay to avoid busy-waiting
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            match wait_duration {
+                Some(duration) if duration.is_zero() => {
+                    if updates.changed().await.is_err() {
+                        tokio::task::yield_now().await;
+                    }
+                }
+                Some(duration) => {
+                    tokio::select! {
+                        _ = tokio::time::sleep(duration) => {}
+                        changed = updates.changed() => {
+                            if changed.is_err() {
+                                tokio::task::yield_now().await;
+                            }
+                        }
+                    }
+                }
+                None => tokio::task::yield_now().await,
+            }
         }
     }
 
@@ -330,7 +408,12 @@ impl MessageThrottle {
     /// It reduces the in-flight message count.
     pub async fn record_ack(&self) {
         let mut state = self.state.lock().await;
+        let had_in_flight = state.in_flight_count > 0;
         state.record_ack();
+        drop(state);
+        if had_in_flight {
+            self.notify_waiters();
+        }
     }
 
     /// Get current throttle statistics
@@ -346,6 +429,8 @@ impl MessageThrottle {
         state.in_flight_count = 0;
         state.total_messages = 0;
         state.total_bytes = 0;
+        drop(state);
+        self.notify_waiters();
     }
 }
 

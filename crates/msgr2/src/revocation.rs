@@ -13,7 +13,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{oneshot, watch, Mutex};
+
+fn notify_update(updates: &watch::Sender<u64>) {
+    let next = (*updates.borrow()).wrapping_add(1);
+    let _ = updates.send(next);
+}
 
 /// Unique identifier for a message that can be revoked
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -64,6 +69,7 @@ pub struct MessageHandle {
     id: MessageId,
     revocation_tx: Option<oneshot::Sender<()>>,
     manager: Arc<Mutex<RevocationManagerState>>,
+    updates: watch::Sender<u64>,
 }
 
 impl MessageHandle {
@@ -95,48 +101,58 @@ impl MessageHandle {
     /// - `AlreadySent`: Message was already fully transmitted
     /// - `NotFound`: Message ID not found
     pub async fn revoke(mut self) -> RevocationResult {
-        let mut state = self.manager.lock().await;
+        let mut notify = false;
+        let result = {
+            let mut state = self.manager.lock().await;
 
-        if let Some(info) = state.messages.get_mut(&self.id) {
-            match info.status {
-                MessageStatus::Queued | MessageStatus::Sending => {
-                    // Mark as revoked
-                    info.status = MessageStatus::Revoked;
+            if let Some(info) = state.messages.get_mut(&self.id) {
+                match info.status {
+                    MessageStatus::Queued | MessageStatus::Sending => {
+                        info.status = MessageStatus::Revoked;
+                        notify = true;
 
-                    // Signal the sender to stop
-                    if let Some(tx) = self.revocation_tx.take() {
-                        let _ = tx.send(());
+                        if let Some(tx) = self.revocation_tx.take() {
+                            let _ = tx.send(());
+                        }
+
+                        tracing::debug!("Message {:?} revoked", self.id);
+                        RevocationResult::Revoked
                     }
-
-                    tracing::debug!("Message {:?} revoked", self.id);
-                    RevocationResult::Revoked
+                    MessageStatus::Sent => {
+                        tracing::debug!("Message {:?} already sent, cannot revoke", self.id);
+                        RevocationResult::AlreadySent
+                    }
+                    MessageStatus::Revoked => {
+                        tracing::debug!("Message {:?} already revoked", self.id);
+                        RevocationResult::Revoked
+                    }
                 }
-                MessageStatus::Sent => {
-                    tracing::debug!("Message {:?} already sent, cannot revoke", self.id);
-                    RevocationResult::AlreadySent
-                }
-                MessageStatus::Revoked => {
-                    tracing::debug!("Message {:?} already revoked", self.id);
-                    RevocationResult::Revoked
-                }
+            } else {
+                tracing::debug!("Message {:?} not found", self.id);
+                RevocationResult::NotFound
             }
-        } else {
-            tracing::debug!("Message {:?} not found", self.id);
-            RevocationResult::NotFound
+        };
+
+        if notify {
+            notify_update(&self.updates);
         }
+
+        result
     }
 
     /// Wait for the message to complete (either sent or revoked)
     ///
     /// Returns the final status of the message.
     pub async fn wait_completion(&self) -> MessageStatus {
+        let mut updates = self.updates.subscribe();
         loop {
             if let Some(status) = self.status().await {
                 match status {
                     MessageStatus::Sent | MessageStatus::Revoked => return status,
                     _ => {
-                        // Still in progress, wait a bit
-                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        if updates.changed().await.is_err() {
+                            return MessageStatus::Sent;
+                        }
                     }
                 }
             } else {
@@ -215,13 +231,16 @@ impl RevocationManagerState {
 #[derive(Debug, Clone)]
 pub struct RevocationManager {
     state: Arc<Mutex<RevocationManagerState>>,
+    updates: watch::Sender<u64>,
 }
 
 impl RevocationManager {
     /// Create a new revocation manager
     pub fn new() -> Self {
+        let (updates, _rx) = watch::channel(0);
         Self {
             state: Arc::new(Mutex::new(RevocationManagerState::new())),
+            updates,
         }
     }
 
@@ -249,6 +268,7 @@ impl RevocationManager {
             id,
             revocation_tx: Some(revocation_tx),
             manager: self.state.clone(),
+            updates: self.updates.clone(),
         };
 
         (handle, revocation_rx)
@@ -257,30 +277,46 @@ impl RevocationManager {
     /// Mark a message as currently being sent
     pub async fn mark_sending(&self, id: MessageId) {
         let mut state = self.state.lock().await;
+        let mut notify = false;
         if let Some(info) = state.messages.get_mut(&id) {
             if info.status == MessageStatus::Queued {
                 info.status = MessageStatus::Sending;
+                notify = true;
                 tracing::trace!("Message {:?} marked as sending", id);
             }
+        }
+        drop(state);
+        if notify {
+            notify_update(&self.updates);
         }
     }
 
     /// Mark a message as fully sent
     pub async fn mark_sent(&self, id: MessageId) {
         let mut state = self.state.lock().await;
+        let mut notify = false;
         if let Some(info) = state.messages.get_mut(&id) {
             if info.status != MessageStatus::Revoked {
                 info.status = MessageStatus::Sent;
+                notify = true;
                 tracing::trace!("Message {:?} marked as sent", id);
             }
+        }
+        drop(state);
+        if notify {
+            notify_update(&self.updates);
         }
     }
 
     /// Remove a message from tracking (cleanup after completion)
     pub async fn remove_message(&self, id: MessageId) {
         let mut state = self.state.lock().await;
-        state.messages.remove(&id);
+        let removed = state.messages.remove(&id).is_some();
         tracing::trace!("Message {:?} removed from tracking", id);
+        drop(state);
+        if removed {
+            notify_update(&self.updates);
+        }
     }
 
     /// Get the status of a message
@@ -298,8 +334,13 @@ impl RevocationManager {
     /// Clear all tracked messages (useful for cleanup on connection close)
     pub async fn clear(&self) {
         let mut state = self.state.lock().await;
+        let had_messages = !state.messages.is_empty();
         state.messages.clear();
         tracing::debug!("Cleared all tracked messages");
+        drop(state);
+        if had_messages {
+            notify_update(&self.updates);
+        }
     }
 
     /// Get statistics about tracked messages

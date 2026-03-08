@@ -31,7 +31,7 @@ pub use frames::{
 };
 pub use header::MsgHeader;
 pub use map_channel::{map_channel, MapMessage, MapReceiver, MapSender};
-pub use message::{Message, MessagePriority, MsgFooter};
+pub use message::{Message, MessagePriority, MessageType, MsgFooter};
 pub use revocation::{
     MessageHandle, MessageId, MessageStatus, RevocationManager, RevocationResult, RevocationStats,
 };
@@ -298,6 +298,10 @@ pub struct ConnectionConfig {
     /// If None, no throttling is applied (default, matches Ceph client behavior)
     /// If Some, throttles message sending/receiving according to the config
     pub throttle_config: Option<ThrottleConfig>,
+
+    /// Maximum number of unacknowledged messages to retain for replay on reconnect.
+    /// If `None`, the replay queue is unbounded.
+    pub max_replay_queue_len: Option<usize>,
 }
 
 impl Default for ConnectionConfig {
@@ -317,6 +321,7 @@ impl Default for ConnectionConfig {
             entity_name: denc::EntityName::client("admin"),
             global_id: 0,          // Will be set after monitor authentication
             throttle_config: None, // No throttle by default (matches Ceph client)
+            max_replay_queue_len: None,
         }
     }
 }
@@ -527,6 +532,12 @@ impl ConnectionConfig {
             }
         }
 
+        if let Some(limit) = self.max_replay_queue_len {
+            if limit == 0 {
+                return Err("max_replay_queue_len must be greater than zero".to_string());
+            }
+        }
+
         Ok(())
     }
 
@@ -575,6 +586,12 @@ impl ConnectionConfig {
         self.throttle_config = Some(ThrottleConfig::with_byte_rate(100 * 1024 * 1024));
         self
     }
+
+    /// Set a limit on the number of unacknowledged messages retained for replay.
+    pub fn with_replay_queue_limit(mut self, max_replay_queue_len: usize) -> Self {
+        self.max_replay_queue_len = Some(max_replay_queue_len);
+        self
+    }
 }
 
 /// Parse size string from ceph.conf (e.g., "100M", "1G", "512K")
@@ -592,6 +609,7 @@ mod tests {
             vec![ConnectionMode::Secure, ConnectionMode::Crc]
         );
         assert!(config.throttle_config.is_none());
+        assert_eq!(config.max_replay_queue_len, None);
         let features = FeatureSet::from(config.supported_features);
         assert!(features.contains(FeatureSet::REVISION_1));
         assert!(!features.contains(FeatureSet::COMPRESSION));
@@ -868,5 +886,24 @@ mod tests {
             ..Default::default()
         };
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_connection_config_replay_limit_builder() {
+        let config = ConnectionConfig::default().with_replay_queue_limit(128);
+        assert_eq!(config.max_replay_queue_len, Some(128));
+    }
+
+    #[test]
+    fn test_connection_config_validate_replay_limit_zero() {
+        let config = ConnectionConfig {
+            max_replay_queue_len: Some(0),
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+        assert!(config
+            .validate()
+            .unwrap_err()
+            .contains("max_replay_queue_len"));
     }
 }

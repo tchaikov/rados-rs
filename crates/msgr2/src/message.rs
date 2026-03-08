@@ -32,17 +32,36 @@ pub enum MessagePriority {
     High = 2,
 }
 
-pub const CEPH_MSG_PING: u16 = 0x0001;
-pub const CEPH_MSG_PING_ACK: u16 = 0x0002;
-pub const CEPH_MSG_MON_MAP: u16 = 0x0004;
-pub const CEPH_MSG_OSD_MAP: u16 = 0x0029; // 41 decimal - Verified from Ceph src/include/ceph_fs.h:174
-pub const CEPH_MSG_MON_COMMAND: u16 = 50;
-pub const CEPH_MSG_MON_COMMAND_ACK: u16 = 51;
-pub const CEPH_MSG_POOLOP_REPLY: u16 = 48;
-pub const CEPH_MSG_POOLOP: u16 = 49;
-pub const CEPH_MSG_CONFIG: u16 = 62;
-pub const CEPH_MSG_AUTH: u16 = 0x0011;
-pub const CEPH_MSG_AUTH_REPLY: u16 = 0x0012;
+/// Known Ceph message type identifiers used by this crate.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u16)]
+pub enum MessageType {
+    Ping = 0x0001,
+    PingAck = 0x0002,
+    MonMap = 0x0004,
+    Auth = 0x0011,
+    AuthReply = 0x0012,
+    PoolOpReply = 48,
+    PoolOp = 49,
+    MonCommand = 50,
+    MonCommandAck = 51,
+    Config = 62,
+    OsdMap = 0x0029,
+}
+
+pub const CEPH_MSG_PING: u16 = MessageType::Ping as u16;
+pub const CEPH_MSG_PING_ACK: u16 = MessageType::PingAck as u16;
+pub const CEPH_MSG_MON_MAP: u16 = MessageType::MonMap as u16;
+pub const CEPH_MSG_OSD_MAP: u16 = MessageType::OsdMap as u16; // 41 decimal - Verified from Ceph src/include/ceph_fs.h:174
+pub const CEPH_MSG_MON_COMMAND: u16 = MessageType::MonCommand as u16;
+pub const CEPH_MSG_MON_COMMAND_ACK: u16 = MessageType::MonCommandAck as u16;
+pub const CEPH_MSG_POOLOP_REPLY: u16 = MessageType::PoolOpReply as u16;
+pub const CEPH_MSG_POOLOP: u16 = MessageType::PoolOp as u16;
+pub const CEPH_MSG_CONFIG: u16 = MessageType::Config as u16;
+pub const CEPH_MSG_AUTH: u16 = MessageType::Auth as u16;
+pub const CEPH_MSG_AUTH_REPLY: u16 = MessageType::AuthReply as u16;
 
 #[derive(Debug, Clone)]
 pub struct Message {
@@ -65,12 +84,16 @@ impl Message {
         }
     }
 
+    pub fn new_typed(msg_type: MessageType, front: Bytes) -> Self {
+        Self::new(msg_type.into(), front)
+    }
+
     pub fn ping() -> Self {
-        Self::new(CEPH_MSG_PING, Bytes::new()).with_priority(MessagePriority::High)
+        Self::new_typed(MessageType::Ping, Bytes::new()).with_priority(MessagePriority::High)
     }
 
     pub fn ping_ack() -> Self {
-        Self::new(CEPH_MSG_PING_ACK, Bytes::new()).with_priority(MessagePriority::High)
+        Self::new_typed(MessageType::PingAck, Bytes::new()).with_priority(MessagePriority::High)
     }
 
     pub fn with_seq(mut self, seq: u64) -> Self {
@@ -143,7 +166,13 @@ impl Message {
         Ok(())
     }
 
-    pub fn decode(src: &mut impl Buf) -> Result<Self> {
+    /// Decode a flattened message payload when only `data_off` is known.
+    ///
+    /// The legacy message header only carries the end of the front segment, so
+    /// callers without frame segment descriptors cannot distinguish `middle`
+    /// from `data`. This helper preserves the front segment and flattens the
+    /// remaining payload into `data`.
+    pub fn decode_flattened(src: &mut impl Buf) -> Result<Self> {
         // Decode header
         let header = MsgHeader::decode(src)?;
 
@@ -183,7 +212,17 @@ impl Message {
         })
     }
 
-    /// Decode message with explicit segment lengths (used by frame protocol)
+    #[deprecated(
+        note = "Message::decode flattens middle/data payloads; use decode_flattened() for explicit lossy decoding or decode_segments() when segment lengths are known"
+    )]
+    pub fn decode(src: &mut impl Buf) -> Result<Self> {
+        Self::decode_flattened(src)
+    }
+
+    /// Decode message with explicit segment lengths (used by frame protocol).
+    ///
+    /// Unlike [`Self::decode_flattened`], this preserves front/middle/data
+    /// segment boundaries and should be used for msgr2 MESSAGE frames.
     pub fn decode_segments(
         src: &mut impl Buf,
         front_len: usize,
@@ -234,6 +273,12 @@ impl Message {
         self.header.msg_type.get()
     }
 
+    pub fn msg_type_enum(
+        &self,
+    ) -> std::result::Result<MessageType, num_enum::TryFromPrimitiveError<MessageType>> {
+        MessageType::try_from(self.msg_type())
+    }
+
     pub fn seq(&self) -> u64 {
         self.header.get_seq()
     }
@@ -260,21 +305,23 @@ impl Message {
 
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let type_name = match self.msg_type() {
-            CEPH_MSG_PING => "PING",
-            CEPH_MSG_PING_ACK => "PING_ACK",
-            CEPH_MSG_OSD_MAP => "OSD_MAP",
-            CEPH_MSG_MON_MAP => "MON_MAP",
-            CEPH_MSG_MON_COMMAND => "MON_COMMAND",
-            CEPH_MSG_MON_COMMAND_ACK => "MON_COMMAND_ACK",
-            CEPH_MSG_CONFIG => "CONFIG",
-            CEPH_MSG_AUTH => "AUTH",
-            CEPH_MSG_AUTH_REPLY => "AUTH_REPLY",
-            t => {
+        let type_name = match self.msg_type_enum() {
+            Ok(MessageType::Ping) => "PING",
+            Ok(MessageType::PingAck) => "PING_ACK",
+            Ok(MessageType::OsdMap) => "OSD_MAP",
+            Ok(MessageType::MonMap) => "MON_MAP",
+            Ok(MessageType::MonCommand) => "MON_COMMAND",
+            Ok(MessageType::MonCommandAck) => "MON_COMMAND_ACK",
+            Ok(MessageType::Config) => "CONFIG",
+            Ok(MessageType::Auth) => "AUTH",
+            Ok(MessageType::AuthReply) => "AUTH_REPLY",
+            Ok(MessageType::PoolOpReply) => "POOLOP_REPLY",
+            Ok(MessageType::PoolOp) => "POOLOP",
+            Err(_) => {
                 return write!(
                     f,
                     "Message(type={}, seq={}, len={})",
-                    t,
+                    self.msg_type(),
                     self.seq(),
                     self.total_len()
                 );
@@ -357,7 +404,7 @@ mod tests {
 
         // Decode
         let mut read_buf = buf.freeze();
-        let decoded = Message::decode(&mut read_buf).unwrap();
+        let decoded = Message::decode_flattened(&mut read_buf).unwrap();
 
         assert_eq!(decoded.msg_type(), CEPH_MSG_PING);
         assert_eq!(decoded.front, front);
@@ -385,7 +432,7 @@ mod tests {
 
         // Decode using basic decode() - will combine middle+data
         let mut read_buf = buf.freeze();
-        let decoded = Message::decode(&mut read_buf).unwrap();
+        let decoded = Message::decode_flattened(&mut read_buf).unwrap();
 
         assert_eq!(decoded.msg_type(), CEPH_MSG_AUTH);
         assert_eq!(decoded.front, front);
@@ -436,7 +483,7 @@ mod tests {
 
         // Decode
         let mut read_buf = buf.freeze();
-        let decoded = Message::decode(&mut read_buf).unwrap();
+        let decoded = Message::decode_flattened(&mut read_buf).unwrap();
 
         assert_eq!(decoded.msg_type(), CEPH_MSG_PING);
         assert_eq!(decoded.front.len(), 0);
@@ -460,6 +507,13 @@ mod tests {
         assert_eq!(decoded.front.len(), 0);
         assert_eq!(decoded.middle.len(), 0);
         assert_eq!(decoded.data.len(), 0);
+    }
+
+    #[test]
+    fn test_message_type_helpers() {
+        let msg = Message::new_typed(MessageType::Auth, Bytes::new());
+        assert_eq!(msg.msg_type(), CEPH_MSG_AUTH);
+        assert_eq!(msg.msg_type_enum().unwrap(), MessageType::Auth);
     }
 
     #[test]

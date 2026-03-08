@@ -8,7 +8,6 @@ use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
 
 use crate::banner::Banner;
 use crate::error::{Msgr2Error as Error, Result};
@@ -103,7 +102,7 @@ enum ReconnectAction<T> {
 }
 
 /// Frame I/O layer - handles encryption-aware frame send/recv
-pub struct FrameIO {
+pub(crate) struct FrameIO {
     stream: TcpStream,
 }
 
@@ -711,7 +710,7 @@ impl FrameIO {
 }
 
 /// Connection state coordination layer
-pub struct ConnectionState {
+pub(crate) struct ConnectionState {
     state_machine: StateMachine,
     frame_io: FrameIO,
     /// Outgoing message sequence number (incremented for each message sent)
@@ -735,13 +734,16 @@ struct SessionState {
     connect_seq: u64,
     /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
     sent_messages: std::collections::VecDeque<Message>,
+    /// Optional cap on the replay queue size
+    max_sent_messages: Option<usize>,
     /// Connection policy - if true, connection is lossy (no reconnection support)
     is_lossy: bool,
 }
 
+#[allow(dead_code)]
 impl ConnectionState {
     /// Create a new connection state with the given stream and state machine
-    pub fn new(stream: TcpStream, state_machine: StateMachine) -> Self {
+    fn new(stream: TcpStream, state_machine: StateMachine) -> Self {
         let frame_io = FrameIO::new(stream);
 
         // Generate a random client cookie for this connection instance
@@ -758,30 +760,31 @@ impl ConnectionState {
                 global_seq: 0,
                 connect_seq: 0,
                 sent_messages: std::collections::VecDeque::new(),
+                max_sent_messages: None,
                 is_lossy: false, // Default to lossless (reconnectable)
             },
         }
     }
 
     /// Send a frame through the state machine and frame I/O
-    pub async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+    pub(crate) async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
         self.frame_io
             .send_frame(frame, &mut self.state_machine)
             .await
     }
 
     /// Receive a frame through the frame I/O and state machine
-    pub async fn recv_frame(&mut self) -> Result<Frame> {
+    pub(crate) async fn recv_frame(&mut self) -> Result<Frame> {
         self.frame_io.recv_frame(&mut self.state_machine).await
     }
 
     /// Handle a frame with the state machine
-    pub fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
+    fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         self.state_machine.handle_frame(frame)
     }
 
     /// Enter the state machine
-    pub fn enter(&mut self) -> Result<StateResult> {
+    fn enter(&mut self) -> Result<StateResult> {
         self.state_machine.enter()
     }
 
@@ -794,76 +797,85 @@ impl ConnectionState {
     }
 
     /// Get the current state name
-    pub fn current_state_name(&self) -> &str {
+    fn current_state_name(&self) -> &str {
         self.state_machine.current_state_name()
     }
 
     /// Get the current state kind
-    pub fn current_state_kind(&self) -> StateKind {
+    fn current_state_kind(&self) -> StateKind {
         self.state_machine.current_state_kind()
     }
 
     // Session state management methods
 
     /// Get the client cookie for this connection
-    pub fn client_cookie(&self) -> u64 {
+    pub(crate) fn client_cookie(&self) -> u64 {
         self.session.client_cookie
     }
 
     /// Get the server cookie (0 if not yet assigned)
-    pub fn server_cookie(&self) -> u64 {
+    pub(crate) fn server_cookie(&self) -> u64 {
         self.session.server_cookie
     }
 
     /// Set the server cookie (called when SERVER_IDENT is received)
-    pub fn set_server_cookie(&mut self, cookie: u64) {
+    fn set_server_cookie(&mut self, cookie: u64) {
         self.session.server_cookie = cookie;
     }
 
     /// Check if this connection has a valid session that can be reconnected
-    pub fn can_reconnect(&self) -> bool {
+    pub(crate) fn can_reconnect(&self) -> bool {
         !self.session.is_lossy && self.session.server_cookie != 0
     }
 
     /// Get the current global sequence number
-    pub fn global_seq(&self) -> u64 {
+    fn global_seq(&self) -> u64 {
         self.session.global_seq
     }
 
     /// Set the global sequence number
-    pub fn set_global_seq(&mut self, seq: u64) {
+    fn set_global_seq(&mut self, seq: u64) {
         self.session.global_seq = seq;
     }
 
     /// Get the current connection sequence number
-    pub fn connect_seq(&self) -> u64 {
+    fn connect_seq(&self) -> u64 {
         self.session.connect_seq
     }
 
     /// Increment the connection sequence number (for reconnection attempts)
-    pub fn increment_connect_seq(&mut self) {
+    fn increment_connect_seq(&mut self) {
         self.session.connect_seq += 1;
     }
 
     /// Get the last received message sequence number
-    pub fn in_seq(&self) -> u64 {
+    fn in_seq(&self) -> u64 {
         self.in_seq
     }
 
     /// Set the incoming message sequence number
-    pub fn set_in_seq(&mut self, seq: u64) {
+    pub(crate) fn set_in_seq(&mut self, seq: u64) {
         self.in_seq = seq;
     }
 
     /// Record a sent message for potential replay
-    pub fn record_sent_message(&mut self, message: Message) {
-        if !self.session.is_lossy {
-            self.session.sent_messages.push_back(message);
+    pub(crate) fn record_sent_message(&mut self, message: Message) -> Result<()> {
+        if self.session.is_lossy {
+            return Ok(());
         }
+        if let Some(limit) = self.session.max_sent_messages {
+            if self.session.sent_messages.len() >= limit {
+                return Err(Error::Protocol(format!(
+                    "replay queue limit ({limit}) reached; acknowledge or raise ConnectionConfig::max_replay_queue_len before sending more messages"
+                )));
+            }
+        }
+        self.session.sent_messages.push_back(message);
+        Ok(())
     }
 
     /// Discard acknowledged messages up to the given sequence number
-    pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
+    pub(crate) fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
         while let Some(msg) = self.session.sent_messages.front() {
             if msg.header.get_seq() <= ack_seq {
                 self.session.sent_messages.pop_front();
@@ -874,17 +886,17 @@ impl ConnectionState {
     }
 
     /// Get all unacknowledged messages for replay
-    pub fn get_unacknowledged_messages(&self) -> &std::collections::VecDeque<Message> {
+    pub(crate) fn get_unacknowledged_messages(&self) -> &std::collections::VecDeque<Message> {
         &self.session.sent_messages
     }
 
     /// Clear the sent message queue
-    pub fn clear_sent_messages(&mut self) {
+    pub(crate) fn clear_sent_messages(&mut self) {
         self.session.sent_messages.clear();
     }
 
     /// Reset session state for a new connection
-    pub fn reset_session(&mut self) {
+    pub(crate) fn reset_session(&mut self) {
         self.session.server_cookie = 0;
         self.session.global_seq = 0;
         self.session.connect_seq = 0;
@@ -909,9 +921,6 @@ pub struct Connection {
     config: crate::ConnectionConfig,
     /// Optional message throttle for rate limiting
     throttle: Option<crate::throttle::MessageThrottle>,
-    /// Background task handle for message loop
-    #[allow(dead_code)] // Will be used when message loop is implemented
-    recv_task: Option<JoinHandle<()>>,
 }
 
 /// Snapshot of runtime connection state for diagnostics and debugging.
@@ -1072,6 +1081,8 @@ impl Connection {
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
 
         let state = ConnectionState::new(stream, state_machine);
+        let mut state = state;
+        state.session.max_sent_messages = config.max_replay_queue_len;
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1085,7 +1096,6 @@ impl Connection {
             target_entity_addr: Some(target_entity_addr),
             config,
             throttle,
-            recv_task: None,
         })
     }
 
@@ -1131,7 +1141,8 @@ impl Connection {
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
 
-        let state = ConnectionState::new(stream, state_machine);
+        let mut state = ConnectionState::new(stream, state_machine);
+        state.session.max_sent_messages = config.max_replay_queue_len;
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1145,7 +1156,6 @@ impl Connection {
             target_entity_addr: None,
             config,
             throttle,
-            recv_task: None,
         })
     }
 
@@ -1361,7 +1371,8 @@ impl Connection {
         // Perform msgr2 banner exchange (server-side: receive first, then send)
         Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
 
-        let state = ConnectionState::new(stream, state_machine);
+        let mut state = ConnectionState::new(stream, state_machine);
+        state.session.max_sent_messages = config.max_replay_queue_len;
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1375,7 +1386,6 @@ impl Connection {
             target_entity_addr: None,
             config,
             throttle,
-            recv_task: None,
         })
     }
 
@@ -1649,6 +1659,7 @@ impl Connection {
         let in_seq = self.state.in_seq;
         let out_seq = self.state.out_seq;
         let sent_messages = self.state.session.sent_messages.clone();
+        let max_sent_messages = self.state.session.max_sent_messages;
 
         tracing::debug!(
             "Reconnecting with: client_cookie={}, server_cookie={}, global_seq={}, connect_seq={}, in_seq={}, out_seq={}, queued_messages={}",
@@ -1692,6 +1703,7 @@ impl Connection {
         state.out_seq = out_seq;
         state.in_seq = in_seq;
         state.session.sent_messages = sent_messages;
+        state.session.max_sent_messages = max_sent_messages;
 
         // Replace current state with new reconnected state
         self.state = state;
@@ -1813,38 +1825,6 @@ impl Connection {
         )))
     }
 
-    /// Start the embedded message loop
-    ///
-    /// This spawns a background task that continuously receives messages from the
-    /// connection and dispatches them to registered handlers. Local handlers are
-    /// tried first, then the global message bus if no local handler is found.
-    ///
-    /// # Implementation Status
-    ///
-    /// **TODO**: Not yet implemented. Requires architectural refactoring of Connection
-    /// to support interior mutability or split send/receive paths. The current design
-    /// with `recv_message(&mut self)` cannot be called from a spawned task without
-    /// wrapping Connection in Arc<Mutex<...>>.
-    ///
-    /// Possible approaches:
-    /// 1. Wrap ConnectionState in Arc<Mutex<...>> for shared access
-    /// 2. Split Connection into send/receive halves (like tokio::net::TcpStream::split)
-    /// 3. Use channels between the task and Connection methods
-    ///
-    /// For now, applications should call recv_message() manually in their own loops.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if:
-    /// - No handlers (local or global) are configured
-    /// - A message is received with no handler registered
-    pub fn start(&mut self) -> Result<()> {
-        // TODO: Implement message loop once Connection architecture supports it
-        Err(Error::Protocol(
-            "Embedded message loop not yet implemented - use recv_message() manually".into(),
-        ))
-    }
-
     /// Send a Ceph message over the established session
     ///
     /// This method automatically handles connection failures by attempting
@@ -1900,7 +1880,7 @@ impl Connection {
 
         // Record message in sent queue for potential replay (before sending)
         // This follows Ceph's practice of recording before transmission
-        self.state.record_sent_message(msg.clone());
+        self.state.record_sent_message(msg.clone())?;
 
         // Convert Message to MessageFrame
         let msg_frame = MessageFrame::new(
@@ -2170,6 +2150,7 @@ impl Connection {
             global_seq: self.state.session.global_seq,
             connect_seq: self.state.session.connect_seq,
             sent_messages: self.state.session.sent_messages.clone(),
+            max_sent_messages: self.state.session.max_sent_messages,
             is_lossy: self.state.session.is_lossy,
             global_id: self.state.state_machine.global_id(),
         };
@@ -2280,7 +2261,6 @@ mod tests {
             target_entity_addr: None,
             config: crate::ConnectionConfig::with_no_auth(),
             throttle: None,
-            recv_task: None,
         }
     }
 

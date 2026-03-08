@@ -63,6 +63,8 @@ pub struct SharedState {
     pub connect_seq: u64,
     /// Queue of sent messages awaiting acknowledgment
     pub sent_messages: VecDeque<Message>,
+    /// Optional cap on the replay queue size
+    pub max_sent_messages: Option<usize>,
     /// Whether the connection is lossy
     pub is_lossy: bool,
     /// Global ID from authentication
@@ -71,10 +73,26 @@ pub struct SharedState {
 
 impl SharedState {
     /// Record a sent message for potential replay
-    pub fn record_sent_message(&mut self, message: Message) {
+    pub fn can_record_sent_message(&self) -> Result<()> {
+        if self.is_lossy {
+            return Ok(());
+        }
+        if let Some(limit) = self.max_sent_messages {
+            if self.sent_messages.len() >= limit {
+                return Err(Error::Protocol(format!(
+                    "replay queue limit ({limit}) reached; acknowledge or raise ConnectionConfig::max_replay_queue_len before sending more messages"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn record_sent_message(&mut self, message: Message) -> Result<()> {
+        self.can_record_sent_message()?;
         if !self.is_lossy {
             self.sent_messages.push_back(message);
         }
+        Ok(())
     }
 
     /// Discard acknowledged messages up to the given sequence number
@@ -257,24 +275,32 @@ impl OutboundQueue {
 
 /// Assign seq/ack_seq, record in sent_messages, convert to frame, and send.
 ///
-/// Returns `true` on success, `false` on send failure (connection broken).
+enum SendOutcome {
+    Continue,
+    Disconnect,
+}
+
 /// The result is always forwarded to the caller via the reply channel.
 async fn send_outbound_entry(
     entry: OutboundEntry,
     connection_state: &mut crate::protocol::ConnectionState,
     shared: &Arc<Mutex<SharedState>>,
-) -> bool {
+) -> SendOutcome {
     let OutboundEntry { mut msg, reply } = entry;
 
     // Assign sequence numbers under lock
-    let (seq, ack_seq) = {
+    let (seq, ack_seq, should_record) = {
         let mut state = shared.lock().await;
+        if let Err(err) = state.can_record_sent_message() {
+            let _ = reply.send(Err(err));
+            return SendOutcome::Continue;
+        }
         state.out_seq += 1;
         msg.header.set_seq(state.out_seq);
         msg.header.set_ack_seq(state.in_seq);
-        state.record_sent_message(msg.clone());
-        (state.out_seq, state.in_seq)
+        (state.out_seq, state.in_seq, !state.is_lossy)
     };
+    let recorded_msg = should_record.then(|| msg.clone());
 
     tracing::debug!(
         "I/O task: sending message type=0x{:04x}, seq={}, ack_seq={}",
@@ -289,13 +315,26 @@ async fn send_outbound_entry(
         Ok(f) => f,
         Err(e) => {
             let _ = reply.send(Err(e));
-            return false;
+            return SendOutcome::Continue;
         }
     };
     let result = connection_state.send_frame(&frame).await;
     let success = result.is_ok();
+    if success {
+        if let Some(recorded_msg) = recorded_msg {
+            let mut state = shared.lock().await;
+            if let Err(err) = state.record_sent_message(recorded_msg) {
+                let _ = reply.send(Err(err));
+                return SendOutcome::Continue;
+            }
+        }
+    }
     let _ = reply.send(result);
-    success
+    if success {
+        SendOutcome::Continue
+    } else {
+        SendOutcome::Disconnect
+    }
 }
 
 /// Internal I/O task that handles frame send/receive with priority ordering.
@@ -340,7 +379,10 @@ async fn io_task(
 
         // Phase 2: Send the highest-priority queued message
         if let Some(entry) = outbound.pop() {
-            if !send_outbound_entry(entry, &mut connection_state, &shared).await {
+            if matches!(
+                send_outbound_entry(entry, &mut connection_state, &shared).await,
+                SendOutcome::Disconnect
+            ) {
                 tracing::error!("I/O task: send error, shutting down");
                 break;
             }
@@ -552,6 +594,7 @@ mod tests {
             global_seq: 1,
             connect_seq: 0,
             sent_messages: VecDeque::new(),
+            max_sent_messages: None,
             is_lossy: false,
             global_id: 100,
         };
@@ -566,7 +609,7 @@ mod tests {
                 footer: None,
             };
             msg.header.set_seq(i);
-            shared.record_sent_message(msg);
+            shared.record_sent_message(msg).unwrap();
         }
 
         assert_eq!(shared.sent_messages.len(), 5);
