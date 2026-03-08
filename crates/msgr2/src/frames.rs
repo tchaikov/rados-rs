@@ -278,13 +278,13 @@ impl Frame {
 
     /// Legacy encode method - just concatenates preamble and segments without epilogue
     /// This is NOT suitable for sending over the network
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes, RadosError> {
         let mut buf = BytesMut::new();
-        buf.extend_from_slice(&self.preamble.encode());
+        buf.extend_from_slice(&self.preamble.encode()?);
         for segment in &self.segments {
             buf.extend_from_slice(segment);
         }
-        buf.freeze()
+        Ok(buf.freeze())
     }
 
     /// Build the secure-mode payload body for focused layout tests.
@@ -375,29 +375,29 @@ impl Preamble {
         self.flags = flags.raw();
     }
 
-    pub fn encode(&self) -> Bytes {
+    pub fn encode(&self) -> Result<Bytes, RadosError> {
         use denc::Denc;
         let mut buf = BytesMut::with_capacity(PREAMBLE_SIZE);
 
-        (self.tag as u8).encode(&mut buf, 0).unwrap();
-        self.num_segments.encode(&mut buf, 0).unwrap();
+        (self.tag as u8).encode(&mut buf, 0)?;
+        self.num_segments.encode(&mut buf, 0)?;
 
         for segment in &self.segments {
-            segment.logical_len.encode(&mut buf, 0).unwrap();
-            segment.align.encode(&mut buf, 0).unwrap();
+            segment.logical_len.encode(&mut buf, 0)?;
+            segment.align.encode(&mut buf, 0)?;
         }
 
-        self.flags.encode(&mut buf, 0).unwrap();
-        self.reserved.encode(&mut buf, 0).unwrap();
+        self.flags.encode(&mut buf, 0)?;
+        self.reserved.encode(&mut buf, 0)?;
 
         // Calculate CRC using Ceph's non-standard CRC32C algorithm
         // Ceph's ceph_crc32c() produces different results than standard CRC32C
         // We need to match Ceph's algorithm: !crc32c_append(0xFFFFFFFF, data)
         let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
 
-        crc.encode(&mut buf, 0).unwrap();
+        crc.encode(&mut buf, 0)?;
 
-        buf.freeze()
+        Ok(buf.freeze())
     }
 
     pub fn decode(buf: Bytes) -> Result<Self, RadosError> {
@@ -674,7 +674,7 @@ impl FrameAssembler {
         let mut frame = BytesMut::with_capacity(total_size);
 
         // Add preamble
-        frame.extend_from_slice(&preamble.encode());
+        frame.extend_from_slice(&preamble.encode()?);
 
         // Add segments and calculate their CRCs
         let mut epilogue = EpilogueCrcRev0 {
@@ -724,7 +724,7 @@ impl FrameAssembler {
         let mut frame = BytesMut::with_capacity(total_size);
 
         // Add preamble
-        frame.extend_from_slice(&preamble.encode());
+        frame.extend_from_slice(&preamble.encode()?);
 
         // Add first segment with its CRC
         if !segments.is_empty() && !segments[0].is_empty() {
@@ -882,7 +882,7 @@ macro_rules! define_control_frame {
                 }
                 let mut payload = segments.remove(0);
                 Ok(Self {
-                    $($field_name: <$field_type as Denc>::decode(&mut payload, 0).map_err(|e| RadosError::Denc(e.to_string()))?,)*
+                    $($field_name: <$field_type as Denc>::decode(&mut payload, 0)?,)*
                 })
             }
         }
@@ -936,7 +936,7 @@ impl MessageFrame {
                 let mut buf = BytesMut::new();
                 self.header
                     .encode(&mut buf)
-                    .map_err(|e| RadosError::Protocol(format!("Failed to encode header: {}", e)))?;
+                    .map_err(|e| RadosError::Protocol(e.to_string()))?;
                 buf.freeze()
             },
             self.front.clone(),
@@ -955,8 +955,8 @@ impl MessageFrame {
             segments.push(Bytes::new());
         }
 
-        let header =
-            MsgHeader::decode(&mut segments[0]).map_err(|e| RadosError::Denc(e.to_string()))?;
+        let header = MsgHeader::decode(&mut segments[0])
+            .map_err(|e| RadosError::Denc(e.to_string()))?;
 
         Ok(Self {
             header,

@@ -2237,12 +2237,8 @@ impl State for Ready {
                 // Parse keepalive and send ack with same timestamp
                 if let Some(segment) = frame.segments.first() {
                     let mut payload = segment.clone();
-                    let timestamp_sec = u32::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode timestamp_sec: {:?}", e))
-                    })?;
-                    let timestamp_nsec = u32::decode(&mut payload, 0).map_err(|e| {
-                        Error::protocol_error(&format!("Failed to decode timestamp_nsec: {:?}", e))
-                    })?;
+                    let timestamp_sec = u32::decode(&mut payload, 0)?;
+                    let timestamp_nsec = u32::decode(&mut payload, 0)?;
 
                     tracing::debug!(
                         "Received KEEPALIVE2 with timestamp {}.{:09}",

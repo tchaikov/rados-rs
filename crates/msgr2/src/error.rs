@@ -19,6 +19,8 @@ pub enum Msgr2Error {
     Auth(String),
     #[error("CephX error: {0}")]
     CephX(#[from] auth::error::CephXError),
+    #[error("Crypto error: {0}")]
+    Crypto(#[from] crate::crypto::CryptoError),
     #[error("Connection error: {0}")]
     Connection(String),
     #[error("Timeout error")]
@@ -108,6 +110,7 @@ impl Msgr2Error {
             Msgr2Error::Io(_) => "I/O",
             Msgr2Error::Denc(_) => "Encoding",
             Msgr2Error::Auth(_) | Msgr2Error::CephX(_) => "Authentication",
+            Msgr2Error::Crypto(_) => "Crypto",
             Msgr2Error::Connection(_) => "Connection",
             Msgr2Error::Timeout => "Timeout",
             Msgr2Error::InvalidData(_) => "InvalidData",
