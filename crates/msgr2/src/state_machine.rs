@@ -2493,6 +2493,114 @@ impl StateMachine {
         self.pre_auth_enabled = true; // re-enable for next connection attempt
     }
 
+    // ── Phase-coordinator helpers ─────────────────────────────────────────────
+
+    /// Expose HMAC-SHA256 to the phase coordinator in `protocol.rs`.
+    pub fn hmac_sha256_pub(key: Option<&Bytes>, data: &[u8]) -> Result<Bytes> {
+        Self::hmac_sha256(key, data)
+    }
+
+    /// Store the global ID assigned by the server during authentication.
+    pub fn set_global_id(&mut self, id: u64) {
+        self.global_id = id;
+    }
+
+    /// Store the connection mode negotiated during authentication.
+    pub fn set_connection_mode(&mut self, mode: u32) {
+        self.connection_mode = mode;
+    }
+
+    /// Store the connection secret (used for reconnection state).
+    pub fn set_connection_secret(&mut self, secret: Option<Bytes>) {
+        self.connection_secret = secret;
+    }
+
+    /// Record the server cookie assigned in SERVER_IDENT.
+    pub fn set_server_cookie(&mut self, cookie: u64) {
+        self.server_cookie = cookie;
+    }
+
+    /// Transition the state machine to the Ready state after session establishment.
+    ///
+    /// Sets `negotiated_features` and installs the `Ready` state so that
+    /// post-handshake frames (keepalive, messages) are handled correctly.
+    pub fn transition_to_ready(&mut self, negotiated_features: u64) {
+        self.negotiated_features = negotiated_features;
+        self.current_state = Box::new(Ready);
+    }
+
+    // ── Phase-coordinator read accessors ─────────────────────────────────────
+
+    /// Peer's supported msgr2 feature bits (set after banner exchange).
+    pub fn peer_supported_features_val(&self) -> u64 {
+        self.peer_supported_features
+    }
+
+    /// Our own advertised msgr2 feature bits (from config).
+    pub fn our_supported_features(&self) -> u64 {
+        self.config.supported_features
+    }
+
+    /// Clone the server entity address, falling back to default if not set.
+    pub fn server_addr_clone(&self) -> denc::EntityAddr {
+        self.server_addr.clone().unwrap_or_default()
+    }
+
+    /// Clone the client entity address, falling back to default if not set.
+    pub fn client_addr_clone(&self) -> denc::EntityAddr {
+        self.client_addr.clone().unwrap_or_default()
+    }
+
+    /// Client cookie for this connection.
+    pub fn client_cookie_val(&self) -> u64 {
+        self.client_cookie
+    }
+
+    /// Server cookie (0 if not yet assigned by the peer).
+    pub fn server_cookie_val(&self) -> u64 {
+        self.server_cookie
+    }
+
+    /// Current global sequence number.
+    pub fn global_seq_val(&self) -> u64 {
+        self.global_seq
+    }
+
+    /// Current connection sequence number.
+    pub fn connect_seq_val(&self) -> u64 {
+        self.connect_seq
+    }
+
+    /// Current incoming message sequence number.
+    pub fn in_seq_val(&self) -> u64 {
+        self.in_seq
+    }
+
+    /// Preferred connection modes from config.
+    pub fn config_preferred_modes(&self) -> &[crate::ConnectionMode] {
+        &self.config.preferred_modes
+    }
+
+    /// Supported auth methods from config.
+    pub fn config_supported_auth_methods(&self) -> &[crate::AuthMethod] {
+        &self.config.supported_auth_methods
+    }
+
+    /// Service ID from config.
+    pub fn config_service_id(&self) -> u32 {
+        self.config.service_id
+    }
+
+    /// Entity name from config.
+    pub fn config_entity_name(&self) -> &denc::EntityName {
+        &self.config.entity_name
+    }
+
+    /// Take the server-side auth handler (consumed once during `accept_session`).
+    pub fn take_server_auth_handler(&mut self) -> Option<auth::CephXServerHandler> {
+        self.server_auth_handler.take()
+    }
+
     /// Create a new state machine for server connection
     pub fn new_server() -> Self {
         Self::new_server_with_auth(None)

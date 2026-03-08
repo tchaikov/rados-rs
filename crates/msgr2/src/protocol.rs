@@ -785,6 +785,14 @@ impl ConnectionState {
         self.state_machine.enter()
     }
 
+    /// Drive a phase to completion, handling the enter / recv / send loop.
+    pub(crate) async fn drive_phase<P: crate::phase::Phase>(
+        &mut self,
+        phase: P,
+    ) -> Result<P::Output> {
+        crate::phase::drive(&mut self.frame_io, &mut self.state_machine, phase).await
+    }
+
     /// Get the current state name
     pub fn current_state_name(&self) -> &str {
         self.state_machine.current_state_name()
@@ -1373,366 +1381,246 @@ impl Connection {
 
     /// Accept a session by completing the full msgr2 handshake (server-side)
     ///
-    /// This goes through:
-    /// 1. Receive HELLO from client, send HELLO response
-    /// 2. Receive AUTH_REQUEST, send AUTH_DONE
-    /// 3. Receive CLIENT_IDENT, send SERVER_IDENT
+    /// Drives the following phase sequence:
+    /// 1. `HelloServer`  — receive HELLO, send HELLO
+    /// 2. `AuthServer`   — receive AUTH_REQUEST, send AUTH_DONE (with optional CephX round)
+    /// 3. Coordinator    — compute HMAC-SHA256, install encryption
+    /// 4. `AuthSignServer` — send server signature, verify client signature
+    /// 5. `CompressionServer` (optional) — negotiate compression
+    /// 6. `SessionServer` — receive CLIENT_IDENT, send SERVER_IDENT
     ///
     /// Returns when the connection is ready for message exchange.
     pub async fn accept_session(&mut self) -> Result<()> {
+        use crate::{
+            compression::CompressionAlgorithm,
+            phase::{
+                auth::AuthServer, compression::CompressionServer, hello::HelloServer,
+                session::SessionServer, sign::AuthSignServer,
+            },
+        };
+
         tracing::info!("Accepting msgr2 session...");
 
-        // Server starts by waiting for HELLO from client
-        tracing::debug!("Waiting for HELLO frame from client...");
-        let hello_frame = self.state.recv_frame().await?;
-        tracing::debug!("Received HELLO frame (tag: {:?})", hello_frame.preamble.tag);
+        // Phase 1: HELLO exchange (server receives, then sends)
+        self.state.drive_phase(HelloServer).await?;
 
-        // Process HELLO and send response
-        match self.state.handle_frame(hello_frame)? {
-            StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("Sending HELLO response");
-                self.state.send_frame(&frame).await?;
-            }
-            result => {
-                return Err(Error::Protocol(format!(
-                    "Unexpected HELLO processing result: {:?}",
-                    result
-                )));
-            }
-        }
+        // Phase 2: Authentication
+        let auth_handler = self.state.state_machine.take_server_auth_handler();
+        let auth_out = self
+            .state
+            .drive_phase(AuthServer::new(auth_handler))
+            .await?;
 
-        // Wait for AUTH_REQUEST
-        tracing::debug!("Waiting for AUTH_REQUEST from client...");
-        let auth_request = self.state.recv_frame().await?;
-        tracing::debug!(
-            "Received AUTH_REQUEST (tag: {:?})",
-            auth_request.preamble.tag
-        );
+        // Coordinator: compute HMAC signatures
+        let our_sig = {
+            let sm = &self.state.state_machine;
+            let rx_buf = Bytes::copy_from_slice(sm.get_pre_auth_rxbuf());
+            StateMachine::hmac_sha256_pub(auth_out.session_key.as_ref(), &rx_buf)?
+        };
+        let exp_sig = {
+            let sm = &self.state.state_machine;
+            let tx_buf = Bytes::copy_from_slice(sm.get_pre_auth_txbuf());
+            Some(StateMachine::hmac_sha256_pub(
+                auth_out.session_key.as_ref(),
+                &tx_buf,
+            )?)
+        };
 
-        // Process AUTH_REQUEST and send AUTH_DONE
-        match self.state.handle_frame(auth_request)? {
-            StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("Sending AUTH_DONE");
-                self.state.send_frame(&frame).await?;
-
-                // Check if we transitioned to AUTH_ACCEPTING_SIGN state (SECURE mode)
-                if self.state.current_state_kind() == StateKind::AuthAcceptingSign {
-                    tracing::debug!("SECURE mode: Performing AUTH_SIGNATURE exchange");
-
-                    // Server needs to send AUTH_SIGNATURE (from enter())
-                    match self.state.enter()? {
-                        StateResult::SendAndWait {
-                            frame: sig_frame, ..
-                        } => {
-                            tracing::debug!("Sending server AUTH_SIGNATURE");
-                            self.state.send_frame(&sig_frame).await?;
-
-                            // Now wait for client's AUTH_SIGNATURE
-                            tracing::debug!("Waiting for client AUTH_SIGNATURE...");
-                            let client_sig = self.state.recv_frame().await?;
-                            tracing::debug!(
-                                "Received client AUTH_SIGNATURE (tag: {:?})",
-                                client_sig.preamble.tag
-                            );
-
-                            // Process client's AUTH_SIGNATURE
-                            match self.state.handle_frame(client_sig)? {
-                                StateResult::Transition(..) | StateResult::Continue => {
-                                    tracing::debug!("AUTH_SIGNATURE verified, transitioned to SESSION_ACCEPTING");
-                                }
-                                result => {
-                                    return Err(Error::Protocol(format!(
-                                        "Unexpected AUTH_SIGNATURE result: {:?}",
-                                        result
-                                    )));
-                                }
-                            }
-                        }
-                        result => {
-                            return Err(Error::Protocol(format!(
-                                "Unexpected AUTH_ACCEPTING_SIGN enter result: {:?}",
-                                result
-                            )));
-                        }
-                    }
-                }
-            }
-            result => {
-                return Err(Error::Protocol(format!(
-                    "Unexpected AUTH processing result: {:?}",
-                    result
-                )));
+        // Coordinator: commit auth state and install encryption
+        {
+            let sm = &mut self.state.state_machine;
+            sm.complete_pre_auth(auth_out.session_key.clone());
+            sm.set_connection_mode(auth_out.connection_mode);
+            sm.set_connection_secret(auth_out.connection_secret.clone());
+            if let Some(ref secret) = auth_out.connection_secret {
+                sm.setup_encryption(secret)?;
             }
         }
 
-        // Check if we need to handle compression negotiation
-        if self.state.current_state_kind() == StateKind::CompressionAccepting {
-            tracing::debug!(
-                "Compression supported: Waiting for COMPRESSION_REQUEST from client..."
-            );
-            let compression_request = self.state.recv_frame().await?;
-            tracing::debug!(
-                "Received COMPRESSION_REQUEST (tag: {:?})",
-                compression_request.preamble.tag
-            );
+        // Phase 3: Auth-signature exchange (server sends first)
+        self.state
+            .drive_phase(AuthSignServer::new(our_sig, exp_sig))
+            .await?;
 
-            // Process COMPRESSION_REQUEST and send COMPRESSION_DONE
-            match self.state.handle_frame(compression_request)? {
-                StateResult::SendFrame { frame, .. } => {
-                    tracing::debug!("Sending COMPRESSION_DONE");
-                    self.state.send_frame(&frame).await?;
-                }
-                result => {
-                    return Err(Error::Protocol(format!(
-                        "Unexpected COMPRESSION processing result: {:?}",
-                        result
-                    )));
-                }
+        // Phase 4: Compression (only when both peers advertise it)
+        if self.state.state_machine.compression_negotiation_needed() {
+            let comp_out = self.state.drive_phase(CompressionServer).await?;
+            if comp_out.algorithm != CompressionAlgorithm::None {
+                self.state
+                    .state_machine
+                    .setup_compression(comp_out.algorithm);
             }
         }
 
-        // Wait for CLIENT_IDENT
-        tracing::debug!("Waiting for CLIENT_IDENT from client...");
-        let client_ident = self.state.recv_frame().await?;
-        tracing::debug!(
-            "Received CLIENT_IDENT (tag: {:?})",
-            client_ident.preamble.tag
-        );
+        // Phase 5: Session establishment
+        let server_cookie = self.state.state_machine.server_cookie_val();
+        self.state
+            .drive_phase(SessionServer::new(server_cookie))
+            .await?;
 
-        // Process CLIENT_IDENT and send SERVER_IDENT
-        match self.state.handle_frame(client_ident)? {
-            StateResult::SendFrame { frame, .. } => {
-                tracing::debug!("Sending SERVER_IDENT");
-                self.state.send_frame(&frame).await?;
-            }
-            StateResult::Ready => {
-                tracing::info!("Session established (server-side)");
-                return Ok(());
-            }
-            result => {
-                return Err(Error::Protocol(format!(
-                    "Unexpected SESSION processing result: {:?}",
-                    result
-                )));
-            }
-        }
-
+        self.state.state_machine.transition_to_ready(0);
         tracing::info!("Session established (server-side)");
         Ok(())
     }
 
     /// Establish a session by completing the full msgr2 handshake (client-side)
     ///
-    /// This goes through:
-    /// 1. HELLO exchange
-    /// 2. CephX authentication
-    /// 3. SESSION_CONNECTING with CLIENT_IDENT/SERVER_IDENT
+    /// Drives the following phase sequence:
+    /// 1. `HelloClient`  — send HELLO, receive HELLO
+    /// 2. `AuthClient`   — AUTH_REQUEST ↔ AUTH_DONE exchange (with optional retries)
+    /// 3. Coordinator    — compute HMAC-SHA256, install encryption
+    /// 4. `AuthSignClient` — send client signature, verify server signature
+    /// 5. `CompressionClient` (optional) — negotiate compression
+    /// 6. `SessionClient` — send CLIENT_IDENT / SESSION_RECONNECT, receive SERVER_IDENT
     ///
     /// Returns when the connection is ready for message exchange.
     pub async fn establish_session(&mut self) -> Result<()> {
+        use crate::{
+            compression::CompressionAlgorithm,
+            phase::{
+                auth::{AuthClient, AuthOutput},
+                compression::CompressionClient,
+                hello::HelloClient,
+                session::SessionClient,
+                sign::AuthSignClient,
+            },
+        };
+
         tracing::info!("Establishing msgr2 session...");
 
-        // Enter state machine and send HELLO
-        match self.state.enter()? {
-            StateResult::SendAndWait { frame, .. } => {
-                tracing::debug!("Sending HELLO frame");
-                self.state.send_frame(&frame).await?;
-            }
-            result => {
-                return Err(Error::Protocol(format!(
-                    "Unexpected initial state result: {:?}",
-                    result
-                )));
+        // Snapshot config data before any mutable operations.
+        let preferred_modes = self.state.state_machine.config_preferred_modes().to_vec();
+        let supported_auth_methods = self
+            .state
+            .state_machine
+            .config_supported_auth_methods()
+            .to_vec();
+        let auth_provider = self.state.state_machine.get_auth_provider();
+        let service_id = self.state.state_machine.config_service_id();
+        let entity_name = self.state.state_machine.config_entity_name().clone();
+        let client_cookie = self.state.session.client_cookie;
+
+        // Phase 1: HELLO exchange
+        self.state.drive_phase(HelloClient).await?;
+
+        // Phase 2: Authentication
+        let initial_global_id = self.state.state_machine.global_id();
+        let auth_out: AuthOutput = self
+            .state
+            .drive_phase(AuthClient::new(
+                preferred_modes,
+                supported_auth_methods,
+                auth_provider,
+                service_id,
+                entity_name,
+                initial_global_id,
+            ))
+            .await?;
+
+        // Coordinator: compute HMAC-SHA256 signatures over pre-auth byte streams.
+        let our_sig = {
+            let rx_buf = Bytes::copy_from_slice(self.state.state_machine.get_pre_auth_rxbuf());
+            StateMachine::hmac_sha256_pub(auth_out.session_key.as_ref(), &rx_buf)?
+        };
+        let exp_sig = {
+            let tx_buf = Bytes::copy_from_slice(self.state.state_machine.get_pre_auth_txbuf());
+            Some(StateMachine::hmac_sha256_pub(
+                auth_out.session_key.as_ref(),
+                &tx_buf,
+            )?)
+        };
+
+        // Coordinator: commit auth state and install encryption.
+        self.state
+            .state_machine
+            .complete_pre_auth(auth_out.session_key.clone());
+        self.state.state_machine.set_global_id(auth_out.global_id);
+        self.state
+            .state_machine
+            .set_connection_mode(auth_out.connection_mode);
+        self.state
+            .state_machine
+            .set_connection_secret(auth_out.connection_secret.clone());
+        if let Some(ref secret) = auth_out.connection_secret {
+            self.state.state_machine.setup_encryption(secret)?;
+        }
+
+        // Phase 3: Auth-signature exchange (client sends first)
+        let peer_features = self.state.state_machine.peer_supported_features_val();
+        let our_features = self.state.state_machine.our_supported_features();
+        let sign_out = self
+            .state
+            .drive_phase(AuthSignClient::new(
+                our_sig,
+                exp_sig,
+                peer_features,
+                our_features,
+            ))
+            .await?;
+
+        // Phase 4: Compression (only when both peers advertise it)
+        if sign_out.needs_compression {
+            let comp_out = self.state.drive_phase(CompressionClient).await?;
+            if comp_out.algorithm != CompressionAlgorithm::None {
+                self.state
+                    .state_machine
+                    .setup_compression(comp_out.algorithm);
             }
         }
 
-        // Read HELLO response
-        tracing::debug!("Reading HELLO response from server...");
-        let hello_response = self.state.recv_frame().await?;
-        tracing::debug!(
-            "Received HELLO response (tag: {:?})",
-            hello_response.preamble.tag
-        );
+        // Phase 5: Session establishment (CLIENT_IDENT or SESSION_RECONNECT)
+        let server_cookie = self.state.session.server_cookie;
+        let global_seq = self.state.session.global_seq;
+        let connect_seq = self.state.session.connect_seq;
+        let in_seq = self.state.in_seq;
+        let global_id = self.state.state_machine.global_id();
+        let server_addr = self.state.state_machine.server_addr_clone();
+        let client_addr = self.state.state_machine.client_addr_clone();
 
-        // Process HELLO response
-        match self.state.handle_frame(hello_response)? {
-            StateResult::SendAndWait { frame, .. } => {
-                tracing::debug!("Sending AUTH_REQUEST frame");
-                self.state.send_frame(&frame).await?;
-            }
-            result => {
-                return Err(Error::Protocol(format!(
-                    "Unexpected HELLO response result: {:?}",
-                    result
-                )));
-            }
-        }
+        let sess_out = self
+            .state
+            .drive_phase(SessionClient::new(
+                global_id,
+                server_addr,
+                client_addr,
+                client_cookie,
+                server_cookie,
+                global_seq,
+                connect_seq,
+                in_seq,
+            ))
+            .await?;
 
-        // Handle AUTH exchange (may be multiple rounds)
-        tracing::info!("Processing authentication...");
-        let mut auth_rounds = 0;
-        loop {
-            auth_rounds += 1;
-            if auth_rounds > 5 {
-                return Err(Error::Protocol("Too many auth rounds".to_string()));
-            }
+        // Apply session results.
+        self.state.session.server_cookie = sess_out.server_cookie;
+        self.state
+            .state_machine
+            .transition_to_ready(sess_out.negotiated_features);
 
-            tracing::debug!("Auth round {}", auth_rounds);
-
-            let auth_response = self.state.recv_frame().await?;
-            tracing::debug!(
-                "Received auth frame (tag: {:?})",
-                auth_response.preamble.tag
-            );
-
-            match self.state.handle_frame(auth_response)? {
-                StateResult::SendAndWait { frame, .. } | StateResult::SendFrame { frame, .. } => {
-                    tracing::debug!("  → Sending next auth frame");
+        if let Some(msg_seq) = sess_out.reconnect_msg_seq {
+            tracing::info!("Session reconnected, server acked up to msg_seq={msg_seq}");
+            self.state.discard_acknowledged_messages(msg_seq);
+            let messages_to_replay: Vec<_> =
+                self.state.session.sent_messages.iter().cloned().collect();
+            if !messages_to_replay.is_empty() {
+                tracing::info!(
+                    "Replaying {} unacknowledged messages",
+                    messages_to_replay.len()
+                );
+                for msg in messages_to_replay {
+                    let msg_frame = MessageFrame::new(
+                        msg.header,
+                        msg.front.clone(),
+                        msg.middle.clone(),
+                        msg.data.clone(),
+                    );
+                    let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
                     self.state.send_frame(&frame).await?;
-
-                    // Check if we've transitioned past auth states
-                    let state_kind = self.state.current_state_kind();
-                    if state_kind.is_authenticated() {
-                        tracing::info!(
-                            "Authentication and signature exchange completed, now in state: {}",
-                            state_kind.as_str()
-                        );
-                        break;
-                    } else if !state_kind.is_auth_state() {
-                        tracing::debug!("Transitioned to state: {}", state_kind.as_str());
-                        break;
-                    }
-                    // Continue loop for AUTH_CONNECTING and AUTH_CONNECTING_SIGN states
-                }
-                StateResult::Transition(..) => {
-                    let state_kind = self.state.current_state_kind();
-                    tracing::debug!("Transitioned to state: {}", state_kind.as_str());
-                    // Only break if we're past the auth states
-                    if !state_kind.is_auth_state() {
-                        break;
-                    }
-                }
-                result => {
-                    return Err(Error::Protocol(format!(
-                        "Unexpected auth result: {:?}",
-                        result
-                    )));
                 }
             }
         }
 
-        // Handle compression negotiation if we're in COMPRESSION_CONNECTING state
-        if self.state.current_state_kind() == StateKind::CompressionConnecting {
-            tracing::debug!(
-                "Now in COMPRESSION_CONNECTING state, handling compression negotiation"
-            );
-
-            // Read COMPRESSION_DONE response
-            let compression_response = self.state.recv_frame().await?;
-            tracing::debug!(
-                "Received frame (tag: {:?})",
-                compression_response.preamble.tag
-            );
-
-            // Process compression response and transition to SESSION_CONNECTING
-            match self.state.handle_frame(compression_response)? {
-                StateResult::SendAndWait { frame, .. } => {
-                    tracing::debug!("Transitioned to SESSION_CONNECTING, sending CLIENT_IDENT");
-                    self.state.send_frame(&frame).await?;
-                }
-                result => {
-                    return Err(Error::Protocol(format!(
-                        "Unexpected compression result: {:?}",
-                        result
-                    )));
-                }
-            }
-        }
-
-        // Now we should be in SESSION_CONNECTING state and CLIENT_IDENT has been sent
-        if self.state.current_state_kind() == StateKind::SessionConnecting {
-            tracing::debug!("CLIENT_IDENT sent, waiting for SERVER_IDENT");
-
-            // Loop to handle potential AUTH_SIGNATURE followed by SERVER_IDENT
-            loop {
-                tracing::debug!("Reading response frame...");
-                let response_frame = self.state.recv_frame().await?;
-                tracing::debug!("Received frame (tag: {:?})", response_frame.preamble.tag);
-
-                // Process frame
-                match self.state.handle_frame(response_frame)? {
-                    StateResult::Ready => {
-                        tracing::info!("Session established! Ready for message exchange");
-                        break;
-                    }
-                    StateResult::ReconnectReady { msg_seq } => {
-                        tracing::info!(
-                            "Session reconnected! Server acknowledged up to msg_seq={}",
-                            msg_seq
-                        );
-
-                        // Discard acknowledged messages from sent queue (following Ceph's practice)
-                        self.state.discard_acknowledged_messages(msg_seq);
-
-                        // Replay unacknowledged messages (following Ceph's practice)
-                        let messages_to_replay: Vec<_> =
-                            self.state.session.sent_messages.iter().cloned().collect();
-
-                        if !messages_to_replay.is_empty() {
-                            tracing::info!(
-                                "Replaying {} unacknowledged messages",
-                                messages_to_replay.len()
-                            );
-
-                            for msg in messages_to_replay {
-                                tracing::debug!(
-                                    "Replaying message: type={}, seq={}",
-                                    msg.msg_type(),
-                                    msg.seq()
-                                );
-
-                                // Resend the message with its original sequence number
-                                // (following Ceph's practice of preserving message sequence)
-                                let msg_frame = MessageFrame::new(
-                                    msg.header,
-                                    msg.front.clone(),
-                                    msg.middle.clone(),
-                                    msg.data.clone(),
-                                );
-
-                                let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-                                self.state.send_frame(&frame).await?;
-                            }
-
-                            tracing::info!("Message replay complete");
-                        }
-
-                        break;
-                    }
-                    StateResult::Continue => {
-                        // Frame was handled (e.g., AUTH_SIGNATURE), continue to next frame
-                        tracing::debug!("Frame handled, continuing to read next frame");
-                        continue;
-                    }
-                    StateResult::Fault(msg) => {
-                        self.state.state_machine.fault_reset();
-                        return Err(Error::Protocol(format!("Session setup fault: {}", msg)));
-                    }
-                    result => {
-                        return Err(Error::Protocol(format!(
-                            "Unexpected session setup result: {:?}",
-                            result
-                        )));
-                    }
-                }
-            }
-        } else {
-            return Err(Error::Protocol(format!(
-                "Expected SESSION_CONNECTING, but in: {}",
-                self.state.current_state_name()
-            )));
-        }
-
+        tracing::info!("Session established!");
         Ok(())
     }
 
