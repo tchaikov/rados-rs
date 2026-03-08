@@ -1437,7 +1437,7 @@ impl Connection {
 
                             // Process client's AUTH_SIGNATURE
                             match self.state.handle_frame(client_sig)? {
-                                StateResult::Transition(_) | StateResult::Continue => {
+                                StateResult::Transition(..) | StateResult::Continue => {
                                     tracing::debug!("AUTH_SIGNATURE verified, transitioned to SESSION_ACCEPTING");
                                 }
                                 result => {
@@ -1604,7 +1604,7 @@ impl Connection {
                     }
                     // Continue loop for AUTH_CONNECTING and AUTH_CONNECTING_SIGN states
                 }
-                StateResult::Transition(_) => {
+                StateResult::Transition(..) => {
                     let state_kind = self.state.current_state_kind();
                     tracing::debug!("Transitioned to state: {}", state_kind.as_str());
                     // Only break if we're past the auth states

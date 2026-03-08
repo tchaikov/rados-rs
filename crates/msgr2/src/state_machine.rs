@@ -46,17 +46,78 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Resu
     })
 }
 
+/// Side-effect emitted by a state alongside a transition.
+///
+/// States return `ConnectionEffect` to communicate configuration changes to the
+/// `StateMachine` coordinator without requiring `as_any()` downcasting.
+pub enum ConnectionEffect {
+    /// No side effects — install the new state as-is.
+    None,
+    /// Preserve an updated auth provider (emitted by auth-carrying states when transitioning).
+    PreserveAuthProvider(Box<dyn auth::AuthProvider>),
+    /// Auth phase complete: compute HMAC-SHA256 signatures and optionally set up encryption.
+    ///
+    /// `apply_transition_effect` reads `pre_auth_rx/txbuf` from the machine to compute HMACs,
+    /// then builds the real `AuthConnectingSign` / `AuthAcceptingSign` state.
+    AuthSign {
+        connection_mode: u32,
+        session_key: Option<Bytes>,
+        connection_secret: Option<Bytes>,
+        global_id: u64,
+        /// Updated auth provider to preserve, if any.
+        auth_provider: Option<Box<dyn auth::AuthProvider>>,
+    },
+    /// Client: session phase ready (optionally with compression).
+    ///
+    /// `apply_transition_effect` calls `setup_compression` when `compression_algorithm` is
+    /// `Some`, then builds `SessionConnecting` from machine-level address/cookie fields.
+    SessionReady {
+        compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
+    },
+    /// Server: auth-sign phase complete — route to `CompressionAccepting` or `SessionAccepting`
+    /// based on `compression_negotiation_needed()`.
+    ServerAuthComplete,
+    /// Server: install this compression algorithm when transitioning to `SessionAccepting`.
+    ServerInstallCompression(crate::compression::CompressionAlgorithm),
+}
+
+impl std::fmt::Debug for ConnectionEffect {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ConnectionEffect::None => write!(f, "None"),
+            ConnectionEffect::PreserveAuthProvider(_) => write!(f, "PreserveAuthProvider"),
+            ConnectionEffect::AuthSign {
+                connection_mode,
+                global_id,
+                ..
+            } => {
+                write!(f, "AuthSign(mode={connection_mode}, gid={global_id})")
+            }
+            ConnectionEffect::SessionReady {
+                compression_algorithm,
+            } => {
+                write!(f, "SessionReady(compression={compression_algorithm:?})")
+            }
+            ConnectionEffect::ServerAuthComplete => write!(f, "ServerAuthComplete"),
+            ConnectionEffect::ServerInstallCompression(alg) => {
+                write!(f, "ServerInstallCompression({alg:?})")
+            }
+        }
+    }
+}
+
 /// Result of frame processing that indicates next action
 #[derive(Debug)]
 pub enum StateResult {
     /// Continue in current state
     Continue,
-    /// Transition to a new state
-    Transition(Box<dyn State>),
-    /// Send a frame and optionally transition
+    /// Transition to a new state, with an optional side-effect for the coordinator.
+    Transition(Box<dyn State>, ConnectionEffect),
+    /// Send a frame and optionally transition, with an optional side-effect.
     SendFrame {
         frame: Frame,
         next_state: Option<Box<dyn State>>,
+        effect: ConnectionEffect,
     },
     /// Send a frame and wait for specific response
     SendAndWait {
@@ -199,8 +260,10 @@ pub trait State: Debug + Send {
     /// Get expected frame types for this state (for validation/debugging)
     fn expected_frames(&self) -> &[Tag];
 
-    /// Enable downcasting to concrete state types
-    fn as_any(&self) -> &dyn std::any::Any;
+    /// Returns the negotiated Ceph session features (non-zero only in `SessionConnecting`).
+    fn negotiated_features(&self) -> u64 {
+        0
+    }
 }
 
 /// Macro to implement boilerplate State trait methods
@@ -221,10 +284,6 @@ macro_rules! impl_state_boilerplate {
 
         fn expected_frames(&self) -> &[Tag] {
             $expected_frames
-        }
-
-        fn as_any(&self) -> &dyn std::any::Any {
-            self
         }
     };
 }
@@ -269,14 +328,17 @@ impl State for BannerConnecting {
 
     fn enter(&mut self) -> Result<StateResult> {
         // Banner is sent outside of frame protocol
-        Ok(StateResult::Transition(Box::new(HelloConnecting::new(
-            self.preferred_modes.clone(),
-            self.supported_auth_methods.clone(),
-            self.auth_provider.clone(),
-            self.service_id,
-            self.entity_name.clone(),
-            self.global_id,
-        ))))
+        Ok(StateResult::Transition(
+            Box::new(HelloConnecting::new(
+                self.preferred_modes.clone(),
+                self.supported_auth_methods.clone(),
+                self.auth_provider.clone(),
+                self.service_id,
+                self.entity_name.clone(),
+                self.global_id,
+            )),
+            ConnectionEffect::None,
+        ))
     }
 }
 
@@ -349,14 +411,21 @@ impl State for HelloConnecting {
                 tracing::debug!("Received HELLO from entity_type={}", entity_type);
 
                 // Transition to auth phase
-                Ok(StateResult::Transition(Box::new(AuthConnecting::new(
-                    self.preferred_modes.clone(),
-                    self.supported_auth_methods.clone(),
-                    self.auth_provider.clone(),
-                    self.service_id,
-                    self.entity_name.clone(),
-                    self.global_id,
-                ))))
+                let effect = match self.auth_provider.clone() {
+                    Some(p) => ConnectionEffect::PreserveAuthProvider(p),
+                    None => ConnectionEffect::None,
+                };
+                Ok(StateResult::Transition(
+                    Box::new(AuthConnecting::new(
+                        self.preferred_modes.clone(),
+                        self.supported_auth_methods.clone(),
+                        self.auth_provider.take(),
+                        self.service_id,
+                        self.entity_name.clone(),
+                        self.global_id,
+                    )),
+                    effect,
+                ))
             }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in HELLO_CONNECTING state",
@@ -611,7 +680,11 @@ impl State for AuthConnecting {
                 new_state.tried_methods = new_tried;
 
                 // Transition back to AuthConnecting (will send new AUTH_REQUEST)
-                Ok(StateResult::Transition(Box::new(new_state)))
+                let effect = match self.auth_provider.take() {
+                    Some(p) => ConnectionEffect::PreserveAuthProvider(p),
+                    None => ConnectionEffect::None,
+                };
+                Ok(StateResult::Transition(Box::new(new_state), effect))
             }
             Tag::AuthReplyMore => {
                 // Handle CephX multi-round auth
@@ -641,6 +714,7 @@ impl State for AuthConnecting {
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
                             next_state: None,
+                            effect: ConnectionEffect::None,
                         })
                     } else {
                         Err(Error::protocol_error(
@@ -689,19 +763,27 @@ impl State for AuthConnecting {
                         tracing::debug!(
                             "AuthMethod::None - no session key/connection secret, will send empty signature"
                         );
-                        Ok(StateResult::Transition(Box::new(
-                            AuthConnectingSign::new_with_encryption(
+                        Ok(StateResult::Transition(
+                            Box::new(AuthConnectingSign::new_with_encryption(
                                 con_mode,
-                                None,         // No session key for AuthMethod::None
-                                None,         // No connection secret for AuthMethod::None
-                                Bytes::new(), // Empty signature for AuthMethod::None
-                                None,         // No expected server signature for AuthMethod::None
+                                None,
+                                None,
+                                Bytes::new(),
+                                None,
                                 global_id,
-                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
-                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
-                                0, // Placeholder, will be replaced with actual peer_supported_features
-                            ),
-                        )))
+                                denc::EntityAddr::default(),
+                                denc::EntityAddr::default(),
+                                0,
+                                0, // placeholder; overridden by apply_result
+                            )),
+                            ConnectionEffect::AuthSign {
+                                connection_mode: con_mode,
+                                session_key: None,
+                                connection_secret: None,
+                                global_id,
+                                auth_provider: self.auth_provider.take(),
+                            },
+                        ))
                     } else {
                         // CephX authentication - extract session_key and connection_secret
                         let provider = self
@@ -723,21 +805,28 @@ impl State for AuthConnecting {
                         }
 
                         // Authentication completed successfully, transition to AUTH_CONNECTING_SIGN
-                        // for signature exchange, then to session phase
-                        // Note: Signature, server_addr, and client_addr will be set in apply_result()
-                        Ok(StateResult::Transition(Box::new(
-                            AuthConnectingSign::new_with_encryption(
+                        // for signature exchange. apply_result handles HMAC computation.
+                        Ok(StateResult::Transition(
+                            Box::new(AuthConnectingSign::new_with_encryption(
                                 con_mode,
+                                session_key.clone(),
+                                connection_secret.clone(),
+                                Bytes::new(), // Placeholder; replaced with computed signature by apply_result
+                                None, // Placeholder; replaced with computed expected sig by apply_result
+                                global_id,
+                                denc::EntityAddr::default(),
+                                denc::EntityAddr::default(),
+                                0,
+                                0, // placeholder; overridden by apply_result
+                            )),
+                            ConnectionEffect::AuthSign {
+                                connection_mode: con_mode,
                                 session_key,
                                 connection_secret,
-                                Bytes::new(), // Placeholder, will be replaced with computed signature
-                                None, // Placeholder, will be replaced with computed expected server signature
                                 global_id,
-                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual server_addr
-                                denc::EntityAddr::default(), // Placeholder, will be replaced with actual client_addr
-                                0, // Placeholder, will be replaced with actual peer_supported_features
-                            ),
-                        )))
+                                auth_provider: self.auth_provider.take(),
+                            },
+                        ))
                     }
                 } else {
                     Err(Error::protocol_error("AUTH_DONE frame missing payload"))
@@ -827,6 +916,8 @@ pub struct AuthConnectingSign {
     pub client_addr: denc::EntityAddr,
     /// Peer supported features (to check for compression support)
     pub peer_supported_features: u64,
+    /// Our own supported features (to check if we advertised compression)
+    pub our_supported_features: u64,
 }
 
 /// Compression Connecting state - negotiate compression after AUTH_SIGNATURE
@@ -905,19 +996,21 @@ impl State for CompressionConnecting {
                         compression_algorithm
                     );
 
-                    // Create a new CompressionConnecting state with the algorithm stored
-                    let mut new_state = CompressionConnecting::new_with_encryption(
-                        self.connection_mode,
-                        self.session_key.clone(),
-                        self.connection_secret.clone(),
-                        self.global_id,
-                        self.server_addr.clone(),
-                        self.client_addr.clone(),
-                    );
-                    new_state.compression_algorithm = Some(compression_algorithm);
-
-                    // Return a special result that will trigger compression setup in apply_result
-                    Ok(StateResult::Transition(Box::new(new_state)))
+                    // Emit SessionReady effect — apply_result installs compression and
+                    // builds SessionConnecting from machine-level address/cookie fields.
+                    Ok(StateResult::Transition(
+                        Box::new(CompressionConnecting::new_with_encryption(
+                            self.connection_mode,
+                            self.session_key.clone(),
+                            self.connection_secret.clone(),
+                            self.global_id,
+                            self.server_addr.clone(),
+                            self.client_addr.clone(),
+                        )),
+                        ConnectionEffect::SessionReady {
+                            compression_algorithm: Some(compression_algorithm),
+                        },
+                    ))
                 } else {
                     Err(Error::protocol_error(
                         "COMPRESSION_DONE frame missing payload",
@@ -973,6 +1066,7 @@ impl AuthConnectingSign {
         server_addr: denc::EntityAddr,
         client_addr: denc::EntityAddr,
         peer_supported_features: u64,
+        our_supported_features: u64,
     ) -> Self {
         Self {
             connection_mode,
@@ -984,6 +1078,7 @@ impl AuthConnectingSign {
             server_addr,
             client_addr,
             peer_supported_features,
+            our_supported_features,
         }
     }
 }
@@ -1040,42 +1135,50 @@ impl State for AuthConnectingSign {
 
                 // After verification, transition based on compression support
                 tracing::debug!(
-                    "peer_supported_features = 0x{:x}",
-                    self.peer_supported_features
+                    "peer_supported_features = 0x{:x}, our_supported_features = 0x{:x}",
+                    self.peer_supported_features,
+                    self.our_supported_features,
                 );
                 let peer_features = crate::FeatureSet::from(self.peer_supported_features);
-                if peer_features.contains(crate::FeatureSet::COMPRESSION) {
+                let our_features = crate::FeatureSet::from(self.our_supported_features);
+                if peer_features.contains(crate::FeatureSet::COMPRESSION)
+                    && our_features.contains(crate::FeatureSet::COMPRESSION)
+                {
                     tracing::debug!(
-                        "Peer supports COMPRESSION, transitioning to COMPRESSION_CONNECTING"
+                        "Both sides support COMPRESSION, transitioning to COMPRESSION_CONNECTING"
                     );
-                    Ok(StateResult::Transition(Box::new(
-                        CompressionConnecting::new_with_encryption(
+                    Ok(StateResult::Transition(
+                        Box::new(CompressionConnecting::new_with_encryption(
                             self.connection_mode,
                             self.session_key.clone(),
                             self.connection_secret.clone(),
                             self.global_id,
                             self.server_addr.clone(),
                             self.client_addr.clone(),
-                        ),
-                    )))
+                        )),
+                        ConnectionEffect::None,
+                    ))
                 } else {
                     tracing::debug!("Peer does NOT support COMPRESSION, transitioning directly to SESSION_CONNECTING");
-                    Ok(StateResult::Transition(Box::new(
-                        SessionConnecting::new_with_encryption(
+                    Ok(StateResult::Transition(
+                        Box::new(SessionConnecting::new_with_encryption(
                             self.connection_mode,
                             self.session_key.clone(),
                             self.connection_secret.clone(),
-                            None, // No expected signature needed anymore
+                            None,
                             self.global_id,
                             self.server_addr.clone(),
                             self.client_addr.clone(),
-                            rand::random(), // client_cookie - will be overridden in apply_result
-                            0,              // server_cookie - will be set in apply_result
-                            0,              // global_seq - will be set in apply_result
-                            0,              // connect_seq - will be set in apply_result
-                            0,              // in_seq - will be set in apply_result
-                        ),
-                    )))
+                            rand::random(), // client_cookie — overridden in apply_result
+                            0,              // server_cookie — set in apply_result
+                            0,              // global_seq — set in apply_result
+                            0,              // connect_seq — set in apply_result
+                            0,              // in_seq — set in apply_result
+                        )),
+                        ConnectionEffect::SessionReady {
+                            compression_algorithm: None,
+                        },
+                    ))
                 }
             }
             _ => Err(Error::protocol_error(&format!(
@@ -1119,6 +1222,7 @@ impl State for AuthConnectingSign {
                 self.server_addr.clone(),
                 self.client_addr.clone(),
                 self.peer_supported_features,
+                self.our_supported_features,
             )),
         })
     }
@@ -1228,6 +1332,10 @@ impl State for SessionConnecting {
             Tag::SessionReset,
         ]
     );
+
+    fn negotiated_features(&self) -> u64 {
+        self.negotiated_features
+    }
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         tracing::debug!(
@@ -1629,6 +1737,7 @@ impl State for HelloAccepting {
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
                     next_state: Some(Box::new(AuthAccepting::new())),
+                    effect: ConnectionEffect::None,
                 })
             }
             _ => Err(Error::protocol_error(&format!(
@@ -1746,6 +1855,7 @@ impl State for AuthAccepting {
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
                             next_state: None, // Stay in AuthAccepting for phase 2
+                            effect: ConnectionEffect::None,
                         })
                     } else {
                         // No auth handler - send AUTH_DONE with negotiated connection mode
@@ -1756,21 +1866,23 @@ impl State for AuthAccepting {
                             AuthDoneFrame::new(1001, self.connection_mode, Bytes::new());
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone)?;
 
-                        // If SECURE mode, transition to AuthAcceptingSign for signature exchange
-                        let next_state: Box<dyn State> =
-                            if self.connection_mode == crate::ConnectionMode::Secure as u32 {
-                                Box::new(AuthAcceptingSign::new(
-                                    self.connection_mode,
-                                    None, // No session key for AUTH_NONE
-                                    None, // No connection secret for AUTH_NONE
-                                ))
-                            } else {
-                                Box::new(SessionAccepting::new())
-                            };
+                        let effect = if self.connection_mode == crate::ConnectionMode::Secure as u32
+                        {
+                            ConnectionEffect::AuthSign {
+                                connection_mode: self.connection_mode,
+                                session_key: None,
+                                connection_secret: None,
+                                global_id: 1001,
+                                auth_provider: None,
+                            }
+                        } else {
+                            ConnectionEffect::ServerAuthComplete
+                        };
 
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
-                            next_state: Some(next_state),
+                            next_state: None,
+                            effect,
                         })
                     }
                 } else {
@@ -1804,22 +1916,23 @@ impl State for AuthAccepting {
                             AuthDoneFrame::new(global_id, self.connection_mode, auth_done_payload);
                         let response_frame = create_frame_from_trait(&auth_done, Tag::AuthDone)?;
 
-                        // If SECURE mode, transition to AuthAcceptingSign for signature exchange
-                        // Otherwise, go directly to SessionAccepting
-                        let next_state: Box<dyn State> =
-                            if self.connection_mode == crate::ConnectionMode::Secure as u32 {
-                                Box::new(AuthAcceptingSign::new(
-                                    self.connection_mode,
-                                    Some(session_key.secret.clone()),
-                                    Some(connection_secret.secret.clone()), // Pass connection_secret for encryption setup
-                                ))
-                            } else {
-                                Box::new(SessionAccepting::new())
-                            };
+                        let effect = if self.connection_mode == crate::ConnectionMode::Secure as u32
+                        {
+                            ConnectionEffect::AuthSign {
+                                connection_mode: self.connection_mode,
+                                session_key: Some(session_key.secret.clone()),
+                                connection_secret: Some(connection_secret.secret.clone()),
+                                global_id,
+                                auth_provider: None,
+                            }
+                        } else {
+                            ConnectionEffect::ServerAuthComplete
+                        };
 
                         Ok(StateResult::SendFrame {
                             frame: response_frame,
-                            next_state: Some(next_state),
+                            next_state: None,
+                            effect,
                         })
                     } else {
                         Err(Error::protocol_error(
@@ -1928,8 +2041,12 @@ impl State for AuthAcceptingSign {
                     );
                 }
 
-                // After verification, transition to SessionAccepting
-                Ok(StateResult::Transition(Box::new(SessionAccepting::new())))
+                // After verification, transition to SessionAccepting.
+                // apply_result will redirect to CompressionAccepting if compression is needed.
+                Ok(StateResult::Transition(
+                    Box::new(SessionAccepting::new()),
+                    ConnectionEffect::ServerAuthComplete,
+                ))
             }
             _ => Err(Error::protocol_error(&format!(
                 "Unexpected frame {:?} in AUTH_ACCEPTING_SIGN state",
@@ -2038,12 +2155,16 @@ impl State for CompressionAccepting {
                     compression_done.method
                 );
 
-                // After sending COMPRESSION_DONE, transition to SessionAccepting
+                // After COMPRESSION_DONE, install SessionAccepting.
+                // Emit ServerInstallCompression so apply_result calls setup_compression if needed.
+                let effect = match compression_algorithm {
+                    Some(alg) => ConnectionEffect::ServerInstallCompression(alg),
+                    None => ConnectionEffect::None,
+                };
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
-                    next_state: Some(Box::new(SessionAccepting::with_compression(
-                        compression_algorithm,
-                    ))),
+                    next_state: Some(Box::new(SessionAccepting::new())),
+                    effect,
                 })
             }
             _ => Err(Error::protocol_error(&format!(
@@ -2054,30 +2175,12 @@ impl State for CompressionAccepting {
     }
 }
 
-#[derive(Debug)]
-pub struct SessionAccepting {
-    compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
-}
-
-impl Default for SessionAccepting {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+#[derive(Debug, Default)]
+pub struct SessionAccepting;
 
 impl SessionAccepting {
     pub fn new() -> Self {
-        Self {
-            compression_algorithm: None,
-        }
-    }
-
-    pub fn with_compression(
-        compression_algorithm: Option<crate::compression::CompressionAlgorithm>,
-    ) -> Self {
-        Self {
-            compression_algorithm,
-        }
+        Self
     }
 }
 
@@ -2102,6 +2205,7 @@ impl State for SessionAccepting {
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
                     next_state: Some(Box::new(Ready)),
+                    effect: ConnectionEffect::None,
                 })
             }
             _ => Err(Error::protocol_error(&format!(
@@ -2153,7 +2257,8 @@ impl State for Ready {
 
                     Ok(StateResult::SendFrame {
                         frame: response_frame,
-                        next_state: None, // Stay in READY state
+                        next_state: None,
+                        effect: ConnectionEffect::None,
                     })
                 } else {
                     Err(Error::protocol_error("KEEPALIVE2 frame missing payload"))
@@ -2209,6 +2314,10 @@ pub struct StateMachine {
     pre_auth_enabled: bool,
     /// Session key from AUTH_DONE, used for HMAC-SHA256 signatures
     session_key: Option<Bytes>,
+    /// Negotiated connection mode (0=none, 1=CRC, 2=SECURE), set during auth phase.
+    connection_mode: u32,
+    /// Connection secret for SECURE mode encryption, set during auth phase.
+    connection_secret: Option<Bytes>,
     /// Server address we're connecting to (for CLIENT_IDENT)
     server_addr: Option<denc::EntityAddr>,
     /// Our own client address (for CLIENT_IDENT)
@@ -2270,6 +2379,8 @@ impl StateMachine {
             pre_auth_txbuf: BytesMut::new(),
             pre_auth_enabled: true,
             session_key: None,
+            connection_mode: 0,
+            connection_secret: None,
             server_addr: None,
             client_addr: None,
             peer_supported_features: 0, // Will be set after banner exchange
@@ -2399,6 +2510,8 @@ impl StateMachine {
             pre_auth_txbuf: BytesMut::new(),
             pre_auth_enabled: true,
             session_key: None,
+            connection_mode: 0,
+            connection_secret: None,
             server_addr: None,
             client_addr: None,
             peer_supported_features: 0, // Will be set after banner exchange
@@ -2607,375 +2720,104 @@ impl StateMachine {
         self.pre_auth_txbuf.clear();
     }
 
+    /// Compute HMAC-SHA256 over `data` using `key`.  Returns 32 zero bytes when `key` is `None`.
+    fn hmac_sha256(key: Option<&Bytes>, data: &[u8]) -> Result<Bytes> {
+        match key {
+            Some(k) => {
+                use hmac::{Hmac, Mac};
+                use sha2::Sha256;
+                type HmacSha256 = Hmac<Sha256>;
+                let mut mac = HmacSha256::new_from_slice(k)
+                    .map_err(|e| Error::protocol_error(&format!("Invalid HMAC key: {e:?}")))?;
+                mac.update(data);
+                Ok(Bytes::copy_from_slice(&mac.finalize().into_bytes()))
+            }
+            None => Ok(Bytes::from(vec![0u8; 32])),
+        }
+    }
+
     fn apply_result(&mut self, result: StateResult) -> Result<StateResult> {
         match result {
-            StateResult::Transition(new_state) => {
-                // Before transitioning, try to preserve the auth provider from the current state
-                // This is important for AUTH_CONNECTING -> AUTH_CONNECTING_SIGN transition
-                // where the auth provider has been updated with session and tickets
-
-                // Try all state types that might have auth_provider
-                if let Some(auth_connecting) =
-                    self.current_state.as_any().downcast_ref::<AuthConnecting>()
-                {
-                    if let Some(ref provider) = auth_connecting.auth_provider {
-                        tracing::debug!("Preserving auth provider from AuthConnecting");
-                        self.preserved_auth_provider = Some(provider.clone_box());
+            StateResult::Transition(new_state, effect) => {
+                match effect {
+                    ConnectionEffect::None => {
+                        self.current_state = new_state;
                     }
-                } else if let Some(hello_connecting) = self
-                    .current_state
-                    .as_any()
-                    .downcast_ref::<HelloConnecting>()
-                {
-                    if let Some(ref provider) = hello_connecting.auth_provider {
-                        tracing::debug!("Preserving auth provider from HelloConnecting");
-                        self.preserved_auth_provider = Some(provider.clone_box());
+                    ConnectionEffect::PreserveAuthProvider(provider) => {
+                        tracing::debug!("Preserving auth provider via effect");
+                        self.preserved_auth_provider = Some(provider);
+                        self.current_state = new_state;
                     }
-                }
-
-                // Check if transitioning to AUTH_CONNECTING_SIGN or SESSION_CONNECTING with encryption
-                if new_state.kind() == StateKind::AuthConnectingSign {
-                    // Downcast to get access to connection_secret and session_key
-                    let auth_sign = new_state
-                        .as_any()
-                        .downcast_ref::<AuthConnectingSign>()
-                        .ok_or_else(|| {
-                            Error::Protocol(
-                                "State machine error: expected AUTH_CONNECTING_SIGN state but downcast failed".into()
-                            )
-                        })?;
-
-                    // Extract parameters
-                    let connection_mode = auth_sign.connection_mode;
-                    let session_key = auth_sign.session_key.clone();
-                    let connection_secret = auth_sign.connection_secret.clone();
-                    let global_id = auth_sign.global_id;
-                    let server_addr = self.server_addr.clone().unwrap_or_default();
-                    let client_addr = self.client_addr.clone().unwrap_or_default();
-
-                    // Store global_id in StateMachine for later access
-                    self.global_id = global_id;
-                    tracing::debug!("Stored global_id {} in StateMachine", global_id);
-
-                    // Compute HMAC-SHA256 signature of pre_auth_rxbuf using session_key
-                    let our_signature = if let Some(ref key) = session_key {
-                        use hmac::{Hmac, Mac};
-                        use sha2::Sha256;
-
-                        type HmacSha256 = Hmac<Sha256>;
-
-                        tracing::debug!(
-                            "Computing client AUTH_SIGNATURE: HMAC-SHA256(key={} bytes, rxbuf={} bytes)",
-                            key.len(),
-                            self.pre_auth_rxbuf.len()
-                        );
-
-                        let mut mac = HmacSha256::new_from_slice(key)
-                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
-                        mac.update(&self.pre_auth_rxbuf);
-                        let result = mac.finalize();
-                        Bytes::copy_from_slice(&result.into_bytes())
-                    } else {
-                        // No session key, send zero signature
-                        Bytes::from(vec![0u8; 32])
-                    };
-
-                    // Compute expected server signature (HMAC of pre_auth_txbuf)
-                    let expected_server_signature = if let Some(ref key) = session_key {
-                        use hmac::{Hmac, Mac};
-                        use sha2::Sha256;
-
-                        type HmacSha256 = Hmac<Sha256>;
-
-                        let mut mac = HmacSha256::new_from_slice(key)
-                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
-                        mac.update(&self.pre_auth_txbuf);
-                        let result = mac.finalize();
-                        Some(Bytes::copy_from_slice(&result.into_bytes()))
-                    } else {
-                        None
-                    };
-
-                    tracing::debug!(
-                        "Computed AUTH_SIGNATURE: {} bytes from {} bytes rxbuf",
-                        our_signature.len(),
-                        self.pre_auth_rxbuf.len()
-                    );
-                    tracing::debug!(
-                        "AUTH_SIGNATURE first 16 bytes: {:02x?}",
-                        &our_signature[..16.min(our_signature.len())]
-                    );
-                    tracing::debug!(
-                        "Computed expected server signature: {} bytes from {} bytes txbuf",
-                        expected_server_signature
-                            .as_ref()
-                            .map(|s| s.len())
-                            .unwrap_or(0),
-                        self.pre_auth_txbuf.len()
-                    );
-
-                    // Complete pre-auth phase and store session_key
-                    self.complete_pre_auth(session_key.clone());
-                    tracing::debug!(
-                        "Pre-auth phase completed: rxbuf={} bytes, txbuf={} bytes",
-                        self.pre_auth_rxbuf.len(),
-                        self.pre_auth_txbuf.len()
-                    );
-                    tracing::debug!(
-                        "Pre-auth rxbuf first 64 bytes: {:02x?}",
-                        &self.pre_auth_rxbuf[..64.min(self.pre_auth_rxbuf.len())]
-                    );
-                    tracing::debug!(
-                        "Pre-auth txbuf first 64 bytes: {:02x?}",
-                        &self.pre_auth_txbuf[..64.min(self.pre_auth_txbuf.len())]
-                    );
-
-                    // Save buffers to files for debugging
-                    std::fs::write("/tmp/pre_auth_rxbuf.bin", &self.pre_auth_rxbuf[..]).ok();
-                    std::fs::write("/tmp/pre_auth_txbuf.bin", &self.pre_auth_txbuf[..]).ok();
-                    tracing::debug!("Saved pre-auth buffers to /tmp/pre_auth_rxbuf.bin and /tmp/pre_auth_txbuf.bin");
-
-                    if let Some(ref connection_secret) = connection_secret {
-                        tracing::debug!("Setting up frame encryption for SECURE mode");
-                        self.setup_encryption(connection_secret)?;
-                    }
-
-                    // Create new AuthConnectingSign with computed signatures and addresses
-                    let new_state_with_sig = Box::new(AuthConnectingSign::new_with_encryption(
+                    ConnectionEffect::AuthSign {
                         connection_mode,
                         session_key,
                         connection_secret,
-                        our_signature,
-                        expected_server_signature,
                         global_id,
-                        server_addr,
-                        client_addr,
-                        self.peer_supported_features,
-                    ));
-
-                    self.current_state = new_state_with_sig;
-                    // Enter new state
-                    let enter_result = self.current_state.enter()?;
-                    return self.apply_result(enter_result);
-                } else if new_state.kind() == StateKind::AuthAcceptingSign {
-                    // Server-side: Compute signatures for AUTH_SIGNATURE exchange
-                    let auth_sign = new_state
-                        .as_any()
-                        .downcast_ref::<AuthAcceptingSign>()
-                        .ok_or_else(|| {
-                            Error::Protocol(
-                                "State machine error: expected AUTH_ACCEPTING_SIGN state but downcast failed".into()
-                            )
-                        })?;
-
-                    // Extract parameters
-                    let connection_mode = auth_sign.connection_mode;
-                    let session_key = auth_sign.session_key.clone();
-                    let connection_secret = auth_sign.connection_secret.clone();
-
-                    // Server computes:
-                    // - our_signature: HMAC-SHA256(session_key, pre_auth_rxbuf) - what we send to client
-                    // - expected_client_signature: HMAC-SHA256(session_key, pre_auth_txbuf) - what we expect from client
-                    //
-                    // Note: This is "crossed" from client perspective:
-                    // - Server's rxbuf is client's txbuf
-                    // - Server's txbuf is client's rxbuf
-
-                    let our_signature = if let Some(ref key) = session_key {
-                        use hmac::{Hmac, Mac};
-                        use sha2::Sha256;
-
-                        type HmacSha256 = Hmac<Sha256>;
-
-                        tracing::debug!(
-                            "Computing server AUTH_SIGNATURE: HMAC-SHA256(key={} bytes, rxbuf={} bytes)",
-                            key.len(),
-                            self.pre_auth_rxbuf.len()
-                        );
-
-                        let mut mac = HmacSha256::new_from_slice(key)
-                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
-                        mac.update(&self.pre_auth_rxbuf);
-                        let result = mac.finalize();
-                        Bytes::copy_from_slice(&result.into_bytes())
-                    } else {
-                        // No session key, send zero signature
-                        Bytes::from(vec![0u8; 32])
-                    };
-
-                    // Compute expected client signature (HMAC of pre_auth_txbuf)
-                    let expected_client_signature = if let Some(ref key) = session_key {
-                        use hmac::{Hmac, Mac};
-                        use sha2::Sha256;
-
-                        type HmacSha256 = Hmac<Sha256>;
-
-                        let mut mac = HmacSha256::new_from_slice(key)
-                            .map_err(|e| Error::protocol_error(&format!("Invalid key: {:?}", e)))?;
-                        mac.update(&self.pre_auth_txbuf);
-                        let result = mac.finalize();
-                        Some(Bytes::copy_from_slice(&result.into_bytes()))
-                    } else {
-                        None
-                    };
-
-                    tracing::debug!(
-                        "Computed server AUTH_SIGNATURE: {} bytes from {} bytes rxbuf",
-                        our_signature.len(),
-                        self.pre_auth_rxbuf.len()
-                    );
-                    tracing::debug!(
-                        "Computed expected client signature: {} bytes from {} bytes txbuf",
-                        expected_client_signature
-                            .as_ref()
-                            .map(|s| s.len())
-                            .unwrap_or(0),
-                        self.pre_auth_txbuf.len()
-                    );
-
-                    // Complete pre-auth phase and store session_key
-                    self.complete_pre_auth(session_key.clone());
-
-                    if let Some(ref connection_secret) = connection_secret {
-                        tracing::debug!(
-                            "Setting up frame encryption for SECURE mode (server-side)"
-                        );
-                        self.setup_encryption(connection_secret)?;
-                    }
-
-                    // Create new AuthAcceptingSign with computed signatures
-                    let new_state_with_sig = Box::new(AuthAcceptingSign::new_with_signatures(
-                        connection_mode,
-                        session_key,
-                        connection_secret,
-                        our_signature,
-                        expected_client_signature,
-                    ));
-
-                    self.current_state = new_state_with_sig;
-                    // Enter new state
-                    let enter_result = self.current_state.enter()?;
-                    return self.apply_result(enter_result);
-                } else if new_state.kind() == StateKind::CompressionConnecting {
-                    // Check if this is after COMPRESSION_DONE (has algorithm set)
-                    let compression_state = new_state
-                        .as_any()
-                        .downcast_ref::<CompressionConnecting>()
-                        .ok_or_else(|| {
-                            Error::Protocol(
-                                "State machine error: expected COMPRESSION_CONNECTING state but downcast failed".into()
-                            )
-                        })?;
-
-                    if let Some(algorithm) = compression_state.compression_algorithm {
-                        // COMPRESSION_DONE received, set up compression and transition to SESSION_CONNECTING
-                        tracing::debug!("Setting up compression with algorithm: {:?}", algorithm);
-                        self.setup_compression(algorithm);
-
-                        // Transition to SESSION_CONNECTING
-                        let new_session_state = Box::new(SessionConnecting::new_with_encryption(
-                            compression_state.connection_mode,
-                            compression_state.session_key.clone(),
-                            compression_state.connection_secret.clone(),
-                            None, // No expected signature needed
-                            compression_state.global_id,
-                            compression_state.server_addr.clone(),
-                            compression_state.client_addr.clone(),
-                            self.client_cookie,
-                            self.server_cookie,
-                            self.global_seq,
-                            self.connect_seq,
-                            self.in_seq,
-                        ));
-
-                        self.global_id = compression_state.global_id;
-                        self.current_state = new_session_state;
-                        let enter_result = self.current_state.enter()?;
-                        return self.apply_result(enter_result);
-                    } else if !self.compression_negotiation_needed() {
-                        // Check if compression negotiation is needed (both client and server must support it)
-                        tracing::debug!(
-                            "Compression negotiation not needed (our features: 0x{:x}, peer features: 0x{:x}), skipping compression negotiation",
-                            self.config.supported_features,
-                            self.peer_supported_features
-                        );
-
-                        // Skip compression negotiation and go directly to SESSION_CONNECTING
-                        let new_session_state = Box::new(SessionConnecting::new_with_encryption(
-                            compression_state.connection_mode,
-                            compression_state.session_key.clone(),
-                            compression_state.connection_secret.clone(),
-                            None, // No expected signature needed
-                            compression_state.global_id,
-                            compression_state.server_addr.clone(),
-                            compression_state.client_addr.clone(),
-                            self.client_cookie,
-                            self.server_cookie,
-                            self.global_seq,
-                            self.connect_seq,
-                            self.in_seq,
-                        ));
-
-                        // Store global_id in StateMachine for later access
-                        self.global_id = compression_state.global_id;
-                        tracing::debug!(
-                            "Stored global_id {} in StateMachine (from CompressionConnecting)",
-                            compression_state.global_id
-                        );
-
-                        self.current_state = new_session_state;
-                        let enter_result = self.current_state.enter()?;
-                        return self.apply_result(enter_result);
-                    }
-                    // If peer supports compression and no algorithm set yet, proceed normally (will send COMPRESSION_REQUEST)
-                } else if new_state.kind() == StateKind::SessionAccepting {
-                    // Check if we're transitioning from AuthAcceptingSign (server-side)
-                    // If compression is supported, redirect to CompressionAccepting instead
-                    if self.current_state.kind() == StateKind::AuthAcceptingSign {
-                        // Check if peer supports compression
-                        if self.compression_negotiation_needed() {
-                            tracing::debug!(
-                                "Server: Compression advertised by both sides, transitioning to COMPRESSION_ACCEPTING"
-                            );
-                            self.current_state = Box::new(CompressionAccepting::new());
-                            let enter_result = self.current_state.enter()?;
-                            return self.apply_result(enter_result);
+                        auth_provider,
+                    } => {
+                        // Client side: compute HMAC-SHA256 signatures, set up encryption,
+                        // then build the real AuthConnectingSign state.
+                        if let Some(p) = auth_provider {
+                            self.preserved_auth_provider = Some(p);
                         }
-                    }
-                    // Otherwise, proceed with SessionAccepting normally
-                } else if new_state.kind() == StateKind::SessionConnecting {
-                    // Store global_id from SessionConnecting state and fix up addresses
-                    let session_state = new_state
-                        .as_any()
-                        .downcast_ref::<SessionConnecting>()
-                        .ok_or_else(|| {
-                            Error::Protocol(
-                                "State machine error: expected SESSION_CONNECTING state but downcast failed".into()
-                            )
-                        })?;
+                        self.global_id = global_id;
+                        self.connection_mode = connection_mode;
+                        self.connection_secret = connection_secret.clone();
 
-                    self.global_id = session_state.our_global_id;
-                    self.negotiated_features = session_state.negotiated_features;
-                    tracing::debug!(
-                        "Stored global_id {} and negotiated features 0x{:x} in StateMachine (from SessionConnecting)",
-                        session_state.our_global_id,
-                        session_state.negotiated_features
-                    );
+                        let our_sig =
+                            Self::hmac_sha256(session_key.as_ref(), &self.pre_auth_rxbuf)?;
+                        let expected_sig =
+                            Self::hmac_sha256(session_key.as_ref(), &self.pre_auth_txbuf)?;
 
-                    // If addresses are default, fix them up with actual addresses
-                    if session_state.server_addr == denc::EntityAddr::default()
-                        || session_state.client_addr == denc::EntityAddr::default()
-                    {
+                        tracing::debug!(
+                            "Client AUTH_SIGNATURE: {} bytes (rxbuf={} bytes, txbuf={} bytes)",
+                            our_sig.len(),
+                            self.pre_auth_rxbuf.len(),
+                            self.pre_auth_txbuf.len()
+                        );
+
+                        // Save buffers for offline debugging.
+                        std::fs::write("/tmp/pre_auth_rxbuf.bin", &self.pre_auth_rxbuf[..]).ok();
+                        std::fs::write("/tmp/pre_auth_txbuf.bin", &self.pre_auth_txbuf[..]).ok();
+
+                        self.complete_pre_auth(session_key.clone());
+                        if let Some(ref secret) = connection_secret {
+                            tracing::debug!("Setting up SECURE-mode encryption (client)");
+                            self.setup_encryption(secret)?;
+                        }
+
                         let server_addr = self.server_addr.clone().unwrap_or_default();
                         let client_addr = self.client_addr.clone().unwrap_or_default();
-
-                        // Create new SessionConnecting with correct addresses
-                        let new_session_state = Box::new(SessionConnecting::new_with_encryption(
-                            session_state.connection_mode,
-                            session_state.session_key.clone(),
-                            session_state.connection_secret.clone(),
-                            session_state.expected_server_signature.clone(),
-                            session_state.our_global_id,
+                        self.current_state = Box::new(AuthConnectingSign::new_with_encryption(
+                            connection_mode,
+                            session_key,
+                            connection_secret,
+                            our_sig,
+                            Some(expected_sig),
+                            global_id,
+                            server_addr,
+                            client_addr,
+                            self.peer_supported_features,
+                            self.config.supported_features,
+                        ));
+                    }
+                    ConnectionEffect::SessionReady {
+                        compression_algorithm,
+                    } => {
+                        // Client side: optionally install compression, then build
+                        // SessionConnecting from machine-level fields set during AuthSign.
+                        if let Some(alg) = compression_algorithm {
+                            tracing::debug!("Installing compression: {alg:?}");
+                            self.setup_compression(alg);
+                        }
+                        let server_addr = self.server_addr.clone().unwrap_or_default();
+                        let client_addr = self.client_addr.clone().unwrap_or_default();
+                        self.current_state = Box::new(SessionConnecting::new_with_encryption(
+                            self.connection_mode,
+                            self.session_key.clone(),
+                            self.connection_secret.clone(),
+                            None,
+                            self.global_id,
                             server_addr,
                             client_addr,
                             self.client_cookie,
@@ -2984,153 +2826,121 @@ impl StateMachine {
                             self.connect_seq,
                             self.in_seq,
                         ));
-
-                        self.current_state = new_session_state;
-                        let enter_result = self.current_state.enter()?;
-                        return self.apply_result(enter_result);
+                    }
+                    ConnectionEffect::ServerAuthComplete => {
+                        // Server side: route to CompressionAccepting or SessionAccepting.
+                        if self.compression_negotiation_needed() {
+                            tracing::debug!(
+                                "Server: Transitioning to COMPRESSION_ACCEPTING after auth"
+                            );
+                            self.current_state = Box::new(CompressionAccepting::new());
+                        } else {
+                            self.current_state = new_state; // SessionAccepting placeholder
+                        }
+                    }
+                    ConnectionEffect::ServerInstallCompression(_) => {
+                        // Unexpected in Transition arm — install as-is.
+                        self.current_state = new_state;
                     }
                 }
-
-                self.current_state = new_state;
-
-                // For SessionConnecting, call enter() to send CLIENT_IDENT
-                // For other states, also call enter()
                 let enter_result = self.current_state.enter()?;
                 self.apply_result(enter_result)
             }
-            StateResult::SendFrame { frame, next_state } => {
-                if let Some(new_state) = next_state {
-                    // Check if transitioning to AuthAccepting and inject auth handler
-                    if new_state.kind() == StateKind::AuthAccepting {
-                        // Take the auth handler from StateMachine and pass it to AuthAccepting
-                        if let Some(auth_handler) = self.server_auth_handler.take() {
-                            self.current_state =
-                                Box::new(AuthAccepting::with_handler(auth_handler));
-                        } else {
+
+            StateResult::SendFrame {
+                frame,
+                next_state,
+                effect,
+            } => {
+                match effect {
+                    ConnectionEffect::None => {
+                        if let Some(new_state) = next_state {
+                            // Inject server auth handler when transitioning to AuthAccepting.
+                            if new_state.kind() == StateKind::AuthAccepting {
+                                if let Some(handler) = self.server_auth_handler.take() {
+                                    self.current_state =
+                                        Box::new(AuthAccepting::with_handler(handler));
+                                } else {
+                                    self.current_state = new_state;
+                                }
+                            } else {
+                                self.current_state = new_state;
+                            }
+                        }
+                    }
+                    ConnectionEffect::PreserveAuthProvider(provider) => {
+                        self.preserved_auth_provider = Some(provider);
+                        if let Some(new_state) = next_state {
                             self.current_state = new_state;
                         }
-                    } else if new_state.kind() == StateKind::AuthAcceptingSign {
-                        // Server-side: Compute signatures for AUTH_SIGNATURE exchange
-                        let auth_sign = new_state
-                            .as_any()
-                            .downcast_ref::<AuthAcceptingSign>()
-                            .ok_or_else(|| {
-                                Error::Protocol(
-                                    "State machine error: expected AUTH_ACCEPTING_SIGN state but downcast failed".into()
-                                )
-                            })?;
+                    }
+                    ConnectionEffect::AuthSign {
+                        connection_mode,
+                        session_key,
+                        connection_secret,
+                        global_id: _,
+                        auth_provider: _,
+                    } => {
+                        // Server side: compute HMAC-SHA256 signatures, set up encryption,
+                        // and install AuthAcceptingSign.  protocol.rs calls enter() explicitly.
+                        self.connection_mode = connection_mode;
+                        self.connection_secret = connection_secret.clone();
 
-                        // Extract parameters
-                        let connection_mode = auth_sign.connection_mode;
-                        let session_key = auth_sign.session_key.clone();
-                        let connection_secret = auth_sign.connection_secret.clone();
-
-                        // Server computes:
-                        // - our_signature: HMAC-SHA256(session_key, pre_auth_rxbuf) - what we send to client
-                        // - expected_client_signature: HMAC-SHA256(session_key, pre_auth_txbuf) - what we expect from client
-
-                        let our_signature = if let Some(ref key) = session_key {
-                            use hmac::{Hmac, Mac};
-                            use sha2::Sha256;
-
-                            type HmacSha256 = Hmac<Sha256>;
-
-                            tracing::debug!(
-                                "Computing server AUTH_SIGNATURE: HMAC-SHA256(key={} bytes, rxbuf={} bytes)",
-                                key.len(),
-                                self.pre_auth_rxbuf.len()
-                            );
-
-                            let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
-                                Error::protocol_error(&format!("Invalid key: {:?}", e))
-                            })?;
-                            mac.update(&self.pre_auth_rxbuf);
-                            let result = mac.finalize();
-                            Bytes::copy_from_slice(&result.into_bytes())
-                        } else {
-                            // No session key, send zero signature
-                            Bytes::from(vec![0u8; 32])
-                        };
-
-                        // Compute expected client signature (HMAC of pre_auth_txbuf)
-                        let expected_client_signature = if let Some(ref key) = session_key {
-                            use hmac::{Hmac, Mac};
-                            use sha2::Sha256;
-
-                            type HmacSha256 = Hmac<Sha256>;
-
-                            let mut mac = HmacSha256::new_from_slice(key).map_err(|e| {
-                                Error::protocol_error(&format!("Invalid key: {:?}", e))
-                            })?;
-                            mac.update(&self.pre_auth_txbuf);
-                            let result = mac.finalize();
-                            Some(Bytes::copy_from_slice(&result.into_bytes()))
-                        } else {
-                            None
-                        };
+                        let our_sig =
+                            Self::hmac_sha256(session_key.as_ref(), &self.pre_auth_rxbuf)?;
+                        let expected_sig =
+                            Self::hmac_sha256(session_key.as_ref(), &self.pre_auth_txbuf)?;
 
                         tracing::debug!(
-                            "Computed server AUTH_SIGNATURE: {} bytes from {} bytes rxbuf",
-                            our_signature.len(),
-                            self.pre_auth_rxbuf.len()
-                        );
-                        tracing::debug!(
-                            "Computed expected client signature: {} bytes from {} bytes txbuf",
-                            expected_client_signature
-                                .as_ref()
-                                .map(|s| s.len())
-                                .unwrap_or(0),
+                            "Server AUTH_SIGNATURE: {} bytes (rxbuf={} bytes, txbuf={} bytes)",
+                            our_sig.len(),
+                            self.pre_auth_rxbuf.len(),
                             self.pre_auth_txbuf.len()
                         );
 
-                        // Complete pre-auth phase and store session_key
                         self.complete_pre_auth(session_key.clone());
-
-                        if let Some(ref connection_secret) = connection_secret {
-                            tracing::debug!(
-                                "Setting up frame encryption for SECURE mode (server-side)"
-                            );
-                            self.setup_encryption(connection_secret)?;
+                        if let Some(ref secret) = connection_secret {
+                            tracing::debug!("Setting up SECURE-mode encryption (server)");
+                            self.setup_encryption(secret)?;
                         }
 
-                        // Create new AuthAcceptingSign with computed signatures
-                        let new_state_with_sig = Box::new(AuthAcceptingSign::new_with_signatures(
+                        self.current_state = Box::new(AuthAcceptingSign::new_with_signatures(
                             connection_mode,
                             session_key,
                             connection_secret,
-                            our_signature,
-                            expected_client_signature,
+                            our_sig,
+                            Some(expected_sig),
                         ));
-
-                        self.current_state = new_state_with_sig;
-                    } else if new_state.kind() == StateKind::SessionAccepting
-                        && self.current_state.kind() == StateKind::CompressionAccepting
-                    {
-                        let session_accepting = new_state
-                            .as_any()
-                            .downcast_ref::<SessionAccepting>()
-                            .ok_or_else(|| {
-                                Error::Protocol(
-                                    "State machine error: expected SESSION_ACCEPTING state but downcast failed".into()
-                                )
-                            })?;
-
-                        if let Some(algorithm) = session_accepting.compression_algorithm {
+                    }
+                    ConnectionEffect::ServerAuthComplete => {
+                        // CRC-mode AUTH_DONE: route to CompressionAccepting or SessionAccepting.
+                        if self.compression_negotiation_needed() {
                             tracing::debug!(
-                                "Server: Installing negotiated compression algorithm {:?}",
-                                algorithm
+                                "Server: Transitioning to COMPRESSION_ACCEPTING after CRC-mode auth"
                             );
-                            self.setup_compression(algorithm);
+                            self.current_state = Box::new(CompressionAccepting::new());
+                        } else {
+                            self.current_state = Box::new(SessionAccepting::new());
                         }
-
-                        self.current_state = new_state;
-                    } else {
-                        self.current_state = new_state;
+                    }
+                    ConnectionEffect::ServerInstallCompression(alg) => {
+                        // CompressionAccepting sent COMPRESSION_DONE: install compression.
+                        tracing::debug!("Server: Installing compression algorithm {alg:?}");
+                        self.setup_compression(alg);
+                        self.current_state =
+                            next_state.unwrap_or_else(|| Box::new(SessionAccepting::new()));
+                    }
+                    ConnectionEffect::SessionReady { .. } => {
+                        // Not expected in SendFrame arm; install as-is.
+                        if let Some(new_state) = next_state {
+                            self.current_state = new_state;
+                        }
                     }
                 }
                 Ok(StateResult::SendFrame {
                     frame,
                     next_state: None,
+                    effect: ConnectionEffect::None,
                 })
             }
             StateResult::SendAndWait { frame, next_state } => {
@@ -3141,25 +2951,15 @@ impl StateMachine {
                 })
             }
             StateResult::SetKeepAliveAck(timestamp) => {
-                // Update last_keepalive_ack timestamp
                 self.last_keepalive_ack = Some(timestamp);
                 Ok(StateResult::Continue)
             }
             StateResult::Ready => {
-                if let Some(session_state) = self
-                    .current_state
-                    .as_any()
-                    .downcast_ref::<SessionConnecting>()
-                {
-                    self.negotiated_features = session_state.negotiated_features;
-                }
-
-                // Transition to Ready state
+                self.negotiated_features = self.current_state.negotiated_features();
                 self.current_state = Box::new(Ready);
                 Ok(StateResult::Ready)
             }
             StateResult::ReconnectReady { msg_seq } => {
-                // Transition to Ready state after reconnection
                 self.current_state = Box::new(Ready);
                 Ok(StateResult::ReconnectReady { msg_seq })
             }
@@ -3221,7 +3021,10 @@ mod tests {
         sm.set_peer_supported_features(crate::FeatureSet::ALL.bits());
 
         let result = sm
-            .apply_result(StateResult::Transition(Box::new(SessionAccepting::new())))
+            .apply_result(StateResult::Transition(
+                Box::new(SessionAccepting::new()),
+                ConnectionEffect::ServerAuthComplete,
+            ))
             .expect("server transition should succeed");
 
         assert!(
@@ -3243,7 +3046,10 @@ mod tests {
         sm.set_peer_supported_features(crate::FeatureSet::ALL.bits());
 
         let result = sm
-            .apply_result(StateResult::Transition(Box::new(SessionAccepting::new())))
+            .apply_result(StateResult::Transition(
+                Box::new(SessionAccepting::new()),
+                ConnectionEffect::ServerAuthComplete,
+            ))
             .expect("server transition should succeed");
 
         assert!(

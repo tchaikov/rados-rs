@@ -1030,7 +1030,10 @@ mod tests {
         assert!(
             matches!(
                 err,
-                RadosError::Codec(denc::CodecError::VersionTooOld { type_name: "CephXAuthorizeB", .. })
+                RadosError::Codec(denc::CodecError::VersionTooOld {
+                    type_name: "CephXAuthorizeB",
+                    ..
+                })
             ),
             "unexpected error: {err:?}"
         );
