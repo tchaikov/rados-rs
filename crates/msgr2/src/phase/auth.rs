@@ -311,12 +311,11 @@ impl AuthServer {
     }
 
     fn negotiate_mode(client_modes: &[u32]) -> u32 {
-        const SECURE: u32 = ConnectionMode::Secure as u32;
-        const CRC: u32 = ConnectionMode::Crc as u32;
-        if client_modes.contains(&SECURE) {
-            SECURE
+        use crate::{CRC_MODE, SECURE_MODE};
+        if client_modes.contains(&SECURE_MODE) {
+            SECURE_MODE
         } else {
-            CRC
+            CRC_MODE
         }
     }
 }

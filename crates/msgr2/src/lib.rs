@@ -208,6 +208,10 @@ pub enum ConnectionMode {
     Secure = 0x2,
 }
 
+/// Connection mode constants for negotiation
+pub const SECURE_MODE: u32 = ConnectionMode::Secure as u32;
+pub const CRC_MODE: u32 = ConnectionMode::Crc as u32;
+
 /// Configuration for msgr2 connection behavior
 ///
 /// # Authentication

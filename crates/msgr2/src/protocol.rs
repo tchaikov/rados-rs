@@ -14,8 +14,9 @@ use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{Frame, MessageFrame, Preamble, Tag};
 use crate::header::MsgHeader;
 use crate::message::Message;
-use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine, StateResult};
+use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine};
 use crate::FeatureSet;
+use denc::Denc;
 use std::borrow::Cow;
 
 /// Zero padding buffer — avoids heap allocation for small alignment padding.
@@ -124,7 +125,7 @@ impl FrameIO {
         num_segments
     }
 
-    fn build_secure_preamble(frame: &Frame, num_segments: usize) -> Bytes {
+    fn build_secure_preamble(frame: &Frame, num_segments: usize) -> Result<Bytes> {
         let mut preamble = Preamble {
             tag: frame.preamble.tag,
             num_segments: num_segments as u8,
@@ -142,11 +143,11 @@ impl FrameIO {
             };
         }
 
-        preamble.encode()
+        Ok(preamble.encode()?)
     }
 
     fn build_secure_payload(frame: &Frame, num_segments: usize) -> BytesMut {
-        const FRAME_LATE_STATUS_COMPLETE: u8 = 0x0e;
+        use crate::frames::FRAME_LATE_STATUS_COMPLETE;
 
         let total_len = frame
             .segments
@@ -259,7 +260,7 @@ impl FrameIO {
             wire_bytes
         } else {
             let num_segments = Self::normalized_num_segments(&frame_to_send);
-            let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments);
+            let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments)?;
             let payload_bytes = Self::build_secure_payload(&frame_to_send, num_segments);
 
             tracing::debug!(
@@ -776,16 +777,6 @@ impl ConnectionState {
     /// Receive a frame through the frame I/O and state machine
     pub(crate) async fn recv_frame(&mut self) -> Result<Frame> {
         self.frame_io.recv_frame(&mut self.state_machine).await
-    }
-
-    /// Handle a frame with the state machine
-    fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
-        self.state_machine.handle_frame(frame)
-    }
-
-    /// Enter the state machine
-    fn enter(&mut self) -> Result<StateResult> {
-        self.state_machine.enter()
     }
 
     /// Drive a phase to completion, handling the enter / recv / send loop.
@@ -1947,18 +1938,8 @@ impl Connection {
                     }
 
                     // ACK frame contains a single uint64_t sequence number
-                    let payload = frame.segments[0].clone();
-                    if payload.len() < 8 {
-                        return Err(Error::protocol_error(&format!(
-                            "ACK frame payload too short: {} bytes",
-                            payload.len()
-                        )));
-                    }
-
-                    let ack_seq = u64::from_le_bytes([
-                        payload[0], payload[1], payload[2], payload[3], payload[4], payload[5],
-                        payload[6], payload[7],
-                    ]);
+                    let mut payload = frame.segments[0].as_ref();
+                    let ack_seq = u64::decode(&mut payload, 0)?;
 
                     tracing::debug!("Received ACK frame: seq={}", ack_seq);
 

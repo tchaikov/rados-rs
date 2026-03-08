@@ -1796,13 +1796,12 @@ impl AuthAccepting {
     /// Negotiate connection mode from client's preferred modes.
     /// Server preference order: SECURE > CRC
     fn negotiate_connection_mode(&self, client_modes: &[u32]) -> u32 {
-        const SECURE: u32 = crate::ConnectionMode::Secure as u32;
-        const CRC: u32 = crate::ConnectionMode::Crc as u32;
+        use crate::{CRC_MODE, SECURE_MODE};
 
-        if client_modes.contains(&SECURE) {
-            SECURE
+        if client_modes.contains(&SECURE_MODE) {
+            SECURE_MODE
         } else {
-            CRC // Default to CRC (covers both explicit CRC and no match)
+            CRC_MODE // Default to CRC (covers both explicit CRC and no match)
         }
     }
 }
@@ -2705,15 +2704,13 @@ impl StateMachine {
         );
         if let Some(decryptor) = &mut self.frame_decryptor {
             tracing::debug!("Attempting AES-GCM decryption of {} bytes", data.len());
-            let result = decryptor
-                .decrypt(data)
-                .map_err(|e| Error::protocol_error(&format!("Frame decryption failed: {}", e)));
+            let result = decryptor.decrypt(data);
             if let Err(ref e) = result {
                 tracing::debug!("Decryption FAILED: {:?}", e);
             } else {
                 tracing::debug!("Decryption SUCCESS");
             }
-            result
+            result.map_err(Into::into)
         } else {
             // No encryption, return as-is
             Ok(Bytes::copy_from_slice(data))
@@ -2723,9 +2720,7 @@ impl StateMachine {
     /// Encrypt frame data if in SECURE mode
     pub fn encrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
         if let Some(encryptor) = &mut self.frame_encryptor {
-            encryptor
-                .encrypt(data)
-                .map_err(|e| Error::protocol_error(&format!("Frame encryption failed: {}", e)))
+            encryptor.encrypt(data).map_err(Into::into)
         } else {
             // No encryption, return as-is
             Ok(Bytes::copy_from_slice(data))
