@@ -1,0 +1,227 @@
+================================================================================
+AUDIT: msgr2 Secure Framing / Copy Reduction — First Patch Recommendation
+================================================================================
+
+MAIN FILES INVOLVED:
+  • /home/kefu/dev/rados-rs/crates/msgr2/src/protocol.rs (2439 lines)
+    - FrameIO::send_frame() [lines 129-321]
+    - FrameIO::recv_frame() [lines 332-657]
+  • /home/kefu/dev/rados-rs/crates/msgr2/src/frames.rs (1489 lines)
+    - Frame::to_wire() [lines 176-187]
+    - Frame::compress() [lines 195-234]
+    - FrameAssembler::assemble_crc_rev1() [lines 701-773]
+    - Preamble::encode() [lines 378-401]
+  • /home/kefu/dev/rados-rs/crates/msgr2/src/compression.rs
+  • /home/kefu/dev/rados-rs/crates/msgr2/src/crypto.rs
+
+================================================================================
+THREE CONCRETE COPY HOT SPOTS IDENTIFIED
+================================================================================
+
+HOT SPOT #1: Send Path Unnecessary Payload Copy [HIGHEST VALUE, SAFEST]
+  Location: protocol.rs:177
+  Problem:  let mut payload_bytes = wire_bytes[PREAMBLE_SIZE..].to_vec();
+  
+  Issue: Full buffer memcpy of payload portion from wire format
+  - In plaintext mode: copy is never used; could return wire_bytes directly
+  - In encrypted mode: copy is discarded; payload rebuilt from frame.segments anyway
+  Impact: Every send_frame() call, all message sizes
+  
+  Fix: Branch on encryption EARLY (line 129 entry)
+       - Non-encrypted: assemble wire once, send directly (no Vec copy)
+       - Encrypted: build secure payload from segments, skip wire format step
+  Complexity: LOW (mechanical reorganization, no algorithm changes)
+  Invariants: Must preserve preamble reference until encryption; in non-encrypted
+             case, wire_bytes returned as-is; in encrypted case, only segments needed
+
+
+HOT SPOT #2: Secure Mode Payload Rebuild [HIGH VALUE]
+  Location: protocol.rs:203-243
+  Problem:  payload_bytes.clear(); then rebuild from frame.segments
+            - Segment copies with alignment padding
+            - Epilogue reconstruction for multi-segment
+  
+  Issue: Complete payload rebuild after already-built wire format
+  - Wire format assembly (CRC calculations) discarded in secure mode
+  - Segments re-copied with alignment (already in wire format bytes)
+  - Unnecessary vector reallocation churn
+  Impact: All encrypted frames (OSD operations, secure connections)
+  
+  Fix: Isolated encrypted path builds secure payload DIRECTLY from segments
+       - Pre-calculate exact size needed (lengths + alignment + epilogue)
+       - Single-pass assembly: [seg0_padded | seg1_padded | ... | epilogue]
+       - Eliminate .clear() and reallocation
+  Complexity: LOW (direct assembly, no encryption changes)
+  Invariants: Must produce: segments 16-byte-aligned with zero-padding
+             Epilogue (16 bytes) only for multi-segment frames
+             NO CRCs in secure mode (GCM tag replaces them)
+
+
+HOT SPOT #3: Receive Inline+Remaining Reassembly [MEDIUM VALUE]
+  Location: protocol.rs:517-521
+  Problem:  let mut combined = BytesMut::with_capacity(INLINE + remaining_len);
+            combined.extend_from_slice(inline_data);
+            combined.extend_from_slice(&decrypted_remaining);
+  
+  Issue: Re-copy of inline portion that was already decrypted in preamble block
+  - Preamble block decrypts to inline_data (48 bytes)
+  - Remaining separately decrypted
+  - Then both copied into combined buffer
+  Impact: Large encrypted frames (N > 48 bytes payload)
+  
+  Fix: Avoid reassembly; read remaining directly into contiguous buffer
+       OR use buffer abstraction that doesn't require copying
+  Complexity: MEDIUM (requires buffer lifetime management)
+  Invariants: Must produce contiguous payload: [inline (48 bytes) | remaining]
+             Both parts already decrypted and available
+
+================================================================================
+RECOMMENDED FIRST PATCH: HOT SPOT #1
+================================================================================
+
+WHY THIS PATCH IS SAFEST & HIGHEST VALUE:
+
+✓ Purely mechanical: no algorithm changes, just reorganization of allocation timing
+✓ Clear logic fork: encrypted vs. non-encrypted are fundamentally different operations
+✓ No state machine impact: protocol.rs logic stays the same, buffering differs
+✓ Easy to test: benchmark before/after on same connection
+✓ Low invariant risk: encrypted and plaintext paths have distinct requirements
+✓ HIGH VALUE: eliminates 1 full-buffer copy on EVERY send_frame() call
+
+IMPLEMENTATION PATTERN:
+
+Current (lines 129-321):
+  1. Compress (if enabled)
+  2. Assemble wire format (preamble + segments + CRCs)
+  3. Split preamble & payload: payload_bytes = wire_bytes[32..].to_vec()  ← COPY
+  4. If encrypted: clear & rebuild payload from segments
+  5. Encrypt
+  
+Optimized (same file, restructured):
+  1. Compress (if enabled)
+  2. Check has_encryption() → BRANCH EARLY
+  
+     NON-ENCRYPTED BRANCH:
+       - Assemble wire format once
+       - Send directly
+       - Return ✓
+  
+     ENCRYPTED BRANCH:
+       - Skip wire format assembly entirely
+       - Build secure payload directly from frame.segments (one pass)
+       - Encrypt directly
+       - Send ✓
+
+KEY FUNCTIONS TO TOUCH:
+  • FrameIO::send_frame() [protocol.rs:129-321]
+    - Extract: build_secure_payload_direct() helper
+    - (optional) Extract: Frame::to_wire_preamble_only() to avoid full assembly
+
+KEY FUNCTIONS NOT TOUCHING:
+  • Frame::compress() / decompress() — remain as-is
+  • FrameAssembler::assemble_crc_rev*() — not called for encrypted path
+  • Crypto/compression traits — no changes
+  • State machine — no changes
+
+CODE SHAPE AFTER PATCH:
+
+  pub async fn send_frame(&mut self, frame: &Frame, state_machine: &mut StateMachine)
+      -> Result<()>
+  {
+      // Step 1: Compression (unchanged)
+      let frame_to_send = ...;
+      
+      // Step 2: Branch on encryption (NEW)
+      if !state_machine.has_encryption() {
+          // Non-encrypted: wire format + send
+          let wire_bytes = frame_to_send.to_wire(is_rev1)?;
+          self.stream.write_all(&wire_bytes).await?;
+          self.stream.flush().await?;
+      } else {
+          // Encrypted: secure payload assembly (isolated)
+          let preamble_bytes = self.extract_preamble(&frame_to_send)?;
+          let secure_payload = self.build_secure_payload(&frame_to_send)?;
+          let encrypted_frame = state_machine.encrypt_secure_frame(
+              &preamble_bytes, &secure_payload)?;
+          self.stream.write_all(&encrypted_frame).await?;
+          self.stream.flush().await?;
+      }
+      Ok(())
+  }
+
+  // Helper: build secure frame payload (no CRCs, alignment padding + epilogue)
+  fn build_secure_payload(&self, frame: &Frame) -> Result<Bytes> {
+      const BLOCK_SIZE: usize = 16;
+      // Calculate exact size: sum(segment_len + padding) + epilogue_for_multi
+      let mut total = 0;
+      for seg in &frame.segments {
+          if !seg.is_empty() {
+              total += (seg.len() + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
+          }
+      }
+      if frame.preamble.num_segments > 1 {
+          total += BLOCK_SIZE;
+      }
+      
+      // Build in one pass, pre-allocated
+      let mut payload = BytesMut::with_capacity(total);
+      for seg in &frame.segments {
+          if !seg.is_empty() {
+              payload.extend_from_slice(seg);
+              let aligned = (seg.len() + BLOCK_SIZE - 1) & !(BLOCK_SIZE - 1);
+              payload.put_bytes(0, aligned - seg.len());
+          }
+      }
+      if frame.preamble.num_segments > 1 {
+          payload.put_u8(0x0e);  // FRAME_LATE_STATUS_COMPLETE
+          payload.put_bytes(0, BLOCK_SIZE - 1);
+      }
+      Ok(payload.freeze())
+  }
+
+================================================================================
+INVARIANTS TO PRESERVE
+================================================================================
+
+Preamble (32 bytes):
+  • Encoded: tag, num_segments, 4× segment descriptors, flags, CRC
+  • Plaintext: CRC covers preamble data itself
+  • Encrypted: included in GCM-encrypted block
+
+Segments:
+  • In order: seg0, seg1, seg2, seg3
+  • Each has logical_len (actual payload size) in descriptor
+  • Empty trailing segments allowed
+
+Frame Assembly Variants:
+  • Plaintext rev0: preamble + segments + epilogue(late_flags + 4 CRCs)
+  • Plaintext rev1: preamble + seg0 + CRC + seg1..3 + epilogue(late_status + 3 CRCs)
+  • Secure mode:   preamble + [seg0_padded | seg1_padded | ... | epilogue_padded]
+                   (no CRCs, 16-byte alignment, GCM authentication tag)
+
+Secure Mode Inline Optimization:
+  • First 48 bytes of payload encrypted with preamble (80 → 96 bytes with GCM tag)
+  • Remaining encrypted separately if any (N → N+16 bytes with GCM tag)
+  • Epilogue: 16 bytes for multi-segment, 0 bytes for single-segment
+
+================================================================================
+SUMMARY
+================================================================================
+
+Three copy hot spots identified; HOT SPOT #1 is safest, highest-value first patch.
+
+Patch target: protocol.rs lines 129-321 (FrameIO::send_frame)
+              
+Changes:      Early branch on encryption; isolated encrypted path
+              eliminates unnecessary wire format assembly + payload copy
+              
+Size:         ~100-150 lines (mostly extracting existing logic into helpers)
+Risk:         LOW (mechanical, no crypto/compression changes)
+Benefit:      1 full-buffer copy eliminated per send_frame() call
+              Foundation for isolating encrypted path for future HOT SPOT #2
+              optimization
+
+Preserve:     All preamble, segment order, CRC/GCM authentication semantics
+              Non-encrypted and encrypted frame layout requirements distinct
+              but both must work correctly
+

@@ -367,10 +367,10 @@ impl FrameIO {
         );
 
         // Calculate total segment size
-        let mut total_segment_size = 0;
-        for i in 0..preamble.num_segments as usize {
-            total_segment_size += preamble.segments[i].logical_len as usize;
-        }
+        let total_segment_size: usize = preamble.segments[..preamble.num_segments as usize]
+            .iter()
+            .map(|s| s.logical_len as usize)
+            .sum();
 
         // Calculate total payload size based on encryption mode and number of segments
         const CRYPTO_BLOCK_SIZE: usize = 16;
@@ -477,12 +477,11 @@ impl FrameIO {
                     offset += segment_len;
                     // Plaintext rev1: 4-byte CRC follows segment 0 (both single and multi-segment)
                     if is_rev1 && i == 0 {
-                        if offset + crate::frames::FRAME_CRC_SIZE <= full_payload.len() {
-                            let received_crc = u32::from_le_bytes(
-                                full_payload[offset..offset + crate::frames::FRAME_CRC_SIZE]
-                                    .try_into()
-                                    .unwrap(),
-                            );
+                        if let Some(crc_bytes) = full_payload
+                            .get(offset..offset + crate::frames::FRAME_CRC_SIZE)
+                            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                        {
+                            let received_crc = u32::from_le_bytes(crc_bytes);
                             let expected_crc = !crc32c::crc32c(&segment_data);
                             if received_crc != expected_crc {
                                 return Err(Error::Protocol(format!(
@@ -525,14 +524,13 @@ impl FrameIO {
                     (0usize, crate::frames::MAX_NUM_SEGMENTS, false)
                 };
                 for seg_idx in crc_start_seg..crc_start_seg + num_epilogue_crcs {
-                    if offset + crate::frames::FRAME_CRC_SIZE > full_payload.len() {
+                    let Some(crc_bytes) = full_payload
+                        .get(offset..offset + crate::frames::FRAME_CRC_SIZE)
+                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                    else {
                         break;
-                    }
-                    let received_crc = u32::from_le_bytes(
-                        full_payload[offset..offset + crate::frames::FRAME_CRC_SIZE]
-                            .try_into()
-                            .unwrap(),
-                    );
+                    };
+                    let received_crc = u32::from_le_bytes(crc_bytes);
                     offset += crate::frames::FRAME_CRC_SIZE;
 
                     if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
@@ -1471,7 +1469,6 @@ impl Connection {
         Ok(())
     }
 
-    /// Check if an error is a connection error that warrants reconnection
     /// Execute an operation with automatic retry and reconnection on recoverable errors
     ///
     /// This generic method handles the common pattern of:

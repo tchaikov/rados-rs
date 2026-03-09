@@ -296,8 +296,8 @@ impl Message {
         MsgHeader::LENGTH + self.front.len() + self.middle.len() + self.data.len()
     }
 
-    /// Calculate total message size for throttling purposes
-    /// This includes header + all payload segments
+    /// Total message size in bytes (header + all payload segments).
+    /// Convenience alias for throttling and diagnostics.
     pub fn total_size(&self) -> u64 {
         self.total_len() as u64
     }

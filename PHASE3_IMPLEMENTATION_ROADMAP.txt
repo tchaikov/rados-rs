@@ -1,0 +1,324 @@
+================================================================================
+PHASE 3: MODERN MONITOR SUBSCRIPTION BEHAVIOR
+Implementation-Ready Roadmap with File:Line References
+================================================================================
+
+CURRENT STATE
+─────────────
+✅ Subscription tracking: MonSub struct (subscription.rs:52-223)
+✅ Default stateful mode: RenewalMode::StatefulOrUnknown (subscription.rs:80)
+✅ ACK fallback: handle_subscribe_ack (client.rs:1330-1341)
+❌ Capability detection: NOT IMPLEMENTED
+❌ Mode negotiation: NOT IMPLEMENTED  
+❌ Defensive timeout: NOT IMPLEMENTED
+
+================================================================================
+PART 1: CAPABILITY DETECTION (2-3 hours) - LOW RISK
+================================================================================
+
+1. Create feature constants
+   FILE: crates/monclient/src/types.rs
+   ADD after existing imports (around line 10):
+   
+   pub const MON_STATEFUL_SUB: u64 = 1 << 0;
+   
+   pub struct MonCapabilities {
+       pub peer_supported_features: u64,
+       pub stateful_sub_supported: bool,
+   }
+   
+   impl MonCapabilities {
+       pub fn from_features(features: u64) -> Self {
+           Self {
+               peer_supported_features: features,
+               stateful_sub_supported: (features & MON_STATEFUL_SUB) != 0,
+           }
+       }
+   }
+
+2. Expose peer features from MonConnection
+   FILE: crates/monclient/src/connection.rs
+   ADD after line 301 (after create_service_auth_provider):
+   
+   /// Get peer's supported features from msgr2 handshake
+   pub fn peer_supported_features(&self) -> Option<u64> {
+       Some(self.connection.state_machine().peer_supported_features)
+   }
+
+   REQUIRES: msgr2 must expose state_machine() accessor
+   CHECK: crates/msgr2/src/protocol.rs around line 2226
+   
+3. Expose state machine from msgr2 Connection (if needed)
+   FILE: crates/msgr2/src/protocol.rs  
+   CHECK line ~2226 for existing:
+   
+   pub fn state_machine(&self) -> &StateMachine {
+       &self.state_machine
+   }
+   
+   If not present, add it.
+
+4. Log capability detection on connect
+   FILE: crates/monclient/src/client.rs
+   MODIFY: handle_monmap_connect method (around line 826-842)
+   
+   After line 838 (after should_send_subscriptions block), ADD:
+   
+   if let Some(features) = active_con.peer_supported_features() {
+       let caps = crate::types::MonCapabilities::from_features(features);
+       info!(
+           "Connected to monitor rank {}: MON_STATEFUL_SUB={}",
+           rank,
+           caps.stateful_sub_supported
+       );
+   }
+
+5. Add import at top of client.rs
+   ADD after existing imports (line 28):
+   
+   use crate::types::MonCapabilities;
+
+================================================================================
+PART 2: EXPLICIT MODE NEGOTIATION (4-5 hours) - MEDIUM RISK
+================================================================================
+
+1. Extend MonSub with capability-aware mode detection
+   FILE: crates/monclient/src/subscription.rs
+   
+   MODIFY struct MonSub (line 56-71):
+   ADD field after renewal_mode:
+   
+   /// Timeout for legacy monitor detection
+   renewal_timeout: Option<Instant>,
+   
+   MODIFY MonSub::new() (line 74-82):
+   Initialize new field:
+   
+   renewal_timeout: None,
+   
+   ADD methods after need_renew() (after line 95):
+   
+   /// Set renewal mode based on monitor capabilities
+   pub fn set_renewal_mode_from_features(&mut self, features: u64) {
+       if (features & crate::types::MON_STATEFUL_SUB) != 0 {
+           self.renewal_mode = RenewalMode::StatefulOrUnknown;
+           tracing::debug!("Monitor supports MON_STATEFUL_SUB");
+       } else {
+           self.renewal_mode = RenewalMode::LegacyAcked;
+           tracing::debug!("Monitor does NOT support MON_STATEFUL_SUB");
+       }
+   }
+   
+   /// Set timeout for detecting legacy monitors
+   pub fn set_renewal_timeout(&mut self, timeout: std::time::Duration) {
+       self.renewal_timeout = Some(Instant::now() + timeout);
+   }
+   
+   /// Check if renewal timeout exceeded
+   pub fn is_renewal_timeout_exceeded(&self) -> bool {
+       self.renewal_timeout
+           .is_some_and(|t| Instant::now() > t)
+   }
+
+2. Update MonSub::clear() (line 216-222)
+   ADD to clear block:
+   
+   self.renewal_timeout = None;
+
+3. Set mode from capabilities after connect
+   FILE: crates/monclient/src/client.rs
+   
+   MODIFY: handle_monmap_connect (line 826-842)
+   ADD after capability logging (line 838+):
+   
+   // Set renewal mode based on monitor capabilities
+   let mut sub_state = self.subscription_state.write().await;
+   if let Some(features) = active_con.peer_supported_features() {
+       sub_state.set_renewal_mode_from_features(features);
+   }
+   // Set timeout for legacy monitor detection (60 seconds)
+   sub_state.set_renewal_timeout(std::time::Duration::from_secs(60));
+   drop(sub_state);
+
+4. Add unit tests
+   FILE: crates/monclient/src/subscription.rs
+   ADD in tests module (after line 411):
+   
+   #[test]
+   fn test_capability_based_mode_detection() {
+       let mut sub = MonSub::new();
+       
+       // Test stateful mode when capability present
+       sub.set_renewal_mode_from_features(crate::types::MON_STATEFUL_SUB);
+       assert_eq!(sub.renewal_mode, RenewalMode::StatefulOrUnknown);
+       
+       // Test legacy mode when capability absent
+       sub.set_renewal_mode_from_features(0);
+       assert_eq!(sub.renewal_mode, RenewalMode::LegacyAcked);
+   }
+   
+   #[test]
+   fn test_renewal_timeout() {
+       let mut sub = MonSub::new();
+       sub.set_renewal_timeout(std::time::Duration::from_millis(100));
+       
+       assert!(!sub.is_renewal_timeout_exceeded());
+       std::thread::sleep(std::time::Duration::from_millis(150));
+       assert!(sub.is_renewal_timeout_exceeded());
+   }
+
+================================================================================
+PART 3: DEFENSIVE TIMEOUT FOR LEGACY DETECTION (2-3 hours) - LOW RISK
+================================================================================
+
+1. Add legacy monitor detection to tick()
+   FILE: crates/monclient/src/client.rs
+   
+   MODIFY: tick() method (line 1059)
+   ADD new section after auth ticket renewal check (around line 1180):
+   
+   // Check if we're still waiting for legacy monitor to send subscribe ACK
+   {
+       let mut sub_state = self.subscription_state.write().await;
+       if sub_state.is_renewal_timeout_exceeded() 
+           && sub_state.renewal_mode == RenewalMode::StatefulOrUnknown {
+           warn!(
+               "Monitor did not send subscribe ACK within timeout, \
+                assuming legacy monitor without MON_STATEFUL_SUB"
+           );
+           sub_state.renewal_mode = RenewalMode::LegacyAcked;
+           // Force renewal to start working for legacy monitor
+           drop(sub_state);
+           self.send_subscriptions().await?;
+       }
+   }
+
+2. Import RenewalMode if not present
+   In client.rs imports (line 11):
+   
+   use crate::subscription::{MonService, MonSub, RenewalMode};
+   
+   (May need to make RenewalMode pub if not already)
+
+================================================================================
+PART 4: INTEGRATION TESTS (3 hours)
+================================================================================
+
+1. Add test helpers
+   FILE: crates/monclient/tests/command_operations.rs
+   
+   ADD test at end of file:
+   
+   #[tokio::test]
+   #[ignore]  // Requires local cluster
+   async fn test_stateful_subscription_mode() {
+       // Connect to modern monitor (Octopus+)
+       let client = setup_monitor_client().await.unwrap();
+       
+       // Subscribe to osdmap
+       client.subscribe(MonService::OsdMap, 0, 0)
+           .await
+           .unwrap();
+       
+       // Get multiple map updates
+       for _ in 0..5 {
+           tokio::time::sleep(Duration::from_millis(100)).await;
+           // Verify: no renewal traffic logged
+       }
+       
+       // Check that renewal_mode is stateful
+       // (May need to add test accessor to MonSub)
+   }
+
+2. Add legacy monitor test
+   FILE: crates/monclient/tests/command_operations.rs
+   
+   #[tokio::test]
+   #[ignore]  // Requires legacy cluster
+   async fn test_legacy_monitor_fallback() {
+       let client = setup_monitor_client().await.unwrap();
+       
+       client.subscribe(MonService::OsdMap, 0, 0)
+           .await
+           .unwrap();
+       
+       // Wait for fallback timeout
+       tokio::time::sleep(Duration::from_secs(61)).await;
+       
+       // Verify: renewal traffic detected
+       // (May need monitoring/metrics for this)
+   }
+
+================================================================================
+PART 5: VERIFICATION COMMANDS
+================================================================================
+
+Unit tests:
+  cargo test -p monclient --lib -- subscription::tests
+
+Integration tests with cluster:
+  CEPH_CONF=/etc/ceph/ceph.conf \
+  cargo test -p monclient --tests -- --ignored --test-threads=1
+
+Check capability logging:
+  cargo test -p monclient --tests -- --ignored --nocapture | grep MON_STATEFUL_SUB
+
+Monitor subscription traffic (during integration test):
+  # In another terminal
+  tcpdump -i any 'dst port 6789' -A | grep -c "MMonSubscribe"
+
+================================================================================
+TIMELINE ESTIMATE
+================================================================================
+
+Part 1 (Capability Detection):        2-3 hours
+Part 2 (Mode Negotiation):            4-5 hours  
+Part 3 (Defensive Timeout):           2-3 hours
+Part 4 (Integration Tests):           3 hours
+Review & Documentation:               1-2 hours
+──────────────────────────────────────
+TOTAL:                               12-16 hours (can parallelize parts)
+
+RECOMMENDED BATCH ORDER:
+  Batch 1: Part 1 (low risk, immediate feedback)
+  Batch 2: Part 2 (core logic, tested)
+  Batch 3: Part 3 + Part 4 (integration verification)
+
+================================================================================
+DEPENDENCY ON COMPRESSION
+================================================================================
+
+✅ NO blocking dependency
+   - msgr2 already has feature negotiation framework
+   - state_machine().peer_supported_features is same infrastructure
+   - Just adding different feature bit (MON_STATEFUL_SUB vs COMPRESSION)
+
+✅ REQUIRES
+   - msgr2 state_machine() accessor exposed (should already exist)
+   - Verify in crates/msgr2/src/protocol.rs line ~2226
+
+✅ SHARES FRAMEWORK WITH
+   - Compression feature negotiation  
+   - Both use msgr2 banner exchange
+   - Both set feature bits from same negotiation
+
+================================================================================
+RISK & ROLLBACK
+================================================================================
+
+Part 1 - LOW RISK
+  - Read-only capability detection
+  - Rollback: Remove logging, revert capability struct
+  
+Part 2 - MEDIUM RISK (main logic change)
+  - Changes how subscription renewal mode is determined
+  - Rollback: Remove set_renewal_mode_from_features calls
+  - Fallback: ACK fallback (handle_subscribe_ack) always works
+  - Mitigation: Feature flag to disable (can add later)
+
+Part 3 - LOW RISK
+  - Timeout-based fallback, non-breaking
+  - Rollback: Remove timeout check from tick()
+  - Mitigation: Make timeout configurable
+
+================================================================================

@@ -8,6 +8,7 @@
 
 use std::collections::HashMap;
 
+use crate::CrushError;
 use num_enum::TryFromPrimitive;
 
 /// CRUSH bucket selection algorithms
@@ -177,23 +178,23 @@ impl CrushMap {
     }
 
     /// Get a bucket by ID
-    pub fn get_bucket(&self, id: i32) -> crate::error::Result<&CrushBucket> {
+    pub fn get_bucket(&self, id: i32) -> crate::Result<&CrushBucket> {
         if id >= 0 {
-            return Err(crate::error::CrushError::InvalidBucketId(id));
+            return Err(CrushError::InvalidBucketId(id));
         }
         let index = (-1 - id) as usize;
         self.buckets
             .get(index)
             .and_then(|b| b.as_ref())
-            .ok_or(crate::error::CrushError::BucketNotFound(id))
+            .ok_or(CrushError::BucketNotFound(id))
     }
 
     /// Get a rule by ID
-    pub fn get_rule(&self, rule_id: u32) -> crate::error::Result<&CrushRule> {
+    pub fn get_rule(&self, rule_id: u32) -> crate::Result<&CrushRule> {
         self.rules
             .get(rule_id as usize)
             .and_then(|r| r.as_ref())
-            .ok_or(crate::error::CrushError::RuleNotFound(rule_id))
+            .ok_or(CrushError::RuleNotFound(rule_id))
     }
 
     /// Get the device class name for a given device/OSD ID

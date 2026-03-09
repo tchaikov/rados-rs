@@ -102,38 +102,29 @@ impl Banner {
             return Err(Error::invalid_data("Incomplete banner payload"));
         }
 
-        // The correct banner payload format is just:
-        // - supported_features (8 bytes)
-        // - required_features (8 bytes)
-        // Total: 16 bytes
-        if payload_size != 16 {
-            // For compatibility, we'll try to handle other sizes too
-            // but log a warning
-            tracing::warn!(
-                "Unexpected banner payload size: {} (expected 16)",
-                payload_size
-            );
-        }
-
-        if payload_size >= 16 {
-            // If there's extra data before features, skip it
-            if payload_size > 16 {
-                src.advance(payload_size - 16);
-            }
-            let supported_features = FeatureSet::from(u64::decode(src, 0)?);
-            let required_features = FeatureSet::from(u64::decode(src, 0)?);
-            Ok(Self {
-                banner: Bytes::from(banner_bytes),
-                supported_features,
-                required_features,
-            })
-        } else {
-            // Not enough data for features - protocol error
-            Err(Error::Protocol(format!(
+        // Banner payload: supported_features (8 bytes) + required_features (8 bytes) = 16 bytes
+        if payload_size < 16 {
+            return Err(Error::Protocol(format!(
                 "Invalid banner payload size: expected 16 bytes, got {}",
                 payload_size
-            )))
+            )));
         }
+
+        if payload_size > 16 {
+            tracing::warn!(
+                "Unexpected banner payload size: {} (expected 16), skipping extra bytes",
+                payload_size
+            );
+            src.advance(payload_size - 16);
+        }
+
+        let supported_features = FeatureSet::from(u64::decode(src, 0)?);
+        let required_features = FeatureSet::from(u64::decode(src, 0)?);
+        Ok(Self {
+            banner: Bytes::from(banner_bytes),
+            supported_features,
+            required_features,
+        })
     }
 }
 

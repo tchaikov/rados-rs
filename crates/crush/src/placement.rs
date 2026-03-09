@@ -69,11 +69,6 @@ impl ObjectLocator {
         }
     }
 
-    /// Create an object locator for a specific pool (alias for new())
-    pub fn with_pool(pool_id: u64) -> Self {
-        Self::new(pool_id)
-    }
-
     /// Check if the locator is empty (has sentinel values)
     pub fn is_empty(&self) -> bool {
         self.pool_id == u64::MAX
@@ -308,15 +303,14 @@ pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> 
         object_name
     };
 
-    // If there's a namespace, include it in the hash
-    let hash_input = if locator.namespace.is_empty() {
-        hash_key.to_string()
+    // Hash the key, prepending "namespace\n" when a namespace is set.
+    // Avoids allocation in the common (empty namespace) case.
+    let hash = if locator.namespace.is_empty() {
+        ceph_str_hash_rjenkins(hash_key.as_bytes())
     } else {
-        format!("{}\n{}", locator.namespace, hash_key)
+        let hash_input = format!("{}\n{}", locator.namespace, hash_key);
+        ceph_str_hash_rjenkins(hash_input.as_bytes())
     };
-
-    // Hash the object name using Ceph's rjenkins hash
-    let hash = ceph_str_hash_rjenkins(hash_input.as_bytes());
 
     // Map to PG number using modulo
     let pg_seed = hash % pg_num;

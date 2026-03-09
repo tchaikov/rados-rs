@@ -207,11 +207,8 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
 /// Straw bucket selection (legacy, deprecated)
 /// Each item gets a straw with random length
 fn bucket_straw_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
-    let (_item_weights, straws) = match &bucket.data {
-        BucketData::Straw {
-            item_weights,
-            straws,
-        } => (item_weights, straws),
+    let straws = match &bucket.data {
+        BucketData::Straw { straws, .. } => straws,
         _ => unreachable!("bucket_straw_choose called on non-Straw bucket"),
     };
 

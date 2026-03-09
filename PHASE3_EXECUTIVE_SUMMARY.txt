@@ -1,0 +1,326 @@
+╔══════════════════════════════════════════════════════════════════════════════╗
+║                                                                              ║
+║    PHASE 3 AUDIT: MODERN MONITOR SUBSCRIPTION BEHAVIOR                       ║
+║    rados-rs Ceph Client                                                       ║
+║                                                                              ║
+║    Status: IMPLEMENTATION-READY WITH CONCRETE ROADMAP                         ║
+║                                                                              ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+EXECUTIVE SUMMARY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ WHAT WORKS:
+   - Default assumes modern (stateful) subscription mode
+   - Correctly suppresses renewal traffic on modern clusters
+   - Falls back to legacy renewal mode when ACK received
+   - Replays subscriptions correctly on reconnect
+   - 6 comprehensive unit tests covering both modes
+
+❌ WHAT'S MISSING:
+   - No way to detect MON_STATEFUL_SUB capability from peer
+   - No explicit mode negotiation (only implicit ACK fallback)
+   - No defensive timeout for legacy monitor detection
+   - No monitoring/metrics about negotiated mode
+   - No way to signal client capabilities to monitor
+
+⚠️  CURRENT RISK:
+   On modern clusters: Works correctly but silently (no verification)
+   On legacy clusters: Waits indefinitely for ACK before detecting fallback
+   No logging to confirm which mode is active
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+KEY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. SUBSCRIPTION BEHAVIOR TODAY
+   ────────────────────────────
+   
+   Core State Machine (subscription.rs:44-50):
+   
+   enum RenewalMode {
+       StatefulOrUnknown,    ← DEFAULT (assumes modern)
+       LegacyAcked,         ← FALLBACK (when ACK received)
+   }
+   
+   Subscription Lifecycle:
+   1. Connected → reload subscriptions (client.rs:830-831)
+   2. Sent MMonSubscribe (client.rs:928-933)
+   3. Receive map update → check need_renew() (client.rs:890-895)
+      - Returns false if StatefulOrUnknown (correct for modern)
+      - Returns true if LegacyAcked (correct for legacy)
+   4. Receive MMonSubscribeAck → switch to LegacyAcked (client.rs:1338)
+   
+   ✅ This is correct behavior for modern monitors
+   ⚠️  But we ASSUME modern—no capability detection
+
+2. WHERE MON_STATEFUL_SUB IS HANDLED
+   ──────────────────────────────────
+   
+   Direct References (3 total):
+   - subscription.rs:46    → Comment in RenewalMode enum
+   - client.rs:827         → Comment about suppressed churn
+   - client.rs:890         → Comment about server-side state
+   
+   Implicit Handling:
+   - Default RenewalMode::StatefulOrUnknown (stateful assumed true)
+   - Only switches to LegacyAcked when ACK received
+   
+   Missing:
+   - No MON_STATEFUL_SUB constant defined
+   - No capability bits exposed from msgr2
+   - No explicit feature detection
+   - No client capability advertisement
+
+3. BEHAVIOR MISMATCH ON MODERN CLUSTERS
+   ────────────────────────────────────
+   
+   What Octopus+ Monitors Expect:
+   - MMonSubscribe with subscription list
+   - No renewal messages for each epoch
+   - Only new MMonSubscribe on changes
+   - Subscription state held server-side
+   
+   What rados-rs Does (Currently):
+   ✅ Matches expectations exactly (works correctly!)
+   ⚠️  But doesn't verify or log capability negotiation
+   ⚠️  No timeout for detecting legacy monitors
+   
+   Example Timeline:
+   
+   Modern Monitor:
+   [Client: MMonSubscribe]
+   [Monitor: (no ACK)]
+   [Client: Skips renewals ✅ - RenewalMode::StatefulOrUnknown]
+   [Client: Gets maps without renewal traffic ✅]
+   
+   Legacy Monitor (<Nautilus):
+   [Client: MMonSubscribe]
+   [Monitor: MMonSubscribeAck interval=30]
+   [Client: Switches to LegacyAcked ✅]
+   [Client: Sends renewal every 15s ✅]
+   
+   Concern: What if monitor hangs/silent fails?
+   [Client: MMonSubscribe]
+   [Monitor: (no response)]
+   [Client: Waits forever... ⚠️ no timeout]
+
+4. SMALLEST SAFE IMPLEMENTATION BATCH
+   ───────────────────────────────────
+   
+   Batch 1 (PHASE 3.1): Capability Detection
+   - Effort: 2-3 hours, Risk: LOW
+   - Files: types.rs (new), connection.rs (accessor), client.rs (logging)
+   - Outcome: Log which mode is negotiated, no logic changes
+   - Benefit: Visibility into subscription mode negotiation
+   
+   Batch 2 (PHASE 3.2): Explicit Mode Setting
+   - Effort: 4-5 hours, Risk: MEDIUM
+   - Files: subscription.rs (new methods), client.rs (use capabilities)
+   - Outcome: Set mode from capability detection, add timeout
+   - Benefit: Proactive mode detection instead of reactive ACK fallback
+   
+   Batch 3 (PHASE 3.3): Integration Tests
+   - Effort: 3 hours, Risk: LOW
+   - Files: tests/command_operations.rs (new tests)
+   - Outcome: Verify correct behavior on modern and legacy monitors
+   - Benefit: Confidence that mode detection works in practice
+
+   Total: ~12-16 hours for full implementation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+FILES TO EDIT (CONCRETE LOCATIONS)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Phase 3.1 - Capability Detection
+─────────────────────────────────
+
+1. crates/monclient/src/types.rs
+   ADD (new section, around line 10):
+   - MON_STATEFUL_SUB constant (u64)
+   - MonCapabilities struct with from_features() method
+   → 15 lines
+
+2. crates/monclient/src/connection.rs  
+   ADD method (after line 301, in impl MonConnection):
+   - pub fn peer_supported_features(&self) -> Option<u64>
+   → 3 lines
+
+3. crates/monclient/src/client.rs
+   MODIFY (line 826-842, handle_monmap_connect):
+   ADD capability logging after successful connect
+   → 5 lines
+
+Phase 3.2 - Mode Negotiation
+─────────────────────────────
+
+4. crates/monclient/src/subscription.rs
+   MODIFY struct MonSub (line 56-71):
+   ADD field: renewal_timeout: Option<Instant>
+   → 1 line
+   
+   ADD methods (after line 95):
+   - set_renewal_mode_from_features(&mut self, features: u64)
+   - set_renewal_timeout(&mut self, timeout: Duration)
+   - is_renewal_timeout_exceeded(&self) -> bool
+   → 20 lines
+   
+   MODIFY MonSub::new() (line 80):
+   Initialize renewal_timeout: None
+   → 1 line
+   
+   MODIFY MonSub::clear() (line 221):
+   Add self.renewal_timeout = None
+   → 1 line
+   
+   ADD tests (after line 411):
+   - test_capability_based_mode_detection()
+   - test_renewal_timeout()
+   → 20 lines
+
+5. crates/monclient/src/client.rs
+   MODIFY (line 826-842, handle_monmap_connect):
+   ADD capability-based mode setting after capabilities logged
+   → 8 lines
+
+Phase 3.3 - Defensive Timeout
+──────────────────────────────
+
+6. crates/monclient/src/client.rs
+   MODIFY (line 1059, tick() method):
+   ADD legacy monitor detection check after auth renewal (around line 1180)
+   → 12 lines
+
+Phase 3.4 - Integration Tests
+──────────────────────────────
+
+7. crates/monclient/tests/command_operations.rs
+   ADD (end of file):
+   - test_stateful_subscription_mode() [#[ignore]]
+   - test_legacy_monitor_fallback() [#[ignore]]
+   → 40 lines
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+CRITICAL FILE:LINE REFERENCES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+CURRENT IMPLEMENTATION (MUST PRESERVE):
+
+subscription.rs:
+  Line 16-23:   MonService enum (maps, osdmap, config, mgrmap, mdsmap)
+  Line 44-50:   RenewalMode enum (StatefulOrUnknown, LegacyAcked)
+  Line 56-71:   MonSub struct with subscription tracking
+  Line 90-95:   need_renew() method (returns false unless LegacyAcked)
+  Line 103-113: renewed() method (moves subs from sub_new to sub_sent)
+  Line 116-126: acked() method (switches to LegacyAcked, sets renewal time)
+  Line 129-150: got() method (updates start version after map received)
+  Line 345-369: Test suite (verify renewal behavior works)
+
+client.rs:
+  Line 826-842: handle_monmap_connect() - reloads subscriptions on reconnect
+  Line 887-908: notify_map_received() - checks if renewal needed
+  Line 910-946: send_subscriptions() - sends pending subs to monitor
+  Line 1330-1341: handle_subscribe_ack() - ACK fallback to legacy mode
+  Line 1059+:    tick() - periodic maintenance (where we add legacy detection)
+
+messages.rs:
+  Line 182-207: MMonSubscribe struct (sent by client)
+  Line 213-224: MMonSubscribeAck struct (received from legacy monitors)
+
+TESTS (VERIFY WITH):
+
+subscription.rs tests:
+  345: test_stateful_subscriptions_do_not_trigger_renewal_from_stale_deadline
+  358: test_legacy_ack_enables_renewal_checks
+  372: test_clear_resets_legacy_renewal_mode
+
+Run with:
+  cargo test -p monclient --lib subscription::tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+COMPRESSION DEPENDENCY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ INDEPENDENT - NO BLOCKING DEPENDENCY
+
+Both use same framework:
+- msgr2/src/state_machine.rs:829 → peer_supported_features: u64
+- msgr2/src/protocol.rs:1202 → set_peer_supported_features() called after banner
+- Both are just different bits in same u64 (MON_STATEFUL_SUB vs COMPRESSION)
+
+Requires only:
+- msgr2 state_machine() accessor exposed (should exist for compression)
+- Check: crates/msgr2/src/protocol.rs line ~2226
+
+No code changes needed to compression—just adding different feature bit.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+VERIFICATION CHECKLIST
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Unit Tests (always works):
+  ✓ cargo test -p monclient --lib subscription::tests
+  ✓ cargo test -p monclient --lib -- --test-threads=1 (for subscription tests)
+
+With Real Octopus+ Cluster:
+  ✓ CEPH_CONF=/etc/ceph/ceph.conf cargo test -p monclient --tests -- --ignored
+  ✓ Verify logs show: "MON_STATEFUL_SUB=true"
+  ✓ Monitor tcpdump during test should show NO MMonSubscribe renewal traffic
+    tcpdump -i any 'dst port 6789' -A | grep -c "MMonSubscribe"
+
+With Real Legacy Cluster:
+  ✓ Same test, verify logs show: "MON_STATEFUL_SUB=false"
+  ✓ Monitor tcpdump should show MMonSubscribe renewal traffic (~every 30s)
+
+Performance Check:
+  ✓ Subscription overhead unchanged
+  ✓ Renewal latency: legacy ~30s (from config), modern: 0 (none)
+  ✓ Memory: no additional allocations beyond existing MonSub
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RECOMMENDED SEQUENCE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Week 1, Day 1: Batch 1 (Capability Detection)
+  Step 1: Add types.rs constants and struct
+  Step 2: Expose peer_features from connection.rs
+  Step 3: Add logging to client.rs handle_monmap_connect
+  → Immediate benefit: See which mode is negotiated
+  → Time: 2-3 hours
+  → Risk: LOW (read-only, non-breaking)
+
+Week 1, Day 2: Batch 2 (Mode Negotiation)
+  Step 1: Add fields/methods to subscription.rs
+  Step 2: Add mode-setting call to client.rs
+  Step 3: Add unit tests for mode detection
+  → Benefit: Proactive capability-based mode selection
+  → Time: 4-5 hours
+  → Risk: MEDIUM (logic change, but ACK fallback always works)
+
+Week 1, Day 3: Batch 3 (Defensive Timeout + Tests)
+  Step 1: Add timeout check to tick()
+  Step 2: Add integration test cases
+  Step 3: Run against real clusters
+  → Benefit: Confidence in production
+  → Time: 3+ hours (cluster testing takes time)
+  → Risk: LOW (timeout-based, non-breaking)
+
+Estimated Total: 12-16 hours (1-2 development days)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DELIVERABLES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Generated Audit Documents:
+  ✓ PHASE3_AUDIT.md                   (16 KB, comprehensive)
+  ✓ PHASE3_IMPLEMENTATION_ROADMAP.txt (12 KB, concrete code)
+  ✓ This executive summary             (current)
+
+Next Steps:
+  → Choose batch 1 to start
+  → Estimate 3-4 hours for first batch
+  → Deliver capability detection + logging
+  → Creates foundation for remaining batches
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━

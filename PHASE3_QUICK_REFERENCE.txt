@@ -1,0 +1,139 @@
+═══════════════════════════════════════════════════════════════════════════════
+PHASE 3: MODERN MONITOR SUBSCRIPTION BEHAVIOR - QUICK REFERENCE
+═══════════════════════════════════════════════════════════════════════════════
+
+STATUS: Implementation-ready with 3 concrete batches
+
+CURRENT SITUATION
+─────────────────
+✅ Works correctly on modern (Octopus+) monitors
+❌ But doesn't verify which mode is active
+❌ Waits indefinitely if monitor hangs (no timeout)
+
+KEY CODE LOCATIONS
+──────────────────
+subscription.rs:44-50    RenewalMode enum (StatefulOrUnknown, LegacyAcked)
+subscription.rs:80       Default: StatefulOrUnknown (assumes modern)
+client.rs:1330-1341      handle_subscribe_ack() switches to legacy mode
+client.rs:826-842        handle_monmap_connect() reloads on reconnect
+
+BATCH 1: CAPABILITY DETECTION (2-3 hours, LOW RISK)
+───────────────────────────────────────────────────
+
+1. crates/monclient/src/types.rs
+   ADD ~20 lines:
+   pub const MON_STATEFUL_SUB: u64 = 1 << 0;
+   pub struct MonCapabilities { ... }
+
+2. crates/monclient/src/connection.rs
+   ADD ~3 lines after line 301:
+   pub fn peer_supported_features(&self) -> Option<u64>
+
+3. crates/monclient/src/client.rs
+   MODIFY line 826-842:
+   ADD ~5 lines for capability logging
+
+Result: See "MON_STATEFUL_SUB=true/false" in logs
+
+BATCH 2: EXPLICIT MODE NEGOTIATION (4-5 hours, MEDIUM RISK)
+──────────────────────────────────────────────────────────
+
+1. crates/monclient/src/subscription.rs
+   MODIFY line 56:  ADD renewal_timeout field
+   ADD line 95:     set_renewal_mode_from_features() method
+   ADD line 95:     set_renewal_timeout() method
+   ADD line 95:     is_renewal_timeout_exceeded() method
+   MODIFY line 221: Initialize timeout in clear()
+   ADD tests        (~20 lines for mode detection + timeout tests)
+
+2. crates/monclient/src/client.rs
+   MODIFY line 842:
+   ADD ~8 lines to call set_renewal_mode_from_features()
+
+Result: Mode set proactively from capabilities, not just on ACK
+
+BATCH 3: DEFENSIVE TIMEOUT (2-3 hours, LOW RISK)
+────────────────────────────────────────────────
+
+1. crates/monclient/src/client.rs
+   MODIFY tick() around line 1180:
+   ADD ~12 lines to detect legacy monitors that never send ACK
+
+Result: Fallback to renewal after 60s timeout if no ACK
+
+TESTS TO RUN
+────────────
+
+Unit tests (always work):
+  cargo test -p monclient --lib -- subscription::tests
+
+With Octopus+ cluster:
+  CEPH_CONF=/etc/ceph/ceph.conf \
+  cargo test -p monclient --tests -- --ignored --nocapture | grep MON_STATEFUL_SUB
+
+Expected: "MON_STATEFUL_SUB=true"
+
+TIMELINE
+────────
+Batch 1:  2-3 hours  (immediate value: visibility)
+Batch 2:  4-5 hours  (core logic: proactive detection)
+Batch 3:  2-3 hours  (safety: defensive timeout)
+Tests:    3 hours    (confidence: verify with real clusters)
+─────────────────
+Total:   11-14 hours
+
+CRITICAL FILE:LINE REFERENCES
+──────────────────────────────
+
+subscription.rs:
+  44    RenewalMode enum definition
+  80    Default::new() initializes StatefulOrUnknown
+  90    need_renew() implementation
+  116   acked() switches to LegacyAcked
+  345   Test: stateful mode ignores old deadlines
+  358   Test: legacy ack enables renewal
+
+client.rs:
+  826   connect() - reload subscriptions
+  887   notify_map_received() - check renewal needed
+  1330  handle_subscribe_ack() - ACK fallback
+  1059  tick() - add legacy detection here
+
+messages.rs:
+  182   MMonSubscribe structure
+  213   MMonSubscribeAck structure
+
+DEPENDENCY ON COMPRESSION
+──────────────────────────
+✅ NO blocking dependency
+   - Both use same msgr2 feature negotiation
+   - Just different feature bits in same u64
+   - Compression already works, MON_STATEFUL_SUB is independent
+
+RISK ASSESSMENT
+───────────────
+Batch 1: LOW      - Read-only, logging only
+Batch 2: MEDIUM   - Logic change, but ACK fallback always works
+Batch 3: LOW      - Timeout-based, non-breaking
+
+ROLLBACK PLAN
+─────────────
+Batch 1: Remove logging (no impact)
+Batch 2: Remove set_renewal_mode_from_features() calls (falls back to ACK)
+Batch 3: Remove timeout check (falls back to waiting for ACK)
+
+NEXT STEPS
+──────────
+1. Choose Batch 1 (lowest risk, immediate feedback)
+2. Add capability detection and logging
+3. Verify with "cargo test -p monclient --lib"
+4. Deploy Batch 1 (no breaking changes)
+5. Proceed to Batch 2 based on feedback
+
+SEE ALSO
+────────
+- PHASE3_AUDIT.md (comprehensive analysis)
+- PHASE3_IMPLEMENTATION_ROADMAP.txt (detailed code locations)
+- PHASE3_EXECUTIVE_SUMMARY.txt (full context)
+
+═══════════════════════════════════════════════════════════════════════════════

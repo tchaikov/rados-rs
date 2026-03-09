@@ -95,23 +95,24 @@ pub fn crush_do_rule(
     let mut _chooseleaf_descend_once = map.chooseleaf_descend_once;
     let mut chooseleaf_vary_r = map.chooseleaf_vary_r;
     let mut chooseleaf_stable = map.chooseleaf_stable;
-    let mut msr_descents = 1u32; // Default MSR descents
-    let mut msr_collision_tries = 0u32; // Default MSR collision tries
+    let mut _choose_local_tries = map.choose_local_tries;
+    let mut _choose_local_fallback_tries = map.choose_local_fallback_tries;
+    let mut msr_descents = 1u32;
+    let mut msr_collision_tries = 0u32;
 
     for step in &rule.steps {
         match step.op {
             RuleOp::Take => {
-                // Start with a specific bucket or device
                 work.clear();
                 work.push(step.arg1);
             }
 
-            RuleOp::ChooseFirstN => {
-                // Choose N items of a given type
-                scratch.clear();
+            RuleOp::ChooseFirstN | RuleOp::ChooseLeafFirstN => {
+                let recurse_to_leaf = step.op == RuleOp::ChooseLeafFirstN;
                 let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
+                scratch.clear();
                 for &item in &work {
                     crush_choose_firstn(
                         map,
@@ -122,71 +123,16 @@ pub fn crush_do_rule(
                         &mut scratch,
                         weights,
                         choose_tries,
-                        false, // recurse_to_leaf
+                        recurse_to_leaf,
                         chooseleaf_vary_r,
                         chooseleaf_stable,
                     )?;
                 }
-
                 work.clone_from(&scratch);
             }
 
-            RuleOp::ChooseLeafFirstN => {
-                // Choose N items and descend to leaf devices
-                scratch.clear();
-                let numrep = calculate_numrep(step.arg1, result_max);
-                let item_type = step.arg2;
-
-                for &item in &work {
-                    crush_choose_firstn(
-                        map,
-                        item,
-                        x,
-                        numrep,
-                        item_type,
-                        &mut scratch,
-                        weights,
-                        choose_tries,
-                        true, // recurse_to_leaf
-                        chooseleaf_vary_r,
-                        chooseleaf_stable,
-                    )?;
-                }
-
-                work.clone_from(&scratch);
-            }
-
-            RuleOp::Emit => {
-                // Output current working set
-                for &item in &work {
-                    if result.len() < result_max {
-                        result.push(item);
-                    }
-                }
-            }
-
-            RuleOp::SetChooseTries => {
-                choose_tries = step.arg1 as u32;
-            }
-
-            RuleOp::SetChooseLeafTries => {
-                _chooseleaf_descend_once = step.arg1 as u32;
-            }
-
-            RuleOp::SetChooseLeafVaryR => {
-                chooseleaf_vary_r = step.arg1 as u8;
-            }
-
-            RuleOp::SetChooseLeafStable => {
-                chooseleaf_stable = step.arg1 as u8;
-            }
-
-            RuleOp::Noop => {
-                // Do nothing
-            }
-
-            RuleOp::ChooseIndep => {
-                // Choose N items using INDEP algorithm (for erasure coding)
+            RuleOp::ChooseIndep | RuleOp::ChooseLeafIndep => {
+                let recurse_to_leaf = step.op == RuleOp::ChooseLeafIndep;
                 let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
@@ -202,53 +148,16 @@ pub fn crush_do_rule(
                         &mut indep_out,
                         weights,
                         choose_tries,
-                        false, // recurse_to_leaf
+                        recurse_to_leaf,
                         chooseleaf_vary_r,
                         chooseleaf_stable,
                     )?;
                     scratch.extend_from_slice(&indep_out);
                 }
-
                 work.clone_from(&scratch);
-            }
-
-            RuleOp::ChooseLeafIndep => {
-                // Choose N items using INDEP algorithm and descend to leaf
-                let numrep = calculate_numrep(step.arg1, result_max);
-                let item_type = step.arg2;
-
-                scratch.clear();
-                for &item in &work {
-                    let mut indep_out = vec![CRUSH_ITEM_NONE; numrep];
-                    crush_choose_indep(
-                        map,
-                        item,
-                        x,
-                        numrep,
-                        item_type,
-                        &mut indep_out,
-                        weights,
-                        choose_tries,
-                        true, // recurse_to_leaf
-                        chooseleaf_vary_r,
-                        chooseleaf_stable,
-                    )?;
-                    scratch.extend_from_slice(&indep_out);
-                }
-
-                work.clone_from(&scratch);
-            }
-
-            RuleOp::SetMsrDescents => {
-                msr_descents = step.arg1 as u32;
-            }
-
-            RuleOp::SetMsrCollisionTries => {
-                msr_collision_tries = step.arg1 as u32;
             }
 
             RuleOp::ChooseMsr => {
-                // Choose N items using MSR (Main Search Rule) algorithm
                 let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
@@ -265,19 +174,34 @@ pub fn crush_do_rule(
                         weights,
                         msr_descents,
                         msr_collision_tries,
-                        false, // recurse_to_leaf
+                        false,
                     )?;
-                    // Filter out CRUSH_ITEM_NONE entries
-                    scratch.extend(msr_out.into_iter().filter(|&x| x != CRUSH_ITEM_NONE));
+                    scratch.extend(msr_out.into_iter().filter(|&v| v != CRUSH_ITEM_NONE));
                 }
-
                 work.clone_from(&scratch);
             }
 
-            _ => {
-                // Unsupported operations
-                tracing::warn!("Unsupported CRUSH rule operation: {:?}", step.op);
+            RuleOp::Emit => {
+                for &item in &work {
+                    if result.len() < result_max {
+                        result.push(item);
+                    }
+                }
             }
+
+            // Tunable overrides
+            RuleOp::SetChooseTries => choose_tries = step.arg1 as u32,
+            RuleOp::SetChooseLeafTries => _chooseleaf_descend_once = step.arg1 as u32,
+            RuleOp::SetChooseLocalTries => _choose_local_tries = step.arg1 as u32,
+            RuleOp::SetChooseLocalFallbackTries => {
+                _choose_local_fallback_tries = step.arg1 as u32;
+            }
+            RuleOp::SetChooseLeafVaryR => chooseleaf_vary_r = step.arg1 as u8,
+            RuleOp::SetChooseLeafStable => chooseleaf_stable = step.arg1 as u8,
+            RuleOp::SetMsrDescents => msr_descents = step.arg1 as u32,
+            RuleOp::SetMsrCollisionTries => msr_collision_tries = step.arg1 as u32,
+
+            RuleOp::Noop => {}
         }
     }
 
