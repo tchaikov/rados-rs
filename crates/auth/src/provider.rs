@@ -4,10 +4,11 @@
 //! (full CephX authentication vs. authorizer-based authentication)
 
 use crate::error::{CephXError, Result};
-use crate::types::EntityType;
+use crate::types::{CryptoKey, EntityType};
 use bytes::Bytes;
 use denc::Denc;
 use std::fmt::Debug;
+use tracing::{debug, info};
 
 /// Authentication provider trait
 ///
@@ -234,11 +235,39 @@ impl ServiceAuthProvider {
     pub fn handler(&self) -> &std::sync::Arc<std::sync::Mutex<crate::client::CephXClientHandler>> {
         &self.handler
     }
+
+    /// Try to extract connection_secret from AUTH_DONE payload.
+    ///
+    /// Returns `None` if the payload is empty, con_mode is 0, no session key
+    /// is available, or decryption/decoding fails.
+    fn try_extract_connection_secret(
+        con_mode: u32,
+        payload: &Bytes,
+        session_key: Option<&CryptoKey>,
+    ) -> Option<Bytes> {
+        if con_mode == 0 || payload.is_empty() {
+            return None;
+        }
+        let sess_key = session_key?;
+        let mut buf = payload.clone();
+        let encrypted_data = Bytes::decode(&mut buf, 0).ok()?;
+        let decrypted = sess_key.decrypt(&encrypted_data).ok()?;
+        let mut dec_buf = decrypted;
+        let envelope = crate::protocol::CephXEncryptedEnvelope::<
+            crate::protocol::CephXAuthorizeReply,
+        >::decode(&mut dec_buf, 0)
+        .ok()?;
+
+        debug!(
+            "CephXAuthorizeReply: nonce_plus_one=0x{:016x}",
+            envelope.payload.nonce_plus_one
+        );
+        envelope.payload.connection_secret
+    }
 }
 
 impl AuthProvider for ServiceAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, service_id: u32) -> Result<Bytes> {
-        use tracing::debug;
         debug!(
             "ServiceAuthProvider::build_auth_payload called with service_id={}, global_id={}",
             service_id, global_id
@@ -273,7 +302,6 @@ impl AuthProvider for ServiceAuthProvider {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        use tracing::{debug, info};
         debug!(
             "ServiceAuthProvider::handle_auth_response: payload={} bytes, con_mode={}",
             payload.len(),
@@ -285,9 +313,12 @@ impl AuthProvider for ServiceAuthProvider {
         // rebuild the authorizer with the challenge included.
         // The second AUTH_REPLY_MORE (if any) would be AUTH_DONE.
 
-        if payload.len() == 36 {
-            // This is the encrypted CephXAuthorizeReply with server_challenge
-            debug!("Received encrypted challenge (36 bytes), decrypting...");
+        // Encrypted authorize challenge: u32 length prefix (4) + 2 AES blocks (32) = 36 bytes.
+        // The inner plaintext is: struct_v(1) + magic(8) + CephXAuthorizeReply(1+8) = 18 bytes,
+        // PKCS7-padded to 32 bytes.
+        const ENCRYPTED_AUTHORIZE_CHALLENGE_LEN: usize = 36;
+        if payload.len() == ENCRYPTED_AUTHORIZE_CHALLENGE_LEN {
+            debug!("Received encrypted authorize challenge, decrypting...");
 
             // Get the service_id we're authenticating with
             let service_id = self.service_id.ok_or_else(|| {
@@ -349,46 +380,12 @@ impl AuthProvider for ServiceAuthProvider {
         );
 
         // Extract connection_secret from AUTH_DONE payload using CephXEncryptedEnvelope
-        let connection_secret = if con_mode >= 1 && !payload.is_empty() {
-            if let Some(ref sess_key) = session_key {
-                let mut buf = payload.clone();
-                let encrypted_data = Bytes::decode(&mut buf, 0)?;
+        let connection_secret =
+            Self::try_extract_connection_secret(con_mode, &payload, session_key.as_ref());
 
-                match sess_key.decrypt(&encrypted_data) {
-                    Ok(decrypted) => {
-                        let mut dec_buf = decrypted;
-                        match crate::protocol::CephXEncryptedEnvelope::<
-                            crate::protocol::CephXAuthorizeReply,
-                        >::decode(&mut dec_buf, 0)
-                        {
-                            Ok(envelope) => {
-                                debug!(
-                                    "CephXAuthorizeReply: nonce_plus_one=0x{:016x}",
-                                    envelope.payload.nonce_plus_one
-                                );
-                                if let Some(ref secret) = envelope.payload.connection_secret {
-                                    debug!("Extracted connection_secret: {} bytes", secret.len());
-                                }
-                                envelope.payload.connection_secret
-                            }
-                            Err(e) => {
-                                debug!("Failed to decode CephXAuthorizeReply: {:?}", e);
-                                None
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        debug!("Failed to decrypt AUTH_DONE: {:?}", e);
-                        None
-                    }
-                }
-            } else {
-                debug!("No session key available to decrypt AUTH_DONE");
-                None
-            }
-        } else {
-            None
-        };
+        if let Some(ref secret) = connection_secret {
+            debug!("Extracted connection_secret: {} bytes", secret.len());
+        }
 
         // Return the session key so AUTH_SIGNATURE can be computed
         // Also return connection_secret for SECURE mode

@@ -10,7 +10,7 @@ use bytes::{Buf, Bytes, BytesMut};
 use denc::Denc;
 use rand::RngCore;
 use std::time::Duration;
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 /// Decoded service ticket information: (service_type, session_key, secret_id, ticket_blob, validity)
 type DecodedServiceTicket = (EntityType, CryptoKey, u64, CephXTicketBlob, Duration);
@@ -80,10 +80,9 @@ impl CephXClientHandler {
     /// Set the client's secret key
     pub fn set_secret_key(&mut self, key: CryptoKey) {
         debug!(
-            "Setting secret key for {}: {} bytes, first 16: {}",
+            "Setting secret key for {}: {} bytes",
             self.entity_name,
-            key.len(),
-            hex::encode(&key.secret[..16.min(key.len())])
+            key.len()
         );
         self.secret_key = Some(key);
     }
@@ -234,12 +233,7 @@ impl CephXClientHandler {
                     "AUTH_REPLY_MORE too short".into(),
                 ));
             }
-            let payload_len = u32::decode(&mut response, 0)? as usize;
-            debug!(
-                "AUTH_REPLY_MORE: length_prefix={}, remaining={} bytes",
-                payload_len,
-                response.len()
-            );
+            let _payload_len = u32::decode(&mut response, 0)?;
 
             let challenge = CephXServerChallenge::decode(&mut response, 0)?;
             self.server_challenge = Some(challenge.server_challenge);
@@ -440,27 +434,19 @@ impl CephXClientHandler {
             .ok_or_else(|| CephXError::AuthenticationFailed("No secret key set".into()))?;
 
         // Create session if it doesn't exist yet
-        if self.session.is_none() {
+        let session = self.session.get_or_insert_with(|| {
             debug!("Creating new session with global_id={}", global_id);
-            self.session = Some(CephXSession::new(
-                self.entity_name.clone(),
-                global_id,
-                secret_key.clone(),
-            ));
-        }
+            CephXSession::new(self.entity_name.clone(), global_id, secret_key.clone())
+        });
 
         // Store all service tickets in the session
-        if let Some(session) = &mut self.session {
-            for (service_type, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
-                let handler = session.get_ticket_handler(service_type);
-                handler.update(session_key, secret_id, ticket_blob, validity);
-                debug!(
-                    "Stored ticket for service {:?} (secret_id={})",
-                    service_type, secret_id
-                );
-            }
-        } else {
-            warn!("No session available to store ticket handlers");
+        for (service_type, session_key, secret_id, ticket_blob, validity) in ticket_handlers {
+            let handler = session.get_ticket_handler(service_type);
+            handler.update(session_key, secret_id, ticket_blob, validity);
+            debug!(
+                "Stored ticket for service {:?} (secret_id={})",
+                service_type, secret_id
+            );
         }
 
         Ok(())

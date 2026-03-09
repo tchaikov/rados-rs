@@ -66,9 +66,6 @@ impl FeatureSet {
 
     /// All msgr2 features (REVISION_1 | COMPRESSION)
     pub const ALL: Self = Self::REVISION_1.union(Self::COMPRESSION);
-
-    /// Features we support
-    pub const MSGR2: Self = Self::REVISION_1.union(Self::COMPRESSION);
 }
 
 impl From<u64> for FeatureSet {

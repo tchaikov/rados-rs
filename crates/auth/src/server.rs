@@ -208,10 +208,7 @@ impl CephXServerHandler {
             ));
         }
 
-        info!(
-            "Server: ✓ Client {} authenticated successfully",
-            entity_name
-        );
+        info!("Server: Client {} authenticated successfully", entity_name);
 
         // 5. Generate session key
         let mut session_key_bytes = vec![0u8; AES_KEY_LEN];
@@ -257,12 +254,11 @@ impl CephXServerHandler {
     ) -> Result<Vec<CephXTicketBlob>> {
         let mut tickets = Vec::new();
 
-        // Get current time for ticket validity
-        let now = SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e| {
-            CephXError::ProtocolError(format!("System clock before UNIX epoch: {}", e))
-        })?;
-
-        let valid_from = now.as_secs();
+        // SystemTime::now() is always after UNIX_EPOCH on supported platforms
+        let valid_from = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
         let valid_until = valid_from + self.ticket_ttl.as_secs();
 
         // Generate tickets only for the requested services we have secrets for.

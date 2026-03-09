@@ -445,9 +445,8 @@ impl CephXReply {
             tickets.push(ticket);
         }
 
-        let session_key = if data.remaining() >= 4 {
-            let mut key_data = Bytes::copy_from_slice(data);
-            let key = CryptoKey::decode(&mut key_data, 0)?;
+        let session_key = if data.has_remaining() {
+            let key = CryptoKey::decode(&mut data, 0)?;
             if !key.is_empty() {
                 Some(key)
             } else {

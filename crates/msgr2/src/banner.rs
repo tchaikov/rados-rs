@@ -23,7 +23,7 @@ impl Banner {
     pub fn new() -> Self {
         Self {
             banner: Bytes::from_static(CEPH_BANNER),
-            supported_features: FeatureSet::MSGR2,
+            supported_features: FeatureSet::ALL,
             required_features: FeatureSet::EMPTY,
         }
     }

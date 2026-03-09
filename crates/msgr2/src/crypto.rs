@@ -68,14 +68,48 @@ pub fn parse_connection_secret(secret: &[u8]) -> Result<ConnectionSecret, Crypto
     let rx_nonce = secret[KEY_SIZE..KEY_SIZE + NONCE_SIZE].to_vec();
     let tx_nonce = secret[KEY_SIZE + NONCE_SIZE..KEY_SIZE + 2 * NONCE_SIZE].to_vec();
 
-    tracing::debug!(
-        "Parsed connection_secret: key={} bytes, rx_nonce={} bytes, tx_nonce={} bytes",
-        key.len(),
-        rx_nonce.len(),
-        tx_nonce.len()
-    );
-
     Ok((key, rx_nonce, tx_nonce))
+}
+
+/// Validate key and nonce lengths, then construct an AES-128-GCM cipher.
+fn new_aes128gcm_cipher(key: &[u8], nonce: &[u8]) -> Result<aes_gcm::Aes128Gcm, CryptoError> {
+    use aes_gcm::KeyInit;
+
+    if key.len() != 16 {
+        return Err(CryptoError::InvalidParameters(format!(
+            "Invalid key length: {} bytes, expected 16",
+            key.len()
+        )));
+    }
+    if nonce.len() != 12 {
+        return Err(CryptoError::InvalidParameters(format!(
+            "Invalid nonce length: {} bytes, expected 12",
+            nonce.len()
+        )));
+    }
+
+    aes_gcm::Aes128Gcm::new_from_slice(key)
+        .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))
+}
+
+/// Build a 12-byte AES-GCM nonce by adding the sequence number to the counter
+/// field (last 8 bytes) of the base nonce.
+///
+/// Nonce structure (12 bytes):
+/// - bytes 0-3: fixed field (little-endian u32)
+/// - bytes 4-11: counter field (little-endian u64)
+///
+/// This matches Ceph's: nonce.counter = nonce.counter + sequence
+fn build_nonce(base_nonce: &[u8], sequence: u64) -> BytesMut {
+    let mut full_nonce = BytesMut::with_capacity(12);
+    full_nonce.extend_from_slice(base_nonce);
+
+    let counter_bytes = &mut full_nonce[4..12];
+    let mut counter = u64::from_le_bytes(counter_bytes.try_into().unwrap());
+    counter = counter.wrapping_add(sequence);
+    counter_bytes.copy_from_slice(&counter.to_le_bytes());
+
+    full_nonce
 }
 
 /// AES-128-GCM frame decryptor
@@ -96,24 +130,7 @@ impl fmt::Debug for Aes128GcmDecryptor {
 impl Aes128GcmDecryptor {
     /// Create a new decryptor with the given key and nonce
     pub fn new(key: Vec<u8>, nonce: Vec<u8>) -> Result<Self, CryptoError> {
-        use aes_gcm::KeyInit;
-
-        if key.len() != 16 {
-            return Err(CryptoError::InvalidParameters(format!(
-                "Invalid key length: {} bytes, expected 16",
-                key.len()
-            )));
-        }
-        if nonce.len() != 12 {
-            return Err(CryptoError::InvalidParameters(format!(
-                "Invalid nonce length: {} bytes, expected 12",
-                nonce.len()
-            )));
-        }
-
-        let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
-            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
-
+        let cipher = new_aes128gcm_cipher(&key, &nonce)?;
         Ok(Self {
             cipher,
             nonce,
@@ -132,20 +149,7 @@ impl FrameDecryptor for Aes128GcmDecryptor {
             &ciphertext[..ciphertext.len().min(64)]
         );
 
-        // Build nonce from base nonce + sequence number
-        // Nonce structure (12 bytes):
-        // - bytes 0-3: fixed field (little-endian u32)
-        // - bytes 4-11: counter field (little-endian u64)
-        let mut full_nonce = BytesMut::with_capacity(12);
-        full_nonce.extend_from_slice(&self.nonce);
-
-        // Add sequence number to the counter field (last 8 bytes)
-        // This matches Ceph's: nonce.counter = nonce.counter + sequence
-        let counter_bytes = &mut full_nonce[4..12];
-        let mut counter = u64::from_le_bytes(counter_bytes.try_into().unwrap());
-        counter = counter.wrapping_add(self.sequence);
-        counter_bytes.copy_from_slice(&counter.to_le_bytes());
-
+        let full_nonce = build_nonce(&self.nonce, self.sequence);
         let nonce_array = Nonce::from_slice(&full_nonce);
         tracing::trace!("RX nonce: {:02x?}", &full_nonce[..]);
 
@@ -156,8 +160,6 @@ impl FrameDecryptor for Aes128GcmDecryptor {
             ))
         })?;
 
-        // Increment sequence AFTER decryption (for next frame)
-        // Ceph increments in reset_rx_handler which is called before the next decryption
         self.sequence += 1;
 
         tracing::debug!(
@@ -189,24 +191,7 @@ impl fmt::Debug for Aes128GcmEncryptor {
 impl Aes128GcmEncryptor {
     /// Create a new encryptor with the given key and nonce
     pub fn new(key: Vec<u8>, nonce: Vec<u8>) -> Result<Self, CryptoError> {
-        use aes_gcm::KeyInit;
-
-        if key.len() != 16 {
-            return Err(CryptoError::InvalidParameters(format!(
-                "Invalid key length: {} bytes, expected 16",
-                key.len()
-            )));
-        }
-        if nonce.len() != 12 {
-            return Err(CryptoError::InvalidParameters(format!(
-                "Invalid nonce length: {} bytes, expected 12",
-                nonce.len()
-            )));
-        }
-
-        let cipher = aes_gcm::Aes128Gcm::new_from_slice(&key)
-            .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))?;
-
+        let cipher = new_aes128gcm_cipher(&key, &nonce)?;
         Ok(Self {
             cipher,
             nonce,
@@ -219,28 +204,13 @@ impl FrameEncryptor for Aes128GcmEncryptor {
     fn encrypt(&mut self, plaintext: &[u8]) -> Result<Bytes, CryptoError> {
         use aes_gcm::{aead::Aead, Nonce};
 
-        // Build nonce from base nonce + sequence number
-        // Nonce structure (12 bytes):
-        // - bytes 0-3: fixed field (little-endian u32)
-        // - bytes 4-11: counter field (little-endian u64)
-        let mut full_nonce = BytesMut::with_capacity(12);
-        full_nonce.extend_from_slice(&self.nonce);
-
-        // Add sequence number to the counter field (last 8 bytes)
-        // This matches Ceph's: nonce.counter = nonce.counter + sequence
-        let counter_bytes = &mut full_nonce[4..12];
-        let mut counter = u64::from_le_bytes(counter_bytes.try_into().unwrap());
-        counter = counter.wrapping_add(self.sequence);
-        counter_bytes.copy_from_slice(&counter.to_le_bytes());
-
+        let full_nonce = build_nonce(&self.nonce, self.sequence);
         let nonce_array = Nonce::from_slice(&full_nonce);
 
         let ciphertext = self.cipher.encrypt(nonce_array, plaintext).map_err(|e| {
             CryptoError::EncryptionFailed(format!("AES-GCM encrypt failed: {:?}", e))
         })?;
 
-        // Increment sequence AFTER encryption (for next frame)
-        // Ceph increments in reset_tx_handler which is called before the next encryption
         self.sequence += 1;
 
         tracing::debug!(
