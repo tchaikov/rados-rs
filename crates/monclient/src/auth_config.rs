@@ -128,12 +128,6 @@ impl AuthConfig {
         &self.entity_name
     }
 
-    /// Get the auth provider (internal use)
-    #[allow(dead_code)]
-    pub(crate) fn provider(&self) -> Option<&auth::MonitorAuthProvider> {
-        self.auth_provider.as_ref()
-    }
-
     /// Clone the auth provider (for connection creation)
     pub(crate) fn clone_provider(&self) -> Option<auth::MonitorAuthProvider> {
         self.auth_provider.clone()

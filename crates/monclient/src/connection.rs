@@ -3,7 +3,7 @@
 //! Wraps a msgr2 connection with monitor-specific state.
 
 use crate::error::{MonClientError, Result};
-use crate::messages::{MOSDMap, CEPH_MSG_OSD_MAP};
+use crate::messages::MOSDMap;
 use msgr2::io_loop::{run_io_loop, KeepaliveConfig};
 use msgr2::protocol::Connection as Msgr2Connection;
 use msgr2::{ConnectionConfig, MapSender};
@@ -131,28 +131,27 @@ impl MonConnection {
             (peer_supported_features & CEPH_FEATURE_MON_STATEFUL_SUB) != 0
         );
 
-        // Get the authenticated auth provider from the connection
+        // Extract the MonitorAuthProvider from the dynamic auth provider
         let auth_provider = connection.get_auth_provider().and_then(|provider| {
-            tracing::debug!("Retrieved auth provider from connection after authentication");
             provider
                 .as_any()
                 .downcast_ref::<auth::MonitorAuthProvider>()
-                .map(|mon_auth| {
-                    tracing::debug!("Successfully downcast to MonitorAuthProvider");
-                    mon_auth.clone()
-                })
+                .cloned()
         });
 
         if auth_provider.is_none() {
-            tracing::warn!("Auth provider is None after authentication! Need to fix state machine to preserve auth_provider");
+            tracing::debug!(
+                "No MonitorAuthProvider available (no-auth cluster or auth not configured)"
+            );
         }
 
         // Create bounded send channel (monitors are low-rate senders)
         let (send_tx, send_rx) =
             mpsc::channel::<msgr2::message::Message>(CONNECTION_SEND_CHANNEL_CAPACITY);
 
-        let osdmap_tx_for_task = params.osdmap_tx.clone();
-        let mon_msg_tx_for_task = params.mon_msg_tx.clone();
+        let rank = params.rank;
+        let osdmap_tx_for_task = params.osdmap_tx;
+        let mon_msg_tx_for_task = params.mon_msg_tx;
         let keepalive_policy = params.keepalive_policy;
 
         // Convert KeepalivePolicy → KeepaliveConfig for run_io_loop
@@ -167,7 +166,7 @@ impl MonConnection {
 
         // Spawn unified I/O task using the shared loop
         let handle = tokio::spawn(async move {
-            tracing::debug!("MonConnection I/O task started for rank {}", params.rank);
+            tracing::debug!("MonConnection I/O task started for rank {}", rank);
 
             run_io_loop(
                 connection,
@@ -179,7 +178,7 @@ impl MonConnection {
                     let mon_msg_tx = mon_msg_tx_for_task.clone();
                     async move {
                         // Forward OSDMap messages to OSDClient if configured
-                        if msg.msg_type() == CEPH_MSG_OSD_MAP {
+                        if msg.msg_type() == msgr2::message::CEPH_MSG_OSD_MAP {
                             if let Some(ref tx) = osdmap_tx {
                                 if let Err(e) = tx.send(msg.clone()).await {
                                     tracing::error!("Failed to send MOSDMap to OSDClient: {:?}", e);
@@ -198,11 +197,11 @@ impl MonConnection {
             )
             .await;
 
-            tracing::debug!("MonConnection I/O task terminated for rank {}", params.rank);
+            tracing::debug!("MonConnection I/O task terminated for rank {}", rank);
         });
 
         let mon_conn = Self {
-            rank: params.rank,
+            rank,
             global_id,
             peer_supported_features,
             auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
@@ -211,7 +210,7 @@ impl MonConnection {
             shutdown_token,
         };
 
-        tracing::debug!("MonConnection created for rank {}", params.rank);
+        tracing::debug!("MonConnection created for rank {}", rank);
 
         Ok(mon_conn)
     }

@@ -37,7 +37,6 @@
 
 use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{Frame, MessageFrame, Tag};
-use crate::header::MsgHeader;
 use crate::message::Message;
 use crate::state_machine::create_frame_from_trait;
 use crate::throttle::MessageThrottle;
@@ -476,27 +475,9 @@ async fn io_task(
 
 /// Parse a Message frame and update shared state
 async fn parse_message_frame(frame: &Frame, shared: &Arc<Mutex<SharedState>>) -> Result<Message> {
-    if frame.segments.is_empty() {
-        return Err(Error::protocol_error("Message frame missing header"));
-    }
-
-    let mut header_buf = frame.segments[0].clone();
-    let header = MsgHeader::decode(&mut header_buf)?;
-
-    let front = frame.segments.get(1).cloned().unwrap_or_default();
-    let middle = frame.segments.get(2).cloned().unwrap_or_default();
-    let data = frame.segments.get(3).cloned().unwrap_or_default();
-
-    let msg_seq = header.get_seq();
-    let ack_seq = header.get_ack_seq();
-
-    let msg = Message {
-        header,
-        front,
-        middle,
-        data,
-        footer: None,
-    };
+    let msg = Message::from_frame_segments(&frame.segments)?;
+    let msg_seq = msg.header.get_seq();
+    let ack_seq = msg.header.get_ack_seq();
 
     tracing::debug!(
         "I/O task: received message type={}, seq={}, ack_seq={}",
@@ -591,14 +572,7 @@ mod tests {
 
         // Create some test messages with proper headers
         for i in 1..=5u64 {
-            let mut msg = Message {
-                header: MsgHeader::new_default(0, 0), // msg_type=0, priority=0
-                front: Bytes::new(),
-                middle: Bytes::new(),
-                data: Bytes::new(),
-                footer: None,
-            };
-            msg.header.set_seq(i);
+            let msg = Message::new(0, Bytes::new()).with_seq(i);
             shared.record_sent_message(msg).unwrap();
         }
 

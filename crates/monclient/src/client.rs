@@ -728,7 +728,6 @@ impl MonClient {
 
         info!("Connecting to mon.{} at {:?}", rank, socket_addr);
 
-        // Get auth config to extract provider
         let auth_config = self.config.auth.clone().unwrap_or_default();
         let auth_provider = auth_config.clone_provider();
 
@@ -755,10 +754,6 @@ impl MonClient {
             .await?,
         );
 
-        // Note: Connection is now managed by a background task, no need to test it
-        // The task was already spawned in MonConnection::connect()
-
-        // Get global_id before taking lock (avoid holding lock during async call)
         let global_id = mon_con.global_id();
         debug!("Retrieved global_id {} from MonConnection", global_id);
 
@@ -802,12 +797,11 @@ impl MonClient {
             return Ok(());
         }
 
-        // Update auth state
+        // Update auth state (authentication completed during establish_session)
         {
             let mut auth_state = self.auth_state.write().await;
-            // Authentication was completed during MonConnection::connect() -> establish_session()
             auth_state.authenticated = true;
-            auth_state.global_id = global_id; // Store global_id in MonClient
+            auth_state.global_id = global_id;
         }
 
         // Move previously-sent subscriptions back to pending so they are resent on reconnect.
@@ -831,21 +825,26 @@ impl MonClient {
 
     /// Subscribe to a cluster map
     pub async fn subscribe(&self, what: MonService, start: u64, flags: u8) -> Result<()> {
-        let auth_state = self.auth_state.read().await;
-        if !auth_state.initialized {
-            return Err(MonClientError::NotInitialized);
+        {
+            let auth_state = self.auth_state.read().await;
+            if !auth_state.initialized {
+                return Err(MonClientError::NotInitialized);
+            }
         }
-        drop(auth_state);
 
         debug!("Subscribing to {} from version {}", what, start);
 
-        let mut sub_state = self.subscription_state.write().await;
-        if sub_state.want(what, start, flags) {
-            // New subscription, send it if connected
-            drop(sub_state);
-            let conn_state = self.connection_state.read().await;
-            if conn_state.active_con.is_some() {
-                drop(conn_state);
+        let is_new = {
+            let mut sub_state = self.subscription_state.write().await;
+            sub_state.want(what, start, flags)
+        };
+
+        if is_new {
+            let has_connection = {
+                let conn_state = self.connection_state.read().await;
+                conn_state.active_con.is_some()
+            };
+            if has_connection {
                 self.send_subscriptions().await?;
             }
         }
@@ -1063,12 +1062,12 @@ impl MonClient {
 
     /// Periodic maintenance tick
     async fn tick(&self) -> Result<()> {
-        // Phase 2.2: If we're in hunting state, continue hunting regardless of active_con
         let (is_hunting, active_con_opt) = {
             let conn_state = self.connection_state.read().await;
-            let is_hunting = conn_state.hunting;
-            let active_con = conn_state.active_con.as_ref().map(Arc::clone);
-            (is_hunting, active_con)
+            (
+                conn_state.hunting,
+                conn_state.active_con.as_ref().map(Arc::clone),
+            )
         };
 
         if is_hunting {
@@ -1084,9 +1083,8 @@ impl MonClient {
             }
         };
 
-        // Phase 2.1: Detect unexpected I/O task death (connection died without explicit shutdown).
+        // Detect unexpected I/O task death (connection died without explicit shutdown).
         // The background task exits on keepalive timeout, send errors, or recv errors.
-        // This replaces the old try_recv_timeout() channel-based approach.
         if !self.shutdown_token.is_cancelled() && active_con.is_task_finished().await {
             warn!(
                 "Connection to mon.{} lost (I/O task exited), hunting for new monitor",
@@ -1099,17 +1097,11 @@ impl MonClient {
                 conn_state.hunting = true;
             }
 
-            if let Err(e) = self.start_hunting().await {
-                error!("Failed to start hunting after connection loss: {}", e);
-                return Err(e);
-            }
-
-            info!("Successfully started hunting after connection loss");
+            self.start_hunting().await?;
             return Ok(());
         }
 
         // Check if auth tickets need renewal
-        // This matches the official MonClient::_check_auth_tickets() behavior
         if let Err(e) = self.check_auth_tickets(&active_con).await {
             warn!("Auth ticket renewal check failed: {:?}", e);
         }
@@ -1119,12 +1111,9 @@ impl MonClient {
     }
 
     /// Check if auth tickets need renewal and send renewal requests if so.
-    ///
-    /// This matches the official MonClient::_check_auth_tickets() behavior.
     async fn check_auth_tickets(&self, active_con: &MonConnection) -> Result<()> {
-        let auth_provider_arc = match active_con.get_auth_provider() {
-            Some(p) => p,
-            None => return Ok(()),
+        let Some(auth_provider_arc) = active_con.get_auth_provider() else {
+            return Ok(());
         };
 
         // Get the handler reference, releasing the tokio mutex early
@@ -1133,37 +1122,32 @@ impl MonClient {
             std::sync::Arc::clone(auth_provider.handler())
         };
 
+        let lock_err = |e| MonClientError::Other(format!("Failed to lock auth handler: {}", e));
+
         // Check if tickets need renewal and collect needed keys
         let renewal_info = {
-            let handler = handler_arc
-                .lock()
-                .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
-
-            match handler.get_session() {
-                Some(session) => {
-                    let mut needed_keys = auth::EntityType::empty();
-                    for (service_type, ticket_handler) in &session.ticket_handlers {
-                        if ticket_handler.need_key() {
-                            debug!(
-                                "Service ticket for {:?} needs renewal (renew_after reached)",
-                                *service_type
-                            );
-                            needed_keys |= *service_type;
-                        }
-                    }
-                    if needed_keys.is_empty() {
-                        None
-                    } else {
-                        Some((session.global_id, needed_keys))
+            let handler = handler_arc.lock().map_err(lock_err)?;
+            handler.get_session().and_then(|session| {
+                let mut needed_keys = auth::EntityType::empty();
+                for (service_type, ticket_handler) in &session.ticket_handlers {
+                    if ticket_handler.need_key() {
+                        debug!(
+                            "Service ticket for {:?} needs renewal (renew_after reached)",
+                            *service_type
+                        );
+                        needed_keys |= *service_type;
                     }
                 }
-                None => None,
-            }
+                if needed_keys.is_empty() {
+                    None
+                } else {
+                    Some((session.global_id, needed_keys))
+                }
+            })
         };
 
-        let (global_id, needed_keys) = match renewal_info {
-            Some(info) => info,
-            None => return Ok(()),
+        let Some((global_id, needed_keys)) = renewal_info else {
+            return Ok(());
         };
 
         debug!(
@@ -1173,9 +1157,7 @@ impl MonClient {
 
         // Lock the handler again (mutably) to build the ticket renewal request
         let auth_payload = {
-            let mut handler_mut = handler_arc
-                .lock()
-                .map_err(|e| MonClientError::Other(format!("Failed to lock handler: {}", e)))?;
+            let mut handler_mut = handler_arc.lock().map_err(lock_err)?;
             handler_mut.build_ticket_renewal_request(global_id, needed_keys)
         };
 
@@ -1278,11 +1260,10 @@ impl MonClient {
         Ok(())
     }
 
-    /// Handle MonMapState message
+    /// Handle MonMap message
     async fn handle_monmap(&self, msg: msgr2::message::Message) -> Result<()> {
-        info!("Handling MonMap message ({} bytes)", msg.front.len());
         let mmonmap: MMonMap = decode_message(&msg)?;
-        info!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
+        debug!("Received monmap blob: {} bytes", mmonmap.monmap_bl.len());
 
         // Decode the actual MonMap
         let monmap = MonMapState::decode(&mmonmap.monmap_bl)?;
@@ -1335,17 +1316,14 @@ impl MonClient {
     /// Handle config update message
     async fn handle_config(&self, msg: msgr2::message::Message) -> Result<()> {
         let mconfig: MConfig = decode_message(&msg)?;
-        let has_receivers = self.map_events.receiver_count() > 0;
 
         {
             let mut runtime_config = self.runtime_config.write().await;
             runtime_config.update_from_map(&mconfig.config);
         }
 
-        if has_receivers {
-            let keys: Vec<String> = mconfig.config.keys().cloned().collect();
-            let _ = self.map_events.send(MapEvent::ConfigUpdated { keys });
-        }
+        let keys: Vec<String> = mconfig.config.into_keys().collect();
+        let _ = self.map_events.send(MapEvent::ConfigUpdated { keys });
         Ok(())
     }
 
@@ -1372,7 +1350,6 @@ impl MonClient {
             epoch: epoch as u64,
         });
 
-        debug!("OSDMap cached successfully");
         Ok(())
     }
 
@@ -1380,7 +1357,7 @@ impl MonClient {
     async fn handle_version_reply(&self, msg: msgr2::message::Message) -> Result<()> {
         let reply: MMonGetVersionReply = decode_message(&msg)?;
 
-        // Get the transaction ID from the message payload (not header in this case)
+        // tid comes from the payload, not the message header
         let tid = reply.tid;
 
         debug!(
@@ -1405,10 +1382,7 @@ impl MonClient {
 
     /// Handle command ack
     async fn handle_command_ack(&self, msg: msgr2::message::Message) -> Result<()> {
-        // Decode the command ack message from the front payload
         let ack = MMonCommandAck::decode(&msg.front)?;
-
-        // Get the transaction ID from the message header
         let tid = msg.header.get_tid();
 
         debug!(
@@ -1416,10 +1390,8 @@ impl MonClient {
             tid, ack.r, ack.rs
         );
 
-        // Find and complete the pending command by matching tid
         if let Some((_, tracker)) = self.commands.remove(&tid) {
-            // The command output is in the data field, not the rs field
-            // Use rs only if data is empty (for error messages)
+            // Command output is in the data field; use rs only if data is empty
             let outs = if !msg.data.is_empty() {
                 String::from_utf8_lossy(&msg.data).to_string()
             } else {
@@ -1439,16 +1411,14 @@ impl MonClient {
 
     /// Handle pool operation reply
     async fn handle_poolop_reply(&self, msg: msgr2::message::Message) -> Result<()> {
-        // Decode the pool operation reply message from the front payload
         let reply = MPoolOpReply::decode(&msg.front)?;
-
         let tid = msg.tid();
+
         debug!(
             "Received pool op reply: tid={}, reply_code={}, epoch={}",
             tid, reply.reply_code, reply.epoch
         );
 
-        // Find and complete the pending pool operation by matching tid
         if let Some((_, tracker)) = self.pool_ops.remove(&tid) {
             let result =
                 PoolOpResult::new(reply.reply_code as i32, reply.epoch, reply.response_data);

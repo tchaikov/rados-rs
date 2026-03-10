@@ -110,6 +110,9 @@ impl Banner {
             )));
         }
 
+        let supported_features = FeatureSet::from(u64::decode(src, 0)?);
+        let required_features = FeatureSet::from(u64::decode(src, 0)?);
+
         if payload_size > 16 {
             tracing::warn!(
                 "Unexpected banner payload size: {} (expected 16), skipping extra bytes",
@@ -117,9 +120,6 @@ impl Banner {
             );
             src.advance(payload_size - 16);
         }
-
-        let supported_features = FeatureSet::from(u64::decode(src, 0)?);
-        let required_features = FeatureSet::from(u64::decode(src, 0)?);
         Ok(Self {
             banner: Bytes::from(banner_bytes),
             supported_features,

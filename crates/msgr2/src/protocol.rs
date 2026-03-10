@@ -12,7 +12,6 @@ use tokio::net::TcpStream;
 use crate::banner::Banner;
 use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{Frame, MessageFrame, Preamble, Tag};
-use crate::header::MsgHeader;
 use crate::message::Message;
 use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine};
 use crate::FeatureSet;
@@ -1650,32 +1649,9 @@ impl Connection {
                     continue;
                 }
                 Tag::Message => {
-                    // Convert Frame to MessageFrame
-                    // MessageFrame has 4 segments: header, front, middle, data
-                    if frame.segments.is_empty() {
-                        return Err(Error::protocol_error(
-                            "Message frame missing header segment",
-                        ));
-                    }
-
-                    let mut header_buf = frame.segments[0].clone();
-                    let header = MsgHeader::decode(&mut header_buf)?;
-
-                    let front = frame.segments.get(1).cloned().unwrap_or_default();
-                    let middle = frame.segments.get(2).cloned().unwrap_or_default();
-                    let data = frame.segments.get(3).cloned().unwrap_or_default();
-
-                    // Use safe accessors for packed field values
-                    let msg_seq = header.get_seq();
-                    let ack_seq = header.get_ack_seq();
-
-                    let msg = Message {
-                        header,
-                        front,
-                        middle,
-                        data,
-                        footer: None,
-                    };
+                    let msg = Message::from_frame_segments(&frame.segments)?;
+                    let msg_seq = msg.header.get_seq();
+                    let ack_seq = msg.header.get_ack_seq();
 
                     tracing::debug!(
                         "Received message: type={}, seq={}, ack_seq={}",

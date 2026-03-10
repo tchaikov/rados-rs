@@ -24,6 +24,7 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Resu
         .bits();
 
     let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED)?;
+    let alignments = F::segment_alignments();
     Ok(Frame {
         preamble: crate::frames::Preamble {
             tag,
@@ -33,7 +34,10 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Resu
                 for (i, seg) in segments.iter().enumerate() {
                     descs[i] = crate::frames::SegmentDescriptor {
                         logical_len: seg.len() as u32,
-                        align: 8,
+                        align: alignments
+                            .get(i)
+                            .copied()
+                            .unwrap_or(crate::frames::DEFAULT_ALIGNMENT),
                     };
                 }
                 descs

@@ -301,6 +301,34 @@ impl Message {
     pub fn total_size(&self) -> u64 {
         self.total_len() as u64
     }
+
+    /// Build a `Message` from raw frame segments (header, front, middle, data).
+    ///
+    /// This is the canonical way to convert a received msgr2 `Frame` with
+    /// `Tag::Message` into a `Message`.  Both the unsplit `Connection` and the
+    /// split I/O task use this to avoid duplicating the extraction logic.
+    pub fn from_frame_segments(segments: &[Bytes]) -> Result<Self> {
+        if segments.is_empty() {
+            return Err(Error::protocol_error(
+                "Message frame missing header segment",
+            ));
+        }
+
+        let mut header_buf = segments[0].clone();
+        let header = MsgHeader::decode(&mut header_buf)?;
+
+        let front = segments.get(1).cloned().unwrap_or_default();
+        let middle = segments.get(2).cloned().unwrap_or_default();
+        let data = segments.get(3).cloned().unwrap_or_default();
+
+        Ok(Self {
+            header,
+            front,
+            middle,
+            data,
+            footer: None,
+        })
+    }
 }
 
 impl fmt::Display for Message {
