@@ -11,8 +11,8 @@ use bytes::{Buf, BufMut};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-// Import specific types from types module
-use crate::types::{Epoch, FsId, UTime};
+use crate::ids::Epoch;
+use crate::types::{FsId, UTime};
 
 const MONMAP_ENCODING_VERSION: u8 = 9;
 const MONMAP_COMPAT_VERSION: u8 = 3;
@@ -42,32 +42,20 @@ impl VersionedEncode for MonFeature {
     fn encode_content<B: BufMut>(
         &self,
         buf: &mut B,
-        _features: u64,
+        features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient buffer space for MonFeature: need 8, have {}",
-                buf.remaining_mut()
-            )));
-        }
-        buf.put_u64_le(self.features);
-        Ok(())
+        self.features.encode(buf, features)
     }
 
     fn decode_content<B: Buf>(
         buf: &mut B,
-        _features: u64,
+        features: u64,
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for MonFeature".to_string(),
-            ));
-        }
         Ok(MonFeature {
-            features: buf.get_u64_le(),
+            features: u64::decode(buf, features)?,
         })
     }
 
@@ -135,23 +123,12 @@ impl From<u8> for MonCephRelease {
 }
 
 impl Denc for MonCephRelease {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient buffer space for MonCephRelease".to_string(),
-            ));
-        }
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        (*self as u8).encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for MonCephRelease".to_string(),
-            ));
-        }
-        Ok(MonCephRelease::from(buf.get_u8()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(MonCephRelease::from(u8::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -185,23 +162,12 @@ impl From<u8> for ElectionStrategy {
 }
 
 impl Denc for ElectionStrategy {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient buffer space for ElectionStrategy".to_string(),
-            ));
-        }
-        buf.put_u8(*self as u8);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        (*self as u8).encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for ElectionStrategy".to_string(),
-            ));
-        }
-        Ok(ElectionStrategy::from(buf.get_u8()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(ElectionStrategy::from(u8::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -249,13 +215,7 @@ impl VersionedEncode for MonInfo {
         // Encode name
         Denc::encode(&self.name, buf, features)?;
 
-        // Encode public_addrs (v3+ uses entity_addrvec_t, v1-v2 use entity_addr_t)
-        if version < 3 {
-            // For v1-v2, encode as legacy addr (simplified - just use first addr)
-            Denc::encode(&self.public_addrs, buf, features)?;
-        } else {
-            Denc::encode(&self.public_addrs, buf, features)?;
-        }
+        Denc::encode(&self.public_addrs, buf, features)?;
 
         // Encode priority (v2+)
         if version >= 2 {
@@ -384,13 +344,7 @@ impl VersionedEncode for MonMap {
         features: u64,
         version: u8,
     ) -> Result<(), RadosError> {
-        // Encode fsid (raw 16 bytes)
-        if buf.remaining_mut() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient buffer space for fsid".to_string(),
-            ));
-        }
-        buf.put_slice(&self.fsid);
+        Denc::encode(&self.fsid, buf, features)?;
 
         // Encode epoch
         Denc::encode(&self.epoch, buf, features)?;
@@ -425,14 +379,7 @@ impl VersionedEncode for MonMap {
         // Version 6 remains the wire-format floor we decode for modern MonMap layouts.
         crate::check_min_version!(version, MONMAP_MIN_DECODE_VERSION, "MonMap", "Octopus v15+");
 
-        // Decode fsid (raw 16 bytes)
-        if buf.remaining() < 16 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for fsid".to_string(),
-            ));
-        }
-        let mut fsid = [0u8; 16];
-        buf.copy_to_slice(&mut fsid);
+        let fsid = <[u8; 16] as Denc>::decode(buf, features)?;
 
         // Decode epoch
         let epoch = <Epoch as Denc>::decode(buf, features)?;
@@ -503,7 +450,8 @@ impl VersionedEncode for MonMap {
         debug_assert_eq!(version, MONMAP_ENCODING_VERSION);
 
         Some(
-            16 + 4
+            self.fsid.encoded_size(features)?
+                + self.epoch.encoded_size(features)?
                 + self.last_changed.encoded_size(features)?
                 + self.created.encoded_size(features)?
                 + self.persistent_features.encoded_size(features)?

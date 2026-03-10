@@ -5,12 +5,9 @@
 //! monitor, OSD, and messenger payloads. Keeping them here avoids duplicate
 //! definitions across crates and centralizes their DENC behavior.
 
-// Re-export types from other modules for consistency
-pub use crate::entity_addr::{EntityAddr, EntityAddrType};
-pub use crate::ids::{Epoch, GlobalId, OsdId, PoolId};
-
 use crate::codec::Denc;
 use crate::error::RadosError;
+use crate::ids::Epoch;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
 use std::fmt;

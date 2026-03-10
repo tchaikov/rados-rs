@@ -35,10 +35,6 @@ use std::fs;
 use std::io::{self, Read};
 use std::process;
 
-// Re-export auth types (may not compile if auth crate is not available)
-// use auth::types::{CephXTicketBlob, CryptoKey};
-// use auth::protocol::{CephXAuthenticate, CephXRequestHeader};
-
 /// Trait for type-erased serializable objects
 ///
 /// This bridges the gap between type erasure (Box<dyn SerializableType>)
@@ -76,7 +72,7 @@ fn decode_denc<T>(bytes: &mut Bytes, features: u64) -> Result<Box<dyn Serializab
 where
     T: Denc + Serialize + 'static,
 {
-    let obj = T::decode(bytes, features).map_err(DencoderError::DecodeError)?;
+    let obj = T::decode(bytes, features)?;
     Ok(Box::new(obj))
 }
 
@@ -85,7 +81,7 @@ fn decode_versioned<T>(bytes: &mut Bytes, features: u64) -> Result<Box<dyn Seria
 where
     T: VersionedEncode + Serialize + 'static,
 {
-    let obj = T::decode_versioned(bytes, features).map_err(DencoderError::DecodeError)?;
+    let obj = T::decode_versioned(bytes, features)?;
     Ok(Box::new(obj))
 }
 
@@ -233,8 +229,6 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         // Dependencies: FsId, UTime×2 (Level 1), MonFeature×2, MonInfo (Level 3), MonCephRelease, ElectionStrategy
         "MonMap" => Some(type_info_denc::<MonMap>()),
 
-        // Auth types (commented out if auth crate not available)
-        // "CryptoKey" => Some(type_info_denc::<CryptoKey>()),
         _ => None,
     }
 }
@@ -321,6 +315,7 @@ enum DencoderError {
     InvalidFeatures(String),
     JsonError(serde_json::Error),
     MissingArgument(String),
+    UnknownCommand(String),
 }
 
 impl fmt::Display for DencoderError {
@@ -346,6 +341,11 @@ impl fmt::Display for DencoderError {
             Self::InvalidFeatures(s) => write!(f, "Invalid features: {}", s),
             Self::JsonError(e) => write!(f, "JSON error: {}", e),
             Self::MissingArgument(cmd) => write!(f, "Error: Missing argument for '{}'", cmd),
+            Self::UnknownCommand(cmd) => write!(
+                f,
+                "Error: Unknown command '{}'. Use 'list_types' to see available commands.",
+                cmd
+            ),
         }
     }
 }
@@ -433,12 +433,9 @@ fn cmd_encode(state: &mut DencoderState) -> Result<()> {
         .as_ref()
         .ok_or(DencoderError::NothingDecoded)?;
 
-    state.raw_data = Some((type_info.encode_fn)(decoded.as_ref(), state.features)?);
-
-    println!(
-        "Encoded successfully ({} bytes)",
-        state.raw_data.as_ref().unwrap().len()
-    );
+    let encoded = (type_info.encode_fn)(decoded.as_ref(), state.features)?;
+    println!("Encoded successfully ({} bytes)", encoded.len());
+    state.raw_data = Some(encoded);
     Ok(())
 }
 
@@ -571,9 +568,8 @@ fn process_command(state: &mut DencoderState, cmd: &str, args: &[String]) -> Res
             Ok(())
         }
         _ => {
-            eprintln!("Unknown command: {}", cmd);
             print_usage();
-            process::exit(1);
+            Err(DencoderError::UnknownCommand(cmd.to_string()))
         }
     }
 }

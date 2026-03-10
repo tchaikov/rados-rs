@@ -252,48 +252,16 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
     }
 }
 
-/// Run ceph-dencoder on a corpus file and get JSON output
+/// Run ceph-dencoder on a corpus file and get JSON output.
+///
+/// Following Ceph's readable.sh pattern:
+/// - Normal (roundtrip=false): import decode dump_json
+/// - Roundtrip (roundtrip=true): import decode encode decode dump_json
 fn run_ceph_dencoder(
     ceph_dencoder: &Path,
     type_name: &str,
     corpus_file: &Path,
     features: Option<u64>,
-) -> Result<String, String> {
-    let mut cmd = Command::new(ceph_dencoder);
-    cmd.arg("type").arg(type_name);
-
-    if let Some(f) = features {
-        cmd.arg("set_features").arg(format!("0x{:x}", f));
-    }
-
-    cmd.arg("import")
-        .arg(corpus_file)
-        .arg("decode")
-        .arg("dump_json");
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run ceph-dencoder: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "ceph-dencoder failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-/// Run ceph-dencoder with optional roundtrip (encode before final decode)
-/// Following Ceph's readable.sh pattern:
-/// - Normal: import decode dump_json
-/// - Roundtrip: import decode encode decode dump_json
-fn run_ceph_dencoder_with_ops(
-    ceph_dencoder: &Path,
-    type_name: &str,
-    corpus_file: &Path,
-    features: Option<u64>,
     roundtrip: bool,
 ) -> Result<String, String> {
     let mut cmd = Command::new(ceph_dencoder);
@@ -325,53 +293,14 @@ fn run_ceph_dencoder_with_ops(
     Ok(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
-/// Run our Rust dencoder on a corpus file and get JSON output
+/// Run our Rust dencoder on a corpus file and get JSON output.
+///
+/// When roundtrip=true, adds encode/decode steps before dump_json.
 fn run_rust_dencoder(
     rust_dencoder: &Path,
     type_name: &str,
     corpus_file: &Path,
     features: Option<u64>,
-) -> Result<String, String> {
-    let mut cmd = Command::new(rust_dencoder);
-    cmd.arg("type").arg(type_name);
-
-    if let Some(f) = features {
-        cmd.arg("set_features").arg(format!("0x{:x}", f));
-    }
-
-    cmd.arg("import")
-        .arg(corpus_file)
-        .arg("decode")
-        .arg("dump_json");
-
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run rust dencoder: {}", e))?;
-
-    if !output.status.success() {
-        return Err(format!(
-            "rust dencoder failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-
-    let full_output = String::from_utf8_lossy(&output.stdout).to_string();
-
-    // Extract JSON from output - it starts with '{' or '['
-    // Our dencoder prints status messages before the JSON
-    let json_start = full_output
-        .find(['{', '['])
-        .ok_or_else(|| format!("No JSON found in output: {}", full_output))?;
-
-    Ok(full_output[json_start..].trim().to_string())
-}
-
-/// Run our Rust dencoder with optional roundtrip (encode before final decode)
-fn run_rust_dencoder_with_ops(
-    rust_dencoder: &Path,
-    type_name: &str,
-    corpus_file: &Path,
-    features: Option<u64>,
     roundtrip: bool,
 ) -> Result<String, String> {
     let mut cmd = Command::new(rust_dencoder);
@@ -409,10 +338,6 @@ fn run_rust_dencoder_with_ops(
         .ok_or_else(|| format!("No JSON found in output: {}", full_output))?;
 
     Ok(full_output[json_start..].trim().to_string())
-}
-
-fn corpus_types() -> &'static [TypeSpec] {
-    CORPUS_TYPES
 }
 
 /// Compare two JSON outputs
@@ -453,8 +378,6 @@ fn export_encoded_binary(
     corpus_file: &Path,
     features: Option<u64>,
 ) -> Result<PathBuf, String> {
-    use std::env;
-
     // Create a unique temporary file
     let temp_dir = env::temp_dir();
     let temp_file = temp_dir.join(format!(
@@ -510,11 +433,17 @@ fn test_rust_encode_ceph_decode(
         .map_err(|e| format!("Rust export failed: {}", e))?;
 
     // Decode with Ceph
-    let ceph_decoded_json =
-        run_ceph_dencoder(ceph_dencoder, type_name, &rust_encoded_file, features).map_err(|e| {
-            let _ = fs::remove_file(&rust_encoded_file);
-            format!("Ceph decode of Rust-encoded failed: {}", e)
-        })?;
+    let ceph_decoded_json = run_ceph_dencoder(
+        ceph_dencoder,
+        type_name,
+        &rust_encoded_file,
+        features,
+        false,
+    )
+    .map_err(|e| {
+        let _ = fs::remove_file(&rust_encoded_file);
+        format!("Ceph decode of Rust-encoded failed: {}", e)
+    })?;
 
     // Clean up temp file
     let _ = fs::remove_file(&rust_encoded_file);
@@ -543,11 +472,17 @@ fn test_ceph_encode_rust_decode(
         .map_err(|e| format!("Ceph export failed: {}", e))?;
 
     // Decode with Rust
-    let rust_decoded_json =
-        run_rust_dencoder(rust_dencoder, type_name, &ceph_encoded_file, features).map_err(|e| {
-            let _ = fs::remove_file(&ceph_encoded_file);
-            format!("Rust decode of Ceph-encoded failed: {}", e)
-        })?;
+    let rust_decoded_json = run_rust_dencoder(
+        rust_dencoder,
+        type_name,
+        &ceph_encoded_file,
+        features,
+        false,
+    )
+    .map_err(|e| {
+        let _ = fs::remove_file(&ceph_encoded_file);
+        format!("Rust decode of Ceph-encoded failed: {}", e)
+    })?;
 
     // Clean up temp file
     let _ = fs::remove_file(&ceph_encoded_file);
@@ -572,7 +507,7 @@ fn test_type(
     let type_dir = corpus_base.join(type_name);
 
     if !type_dir.exists() {
-        eprintln!("  ⚠ No corpus directory found for {}", type_name);
+        eprintln!("  [WARN] No corpus directory found for {}", type_name);
         return Ok(TypeSummary::default());
     }
 
@@ -583,7 +518,7 @@ fn test_type(
         .collect();
 
     if entries.is_empty() {
-        eprintln!("  ⚠ No corpus files found in {}", type_dir.display());
+        eprintln!("  [WARN] No corpus files found in {}", type_dir.display());
         return Ok(TypeSummary::default());
     }
 
@@ -599,21 +534,23 @@ fn test_type(
         total += 1;
 
         // Run both dencoders
-        let ceph_json = match run_ceph_dencoder(ceph_dencoder, type_name, &corpus_file, features) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("    ✗ ceph-dencoder failed for {}: {}", file_name, e);
-                continue;
-            }
-        };
+        let ceph_json =
+            match run_ceph_dencoder(ceph_dencoder, type_name, &corpus_file, features, false) {
+                Ok(json) => json,
+                Err(e) => {
+                    eprintln!("    [FAIL] ceph-dencoder failed for {}: {}", file_name, e);
+                    continue;
+                }
+            };
 
-        let rust_json = match run_rust_dencoder(rust_dencoder, type_name, &corpus_file, features) {
-            Ok(json) => json,
-            Err(e) => {
-                eprintln!("    ✗ rust dencoder failed for {}: {}", file_name, e);
-                continue;
-            }
-        };
+        let rust_json =
+            match run_rust_dencoder(rust_dencoder, type_name, &corpus_file, features, false) {
+                Ok(json) => json,
+                Err(e) => {
+                    eprintln!("    [FAIL] rust dencoder failed for {}: {}", file_name, e);
+                    continue;
+                }
+            };
 
         // Both decoders succeeded
         both_decoded += 1;
@@ -628,8 +565,8 @@ fn test_type(
         // ceph-dencoder to lose version-specific data. Ceph auto-detects from the file.
         // We DO pass features to Rust because our implementation needs them for encoding.
         let (ceph_roundtrip_consistent, rust_roundtrip_consistent) = match (
-            run_ceph_dencoder_with_ops(ceph_dencoder, type_name, &corpus_file, None, true),
-            run_rust_dencoder_with_ops(rust_dencoder, type_name, &corpus_file, features, true),
+            run_ceph_dencoder(ceph_dencoder, type_name, &corpus_file, None, true),
+            run_rust_dencoder(rust_dencoder, type_name, &corpus_file, features, true),
         ) {
             (Ok(ceph_roundtrip_json), Ok(rust_roundtrip_json)) => {
                 // Check Ceph's roundtrip consistency
@@ -680,14 +617,14 @@ fn test_type(
             && rust_to_ceph_works
             && ceph_to_rust_works
         {
-            eprintln!("    ✓ {} (decode + roundtrip + cross-decode)", file_name);
+            eprintln!("    [OK] {} (decode + roundtrip + cross-decode)", file_name);
             matched += 1;
         } else {
             // Format mismatch - both decoded but outputs differ
             format_mismatch += 1;
             // Only show first mismatch details to avoid spam
             if format_mismatch == 1 {
-                let marker = "⚠";
+                let marker = "[WARN]";
                 let mut reasons = Vec::new();
                 if !decode_matches {
                     reasons.push("decode mismatch");
@@ -729,11 +666,11 @@ fn test_corpus_comparison() {
     // Get configuration from environment
     let corpus_root = match ensure_corpus_available() {
         Ok(root) => {
-            eprintln!("✓ Found corpus root at: {:?}", root);
+            eprintln!("[OK] Found corpus root at: {:?}", root);
             root
         }
         Err(e) => {
-            panic!("❌ {}", e);
+            panic!("[ERROR] {}", e);
         }
     };
 
@@ -754,7 +691,7 @@ fn test_corpus_comparison() {
                 }
                 if versions.is_empty() {
                     eprintln!(
-                        "⚠ No 18.2.0 or 19.2.0 versions found, testing all available versions"
+                        "[WARN] No 18.2.0 or 19.2.0 versions found, testing all available versions"
                     );
                     all_versions
                 } else {
@@ -762,7 +699,7 @@ fn test_corpus_comparison() {
                 }
             }
             Err(e) => {
-                panic!("❌ Failed to get available versions: {}", e);
+                panic!("[ERROR] Failed to get available versions: {}", e);
             }
         }
     };
@@ -775,21 +712,21 @@ fn test_corpus_comparison() {
     // Check prerequisites
     let ceph_dencoder = match check_ceph_dencoder() {
         Ok(path) => {
-            eprintln!("✓ Found ceph-dencoder at: {:?}", path);
+            eprintln!("[OK] Found ceph-dencoder at: {:?}", path);
             path
         }
         Err(e) => {
-            panic!("❌ {}", e);
+            panic!("[ERROR] {}", e);
         }
     };
 
     let rust_dencoder = match get_rust_dencoder() {
         Ok(path) => {
-            eprintln!("✓ Found rust dencoder at: {:?}", path);
+            eprintln!("[OK] Found rust dencoder at: {:?}", path);
             path
         }
         Err(e) => {
-            panic!("❌ {}", e);
+            panic!("[ERROR] {}", e);
         }
     };
 
@@ -805,17 +742,17 @@ fn test_corpus_comparison() {
     eprintln!();
 
     let types_to_test: Vec<TypeSpec> = if let Some(ref type_name) = requested_type {
-        corpus_types()
+        CORPUS_TYPES
             .iter()
             .copied()
             .filter(|spec| spec.name == type_name)
             .collect()
     } else {
-        corpus_types().to_vec()
+        CORPUS_TYPES.to_vec()
     };
 
     if types_to_test.is_empty() {
-        panic!("❌ No types matched filter: {:?}", requested_type);
+        panic!("[ERROR] No types matched filter: {:?}", requested_type);
     }
 
     let mut version_results: Vec<VersionResult> = Vec::new();
@@ -828,11 +765,11 @@ fn test_corpus_comparison() {
 
         let corpus_base = match get_corpus_path(&corpus_root, version) {
             Ok(path) => {
-                eprintln!("✓ Found corpus at: {:?}", path);
+                eprintln!("[OK] Found corpus at: {:?}", path);
                 path
             }
             Err(e) => {
-                eprintln!("⚠ Skipping version {}: {}", version, e);
+                eprintln!("[WARN] Skipping version {}: {}", version, e);
                 continue;
             }
         };
@@ -891,7 +828,7 @@ fn test_corpus_comparison() {
                     }
                 }
                 Err(e) => {
-                    eprintln!("  ✗ Error testing {}: {}", spec.name, e);
+                    eprintln!("  [FAIL] Error testing {}: {}", spec.name, e);
                     types_with_decode_failures.push(spec.name);
                 }
             }
@@ -955,7 +892,7 @@ fn test_corpus_comparison() {
 
             eprintln!(
                 "  Status: {} - {}/{} exact match, {} non-exception format diffs, {} decode failures",
-                if passed { "✓ PASS" } else { "✗ FAIL" },
+                if passed { "PASS" } else { "FAIL" },
                 result.matched,
                 result.total,
                 non_exception_mismatch,

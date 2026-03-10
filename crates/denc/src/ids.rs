@@ -63,19 +63,12 @@ impl std::fmt::Display for OsdId {
 }
 
 impl Denc for OsdId {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_i32_le(self.0);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for OsdId: need 4, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(OsdId(buf.get_i32_le()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(OsdId(i32::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -131,19 +124,12 @@ impl std::fmt::Display for PoolId {
 }
 
 impl Denc for PoolId {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u64_le(self.0);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for PoolId: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(PoolId(buf.get_u64_le()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(PoolId(u64::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -193,19 +179,12 @@ impl std::fmt::Display for Epoch {
 }
 
 impl Denc for Epoch {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u32_le(self.0);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for Epoch: need 4, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(Epoch(buf.get_u32_le()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(Epoch(u32::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -255,19 +234,12 @@ impl std::fmt::Display for GlobalId {
 }
 
 impl Denc for GlobalId {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u64_le(self.0);
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.0.encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 8 {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for GlobalId: need 8, have {}",
-                buf.remaining()
-            )));
-        }
-        Ok(GlobalId(buf.get_u64_le()))
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(GlobalId(u64::decode(buf, features)?))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

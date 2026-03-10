@@ -151,7 +151,10 @@ impl DencAttrs {
     }
 }
 
-/// Shared codegen fragments for field-by-field Denc-style derives.
+/// Shared codegen fragments for field-by-field encoding/decoding derives.
+///
+/// Generates encode, decode, size, and where-clause token streams for each
+/// field, parameterized by the trait path (e.g., `Denc` or `DencMut`).
 struct FieldCodegen {
     encode_stmts: Vec<TokenStream2>,
     decode_fields: Vec<TokenStream2>,
@@ -160,7 +163,16 @@ struct FieldCodegen {
 }
 
 impl FieldCodegen {
-    fn from_denc_fields<'a, I>(fields: I, krate: &TokenStream2) -> Self
+    fn empty() -> Self {
+        Self {
+            encode_stmts: Vec::new(),
+            decode_fields: Vec::new(),
+            size_stmts: Vec::new(),
+            where_clauses: Vec::new(),
+        }
+    }
+
+    fn from_fields<'a, I>(fields: I, krate: &TokenStream2, trait_name: &TokenStream2) -> Self
     where
         I: IntoIterator<Item = &'a syn::Field>,
     {
@@ -171,7 +183,7 @@ impl FieldCodegen {
             .map(|f| {
                 let field_name = &f.ident;
                 let field_type = &f.ty;
-                quote! { <#field_type as #krate::Denc>::encode(&self.#field_name, buf, features)?; }
+                quote! { <#field_type as #krate::#trait_name>::encode(&self.#field_name, buf, features)?; }
             })
             .collect();
 
@@ -181,7 +193,7 @@ impl FieldCodegen {
                 let field_name = &f.ident;
                 let field_type = &f.ty;
                 quote! {
-                    #field_name: <#field_type as #krate::Denc>::decode(buf, features)?
+                    #field_name: <#field_type as #krate::#trait_name>::decode(buf, features)?
                 }
             })
             .collect();
@@ -191,7 +203,7 @@ impl FieldCodegen {
             .map(|f| {
                 let field_name = &f.ident;
                 let field_type = &f.ty;
-                quote! { size += <#field_type as #krate::Denc>::encoded_size(&self.#field_name, features)?; }
+                quote! { size += <#field_type as #krate::#trait_name>::encoded_size(&self.#field_name, features)?; }
             })
             .collect();
 
@@ -199,7 +211,7 @@ impl FieldCodegen {
             .iter()
             .map(|f| {
                 let field_type = &f.ty;
-                quote! { #field_type: #krate::Denc }
+                quote! { #field_type: #krate::#trait_name }
             })
             .collect();
 
@@ -277,7 +289,8 @@ pub fn derive_denc(input: TokenStream) -> TokenStream {
     let krate = find_denc_crate(&input.attrs);
     let name = &input.ident;
     let fields = expect_named_fields(&input, "Denc");
-    let codegen = FieldCodegen::from_denc_fields(fields.named.iter(), &krate);
+    let denc = quote! { Denc };
+    let codegen = FieldCodegen::from_fields(fields.named.iter(), &krate, &denc);
 
     let encode_stmts = &codegen.encode_stmts;
     let decode_fields = &codegen.decode_fields;
@@ -405,24 +418,11 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
     let name = &input.ident;
     let fields = expect_named_fields(&input, "DencMut");
 
-    let field_names: Vec<_> = fields.named.iter().map(|f| &f.ident).collect();
-    let field_types: Vec<_> = fields.named.iter().map(|f| &f.ty).collect();
-
-    let encode_fields = field_names.iter().map(|name| {
-        quote! { self.#name.encode(buf, features)?; }
-    });
-
-    let decode_fields = fields.named.iter().map(|f| {
-        let field_name = &f.ident;
-        let field_type = &f.ty;
-        quote! {
-            #field_name: <#field_type as #krate::DencMut>::decode(buf, features)?
-        }
-    });
-
-    let size_calculations = field_names.iter().map(|name| {
-        quote! { size += self.#name.encoded_size(features)?; }
-    });
+    let denc_mut = quote! { DencMut };
+    let codegen = FieldCodegen::from_fields(fields.named.iter(), &krate, &denc_mut);
+    let encode_stmts = &codegen.encode_stmts;
+    let decode_fields = &codegen.decode_fields;
+    let size_stmts = &codegen.size_stmts;
 
     let denc_mut_impl = quote! {
         impl #krate::DencMut for #name {
@@ -442,7 +442,7 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
                         );
                     }
                 }
-                #(#encode_fields)*
+                #(#encode_stmts)*
                 ::std::result::Result::Ok(())
             }
 
@@ -460,7 +460,7 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
                 features: u64,
             ) -> ::std::option::Option<usize> {
                 let mut size = 0;
-                #(#size_calculations)*
+                #(#size_stmts)*
                 ::std::option::Option::Some(size)
             }
         }
@@ -472,7 +472,8 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
         .all(|f| is_fixed_size_primitive_or_array(&f.ty));
 
     let fixed_size_impl = if all_fixed_size {
-        let size_sum = field_types.iter().map(|ty| {
+        let size_sum = fields.named.iter().map(|f| {
+            let ty = &f.ty;
             quote! { <#ty as #krate::FixedSize>::SIZE }
         });
         Some(quote! {
@@ -484,10 +485,9 @@ pub fn derive_denc_mut(input: TokenStream) -> TokenStream {
         None
     };
 
-    let expanded = if let Some(fixed_size) = fixed_size_impl {
-        quote! { #denc_mut_impl #fixed_size }
-    } else {
-        quote! { #denc_mut_impl }
+    let expanded = quote! {
+        #denc_mut_impl
+        #fixed_size_impl
     };
 
     TokenStream::from(expanded)
@@ -543,46 +543,32 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
         .expect("#[denc(version = N)] is required when using #[derive(VersionedDenc)]");
     let compat = attrs.compat.unwrap_or(version);
 
-    let (encode_stmts, decode_expr, size_stmts, where_clauses): (
-        Vec<TokenStream2>,
-        TokenStream2,
-        Vec<TokenStream2>,
-        Vec<TokenStream2>,
-    ) = match &input.data {
+    let (codegen, decode_expr) = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
             Fields::Named(fields) => {
-                let codegen = FieldCodegen::from_denc_fields(fields.named.iter(), krate);
-                let decode_fields = codegen.decode_fields;
-
-                let decode_expr = quote! {
-                    Self {
-                        #(#decode_fields,)*
-                    }
-                };
-
-                (
-                    codegen.encode_stmts,
-                    decode_expr,
-                    codegen.size_stmts,
-                    codegen.where_clauses,
-                )
+                let denc = quote! { Denc };
+                let cg = FieldCodegen::from_fields(fields.named.iter(), krate, &denc);
+                let df = &cg.decode_fields;
+                let expr = quote! { Self { #(#df,)* } };
+                (cg, expr)
             }
-            Fields::Unit => (Vec::new(), quote! { Self }, Vec::new(), Vec::new()),
+            Fields::Unit => (FieldCodegen::empty(), quote! { Self }),
             _ => panic!("VersionedDenc derive only supports named or unit structs"),
         },
         _ => panic!("VersionedDenc can only be derived for structs"),
     };
 
-    // Emit `const FEATURE_DEPENDENT: bool = true;` only when the flag is set.
-    let feature_dependent_ve = attrs.feature_dependent_const();
-    let feature_dependent_denc = feature_dependent_ve.clone();
+    let encode_stmts = &codegen.encode_stmts;
+    let size_stmts = &codegen.size_stmts;
+    let where_clauses = &codegen.where_clauses;
+    let feature_dependent = attrs.feature_dependent_const();
 
     let expanded = quote! {
         impl #krate::VersionedEncode for #name
         where
             #(#where_clauses,)*
         {
-            #feature_dependent_ve
+            #feature_dependent
             const MAX_DECODE_VERSION: u8 = #version;
 
             fn encoding_version(&self, _features: u64) -> u8 {
@@ -637,7 +623,7 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
             #(#where_clauses,)*
         {
             const USES_VERSIONING: bool = true;
-            #feature_dependent_denc
+            #feature_dependent
 
             fn encode<B: bytes::BufMut>(
                 &self,
@@ -721,7 +707,8 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
     }
 
     let body_fields: Vec<_> = fields.named.iter().skip(1).collect();
-    let codegen = FieldCodegen::from_denc_fields(body_fields.iter().copied(), krate);
+    let denc = quote! { Denc };
+    let codegen = FieldCodegen::from_fields(body_fields.iter().copied(), krate, &denc);
     let encode_stmts = &codegen.encode_stmts;
     let decode_fields = &codegen.decode_fields;
     let size_stmts = &codegen.size_stmts;
@@ -759,21 +746,21 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let feature_dependent_denc = attrs.feature_dependent_const();
+    let feature_dependent = attrs.feature_dependent_const();
 
     let expanded = quote! {
         impl #krate::Denc for #name
         where
             #(#where_clauses,)*
         {
-            #feature_dependent_denc
+            #feature_dependent
 
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
                 features: u64,
             ) -> ::std::result::Result<(), #krate::RadosError> {
-                if self.struct_v != (#struct_v_lit as u8) {
+                if self.struct_v != #struct_v_lit {
                     return ::std::result::Result::Err(#krate::RadosError::Protocol(
                         ::std::format!(
                             concat!(stringify!(#name), " struct_v {} does not match encoder version {}"),
@@ -803,7 +790,7 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
             }
 
             fn encoded_size(&self, features: u64) -> ::std::option::Option<usize> {
-                let mut size: usize = <u8 as #krate::Denc>::encoded_size(&(#struct_v_lit as u8), 0)?;
+                let mut size: usize = <u8 as #krate::Denc>::encoded_size(&#struct_v_lit, 0)?;
                 #(#size_stmts)*
                 ::std::option::Option::Some(size)
             }

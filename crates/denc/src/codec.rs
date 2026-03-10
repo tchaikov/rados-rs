@@ -497,8 +497,8 @@ pub trait VersionedEncode: Sized {
         let result = Self::decode_content(&mut content, features, struct_v, struct_compat)?;
 
         // DECODE_FINISH: consume any remaining bytes (forward compatibility)
-        if content.remaining() > 0 {
-            let remaining = content.remaining();
+        let remaining = content.remaining();
+        if remaining > 0 {
             content.advance(remaining);
         }
 

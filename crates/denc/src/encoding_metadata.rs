@@ -20,9 +20,6 @@
 //! mark_versioned_encoding!(EntityAddr);
 //! ```
 
-use std::collections::HashMap;
-use std::sync::OnceLock;
-
 /// Compile-time encoding properties of a type
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncodingMetadata {
@@ -49,22 +46,6 @@ impl EncodingMetadata {
         uses_versioning: true,
         feature_dependent: true,
     };
-}
-
-/// Global registry of type encoding metadata
-static ENCODING_REGISTRY: OnceLock<HashMap<&'static str, EncodingMetadata>> = OnceLock::new();
-
-/// Get encoding metadata for a type by name
-pub fn get_encoding_metadata(type_name: &str) -> Option<EncodingMetadata> {
-    ENCODING_REGISTRY
-        .get()
-        .and_then(|registry| registry.get(type_name).copied())
-}
-
-/// Initialize the encoding registry (called by generated macro code)
-#[doc(hidden)]
-pub fn init_registry() -> HashMap<&'static str, EncodingMetadata> {
-    HashMap::new()
 }
 
 /// Trait for types that can report their encoding metadata at compile time

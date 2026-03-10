@@ -1,7 +1,6 @@
-//! EntityAddr implementation using Denc for better performance
+//! EntityAddr and EntityAddrvec wire-format encoding/decoding.
 //!
-//! This is a migration from the old Denc trait to the new Denc trait,
-//! which provides zero-allocation encoding by writing directly to buffers.
+//! Supports both legacy (v1) and modern MSG_ADDR2 (v2) address formats.
 
 use crate::codec::Denc;
 use crate::constants::sockaddr::{AF_INET, AF_INET6, STORAGE_SIZE};
