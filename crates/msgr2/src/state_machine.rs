@@ -2129,8 +2129,6 @@ impl State for Ready {
 #[derive(Debug)]
 pub struct StateMachine {
     current_state: Box<dyn State>,
-    #[allow(dead_code)]
-    is_client: bool,
     /// Frame decryptor for SECURE mode (connection_mode = 2)
     frame_decryptor: Option<Box<dyn crate::crypto::FrameDecryptor>>,
     /// Frame encryptor for SECURE mode (connection_mode = 2)
@@ -2157,7 +2155,6 @@ pub struct StateMachine {
     /// Peer's supported msgr2 features from banner exchange
     peer_supported_features: u64,
     /// Connection configuration
-    #[allow(dead_code)]
     config: crate::ConnectionConfig,
     /// Preserved auth provider (kept across state transitions)
     preserved_auth_provider: Option<Box<dyn auth::AuthProvider>>,
@@ -2203,7 +2200,6 @@ impl StateMachine {
                 entity_name: config.entity_name.clone(),
                 global_id: config.global_id,
             }),
-            is_client: true,
             frame_decryptor: None,
             frame_encryptor: None,
             compression_ctx: None, // Will be set after compression negotiation
@@ -2442,7 +2438,6 @@ impl StateMachine {
     pub fn new_server_with_auth(auth_handler: Option<auth::CephXServerHandler>) -> Self {
         Self {
             current_state: Box::new(HelloAccepting),
-            is_client: false,
             frame_decryptor: None,
             frame_encryptor: None,
             compression_ctx: None, // Will be set after compression negotiation

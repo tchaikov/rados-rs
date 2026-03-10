@@ -803,7 +803,6 @@ impl OSDClient {
         // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
         // 2. Encoded bufferlist (actual data)
         use crate::types::{SparseExtent, SparseReadResult};
-        use denc::Denc;
 
         let outdata = result
             .ops
@@ -903,7 +902,6 @@ impl OSDClient {
         Self::check_op_result(&result, "Stat")?;
 
         // Parse stat data from outdata using OsdStatData's Denc implementation
-        use denc::Denc;
         let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
         let stat_data = crate::denc_types::OsdStatData::decode(&mut &outdata[..], 0)
             .map_err(|e| OSDClientError::Decoding(format!("Failed to decode stat data: {}", e)))?;

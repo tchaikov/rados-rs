@@ -145,11 +145,13 @@ impl MOSDOp {
     /// This is useful for verifying the encoding is correct.
     /// - v8: 209 bytes (without OpenTelemetry trace)
     /// - v9: 216 bytes (with OpenTelemetry trace, 7 bytes for JaegerSpanContext)
-    pub fn expected_front_size_pgls(version: u16) -> usize {
+    ///
+    /// Returns `None` for unsupported versions.
+    pub fn expected_front_size_pgls(version: u16) -> Option<usize> {
         match version {
-            8 => 209, // v8 format (Ceph v18)
-            9 => 216, // v9 format (Ceph v19+)
-            _ => panic!("Unsupported MOSDOp version: {}", version),
+            8 => Some(209), // v8 format (Ceph v18)
+            9 => Some(216), // v9 format (Ceph v19+)
+            _ => None,
         }
     }
 }
@@ -658,7 +660,7 @@ mod tests {
 
         assert_eq!(
             msg.front.len(),
-            MOSDOp::expected_front_size_pgls(8),
+            MOSDOp::expected_front_size_pgls(8).unwrap(),
             "Front section should be 209 bytes for v8"
         );
 
@@ -816,7 +818,7 @@ mod tests {
         // Verify front section size is 216 bytes (v9 with OpenTelemetry trace)
         assert_eq!(
             msg.front.len(),
-            MOSDOp::expected_front_size_pgls(9),
+            MOSDOp::expected_front_size_pgls(9).unwrap(),
             "Front section should be 216 bytes for v9"
         );
 

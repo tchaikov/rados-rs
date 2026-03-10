@@ -180,11 +180,11 @@ impl BackoffTracker {
 
     /// Get the number of PGs with active backoffs
     pub fn num_pgs(&self) -> usize {
-        let mut pgs = HashSet::new();
-        for key in self.entries.keys() {
-            pgs.insert(key.pgid);
-        }
-        pgs.len()
+        self.entries
+            .keys()
+            .map(|key| key.pgid)
+            .collect::<HashSet<_>>()
+            .len()
     }
 
     /// Clear all backoffs (used on session reset)

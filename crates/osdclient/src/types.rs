@@ -776,6 +776,33 @@ impl OSDOp {
         })
     }
 
+    /// Create a lock operation (shared helper for exclusive and shared locks)
+    fn lock_op(
+        name: &str,
+        lock_type: crate::lock::LockType,
+        cookie: &str,
+        tag: &str,
+        description: &str,
+        duration: Option<std::time::Duration>,
+    ) -> Result<Self, crate::error::OSDClientError> {
+        use crate::lock::{LockFlags, LockRequest};
+        use denc::Denc;
+
+        let request = LockRequest {
+            name: name.to_string(),
+            lock_type,
+            cookie: cookie.to_string(),
+            tag: tag.to_string(),
+            description: description.to_string(),
+            duration: duration.unwrap_or(std::time::Duration::ZERO),
+            flags: LockFlags::empty(),
+        };
+
+        let mut buf = bytes::BytesMut::new();
+        Denc::encode(&request, &mut buf, 0)?;
+        Self::call("lock", "lock", buf.freeze())
+    }
+
     /// Create an exclusive lock operation
     ///
     /// # Arguments
@@ -789,22 +816,14 @@ impl OSDOp {
         description: &str,
         duration: Option<std::time::Duration>,
     ) -> Result<Self, crate::error::OSDClientError> {
-        use crate::lock::{LockFlags, LockRequest, LockType};
-        use denc::Denc;
-
-        let request = LockRequest {
-            name: name.to_string(),
-            lock_type: LockType::Exclusive,
-            cookie: cookie.to_string(),
-            tag: String::new(),
-            description: description.to_string(),
-            duration: duration.unwrap_or(std::time::Duration::ZERO),
-            flags: LockFlags::empty(),
-        };
-
-        let mut buf = bytes::BytesMut::new();
-        Denc::encode(&request, &mut buf, 0)?;
-        Self::call("lock", "lock", buf.freeze())
+        Self::lock_op(
+            name,
+            crate::lock::LockType::Exclusive,
+            cookie,
+            "",
+            description,
+            duration,
+        )
     }
 
     /// Create a shared lock operation
@@ -822,22 +841,14 @@ impl OSDOp {
         description: &str,
         duration: Option<std::time::Duration>,
     ) -> Result<Self, crate::error::OSDClientError> {
-        use crate::lock::{LockFlags, LockRequest, LockType};
-        use denc::Denc;
-
-        let request = LockRequest {
-            name: name.to_string(),
-            lock_type: LockType::Shared,
-            cookie: cookie.to_string(),
-            tag: tag.to_string(),
-            description: description.to_string(),
-            duration: duration.unwrap_or(std::time::Duration::ZERO),
-            flags: LockFlags::empty(),
-        };
-
-        let mut buf = bytes::BytesMut::new();
-        Denc::encode(&request, &mut buf, 0)?;
-        Self::call("lock", "lock", buf.freeze())
+        Self::lock_op(
+            name,
+            crate::lock::LockType::Shared,
+            cookie,
+            tag,
+            description,
+            duration,
+        )
     }
 
     /// Create an unlock operation
@@ -859,29 +870,43 @@ impl OSDOp {
         Self::call("lock", "unlock", buf.freeze())
     }
 
+    /// Build an xattr operation with encoded name and optional value
+    fn xattr_op(
+        op: OpCode,
+        name: String,
+        value: Option<Bytes>,
+    ) -> Result<Self, crate::error::OSDClientError> {
+        use bytes::BytesMut;
+        use denc::Denc;
+
+        let mut buf = BytesMut::new();
+        name.encode(&mut buf, 0)?;
+
+        let value_len = value.as_ref().map_or(0, |v| v.len() as u32);
+
+        if let Some(ref v) = value {
+            buf.extend_from_slice(v);
+        }
+
+        Ok(Self {
+            op,
+            flags: 0,
+            op_data: OpData::Xattr {
+                name_len: name.len() as u32,
+                value_len,
+                cmp_op: 0,
+                cmp_mode: 0,
+            },
+            indata: buf.freeze(),
+        })
+    }
+
     /// Get an extended attribute
     ///
     /// # Arguments
     /// * `name` - Attribute name
     pub fn get_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
-        use bytes::BytesMut;
-        use denc::Denc;
-
-        let name = name.into();
-        let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)?;
-
-        Ok(Self {
-            op: OpCode::GetXattr,
-            flags: 0,
-            op_data: OpData::Xattr {
-                name_len: name.len() as u32,
-                value_len: 0,
-                cmp_op: 0,
-                cmp_mode: 0,
-            },
-            indata: extent_buf.freeze(),
-        })
+        Self::xattr_op(OpCode::GetXattr, name.into(), None)
     }
 
     /// Set an extended attribute
@@ -893,28 +918,7 @@ impl OSDOp {
         name: impl Into<String>,
         value: Bytes,
     ) -> Result<Self, crate::error::OSDClientError> {
-        use bytes::BytesMut;
-        use denc::Denc;
-
-        let name = name.into();
-        let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)?;
-
-        Ok(Self {
-            op: OpCode::SetXattr,
-            flags: 0,
-            op_data: OpData::Xattr {
-                name_len: name.len() as u32,
-                value_len: value.len() as u32,
-                cmp_op: 0,
-                cmp_mode: 0,
-            },
-            indata: {
-                let mut buf = extent_buf;
-                buf.extend_from_slice(&value);
-                buf.freeze()
-            },
-        })
+        Self::xattr_op(OpCode::SetXattr, name.into(), Some(value))
     }
 
     /// Remove an extended attribute
@@ -922,24 +926,7 @@ impl OSDOp {
     /// # Arguments
     /// * `name` - Attribute name to remove
     pub fn remove_xattr(name: impl Into<String>) -> Result<Self, crate::error::OSDClientError> {
-        use bytes::BytesMut;
-        use denc::Denc;
-
-        let name = name.into();
-        let mut extent_buf = BytesMut::new();
-        name.encode(&mut extent_buf, 0)?;
-
-        Ok(Self {
-            op: OpCode::RemoveXattr,
-            flags: 0,
-            op_data: OpData::Xattr {
-                name_len: name.len() as u32,
-                value_len: 0,
-                cmp_op: 0,
-                cmp_mode: 0,
-            },
-            indata: extent_buf.freeze(),
-        })
+        Self::xattr_op(OpCode::RemoveXattr, name.into(), None)
     }
 
     /// List all extended attributes

@@ -9,8 +9,9 @@ use tracing::{debug, info};
 
 use crate::client::OSDClient;
 use crate::error::{OSDClientError, Result};
+use crate::operation::OpBuilder;
 use crate::snapshot::SnapId;
-use crate::types::{ReadResult, SparseReadResult, StatResult, WriteResult};
+use crate::types::{OSDOp, ReadResult, SparseReadResult, StatResult, WriteResult};
 
 /// Maximum entries per PGLS request for object listing pagination
 const MAX_ENTRIES_PER_REQUEST: usize = 100;
@@ -101,17 +102,16 @@ impl IoCtx {
     /// # Arguments
     ///
     /// * `oid` - Object name
-    /// * `exclusive` - If true, fail if object already exists
+    /// * `exclusive` - If true, fail if object already exists (not yet implemented)
     ///
     /// # Returns
     ///
     /// Returns Ok(()) on success, error if the object already exists (when exclusive=true)
     /// or if the operation fails.
-    pub async fn create(&self, oid: &str, exclusive: bool) -> Result<()> {
-        info!("Creating object {} (exclusive={})", oid, exclusive);
+    pub async fn create(&self, oid: &str, _exclusive: bool) -> Result<()> {
+        info!("Creating object {}", oid);
 
-        // Use write_full with empty data to create the object
-        // If exclusive, we could add a precondition check
+        // TODO: Use Create opcode with exclusive flag instead of write_full
         self.client
             .write_full(self.pool_id, oid, Bytes::new())
             .await?;
@@ -334,9 +334,6 @@ impl IoCtx {
         description: &str,
         duration: Option<std::time::Duration>,
     ) -> Result<()> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         debug!(
             "Acquiring exclusive lock '{}' on object '{}' in pool {}",
@@ -376,9 +373,6 @@ impl IoCtx {
         description: &str,
         duration: Option<std::time::Duration>,
     ) -> Result<()> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         debug!(
             "Acquiring shared lock '{}' on object '{}' in pool {}",
@@ -409,9 +403,6 @@ impl IoCtx {
     /// * `name` - Lock name to unlock
     /// * `cookie` - Lock identifier that was used when acquiring the lock
     pub async fn unlock(&self, oid: impl Into<String>, name: &str, cookie: &str) -> Result<()> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         debug!(
             "Releasing lock '{}' on object '{}' in pool {}",
@@ -441,9 +432,6 @@ impl IoCtx {
         oid: impl Into<String>,
         name: impl Into<String>,
     ) -> Result<Bytes> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         let name_str = name.into();
         debug!(
@@ -479,9 +467,6 @@ impl IoCtx {
         name: impl Into<String>,
         value: Bytes,
     ) -> Result<()> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         let name_str = name.into();
         debug!(
@@ -510,9 +495,6 @@ impl IoCtx {
         oid: impl Into<String>,
         name: impl Into<String>,
     ) -> Result<()> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
-
         let oid_str = oid.into();
         let name_str = name.into();
         debug!(
@@ -538,8 +520,6 @@ impl IoCtx {
     ///
     /// Vector of attribute names
     pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
-        use crate::operation::OpBuilder;
-        use crate::types::OSDOp;
         use denc::Denc;
 
         let oid_str = oid.into();
@@ -628,8 +608,6 @@ impl IoCtx {
         oid: impl Into<String>,
         snap_id: impl Into<SnapId>,
     ) -> Result<()> {
-        use crate::operation::OpBuilder;
-
         let snap_id = snap_id.into();
         let oid_str = oid.into();
         debug!(

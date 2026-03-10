@@ -602,7 +602,6 @@ struct SessionState {
     is_lossy: bool,
 }
 
-#[allow(dead_code)]
 impl ConnectionState {
     /// Create a new connection state with the given stream and state machine
     fn new(stream: TcpStream, state_machine: StateMachine) -> Self {
@@ -670,39 +669,9 @@ impl ConnectionState {
         self.session.server_cookie
     }
 
-    /// Set the server cookie (called when SERVER_IDENT is received)
-    fn set_server_cookie(&mut self, cookie: u64) {
-        self.session.server_cookie = cookie;
-    }
-
     /// Check if this connection has a valid session that can be reconnected
     pub(crate) fn can_reconnect(&self) -> bool {
         !self.session.is_lossy && self.session.server_cookie != 0
-    }
-
-    /// Get the current global sequence number
-    fn global_seq(&self) -> u64 {
-        self.session.global_seq
-    }
-
-    /// Set the global sequence number
-    fn set_global_seq(&mut self, seq: u64) {
-        self.session.global_seq = seq;
-    }
-
-    /// Get the current connection sequence number
-    fn connect_seq(&self) -> u64 {
-        self.session.connect_seq
-    }
-
-    /// Increment the connection sequence number (for reconnection attempts)
-    fn increment_connect_seq(&mut self) {
-        self.session.connect_seq += 1;
-    }
-
-    /// Get the last received message sequence number
-    fn in_seq(&self) -> u64 {
-        self.in_seq
     }
 
     /// Set the incoming message sequence number
