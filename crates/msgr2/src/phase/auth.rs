@@ -10,9 +10,10 @@
 
 use crate::{
     error::{Msgr2Error as Error, Result},
-    frames::{AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, Frame, Tag},
+    frames::{
+        create_frame_from_trait, AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, Frame, Tag,
+    },
     phase::{Phase, Step},
-    state_machine::create_frame_from_trait,
     AuthMethod, ConnectionMode,
 };
 use auth::AuthProvider;
@@ -123,7 +124,7 @@ impl AuthClient {
             }
         };
         let req = AuthRequestFrame::new(method_id, modes, payload);
-        create_frame_from_trait(&req, Tag::AuthRequest)
+        Ok(create_frame_from_trait(&req, Tag::AuthRequest)?)
     }
 
     fn negotiate_method(&self, allowed: &[u32]) -> Result<AuthMethod> {

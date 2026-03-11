@@ -4,16 +4,17 @@
 //! handling frame I/O, encryption, and state machine coordination.
 
 use bytes::{Bytes, BytesMut};
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::banner::Banner;
 use crate::error::{Msgr2Error as Error, Result};
+use crate::frames::create_frame_from_trait;
 use crate::frames::{Frame, MessageFrame, Preamble, Tag};
 use crate::message::Message;
-use crate::state_machine::{create_frame_from_trait, StateKind, StateMachine};
+pub use crate::priority_queue::PriorityQueue;
+use crate::state_machine::{StateKind, StateMachine};
 use crate::FeatureSet;
 use denc::Denc;
 use std::borrow::Cow;
@@ -21,77 +22,6 @@ use std::borrow::Cow;
 /// Zero padding buffer — avoids heap allocation for small alignment padding.
 /// Large enough to cover INLINE_SIZE (48) padding in one slice.
 const ZEROS: [u8; 64] = [0u8; 64];
-
-/// Priority-based message queue.
-///
-/// Higher-priority messages are sent first, matching Ceph's ProtocolV2 behaviour.
-/// Within a priority level, ordering is FIFO.
-///
-/// Intended for the **outgoing** queue (deciding what to send next). Do not use
-/// for `sent_messages` (ACK replay buffer), which must preserve insertion/sequence
-/// order for correct `discard_acknowledged_messages()` processing.
-#[derive(Debug, Clone, Default)]
-pub struct PriorityQueue {
-    high: VecDeque<Message>,
-    normal: VecDeque<Message>,
-    low: VecDeque<Message>,
-}
-
-impl PriorityQueue {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Push a message into the appropriate priority sub-queue.
-    pub fn push_back(&mut self, msg: Message) {
-        match msg.priority() {
-            crate::message::MessagePriority::High => self.high.push_back(msg),
-            crate::message::MessagePriority::Normal => self.normal.push_back(msg),
-            crate::message::MessagePriority::Low => self.low.push_back(msg),
-        }
-    }
-
-    /// Pop the highest-priority message available.
-    pub fn pop_front(&mut self) -> Option<Message> {
-        self.high
-            .pop_front()
-            .or_else(|| self.normal.pop_front())
-            .or_else(|| self.low.pop_front())
-    }
-
-    /// Peek at the next message to be sent (highest-priority queue's front).
-    pub fn front(&self) -> Option<&Message> {
-        self.high
-            .front()
-            .or_else(|| self.normal.front())
-            .or_else(|| self.low.front())
-    }
-
-    /// Iterate over all messages in priority order (high → normal → low).
-    pub fn iter(&self) -> impl Iterator<Item = &Message> {
-        self.high
-            .iter()
-            .chain(self.normal.iter())
-            .chain(self.low.iter())
-    }
-
-    /// Clear all queues.
-    pub fn clear(&mut self) {
-        self.high.clear();
-        self.normal.clear();
-        self.low.clear();
-    }
-
-    /// Total number of queued messages across all priority levels.
-    pub fn len(&self) -> usize {
-        self.high.len() + self.normal.len() + self.low.len()
-    }
-
-    /// Returns `true` if all priority queues are empty.
-    pub fn is_empty(&self) -> bool {
-        self.high.is_empty() && self.normal.is_empty() && self.low.is_empty()
-    }
-}
 
 /// Action to take after successful reconnection in retry_with_reconnect
 enum ReconnectAction<T> {
@@ -725,6 +655,39 @@ impl ConnectionState {
         self.out_seq = 0;
         // Note: client_cookie is preserved across resets
     }
+
+    /// Post-auth coordinator: compute HMAC signatures, commit auth state, and
+    /// optionally install encryption. Returns `(our_signature, expected_peer_signature)`.
+    fn complete_auth(
+        &mut self,
+        auth_out: &crate::phase::auth::AuthOutput,
+    ) -> Result<(Bytes, Option<Bytes>)> {
+        // Compute HMAC-SHA256 signatures over pre-auth byte streams.
+        let our_sig = {
+            let rx_buf = Bytes::copy_from_slice(self.state_machine.get_pre_auth_rxbuf());
+            StateMachine::hmac_sha256_pub(auth_out.session_key.as_ref(), &rx_buf)?
+        };
+        let exp_sig = {
+            let tx_buf = Bytes::copy_from_slice(self.state_machine.get_pre_auth_txbuf());
+            Some(StateMachine::hmac_sha256_pub(
+                auth_out.session_key.as_ref(),
+                &tx_buf,
+            )?)
+        };
+
+        // Commit auth state and install encryption.
+        self.state_machine
+            .complete_pre_auth(auth_out.session_key.clone());
+        self.state_machine
+            .set_connection_mode(auth_out.connection_mode);
+        self.state_machine
+            .set_connection_secret(auth_out.connection_secret.clone());
+        if let Some(ref secret) = auth_out.connection_secret {
+            self.state_machine.setup_encryption(secret)?;
+        }
+
+        Ok((our_sig, exp_sig))
+    }
 }
 
 /// High-level msgr2 Protocol V2 connection
@@ -1133,31 +1096,8 @@ impl Connection {
             .drive_phase(AuthServer::new(auth_handler))
             .await?;
 
-        // Coordinator: compute HMAC signatures
-        let our_sig = {
-            let sm = &self.state.state_machine;
-            let rx_buf = Bytes::copy_from_slice(sm.get_pre_auth_rxbuf());
-            StateMachine::hmac_sha256_pub(auth_out.session_key.as_ref(), &rx_buf)?
-        };
-        let exp_sig = {
-            let sm = &self.state.state_machine;
-            let tx_buf = Bytes::copy_from_slice(sm.get_pre_auth_txbuf());
-            Some(StateMachine::hmac_sha256_pub(
-                auth_out.session_key.as_ref(),
-                &tx_buf,
-            )?)
-        };
-
-        // Coordinator: commit auth state and install encryption
-        {
-            let sm = &mut self.state.state_machine;
-            sm.complete_pre_auth(auth_out.session_key.clone());
-            sm.set_connection_mode(auth_out.connection_mode);
-            sm.set_connection_secret(auth_out.connection_secret.clone());
-            if let Some(ref secret) = auth_out.connection_secret {
-                sm.setup_encryption(secret)?;
-            }
-        }
+        // Coordinator: compute HMAC signatures, commit auth state, install encryption.
+        let (our_sig, exp_sig) = self.state.complete_auth(&auth_out)?;
 
         // Phase 3: Auth-signature exchange (server sends first)
         self.state
@@ -1239,33 +1179,9 @@ impl Connection {
             ))
             .await?;
 
-        // Coordinator: compute HMAC-SHA256 signatures over pre-auth byte streams.
-        let our_sig = {
-            let rx_buf = Bytes::copy_from_slice(self.state.state_machine.get_pre_auth_rxbuf());
-            StateMachine::hmac_sha256_pub(auth_out.session_key.as_ref(), &rx_buf)?
-        };
-        let exp_sig = {
-            let tx_buf = Bytes::copy_from_slice(self.state.state_machine.get_pre_auth_txbuf());
-            Some(StateMachine::hmac_sha256_pub(
-                auth_out.session_key.as_ref(),
-                &tx_buf,
-            )?)
-        };
-
-        // Coordinator: commit auth state and install encryption.
-        self.state
-            .state_machine
-            .complete_pre_auth(auth_out.session_key.clone());
+        // Coordinator: compute HMAC signatures, commit auth state, install encryption.
+        let (our_sig, exp_sig) = self.state.complete_auth(&auth_out)?;
         self.state.state_machine.set_global_id(auth_out.global_id);
-        self.state
-            .state_machine
-            .set_connection_mode(auth_out.connection_mode);
-        self.state
-            .state_machine
-            .set_connection_secret(auth_out.connection_secret.clone());
-        if let Some(ref secret) = auth_out.connection_secret {
-            self.state.state_machine.setup_encryption(secret)?;
-        }
 
         // Phase 3: Auth-signature exchange (client sends first)
         let peer_features = self.state.state_machine.peer_supported_features_val();
@@ -1710,8 +1626,8 @@ impl Connection {
     /// This sends a Keepalive2 frame with the current timestamp.
     /// The peer should respond with a Keepalive2Ack frame.
     pub async fn send_keepalive(&mut self) -> Result<()> {
+        use crate::frames::create_frame_from_trait;
         use crate::frames::Keepalive2Frame;
-        use crate::state_machine::create_frame_from_trait;
 
         // Get current timestamp
         let now = std::time::SystemTime::now()

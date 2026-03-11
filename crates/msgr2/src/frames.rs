@@ -1213,6 +1213,40 @@ define_frame!(
     alignments = [DEFAULT_ALIGNMENT]
 );
 
+/// Helper function to create a Frame from a FrameTrait.
+pub fn create_frame_from_trait<F: FrameTrait>(
+    frame_trait: &F,
+    tag: Tag,
+) -> Result<Frame, RadosError> {
+    use denc::features::CephFeatures;
+    const MSGR2_FRAME_ASSUMED: u64 = CephFeatures::MASK_MSG_ADDR2
+        .union(CephFeatures::MASK_SERVER_NAUTILUS)
+        .bits();
+
+    let segments = frame_trait.get_segments(MSGR2_FRAME_ASSUMED)?;
+    let alignments = F::segment_alignments();
+    Ok(Frame {
+        preamble: Preamble {
+            tag,
+            num_segments: segments.len() as u8,
+            segments: {
+                let mut descs = [SegmentDescriptor::default(); 4];
+                for (i, seg) in segments.iter().enumerate() {
+                    descs[i] = SegmentDescriptor {
+                        logical_len: seg.len() as u32,
+                        align: alignments.get(i).copied().unwrap_or(DEFAULT_ALIGNMENT),
+                    };
+                }
+                descs
+            },
+            flags: 0,
+            reserved: 0,
+            crc: 0,
+        },
+        segments,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

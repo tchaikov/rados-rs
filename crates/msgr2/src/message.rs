@@ -331,6 +331,12 @@ impl Message {
     }
 }
 
+impl crate::priority_queue::Prioritized for Message {
+    fn priority(&self) -> MessagePriority {
+        self.priority()
+    }
+}
+
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let type_name = match self.msg_type_enum() {

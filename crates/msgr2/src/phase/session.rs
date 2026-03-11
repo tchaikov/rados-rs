@@ -14,12 +14,12 @@
 
 use crate::{
     error::{Msgr2Error as Error, Result},
+    frames::create_frame_from_trait,
     frames::{
         ClientIdentFrame, Frame, IdentMissingFeaturesFrame, ServerIdentFrame,
         SessionReconnectFrame, SessionReconnectOkFrame, Tag,
     },
     phase::{Phase, Step},
-    state_machine::create_frame_from_trait,
 };
 use denc::Denc;
 
@@ -112,7 +112,7 @@ impl SessionClient {
             self.client_cookie,
             self.global_seq
         );
-        create_frame_from_trait(&ident, Tag::ClientIdent)
+        Ok(create_frame_from_trait(&ident, Tag::ClientIdent)?)
     }
 
     fn build_session_reconnect(&self) -> Result<Frame> {
@@ -131,7 +131,7 @@ impl SessionClient {
             self.server_cookie,
             self.connect_seq
         );
-        create_frame_from_trait(&reconnect, Tag::SessionReconnect)
+        Ok(create_frame_from_trait(&reconnect, Tag::SessionReconnect)?)
     }
 }
 

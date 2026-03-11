@@ -51,7 +51,10 @@ fn keepalive_timed_out(
     }
 }
 
-fn should_probe_io_fairness(consecutive_outbound_sends: usize, outbound: &PriorityQueue) -> bool {
+fn should_probe_io_fairness(
+    consecutive_outbound_sends: usize,
+    outbound: &PriorityQueue<Message>,
+) -> bool {
     !outbound.is_empty() && consecutive_outbound_sends >= MAX_OUTBOUND_SEND_BURST
 }
 

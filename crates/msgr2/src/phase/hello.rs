@@ -6,9 +6,9 @@
 
 use crate::{
     error::{Msgr2Error as Error, Result},
+    frames::create_frame_from_trait,
     frames::{Frame, HelloFrame, Tag},
     phase::{Phase, Step},
-    state_machine::create_frame_from_trait,
 };
 use denc::Denc;
 

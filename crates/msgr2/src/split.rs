@@ -36,9 +36,10 @@
 //! ```
 
 use crate::error::{Msgr2Error as Error, Result};
+use crate::frames::create_frame_from_trait;
 use crate::frames::{Frame, MessageFrame, Tag};
 use crate::message::Message;
-use crate::state_machine::create_frame_from_trait;
+use crate::priority_queue::{Prioritized, PriorityQueue};
 use crate::throttle::MessageThrottle;
 use denc::Denc;
 use std::collections::VecDeque;
@@ -240,35 +241,9 @@ struct OutboundEntry {
     reply: tokio::sync::oneshot::Sender<Result<()>>,
 }
 
-/// Priority queue for outbound message entries (high → normal → low).
-struct OutboundQueue {
-    high: VecDeque<OutboundEntry>,
-    normal: VecDeque<OutboundEntry>,
-    low: VecDeque<OutboundEntry>,
-}
-
-impl OutboundQueue {
-    fn new() -> Self {
-        Self {
-            high: VecDeque::new(),
-            normal: VecDeque::new(),
-            low: VecDeque::new(),
-        }
-    }
-
-    fn push(&mut self, entry: OutboundEntry) {
-        match entry.msg.priority() {
-            crate::message::MessagePriority::High => self.high.push_back(entry),
-            crate::message::MessagePriority::Normal => self.normal.push_back(entry),
-            crate::message::MessagePriority::Low => self.low.push_back(entry),
-        }
-    }
-
-    fn pop(&mut self) -> Option<OutboundEntry> {
-        self.high
-            .pop_front()
-            .or_else(|| self.normal.pop_front())
-            .or_else(|| self.low.pop_front())
+impl Prioritized for OutboundEntry {
+    fn priority(&self) -> crate::message::MessagePriority {
+        self.msg.priority()
     }
 }
 
@@ -313,7 +288,7 @@ async fn send_outbound_entry(
     let frame = match create_frame_from_trait(&msg_frame, Tag::Message) {
         Ok(f) => f,
         Err(e) => {
-            let _ = reply.send(Err(e));
+            let _ = reply.send(Err(e.into()));
             return SendOutcome::Continue;
         }
     };
@@ -349,14 +324,14 @@ async fn io_task(
     throttle: Option<MessageThrottle>,
     shutdown: Arc<Notify>,
 ) {
-    let mut outbound = OutboundQueue::new();
+    let mut outbound: PriorityQueue<OutboundEntry> = PriorityQueue::new();
 
     'outer: loop {
         // Phase 1: Drain all pending commands into the priority queue (non-blocking)
         loop {
             match cmd_rx.try_recv() {
                 Ok(IoCommand::SendMessage(msg, reply)) => {
-                    outbound.push(OutboundEntry { msg, reply });
+                    outbound.push_back(OutboundEntry { msg, reply });
                 }
                 Ok(IoCommand::SendFrame(frame, reply)) => {
                     // Non-message frames (keepalive) bypass priority queue
@@ -377,7 +352,7 @@ async fn io_task(
         }
 
         // Phase 2: Send the highest-priority queued message
-        if let Some(entry) = outbound.pop() {
+        if let Some(entry) = outbound.pop_front() {
             if matches!(
                 send_outbound_entry(entry, &mut connection_state, &shared).await,
                 SendOutcome::Disconnect
@@ -398,7 +373,7 @@ async fn io_task(
             cmd = cmd_rx.recv() => {
                 match cmd {
                     Some(IoCommand::SendMessage(msg, reply)) => {
-                        outbound.push(OutboundEntry { msg, reply });
+                        outbound.push_back(OutboundEntry { msg, reply });
                         // Don't send yet — loop back to drain any additional
                         // commands that arrived, so we can prioritise correctly
                     }
