@@ -71,7 +71,6 @@ pub struct UuidD {
     pub bytes: [u8; 16],
 }
 
-// Custom Serialize implementation to match ceph-dencoder format
 impl Serialize for UuidD {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -79,15 +78,7 @@ impl Serialize for UuidD {
     {
         use serde::ser::SerializeStruct;
         let mut state = serializer.serialize_struct("UuidD", 1)?;
-        // Format as UUID string to match ceph-dencoder
-        let uuid_str = format!(
-            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.bytes[0], self.bytes[1], self.bytes[2], self.bytes[3],
-            self.bytes[4], self.bytes[5], self.bytes[6], self.bytes[7],
-            self.bytes[8], self.bytes[9], self.bytes[10], self.bytes[11],
-            self.bytes[12], self.bytes[13], self.bytes[14], self.bytes[15]
-        );
-        state.serialize_field("uuid", &uuid_str)?;
+        state.serialize_field("uuid", &self.to_string())?;
         state.end()
     }
 }
@@ -156,19 +147,15 @@ impl serde::Serialize for EntityType {
 impl fmt::Display for EntityType {
     /// Formats a single-bit EntityType as its Ceph name (e.g. "mon", "osd").
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            match *self {
-                EntityType::MON => "mon",
-                EntityType::MDS => "mds",
-                EntityType::OSD => "osd",
-                EntityType::CLIENT => "client",
-                EntityType::MGR => "mgr",
-                EntityType::AUTH => "auth",
-                _ => "unknown",
-            }
-        )
+        f.write_str(match *self {
+            EntityType::MON => "mon",
+            EntityType::MDS => "mds",
+            EntityType::OSD => "osd",
+            EntityType::CLIENT => "client",
+            EntityType::MGR => "mgr",
+            EntityType::AUTH => "auth",
+            _ => "unknown",
+        })
     }
 }
 

@@ -212,27 +212,23 @@ impl VersionedEncode for MonInfo {
         features: u64,
         version: u8,
     ) -> Result<(), RadosError> {
-        // Encode name
         Denc::encode(&self.name, buf, features)?;
-
         Denc::encode(&self.public_addrs, buf, features)?;
 
-        // Encode priority (v2+)
+        // v2+: priority
         if version >= 2 {
             Denc::encode(&self.priority, buf, features)?;
         }
 
-        // Encode weight (v4+)
+        // v4+: weight
         if version >= 4 {
             Denc::encode(&self.weight, buf, features)?;
         }
-
-        // Encode crush_loc (v5+)
+        // v5+: crush_loc
         if version >= 5 {
             Denc::encode(&self.crush_loc, buf, features)?;
         }
-
-        // Encode time_added (v6+)
+        // v6+: time_added
         if version >= 6 {
             Denc::encode(&self.time_added, buf, features)?;
         }
@@ -259,11 +255,8 @@ impl VersionedEncode for MonInfo {
         let crush_loc = <BTreeMap<String, String> as Denc>::decode(buf, features)?;
 
         // time_added is only present in v6+ (added Nov 2025)
-        let time_added = if version >= 6 {
-            <UTime as Denc>::decode(buf, features)?
-        } else {
-            UTime::default()
-        };
+        let time_added =
+            crate::decode_if_version!(buf, features, version, >= 6, UTime, UTime::default());
 
         Ok(MonInfo {
             name,
@@ -345,8 +338,6 @@ impl VersionedEncode for MonMap {
         version: u8,
     ) -> Result<(), RadosError> {
         Denc::encode(&self.fsid, buf, features)?;
-
-        // Encode epoch
         Denc::encode(&self.epoch, buf, features)?;
 
         debug_assert_eq!(version, MONMAP_ENCODING_VERSION);
@@ -380,30 +371,16 @@ impl VersionedEncode for MonMap {
         crate::check_min_version!(version, MONMAP_MIN_DECODE_VERSION, "MonMap", "Octopus v15+");
 
         let fsid = <[u8; 16] as Denc>::decode(buf, features)?;
-
-        // Decode epoch
         let epoch = <Epoch as Denc>::decode(buf, features)?;
-
-        // Decode timestamps
         let last_changed = <UTime as Denc>::decode(buf, features)?;
         let created = <UTime as Denc>::decode(buf, features)?;
-
-        // Decode features (v6+ always present)
         let persistent_features = <MonFeature as Denc>::decode(buf, features)?;
         let optional_features = <MonFeature as Denc>::decode(buf, features)?;
-
-        // Decode mon_info (v6+ always uses modern format)
         let mon_info = <BTreeMap<String, MonInfo> as Denc>::decode(buf, features)?;
-
-        // Decode ranks (v6+)
         let ranks = <Vec<String> as Denc>::decode(buf, features)?;
 
         // Decode min_mon_release (v7+)
-        let min_mon_release = if version >= 7 {
-            <MonCephRelease as Denc>::decode(buf, features)?
-        } else {
-            MonCephRelease::Unknown
-        };
+        let min_mon_release = crate::decode_if_version!(buf, features, version, >= 7, MonCephRelease, MonCephRelease::Unknown);
 
         // Decode removed_ranks and strategy (v8+)
         let (removed_ranks, strategy, disallowed_leaders) = if version >= 8 {

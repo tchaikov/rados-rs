@@ -201,27 +201,13 @@ impl_denc_int!(i16, put_i16_le, get_i16_le, 2);
 impl_denc_int!(i32, put_i32_le, get_i32_le, 4);
 impl_denc_int!(i64, put_i64_le, get_i64_le, 8);
 
-// bool is encoded as u8 (0 or 1) in C++
 impl Denc for bool {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        if buf.remaining_mut() < 1 {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: 1,
-                available: buf.remaining_mut(),
-            }));
-        }
-        buf.put_u8(if *self { 1 } else { 0 });
-        Ok(())
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        (u8::from(*self)).encode(buf, features)
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: 1,
-                available: buf.remaining(),
-            }));
-        }
-        Ok(buf.get_u8() != 0)
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        Ok(u8::decode(buf, features)? != 0)
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -497,10 +483,7 @@ pub trait VersionedEncode: Sized {
         let result = Self::decode_content(&mut content, features, struct_v, struct_compat)?;
 
         // DECODE_FINISH: consume any remaining bytes (forward compatibility)
-        let remaining = content.remaining();
-        if remaining > 0 {
-            content.advance(remaining);
-        }
+        content.advance(content.remaining());
 
         Ok(result)
     }
@@ -645,7 +628,6 @@ impl Denc for Bytes {
     }
 }
 
-// String implementation - encoded as UTF-8 bytes with length prefix
 impl Denc for String {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         // Encode length as u32

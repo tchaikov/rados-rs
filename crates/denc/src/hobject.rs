@@ -45,69 +45,28 @@ impl PartialOrd for HObject {
 }
 
 impl Ord for HObject {
-    /// Compare hobject_t objects following Ceph's ordering
+    /// Compare hobject_t objects following Ceph's ordering.
     ///
     /// Reference: ~/dev/ceph/src/common/hobject.h operator<=>
     ///
     /// Ordering: max > pool > hash/key > nspace > oid > snap
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        use std::cmp::Ordering;
-
-        // 1. max field (reversed: max objects come last)
-        match self.max.cmp(&other.max) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // 2. pool
-        match self.pool.cmp(&other.pool) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // 3. bitwise key (hash or key)
-        // If key is empty, use hash; otherwise use key string
-        let self_bitwise = if self.key.is_empty() {
-            None
-        } else {
-            Some(&self.key)
-        };
-        let other_bitwise = if other.key.is_empty() {
-            None
-        } else {
-            Some(&other.key)
-        };
-
-        match (self_bitwise, other_bitwise) {
-            (Some(k1), Some(k2)) => match k1.cmp(k2) {
-                Ordering::Equal => {}
-                ord => return ord,
-            },
-            (Some(_), None) => return Ordering::Greater,
-            (None, Some(_)) => return Ordering::Less,
-            (None, None) => {
-                // Both use hash
-                match self.hash.cmp(&other.hash) {
-                    Ordering::Equal => {}
-                    ord => return ord,
+        self.max
+            .cmp(&other.max)
+            .then_with(|| self.pool.cmp(&other.pool))
+            .then_with(|| {
+                // If key is non-empty, compare keys; otherwise compare hashes.
+                // Non-empty key sorts after empty key.
+                match (self.key.is_empty(), other.key.is_empty()) {
+                    (false, false) => self.key.cmp(&other.key),
+                    (false, true) => std::cmp::Ordering::Greater,
+                    (true, false) => std::cmp::Ordering::Less,
+                    (true, true) => self.hash.cmp(&other.hash),
                 }
-            }
-        }
-
-        // 4. nspace
-        match self.nspace.cmp(&other.nspace) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // 5. oid
-        match self.oid.cmp(&other.oid) {
-            Ordering::Equal => {}
-            ord => return ord,
-        }
-
-        // 6. snap
-        self.snapid.cmp(&other.snapid)
+            })
+            .then_with(|| self.nspace.cmp(&other.nspace))
+            .then_with(|| self.oid.cmp(&other.oid))
+            .then_with(|| self.snapid.cmp(&other.snapid))
     }
 }
 
@@ -160,37 +119,15 @@ impl VersionedEncode for HObject {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Encoding order from hobject.cc:
-        // 1. key (string)
-        // 2. oid (string)
-        // 3. snap (uint64)
-        // 4. hash (uint32)
-        // 5. max (bool)
-        // 6. nspace (string)
-        // 7. pool (int64)
-
-        // encode(key, bl)
+        // Field order from hobject.cc: key, oid, snap, hash, max, nspace, pool
         Denc::encode(&self.key, buf, features)?;
-
-        // encode(oid, bl)
         Denc::encode(&self.oid, buf, features)?;
-
-        // encode(snap, bl)
         Denc::encode(&self.snapid, buf, features)?;
-
-        // encode(hash, bl)
         Denc::encode(&self.hash, buf, features)?;
-
-        // encode(max, bl)
         Denc::encode(&self.max, buf, features)?;
-
-        // encode(nspace, bl)
         Denc::encode(&self.nspace, buf, features)?;
-
-        // encode(pool, bl) - convert u64 to i64 for wire format
-        // Note: Large u64 values are reinterpreted as negative i64 values
+        // pool is u64 internally but i64 on the wire
         Denc::encode(&(self.pool as i64), buf, features)?;
-
         Ok(())
     }
 
@@ -233,16 +170,12 @@ impl VersionedEncode for HObject {
     }
 
     fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        // Content size calculation (without VERSION_HEADER_SIZE)
+        // Fixed-size fields: snapid(u64) + hash(u32) + max(bool) + pool(i64) = 21
+        const FIXED: usize = 8 + 4 + 1 + 8;
         let key_size = self.key.encoded_size(features)?;
         let oid_size = self.oid.encoded_size(features)?;
-        let snap_size = 8; // u64
-        let hash_size = 4; // u32
-        let max_size = 1; // bool
         let nspace_size = self.nspace.encoded_size(features)?;
-        let pool_size = 8; // i64
-
-        Some(key_size + oid_size + snap_size + hash_size + max_size + nspace_size + pool_size)
+        Some(key_size + oid_size + nspace_size + FIXED)
     }
 }
 

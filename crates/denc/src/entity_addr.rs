@@ -69,54 +69,48 @@ impl EntityAddr {
         }
     }
 
+    /// Parse address family and port from sockaddr_data.
+    ///
+    /// Returns `(address_family, port)` if the data is at least 4 bytes,
+    /// or `None` if too short.
+    fn parse_af_port(&self) -> Option<(u16, u16)> {
+        if self.sockaddr_data.len() < 8 {
+            return None;
+        }
+        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
+        Some((af, port))
+    }
+
     /// Format sockaddr_data as IP:port string (matching ceph-dencoder output)
     fn format_addr(&self) -> String {
-        if self.sockaddr_data.len() < 8 {
-            return "(unrecognized address family 0)".to_string();
-        }
+        const UNRECOGNIZED: &str = "(unrecognized address family 0)";
 
-        // Parse sockaddr structure
-        // Bytes [0-1]: address family (little-endian u16)
-        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        let Some((af, port)) = self.parse_af_port() else {
+            return UNRECOGNIZED.to_string();
+        };
 
         match af {
             AF_INET => {
-                // AF_INET (IPv4)
-                // Bytes [2-3]: port (big-endian)
-                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
-                // Bytes [4-7]: IPv4 address
-                if self.sockaddr_data.len() >= 8 {
-                    format!(
-                        "{}.{}.{}.{}:{}",
-                        self.sockaddr_data[4],
-                        self.sockaddr_data[5],
-                        self.sockaddr_data[6],
-                        self.sockaddr_data[7],
-                        port
-                    )
-                } else {
-                    "(unrecognized address family 0)".to_string()
-                }
+                format!(
+                    "{}.{}.{}.{}:{}",
+                    self.sockaddr_data[4],
+                    self.sockaddr_data[5],
+                    self.sockaddr_data[6],
+                    self.sockaddr_data[7],
+                    port
+                )
             }
-            AF_INET6 => {
-                // AF_INET6 (IPv6)
-                // Bytes [2-3]: port (big-endian)
-                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
-                // Bytes [8-23]: IPv6 address (16 bytes)
-                if self.sockaddr_data.len() >= 24 {
-                    let addr_bytes = &self.sockaddr_data[8..24];
-                    format!("[{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}]:{}",
-                        addr_bytes[0], addr_bytes[1], addr_bytes[2], addr_bytes[3],
-                        addr_bytes[4], addr_bytes[5], addr_bytes[6], addr_bytes[7],
-                        addr_bytes[8], addr_bytes[9], addr_bytes[10], addr_bytes[11],
-                        addr_bytes[12], addr_bytes[13], addr_bytes[14], addr_bytes[15],
-                        port
-                    )
-                } else {
-                    "(unrecognized address family 0)".to_string()
-                }
+            AF_INET6 if self.sockaddr_data.len() >= 24 => {
+                let b = &self.sockaddr_data[8..24];
+                format!(
+                    "[{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}]:{}",
+                    b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                    b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15],
+                    port
+                )
             }
-            _ => "(unrecognized address family 0)".to_string(),
+            _ => UNRECOGNIZED.to_string(),
         }
     }
 
@@ -124,38 +118,22 @@ impl EntityAddr {
     pub fn to_socket_addr(&self) -> Option<std::net::SocketAddr> {
         use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-        if self.sockaddr_data.len() < 8 {
-            return None;
-        }
-
-        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        let (af, port) = self.parse_af_port()?;
 
         match af {
             AF_INET => {
-                // AF_INET (IPv4)
-                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
-                if self.sockaddr_data.len() >= 8 {
-                    let ip = Ipv4Addr::new(
-                        self.sockaddr_data[4],
-                        self.sockaddr_data[5],
-                        self.sockaddr_data[6],
-                        self.sockaddr_data[7],
-                    );
-                    Some(SocketAddr::new(IpAddr::V4(ip), port))
-                } else {
-                    None
-                }
+                let ip = Ipv4Addr::new(
+                    self.sockaddr_data[4],
+                    self.sockaddr_data[5],
+                    self.sockaddr_data[6],
+                    self.sockaddr_data[7],
+                );
+                Some(SocketAddr::new(IpAddr::V4(ip), port))
             }
-            AF_INET6 => {
-                // AF_INET6 (IPv6)
-                let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
-                if self.sockaddr_data.len() >= 24 {
-                    let addr_bytes: [u8; 16] = self.sockaddr_data[8..24].try_into().ok()?;
-                    let ip = Ipv6Addr::from(addr_bytes);
-                    Some(SocketAddr::new(IpAddr::V6(ip), port))
-                } else {
-                    None
-                }
+            AF_INET6 if self.sockaddr_data.len() >= 24 => {
+                let addr_bytes: [u8; 16] = self.sockaddr_data[8..24].try_into().ok()?;
+                let ip = Ipv6Addr::from(addr_bytes);
+                Some(SocketAddr::new(IpAddr::V6(ip), port))
             }
             _ => None,
         }
@@ -177,31 +155,18 @@ impl EntityAddr {
 
         let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
 
+        // Write address family and port (common to both V4 and V6)
+        let af = match addr.ip() {
+            IpAddr::V4(_) => AF_INET,
+            IpAddr::V6(_) => AF_INET6,
+        };
+        sockaddr_data[0..2].copy_from_slice(&af.to_le_bytes());
+        sockaddr_data[2..4].copy_from_slice(&addr.port().to_be_bytes());
+
+        // Write IP address bytes
         match addr.ip() {
-            IpAddr::V4(ip) => {
-                // AF_INET (little-endian)
-                sockaddr_data[0] = AF_INET as u8;
-                sockaddr_data[1] = (AF_INET >> 8) as u8;
-                // Port (big-endian)
-                let port_bytes = addr.port().to_be_bytes();
-                sockaddr_data[2] = port_bytes[0];
-                sockaddr_data[3] = port_bytes[1];
-                // IPv4 address
-                let octets = ip.octets();
-                sockaddr_data[4..8].copy_from_slice(&octets);
-            }
-            IpAddr::V6(ip) => {
-                // AF_INET6 (little-endian)
-                sockaddr_data[0] = AF_INET6 as u8;
-                sockaddr_data[1] = (AF_INET6 >> 8) as u8;
-                // Port (big-endian)
-                let port_bytes = addr.port().to_be_bytes();
-                sockaddr_data[2] = port_bytes[0];
-                sockaddr_data[3] = port_bytes[1];
-                // IPv6 address (starting at offset 8)
-                let octets = ip.octets();
-                sockaddr_data[8..24].copy_from_slice(&octets);
-            }
+            IpAddr::V4(ip) => sockaddr_data[4..8].copy_from_slice(&ip.octets()),
+            IpAddr::V6(ip) => sockaddr_data[8..24].copy_from_slice(&ip.octets()),
         }
 
         Self {
@@ -222,13 +187,7 @@ impl EntityAddr {
         }
         buf.advance(3); // Skip remaining 3 bytes of the u32 marker
 
-        if buf.remaining() < 4 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for legacy EntityAddr nonce".to_string(),
-            ));
-        }
-
-        let nonce = buf.get_u32_le();
+        let nonce = <u32 as Denc>::decode(buf, 0)?;
 
         // Read sockaddr_storage (STORAGE_SIZE bytes)
         if buf.remaining() < STORAGE_SIZE {
@@ -276,16 +235,13 @@ impl EntityAddr {
         let nonce = <u32 as Denc>::decode(&mut content, 0)?;
         let elen = <u32 as Denc>::decode(&mut content, 0)? as usize;
 
-        let mut sockaddr_data = Vec::new();
-        if elen > 0 {
-            if content.remaining() < elen {
-                return Err(RadosError::Protocol(
-                    "Insufficient sockaddr data".to_string(),
-                ));
-            }
-            sockaddr_data = vec![0u8; elen];
-            content.copy_to_slice(&mut sockaddr_data);
+        if content.remaining() < elen {
+            return Err(RadosError::Protocol(
+                "Insufficient sockaddr data".to_string(),
+            ));
         }
+        let mut sockaddr_data = vec![0u8; elen];
+        content.copy_to_slice(&mut sockaddr_data);
 
         // Note: take() already consumed the bytes from buf, no need to advance
 
@@ -322,10 +278,7 @@ impl EntityAddr {
         Denc::encode(&self.addr_type, buf, 0)?;
         Denc::encode(&self.nonce, buf, 0)?;
         Denc::encode(&(self.sockaddr_data.len() as u32), buf, 0)?;
-
-        if !self.sockaddr_data.is_empty() {
-            buf.put_slice(&self.sockaddr_data);
-        }
+        buf.put_slice(&self.sockaddr_data);
 
         Ok(())
     }
@@ -442,18 +395,13 @@ impl Denc for EntityAddr {
             return Err(RadosError::Protocol("Empty EntityAddr".to_string()));
         }
 
-        let marker = buf.get_u8();
-        if marker == 0 {
-            // Legacy format
-            Self::decode_legacy(buf)
-        } else if marker == 1 {
-            // MSG_ADDR2 format
-            Self::decode_msgr2(buf)
-        } else {
-            Err(RadosError::Protocol(format!(
+        match buf.get_u8() {
+            0 => Self::decode_legacy(buf),
+            1 => Self::decode_msgr2(buf),
+            marker => Err(RadosError::Protocol(format!(
                 "Unknown EntityAddr marker: {}",
                 marker
-            )))
+            ))),
         }
     }
 
@@ -495,7 +443,7 @@ impl crate::codec::Denc for EntityAddrvec {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // Octopus+ peers always use the addrvec marker on encode.
         buf.put_u8(2);
-        buf.put_u32_le(self.addrs.len() as u32);
+        Denc::encode(&(self.addrs.len() as u32), buf, 0)?;
 
         for addr in &self.addrs {
             addr.encode(buf, 0)?;
@@ -511,27 +459,19 @@ impl crate::codec::Denc for EntityAddrvec {
             ));
         }
 
-        // Read the marker byte
         let marker = buf.get_u8();
 
         match marker {
-            0 => {
-                let addr = EntityAddr::decode_legacy(buf)?;
-                Ok(EntityAddrvec { addrs: vec![addr] })
-            }
-            1 => {
-                let addr = EntityAddr::decode_msgr2(buf)?;
-                Ok(EntityAddrvec { addrs: vec![addr] })
-            }
+            // Single-address legacy or msgr2 format
+            0 => Ok(EntityAddrvec {
+                addrs: vec![EntityAddr::decode_legacy(buf)?],
+            }),
+            1 => Ok(EntityAddrvec {
+                addrs: vec![EntityAddr::decode_msgr2(buf)?],
+            }),
+            // MSG_ADDR2 format - vector of addresses
             2 => {
-                // MSG_ADDR2 format - vector of addresses
-                if buf.remaining() < 4 {
-                    return Err(RadosError::Protocol(
-                        "Insufficient bytes for EntityAddrvec count".to_string(),
-                    ));
-                }
-
-                let count = buf.get_u32_le() as usize;
+                let count = <u32 as Denc>::decode(buf, 0)? as usize;
                 let mut addrs = Vec::with_capacity(count);
 
                 for _ in 0..count {

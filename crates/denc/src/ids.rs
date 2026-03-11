@@ -3,10 +3,32 @@
 //! This module provides newtype wrappers around primitive types to prevent
 //! accidental mixing of different ID types (e.g., OSD IDs vs Pool IDs).
 
-use crate::codec::Denc;
+use crate::codec::{Denc, FixedSize};
 use crate::error::RadosError;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
+
+/// Implement Denc for a newtype wrapper around a primitive type.
+///
+/// Generates encode/decode that delegates to the inner type, plus an
+/// `encoded_size` that returns the inner type's FixedSize::SIZE.
+macro_rules! impl_denc_newtype {
+    ($wrapper:ident, $inner:ty) => {
+        impl Denc for $wrapper {
+            fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+                self.0.encode(buf, features)
+            }
+
+            fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+                Ok($wrapper(<$inner>::decode(buf, features)?))
+            }
+
+            fn encoded_size(&self, _features: u64) -> Option<usize> {
+                Some(<$inner as FixedSize>::SIZE)
+            }
+        }
+    };
+}
 
 /// OSD identifier (newtype wrapper around i32)
 ///
@@ -62,19 +84,7 @@ impl std::fmt::Display for OsdId {
     }
 }
 
-impl Denc for OsdId {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.0.encode(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Ok(OsdId(i32::decode(buf, features)?))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(4)
-    }
-}
+impl_denc_newtype!(OsdId, i32);
 
 /// Pool identifier (newtype wrapper around u64)
 ///
@@ -123,19 +133,7 @@ impl std::fmt::Display for PoolId {
     }
 }
 
-impl Denc for PoolId {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.0.encode(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Ok(PoolId(u64::decode(buf, features)?))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
-}
+impl_denc_newtype!(PoolId, u64);
 
 /// Epoch number for versioning cluster state (newtype wrapper around u32)
 ///
@@ -178,19 +176,7 @@ impl std::fmt::Display for Epoch {
     }
 }
 
-impl Denc for Epoch {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.0.encode(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Ok(Epoch(u32::decode(buf, features)?))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(4)
-    }
-}
+impl_denc_newtype!(Epoch, u32);
 
 /// Global ID assigned during authentication (newtype wrapper around u64)
 ///
@@ -233,19 +219,7 @@ impl std::fmt::Display for GlobalId {
     }
 }
 
-impl Denc for GlobalId {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.0.encode(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Ok(GlobalId(u64::decode(buf, features)?))
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(8)
-    }
-}
+impl_denc_newtype!(GlobalId, u64);
 
 #[cfg(test)]
 mod tests {
