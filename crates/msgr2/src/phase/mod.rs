@@ -14,7 +14,12 @@
 //! Hello → AuthNegotiate → AuthSign → [Compression] → Session
 //! ```
 
-use crate::{error::Result, frames::Frame, protocol::FrameIO, state_machine::StateMachine};
+use crate::{
+    error::{Msgr2Error as Error, Result},
+    frames::Frame,
+    protocol::FrameIO,
+    state_machine::StateMachine,
+};
 
 pub mod auth;
 pub mod compression;
@@ -30,6 +35,8 @@ pub enum Step<P, O> {
     Next { state: P, send: Option<Frame> },
     /// Phase is complete.  Optionally send a final `frame` before returning `output`.
     Done(O, Option<Frame>),
+    /// Abort the phase after optionally sending a final protocol error frame.
+    Abort { error: Error, send: Option<Frame> },
 }
 
 /// A pure state machine for one msgr2 handshake phase.
@@ -82,6 +89,12 @@ pub(crate) async fn drive<P: Phase>(
                     frame_io.send_frame(&f, sm).await?;
                 }
                 return Ok(output);
+            }
+            Step::Abort { error, send } => {
+                if let Some(f) = send {
+                    frame_io.send_frame(&f, sm).await?;
+                }
+                return Err(error);
             }
         }
     }

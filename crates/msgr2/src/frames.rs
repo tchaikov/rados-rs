@@ -1113,6 +1113,12 @@ define_control_frame!(
     cookie: u64
 );
 
+define_control_frame!(
+    IdentMissingFeaturesFrame,
+    IdentMissingFeatures,
+    missing_features: u64
+);
+
 // Keepalive frames for connection health monitoring
 define_control_frame!(
     Keepalive2Frame,

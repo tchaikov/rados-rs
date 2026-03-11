@@ -294,6 +294,14 @@ struct VersionTracker {
 }
 
 impl MonClient {
+    async fn spawn_tracked_task<F>(&self, task: F)
+    where
+        F: std::future::Future<Output = ()> + Send + 'static,
+    {
+        let mut tasks = self.tasks.lock().await;
+        tasks.spawn(task);
+    }
+
     /// Create a new MonClient with optional OSDMap routing
     ///
     /// # Arguments
@@ -385,38 +393,40 @@ impl MonClient {
         // Spawn drain task for monitor messages
         let client_weak = Arc::downgrade(&client);
         let drain_token = shutdown_token.clone();
-        client.tasks.lock().await.spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = drain_token.cancelled() => {
-                        info!("MonClient drain task received shutdown signal");
-                        break;
-                    }
-                    msg = mon_msg_rx.recv() => {
-                        match msg {
-                            Some(msg) => {
-                                if let Some(client_arc) = client_weak.upgrade() {
-                                    if let Err(e) = client_arc.dispatch_message(msg).await {
-                                        error!("Failed to dispatch monitor message: {}", e);
+        client
+            .spawn_tracked_task(async move {
+                loop {
+                    tokio::select! {
+                        _ = drain_token.cancelled() => {
+                            info!("MonClient drain task received shutdown signal");
+                            break;
+                        }
+                        msg = mon_msg_rx.recv() => {
+                            match msg {
+                                Some(msg) => {
+                                    if let Some(client_arc) = client_weak.upgrade() {
+                                        if let Err(e) = client_arc.dispatch_message(msg).await {
+                                            error!("Failed to dispatch monitor message: {}", e);
+                                        }
+                                    } else {
+                                        info!("MonClient dropped, terminating drain task");
+                                        break;
                                     }
-                                } else {
-                                    info!("MonClient dropped, terminating drain task");
+
+                                    // Yield after processing each message to avoid starving other tasks
+                                    tokio::task::yield_now().await;
+                                }
+                                None => {
+                                    info!("MonClient message channel closed, drain task exiting");
                                     break;
                                 }
-
-                                // Yield after processing each message to avoid starving other tasks
-                                tokio::task::yield_now().await;
-                            }
-                            None => {
-                                info!("MonClient message channel closed, drain task exiting");
-                                break;
                             }
                         }
                     }
                 }
-            }
-            info!("MonClient drain task terminated");
-        });
+                info!("MonClient drain task terminated");
+            })
+            .await;
 
         Ok(client)
     }
@@ -442,7 +452,7 @@ impl MonClient {
         }
 
         // Start tick loop for periodic keepalive and auth renewal
-        self.start_tick_loop()?;
+        self.start_tick_loop().await?;
 
         // Start hunting process (connects to monitor)
         self.start_hunting().await?;
@@ -996,7 +1006,7 @@ impl MonClient {
     }
 
     /// Start background tick loop for periodic maintenance
-    fn start_tick_loop(&self) -> Result<()> {
+    async fn start_tick_loop(&self) -> Result<()> {
         let connection_state = Arc::clone(&self.connection_state);
         let runtime_config = Arc::clone(&self.runtime_config);
         let self_clone = self.clone();
@@ -1006,58 +1016,53 @@ impl MonClient {
         let explicit_tick_interval = self.config.tick_interval;
 
         // Spawn into the shared JoinSet so shutdown() can await all tasks together.
-        if let Ok(mut tasks) = self.tasks.try_lock() {
-            tasks.spawn(async move {
-                info!("Tick loop started");
+        self.spawn_tracked_task(async move {
+            info!("Tick loop started");
 
-                loop {
-                    // Adaptive tick interval: hunt faster when hunting, ping when connected.
-                    // Matches C++ MonClient::schedule_tick() adaptive logic.
-                    let interval = match explicit_tick_interval {
-                        Some(explicit) => explicit,
-                        None => {
-                            let conn_state = connection_state.read().await;
-                            let runtime_cfg = runtime_config.read().await;
-                            if conn_state.hunting {
-                                runtime_cfg
-                                    .mon_client_hunt_interval
-                                    .mul_f64(conn_state.reopen_interval_multiplier)
-                            } else {
-                                runtime_cfg.mon_client_ping_interval
-                            }
+            loop {
+                // Adaptive tick interval: hunt faster when hunting, ping when connected.
+                // Matches C++ MonClient::schedule_tick() adaptive logic.
+                let interval = match explicit_tick_interval {
+                    Some(explicit) => explicit,
+                    None => {
+                        let conn_state = connection_state.read().await;
+                        let runtime_cfg = runtime_config.read().await;
+                        if conn_state.hunting {
+                            runtime_cfg
+                                .mon_client_hunt_interval
+                                .mul_f64(conn_state.reopen_interval_multiplier)
+                        } else {
+                            runtime_cfg.mon_client_ping_interval
                         }
-                    };
-
-                    tokio::select! {
-                        _ = tick_token.cancelled() => {
-                            info!("Tick loop received shutdown signal");
-                            break;
-                        }
-                        _ = tokio::time::sleep(interval) => {}
                     }
+                };
 
-                    if tick_token.is_cancelled() {
+                tokio::select! {
+                    _ = tick_token.cancelled() => {
+                        info!("Tick loop received shutdown signal");
                         break;
                     }
-
-                    // Perform tick operations
-                    if let Err(e) = self_clone.tick().await {
-                        error!("Error in tick: {}", e);
-                    }
-
-                    // Yield to allow other tasks to run
-                    tokio::task::yield_now().await;
+                    _ = tokio::time::sleep(interval) => {}
                 }
 
-                info!("Tick loop terminated");
-            });
-            info!("Started tick loop");
-            Ok(())
-        } else {
-            Err(MonClientError::Other(
-                "Failed to acquire tasks lock during init - lock may be poisoned".into(),
-            ))
-        }
+                if tick_token.is_cancelled() {
+                    break;
+                }
+
+                // Perform tick operations
+                if let Err(e) = self_clone.tick().await {
+                    error!("Error in tick: {}", e);
+                }
+
+                // Yield to allow other tasks to run
+                tokio::task::yield_now().await;
+            }
+
+            info!("Tick loop terminated");
+        })
+        .await;
+        info!("Started tick loop");
+        Ok(())
     }
 
     /// Periodic maintenance tick

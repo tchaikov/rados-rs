@@ -6,13 +6,15 @@ use crate::error::{Msgr2Error as Error, Result};
 use crate::frames::{
     AuthDoneFrame, AuthRequestFrame, AuthRequestMoreFrame, AuthSignatureFrame,
     CompressionDoneFrame, CompressionRequestFrame, Frame, FrameTrait, HelloFrame,
-    Keepalive2AckFrame, ServerIdentFrame, Tag,
+    Keepalive2AckFrame, ServerIdentFrame, SessionReconnectOkFrame, Tag,
 };
 use bytes::{Bytes, BytesMut};
 use denc::Denc;
 use denc::EntityName;
 use std::fmt::Debug;
 use tracing;
+
+const ALL_LEGACY_CEPH_FEATURE_BITS: u64 = (1u64 << 62) - 1;
 
 /// Helper function to create a Frame from a FrameTrait
 pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Result<Frame> {
@@ -48,6 +50,17 @@ pub fn create_frame_from_trait<F: FrameTrait>(frame_trait: &F, tag: Tag) -> Resu
         },
         segments,
     })
+}
+
+fn session_supported_features() -> u64 {
+    use denc::features::CephFeatures;
+
+    (CephFeatures::MSG_ADDR2 | CephFeatures::SERVER_NAUTILUS | CephFeatures::SERVER_OCTOPUS).bits()
+        | ALL_LEGACY_CEPH_FEATURE_BITS
+}
+
+fn session_required_features() -> u64 {
+    denc::features::CephFeatures::MSG_ADDR2.bits()
 }
 
 /// Side-effect emitted by a state alongside a transition.
@@ -1314,13 +1327,7 @@ impl State for SessionConnecting {
 
                     // Validate that we support the required features
                     // Use the features we advertised in CLIENT_IDENT, not just msgr2 features
-                    use denc::features::CephFeatures;
-                    let our_features: u64 = (CephFeatures::MSG_ADDR2
-                        | CephFeatures::SERVER_NAUTILUS
-                        | CephFeatures::SERVER_OCTOPUS)
-                        .bits()
-                        | 0x3fffffffffffffff; // All features up to bit 61
-
+                    let our_features = session_supported_features();
                     let missing_features = features_required & !our_features;
                     if missing_features != 0 {
                         tracing::error!(
@@ -1534,15 +1541,8 @@ impl State for SessionConnecting {
             let target_addr = self.server_addr.clone();
             let gid = self.our_global_id as i64;
 
-            use denc::features::CephFeatures;
-
-            let features_supported: u64 = (CephFeatures::MSG_ADDR2
-                | CephFeatures::SERVER_NAUTILUS
-                | CephFeatures::SERVER_OCTOPUS)
-                .bits()
-                | 0x3fffffffffffffff; // All features up to bit 61
-
-            let features_required: u64 = CephFeatures::MSG_ADDR2.bits();
+            let features_supported = session_supported_features();
+            let features_required = session_required_features();
             let flags: u64 = 0;
 
             tracing::info!(
@@ -2028,20 +2028,57 @@ impl State for SessionAccepting {
     impl_state_boilerplate!(
         SessionAccepting,
         StateKind::SessionAccepting,
-        &[Tag::ClientIdent]
+        &[Tag::ClientIdent, Tag::SessionReconnect]
     );
 
     fn handle_frame(&mut self, frame: Frame) -> Result<StateResult> {
         match frame.preamble.tag {
             Tag::ClientIdent => {
-                // Parse CLIENT_IDENT to get client information
-                // For now, just send a default SERVER_IDENT response
+                let segment = frame
+                    .segments
+                    .first()
+                    .ok_or_else(|| Error::protocol_error("CLIENT_IDENT frame missing payload"))?;
+                let mut payload = segment.clone();
+                let _addrs = denc::EntityAddrvec::decode(&mut payload, 0)?;
+                let _target_addr = denc::EntityAddr::decode(&mut payload, 0)?;
+                let _gid = i64::decode(&mut payload, 0)?;
+                let _global_seq = u64::decode(&mut payload, 0)?;
+                let client_supported_features = u64::decode(&mut payload, 0)?;
+                let _client_required_features = u64::decode(&mut payload, 0)?;
+                let _flags = u64::decode(&mut payload, 0)?;
+                let _cookie = u64::decode(&mut payload, 0)?;
+
+                let missing_features = session_required_features() & !client_supported_features;
+                if missing_features != 0 {
+                    return Ok(StateResult::Fault(format!(
+                        "Client missing required features: 0x{missing_features:x}"
+                    )));
+                }
+
                 let addrs = denc::EntityAddrvec::with_addr(denc::EntityAddr::default());
-                let server_ident = ServerIdentFrame::new(addrs, 0, 0, 0, 0, 0, 0);
+                let server_ident = ServerIdentFrame::new(
+                    addrs,
+                    0,
+                    0,
+                    session_supported_features(),
+                    session_required_features(),
+                    0,
+                    0,
+                );
                 let response_frame = create_frame_from_trait(&server_ident, Tag::ServerIdent)?;
 
                 // After sending SERVER_IDENT, transition to Ready state
                 // The state machine will handle the transition after the frame is sent
+                Ok(StateResult::SendFrame {
+                    frame: response_frame,
+                    next_state: Some(Box::new(Ready)),
+                    effect: ConnectionEffect::None,
+                })
+            }
+            Tag::SessionReconnect => {
+                let reconnect_ok = SessionReconnectOkFrame::new(0);
+                let response_frame =
+                    create_frame_from_trait(&reconnect_ok, Tag::SessionReconnectOk)?;
                 Ok(StateResult::SendFrame {
                     frame: response_frame,
                     next_state: Some(Box::new(Ready)),
@@ -3032,6 +3069,63 @@ mod tests {
             compression_ctx.algorithm(),
             crate::compression::CompressionAlgorithm::Zstd
         );
+    }
+
+    #[test]
+    fn test_session_accepting_replies_to_session_reconnect() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(SessionAccepting::new());
+
+        let reconnect = crate::frames::SessionReconnectFrame::new(
+            denc::EntityAddrvec::with_addr(denc::EntityAddr::default()),
+            1,
+            2,
+            3,
+            4,
+            5,
+        );
+        let frame =
+            create_frame_from_trait(&reconnect, Tag::SessionReconnect).expect("reconnect frame");
+
+        let result = sm.handle_frame(frame).expect("reconnect should succeed");
+        let response = match result {
+            StateResult::SendFrame { frame, .. } => frame,
+            other => panic!("expected SendFrame, got {:?}", other),
+        };
+        assert_eq!(response.preamble.tag, Tag::SessionReconnectOk);
+        assert_eq!(sm.current_state_kind(), StateKind::Ready);
+    }
+
+    #[test]
+    fn test_session_accepting_rejects_client_missing_required_features() {
+        let mut sm = StateMachine::new_server();
+        sm.current_state = Box::new(SessionAccepting::new());
+
+        let client_ident = crate::frames::ClientIdentFrame::new(
+            denc::EntityAddrvec::with_addr(denc::EntityAddr::default()),
+            denc::EntityAddr::default(),
+            0,
+            0,
+            0,
+            0,
+            0,
+            42,
+        );
+        let frame =
+            create_frame_from_trait(&client_ident, Tag::ClientIdent).expect("client ident frame");
+
+        let result = sm
+            .handle_frame(frame)
+            .expect("state machine should process client ident");
+        match result {
+            StateResult::Fault(msg) => {
+                assert!(
+                    msg.contains("missing required features"),
+                    "unexpected msg: {msg}"
+                );
+            }
+            other => panic!("expected Fault, got {:?}", other),
+        }
     }
 
     #[test]
