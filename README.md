@@ -6,7 +6,7 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 
 - **Async/Await Support**: Built on Tokio for high-performance async I/O
 - **Modern Rust**: Leverages Rust's memory safety and performance
-- **Messenger Protocol**: Complete implementation of Ceph's messenger protocol v2
+- **Full Protocol Stack**: Complete implementation of Ceph's messenger protocol v2, CephX authentication, monitor client, and OSD client
 - **Type Safety**: Strong typing for all Ceph entities and operations
 - **Native Performance**: No C library dependencies
 - **Ceph Octopus+**: Supported on Ceph Octopus (v15) and all later releases
@@ -15,28 +15,14 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ### ✅ Completed Components
 
-- **Core Types**: EntityName, EntityAddr, FeatureSet, ConnectionInfo
-- **Messenger Protocol**: Banner exchange, connection negotiation, feature negotiation  
-- **Message System**: Message encoding/decoding, routing, dispatching
-- **Async Connections**: Tokio-based connection handling with automatic keepalive
-- **Frame Protocol**: Complete frame encoding/decoding for messenger v2
-- **Error Handling**: Comprehensive error types and handling
-
-### 🚧 In Progress
-
-- Basic connection testing and validation
-- Message handler framework
-- CephX authentication system (partial)
-
-### 📋 Planned Features
-
-- **Monitor Client**: Connection and communication with Ceph monitors (**CRITICAL FIRST STEP**)
-  - MonMap, OSD Map, and CRUSH map retrieval and processing
-  - Object placement calculation (PG mapping)
-- **CephX Authentication**: Complete secure authentication with Ceph clusters
-- **OSD Client**: Direct communication with Object Storage Daemons (depends on Monitor client)
-- **Object Operations**: PUT, GET, DELETE operations on RADOS objects
-- **Pool Management**: Pool creation, deletion, and configuration
+- **Core Types & Encoding** (`denc`): EntityName, EntityAddr, OSDMap, PgPool, CRUSH structures — corpus-validated against ceph-dencoder
+- **Messenger Protocol** (`msgr2`): Complete msgr2.1 implementation — banner exchange, connection negotiation, AES-128-GCM encryption, CRC32C, compression (Snappy/Zstandard/LZ4/gzip), message priority queues
+- **CephX Authentication** (`auth`): Full client/server challenge-response authentication, keyring management, service ticket handling
+- **Configuration Parsing** (`cephconfig`): INI-style `ceph.conf` parser with monitor address and keyring extraction
+- **CRUSH Algorithm** (`crush`): All bucket types (Uniform, List, Tree, Straw, Straw2), device class support (ssd, hdd, nvme), object→PG→OSD placement
+- **Monitor Client** (`monclient`): Connection management, MonMap/OSDMap/CRUSH map subscriptions, Paxos support, DNS SRV resolution, automatic keepalive
+- **OSD Client** (`osdclient`): Full CRUD operations (read, write, stat, delete), pool management, sparse reads, snapshot support, CRUSH-based placement
+- **CLI Tool** (`rados`): Command-line interface for object and pool operations
 
 ## 🚀 Quick Start
 
@@ -45,50 +31,74 @@ A Rust native implementation of the RADOS (Reliable Autonomic Distributed Object
 The project includes examples demonstrating various components:
 
 ```bash
-# Test msgr2 session connecting
-cargo run --example test_session_connecting -p msgr2
+# Write, read, stat, and delete an object (requires a running Ceph cluster)
+CEPH_CONF=/etc/ceph/ceph.conf cargo run --example simple_write -p osdclient
 
-# Test OSD map decoding
-cargo run --example test_osdmap_decode -p denc
+# Decode an OSD map from a binary corpus file
+cargo run --example test_osdmap_decode -p osdclient
+
+# Decode a CRUSH map
+cargo run --example test_crush_decode -p crush
+
+# Parse a ceph.conf file
+cargo run --example parse_config -p cephconfig
 ```
 
-### Running Integration Tests
-
-Integration tests use the external ceph-object-corpus:
+### Using the CLI
 
 ```bash
-# Run denc corpus tests (requires ceph-object-corpus)
-CEPH_CONF=~/dev/ceph/build/ceph.conf cargo test -p denc --tests -- --ignored
+# Put an object
+cargo run -p rados -- --pool mypool put myobject /path/to/file
+
+# Get an object
+cargo run -p rados -- --pool mypool get myobject /path/to/output
+
+# List objects in a pool
+cargo run -p rados -- --pool mypool ls
+
+# Get object statistics
+cargo run -p rados -- --pool mypool stat myobject
 ```
 
 ### Using the Library
 
 ```rust
-use msgr2::{SessionConnecting, ConnectionInfo};
-use denc::{EntityName, EntityAddr};
+use monclient::{AuthConfig, MonClient, MonClientConfig, MonService};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Create connection info
-    let local_name = EntityName::client(12345);
-    let peer_addr = EntityAddr::parse("v2:10.0.0.1:6789/0")?;
+    // Load auth from ceph.conf
+    let auth = AuthConfig::from_ceph_conf("/etc/ceph/ceph.conf")?;
 
-    let conn_info = ConnectionInfo {
-        local_name,
-        peer_addr,
-        // ... other fields
-    };
+    let (osdmap_tx, _osdmap_rx) = msgr2::map_channel::<monclient::MOSDMap>(64);
 
-    // Connect to a Ceph monitor
-    // See examples for complete usage
+    let mon_client = MonClient::new(
+        MonClientConfig {
+            mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
+            auth: Some(auth),
+            ..Default::default()
+        },
+        Some(osdmap_tx),
+    )
+    .await?;
+    mon_client.init().await?;
+
+    // Subscribe to OSDMap updates
+    mon_client.subscribe(MonService::OsdMap, 0, 0).await?;
+
+    // Get OSDMap version
+    let (newest, oldest) = mon_client.get_version(MonService::OsdMap).await?;
+    println!("OSDMap version: {} (oldest: {})", newest, oldest);
 
     Ok(())
 }
 ```
 
+See the [`osdclient/examples/simple_write.rs`](crates/osdclient/examples/simple_write.rs) example for a complete end-to-end workflow including object operations.
+
 ## 🔧 Architecture
 
-The project is organized as a Cargo workspace with three main crates:
+The project is organized as a Cargo workspace:
 
 ### `denc` - Encoding/Decoding
 - **Ceph Encoding**: Implementation of Ceph's DENC encoding/decoding protocol
@@ -96,6 +106,13 @@ The project is organized as a Cargo workspace with three main crates:
 - **Addresses**: Network addresses with nonces for unique identification
 - **Features**: Capability negotiation and version compatibility
 - **Complex Types**: OSDMap, PgPool, CRUSH map structures
+
+### `denc-macros` - Procedural Macros
+- Derive macros: `Denc`, `DencMut`, `VersionedDenc`, `ZeroCopyDencode`
+
+### `dencoder` - Encoding Inspector
+- Binary tool to decode, inspect, and dump Ceph binary structures to JSON
+- Corpus comparison against C++ `ceph-dencoder`
 
 ### `msgr2` - Messenger Protocol v2
 - **Protocol Handling**: Complete implementation of Ceph messenger protocol v2.1
@@ -109,49 +126,84 @@ The project is organized as a Cargo workspace with three main crates:
 - **Keyring Management**: Keyring parsing and key management
 - **Ticket System**: Service ticket handling
 
+### `cephconfig` - Configuration
+- **Config Parsing**: INI-style `ceph.conf` parser
+- **Address Extraction**: Monitor v2/v1 address parsing
+- **Type-Safe Options**: Size, Duration, Count, Ratio option types
+
+### `crush` - CRUSH Algorithm
+- **Object Placement**: Controlled Replication Under Scalable Hashing
+- **Bucket Types**: Uniform, List, Tree, Straw, Straw2
+- **Device Classes**: ssd, hdd, nvme support
+
+### `monclient` - Monitor Client
+- **Cluster Maps**: MonMap, OSDMap, CRUSH map retrieval and updates
+- **Subscriptions**: Event-driven map change notifications
+- **Discovery**: Monitor hunting and DNS SRV resolution
+
+### `osdclient` - OSD Client
+- **Object Operations**: read, write, write_full, sparse_read, stat, delete
+- **Pool Management**: list_pools, create_pool, delete_pool
+- **Advanced Features**: Snapshots, locks, sparse reads, operation builders
+
+### `rados` - CLI Tool
+- Command-line interface for object put/get/delete/stat and pool management
+
 ## 🛠️ Development
 
 ### Building
 ```bash
-cargo build
+cargo build --workspace
 ```
 
 ### Testing
 ```bash
-cargo test
+# Run all unit tests
+cargo test --workspace --all-targets
+
+# Run integration tests (requires a running Ceph cluster)
+CEPH_CONF=/etc/ceph/ceph.conf cargo test --workspace --tests -- --ignored --nocapture
 ```
 
 ### Linting
-```bash 
-cargo clippy
+```bash
+cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 ## 🧪 Testing
 
-### Available Test Cluster
+### Docker-based Test Cluster
 
-A Docker-based Ceph cluster is available for testing purposes:
+A Docker Compose setup is provided for local integration testing:
 
-- **Config Path**: `/home/kefu/dev/rust-app-ceres/docker/ceph-config/ceph.conf`
-- **Test Account**: `client.admin`
-- **Keyring**: Available in the same directory as `ceph.client.admin.keyring`
-
-Run tests against this cluster:
 ```bash
-# Test connection to Ceph cluster
-cargo run --bin rados-client ceph-test
+# Start a single-node Ceph cluster (Reef v18)
+docker compose -f docker/docker-compose.ceph.yml up -d
+```
 
-# Run with debug logging
-RUST_LOG=debug cargo run --bin rados-client ceph-test
+The cluster exposes msgr2 on port 3300 and msgr1 on port 6789. A keyring for
+`client.admin` is generated automatically and written into the container.
+
+### Running Integration Tests
+
+```bash
+# Run all integration tests against the cluster
+CEPH_CONF=/path/to/ceph.conf cargo test --workspace --tests -- --ignored --nocapture
+
+# Run integration tests for a specific crate
+CEPH_CONF=/path/to/ceph.conf cargo test -p osdclient --tests -- --ignored --nocapture
+CEPH_CONF=/path/to/ceph.conf cargo test -p monclient --tests -- --ignored --nocapture
+CEPH_CONF=/path/to/ceph.conf cargo test -p msgr2 --tests -- --ignored --nocapture
 ```
 
 ## 📚 Documentation
 
-This implementation is based on the Ceph messenger protocol as implemented in:
-- **Ceph source**: `src/msg/`
-- **Crimson (SeaStore)**: `src/crimson/net/`
-- **Official msgr2 protocol documentation**: `ceph/doc/dev/msgr2.rst` (**CRITICAL REFERENCE**)
-- **Protocol documentation**: Ceph developer docs
+- **Compatibility**: See [COMPATIBILITY.md](COMPATIBILITY.md) for detailed version information
+- **CRUSH Algorithm**: See [CRUSH_DOC_GUIDE.md](CRUSH_DOC_GUIDE.md)
+- **Encoding System**: See [ENCODING_METADATA.md](ENCODING_METADATA.md)
+- **Monitor Client Design**: See [docs/MONCLIENT_DESIGN.md](docs/MONCLIENT_DESIGN.md)
+- **Crate READMEs**: `crates/cephconfig/README.md`, `crates/osdclient/README.md`, `crates/msgr2/README.md`
 
 ### Compatibility
 
