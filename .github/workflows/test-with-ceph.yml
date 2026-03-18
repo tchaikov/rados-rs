@@ -84,6 +84,12 @@ jobs:
           RUST_BACKTRACE: full
           RUST_LOG: debug
 
+      - name: Run monclient Integration Tests
+        run: cargo test -p monclient --tests -- --ignored --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
       - name: Cleanup
         if: always()
         run: |

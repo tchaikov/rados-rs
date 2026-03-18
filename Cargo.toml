@@ -6,6 +6,7 @@ members = [
     "crates/auth",
     "crates/crush",
     "crates/msgr2",
+    "crates/monclient",
 ]
 resolver = "3"
 
@@ -31,3 +32,4 @@ async-trait = "0.1"
 crc32c = "0.6"
 hmac = "0.12"
 sha2 = "0.10"
+futures = "0.3"
