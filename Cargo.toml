@@ -9,6 +9,7 @@ members = [
     "crates/monclient",
     "crates/osdclient",
     "crates/dencoder",
+    "crates/rados",
 ]
 resolver = "3"
 
