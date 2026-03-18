@@ -1,0 +1,27 @@
+[package]
+name = "denc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+paste = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+denc-macros = { path = "../denc-macros" }
+zerocopy = { version = "0.8", features = ["derive"] }
+bitflags = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"
+criterion = "0.5"
+
+[[bench]]
+name = "encoding"
+harness = false
+
+[[bench]]
+name = "message_encoding"
+harness = false
