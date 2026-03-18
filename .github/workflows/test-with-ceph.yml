@@ -72,6 +72,12 @@ jobs:
           docker exec ceph-mon ceph --version
           docker exec ceph-mon ceph status
 
+      - name: Create test pool
+        run: |
+          docker exec ceph-mon ceph osd pool create test-pool 1 1
+          docker exec ceph-mon ceph osd pool application enable test-pool rados
+          echo "Created test-pool"
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -86,6 +92,12 @@ jobs:
 
       - name: Run monclient Integration Tests
         run: cargo test -p monclient --tests -- --ignored --test-threads=1 --nocapture
+        env:
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Run osdclient Integration Tests
+        run: cargo test -p osdclient --tests -- --ignored --nocapture
         env:
           RUST_BACKTRACE: full
           RUST_LOG: info

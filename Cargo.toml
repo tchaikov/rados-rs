@@ -7,6 +7,7 @@ members = [
     "crates/crush",
     "crates/msgr2",
     "crates/monclient",
+    "crates/osdclient",
 ]
 resolver = "3"
 
