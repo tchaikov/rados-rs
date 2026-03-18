@@ -1,0 +1,21 @@
+[package]
+name = "crush"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+denc = { path = "../denc" }
+num_enum = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "crush_mapping"
+harness = false
