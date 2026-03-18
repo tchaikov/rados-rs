@@ -1,0 +1,91 @@
+name: Integration Tests (with Ceph)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  test-ceph:
+    name: Ceph Integration Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      CEPH_CONFIG_DIR: /tmp/rados-rs
+      CEPH_TEST_POOL: test-pool
+      CEPH_CONF: /tmp/rados-rs/ceph.conf
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            libssl-dev \
+            jq \
+            ceph-common
+
+      - name: Start Ceph cluster
+        run: |
+          # Use existing docker-compose setup
+          cd docker
+          docker compose -f docker-compose.ceph.yml up -d
+
+          # Wait for Ceph to be ready
+          echo "Waiting for Ceph cluster to be ready..."
+          for i in {1..60}; do
+            if docker exec ceph-mon ceph -s 2>/dev/null | grep -q "HEALTH_OK\|HEALTH_WARN"; then
+              echo "Ceph cluster is ready!"
+              docker exec ceph-mon ceph -s
+              break
+            fi
+            [ $i -eq 60 ] && { echo "Ceph failed to start"; docker logs ceph-mon; exit 1; }
+            sleep 3
+          done
+
+          # Extract ceph.conf and keyring to a temporary location for tests
+          mkdir -p "$CEPH_CONFIG_DIR"
+          docker exec ceph-mon cat /etc/ceph/ceph.conf > "$CEPH_CONFIG_DIR/ceph.conf"
+          docker exec ceph-mon cat /etc/ceph/ceph.client.admin.keyring > "$CEPH_CONFIG_DIR/ceph.client.admin.keyring"
+          chmod 644 "$CEPH_CONFIG_DIR/ceph.conf" "$CEPH_CONFIG_DIR/ceph.client.admin.keyring"
+
+          # Add keyring path to [global] section of ceph.conf so tests can find it
+          sed -i '/^\[global\]/a keyring = '"$CEPH_CONFIG_DIR"'/ceph.client.admin.keyring' "$CEPH_CONFIG_DIR/ceph.conf"
+          echo "Updated ceph.conf with keyring path"
+
+      - name: Verify Ceph Cluster
+        run: |
+          docker exec ceph-mon ceph --version
+          docker exec ceph-mon ceph status
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run msgr2 Integration Tests
+        run: cargo test -p msgr2 --tests -- --ignored --nocapture
+        env:
+          RUST_BACKTRACE: full
+          RUST_LOG: debug
+
+      - name: Cleanup
+        if: always()
+        run: |
+          cd docker
+          docker compose -f docker-compose.ceph.yml down -v
