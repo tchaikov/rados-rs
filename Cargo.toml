@@ -8,6 +8,7 @@ members = [
     "crates/msgr2",
     "crates/monclient",
     "crates/osdclient",
+    "crates/dencoder",
 ]
 resolver = "3"
 

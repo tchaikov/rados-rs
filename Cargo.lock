@@ -444,6 +444,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dencoder"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "crush",
+ "denc",
+ "osdclient",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
