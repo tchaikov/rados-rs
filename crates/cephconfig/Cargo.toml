@@ -1,0 +1,10 @@
+[package]
+name = "cephconfig"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+
+[dev-dependencies]

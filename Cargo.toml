@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/denc-macros"]
+members = ["crates/denc-macros", "crates/cephconfig"]
 resolver = "3"
 
 [workspace.package]
@@ -8,3 +8,4 @@ edition = "2024"
 rust-version = "1.88"
 
 [workspace.dependencies]
+thiserror = "1.0"
