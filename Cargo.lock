@@ -132,23 +132,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "auth"
-version = "0.1.0"
-dependencies = [
- "aes",
- "base64",
- "bytes",
- "cbc",
- "denc",
- "hex",
- "rand",
- "serde",
- "serde_json",
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "autocfg"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -224,13 +207,6 @@ dependencies = [
  "jobserver",
  "libc",
  "shlex",
-]
-
-[[package]]
-name = "cephconfig"
-version = "0.1.0"
-dependencies = [
- "thiserror",
 ]
 
 [[package]]
@@ -417,20 +393,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
-name = "crush"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "criterion",
- "denc",
- "num_enum",
- "serde",
- "thiserror",
- "tracing",
-]
-
-[[package]]
 name = "crypto-common"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -452,19 +414,6 @@ dependencies = [
 
 [[package]]
 name = "dashmap"
-version = "5.5.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
-dependencies = [
- "cfg-if",
- "hashbrown 0.14.5",
- "lock_api",
- "once_cell",
- "parking_lot_core",
-]
-
-[[package]]
-name = "dashmap"
 version = "6.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5041cc499144891f3790297212f32a74fb938e5136a14943f338ef9e0ae276cf"
@@ -482,43 +431,6 @@ name = "data-encoding"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
-
-[[package]]
-name = "denc"
-version = "0.1.0"
-dependencies = [
- "bitflags",
- "bytes",
- "criterion",
- "denc-macros",
- "hex",
- "paste",
- "serde",
- "serde_json",
- "thiserror",
- "zerocopy",
-]
-
-[[package]]
-name = "denc-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
-name = "dencoder"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "crush",
- "denc",
- "osdclient",
- "serde",
- "serde_json",
-]
 
 [[package]]
 name = "digest"
@@ -574,6 +486,19 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "examples"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "clap",
+ "rados",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]
@@ -1196,66 +1121,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "monclient"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "auth",
- "bytes",
- "cephconfig",
- "dashmap 6.1.0",
- "denc",
- "futures",
- "hex",
- "hickory-resolver",
- "hostname",
- "msgr2",
- "rand",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "msgr2"
-version = "0.1.0"
-dependencies = [
- "aes-gcm",
- "async-trait",
- "auth",
- "bitflags",
- "bytes",
- "cephconfig",
- "crc32c",
- "criterion",
- "denc",
- "flate2",
- "hex",
- "hmac",
- "lz4",
- "num_enum",
- "rand",
- "serde",
- "sha2",
- "snap",
- "tempfile",
- "thiserror",
- "tokio",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "zerocopy",
- "zstd",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1318,40 +1183,6 @@ name = "opaque-debug"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
-
-[[package]]
-name = "osdclient"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "auth",
- "bitflags",
- "bytes",
- "cephconfig",
- "crc32c",
- "criterion",
- "crush",
- "dashmap 5.5.3",
- "denc",
- "futures",
- "hex",
- "libc",
- "lru",
- "monclient",
- "msgr2",
- "rand",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-test",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
- "zerocopy",
-]
 
 [[package]]
 name = "parking_lot"
@@ -1511,16 +1342,54 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 name = "rados"
 version = "0.1.0"
 dependencies = [
+ "aes",
+ "aes-gcm",
  "anyhow",
+ "async-trait",
+ "base64",
+ "bitflags",
  "bytes",
- "cephconfig",
+ "cbc",
  "clap",
- "monclient",
- "msgr2",
- "osdclient",
+ "crc32c",
+ "criterion",
+ "dashmap",
+ "flate2",
+ "futures",
+ "hex",
+ "hickory-resolver",
+ "hmac",
+ "hostname",
+ "libc",
+ "lru",
+ "lz4",
+ "num_enum",
+ "paste",
+ "rados-denc-macros",
+ "rand",
+ "serde",
+ "serde_json",
+ "sha2",
+ "snap",
+ "tempfile",
+ "thiserror",
  "tokio",
+ "tokio-test",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "zerocopy",
+ "zstd",
+]
+
+[[package]]
+name = "rados-denc-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

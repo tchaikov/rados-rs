@@ -1,0 +1,20 @@
+[package]
+name = "examples"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+rados = { path = "../rados", version = "0.1.0" }
+clap = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+bytes = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[[example]]
+name = "rados"
+path = "rados.rs"

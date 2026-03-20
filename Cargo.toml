@@ -1,15 +1,8 @@
 [workspace]
 members = [
-    "crates/denc-macros",
-    "crates/cephconfig",
-    "crates/denc",
-    "crates/auth",
-    "crates/crush",
-    "crates/msgr2",
-    "crates/monclient",
-    "crates/osdclient",
-    "crates/dencoder",
-    "crates/rados",
+    "rados",
+    "rados-denc-macros",
+    "examples",
 ]
 resolver = "3"
 
@@ -39,3 +32,4 @@ crc32c = "0.6"
 hmac = "0.12"
 sha2 = "0.10"
 futures = "0.3"
+clap = { version = "4.5", features = ["derive", "env"] }

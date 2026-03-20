@@ -109,10 +109,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build dencoder
-        run: cargo build -p dencoder
+        run: cargo build -p rados --bin dencoder
 
       - name: Run corpus comparison test
         env:
           CORPUS_ROOT: /tmp/ceph-object-corpus
           CORPUS_VERSION: ${{ matrix.corpus_version }}
-        run: cargo test -p dencoder --test corpus_comparison_test -- --ignored --nocapture
+        run: cargo test -p rados --test dencoder_corpus_comparison_test -- --ignored --nocapture

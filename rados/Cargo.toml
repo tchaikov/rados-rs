@@ -1,0 +1,89 @@
+[package]
+name = "rados"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "Native Rust RADOS client library and tools for Ceph"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "dencoder"
+path = "src/bin/dencoder.rs"
+
+[[bench]]
+name = "crush_mapping"
+harness = false
+
+[[bench]]
+name = "encoding"
+harness = false
+
+[[bench]]
+name = "message_encoding"
+harness = false
+
+[[bench]]
+name = "connection"
+harness = false
+
+[[bench]]
+name = "operations"
+harness = false
+
+[[bench]]
+name = "concurrent"
+harness = false
+
+[[bench]]
+name = "placement"
+harness = false
+
+[dependencies]
+bytes = { workspace = true }
+thiserror = { workspace = true }
+paste = "1.0"
+serde = { workspace = true }
+serde_json = { workspace = true }
+rados-denc-macros = { path = "../rados-denc-macros", version = "0.1.0" }
+zerocopy = { version = "0.8", features = ["derive"] }
+bitflags = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+tracing = { workspace = true }
+hex = "0.4"
+aes = "0.8"
+cbc = { version = "0.1", features = ["std"] }
+tokio = { workspace = true }
+tokio-util = "0.7"
+async-trait = { workspace = true }
+anyhow = { workspace = true }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+hostname = "0.3"
+dashmap = "6.0"
+hickory-resolver = { version = "0.24", default-features = false, features = ["tokio-runtime", "system-config"] }
+crc32c = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+aes-gcm = "0.10"
+num_enum = { workspace = true }
+snap = "1.1"
+zstd = "0.13"
+lz4 = "1.24"
+flate2 = "1.0"
+libc = "0.2"
+lru = "0.12"
+futures = { workspace = true }
+clap = { workspace = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+tokio-test = "0.4"
+criterion = { version = "0.5", features = ["html_reports"] }
+tempfile = "3"
+rand = { workspace = true }
+serde_json = { workspace = true }
+hex = "0.4"
+anyhow = { workspace = true }
+uuid = { version = "1.0", features = ["v4"] }

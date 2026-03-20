@@ -77,15 +77,7 @@ jobs:
 
           VERSION="$(awk -F'"' '/^version = / { print $2; exit }' Cargo.toml)"
           CRATES=(
-            denc-macros
-            cephconfig
-            denc
-            auth
-            crush
-            msgr2
-            monclient
-            osdclient
-            dencoder
+            rados-denc-macros
             rados
           )
 

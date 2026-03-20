@@ -41,11 +41,9 @@ jobs:
 
       - name: Start Ceph cluster
         run: |
-          # Use existing docker-compose setup
           cd docker
           docker compose -f docker-compose.ceph.yml up -d
 
-          # Wait for Ceph to be ready
           echo "Waiting for Ceph cluster to be ready..."
           for i in {1..60}; do
             if docker exec ceph-mon ceph -s 2>/dev/null | grep -q "HEALTH_OK\|HEALTH_WARN"; then
@@ -57,13 +55,11 @@ jobs:
             sleep 3
           done
 
-          # Extract ceph.conf and keyring to a temporary location for tests
           mkdir -p "$CEPH_CONFIG_DIR"
           docker exec ceph-mon cat /etc/ceph/ceph.conf > "$CEPH_CONFIG_DIR/ceph.conf"
           docker exec ceph-mon cat /etc/ceph/ceph.client.admin.keyring > "$CEPH_CONFIG_DIR/ceph.client.admin.keyring"
           chmod 644 "$CEPH_CONFIG_DIR/ceph.conf" "$CEPH_CONFIG_DIR/ceph.client.admin.keyring"
 
-          # Add keyring path to [global] section of ceph.conf so tests can find it
           sed -i '/^\[global\]/a keyring = '"$CEPH_CONFIG_DIR"'/ceph.client.admin.keyring' "$CEPH_CONFIG_DIR/ceph.conf"
           echo "Updated ceph.conf with keyring path"
 
@@ -85,19 +81,25 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run msgr2 Integration Tests
-        run: cargo test -p msgr2 --tests -- --ignored --nocapture
+        run: |
+          for test in msgr2_connection_tests msgr2_server_accept_test; do
+            cargo test -p rados --test "$test" -- --ignored --nocapture
+          done
         env:
           RUST_BACKTRACE: full
           RUST_LOG: debug
 
       - name: Run monclient Integration Tests
-        run: cargo test -p monclient --tests -- --ignored --test-threads=1 --nocapture
+        run: cargo test -p rados --test monclient_command_operations -- --ignored --test-threads=1 --nocapture
         env:
           RUST_BACKTRACE: full
           RUST_LOG: info
 
       - name: Run osdclient Integration Tests
-        run: cargo test -p osdclient --tests -- --ignored --nocapture
+        run: |
+          for test in osdclient_integration_test osdclient_object_io_test osdclient_pool_operations osdclient_rados_operations; do
+            cargo test -p rados --test "$test" -- --ignored --nocapture
+          done
         env:
           RUST_BACKTRACE: full
           RUST_LOG: info

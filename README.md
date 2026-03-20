@@ -11,68 +11,91 @@ A native Rust implementation of the RADOS (Reliable Autonomic Distributed Object
 - **OSD operations**: Write, read, stat, delete on RADOS objects
 - **Ceph Octopus+**: Supports Octopus (v15, March 2020) and all later releases
 
-## Architecture
+## Workspace layout
 
-The workspace contains the following crates:
+The workspace now keeps only the main public crate and the proc-macro support crate as published packages:
 
-| Crate | Description |
+| Package | Description |
 |---|---|
-| `denc` | Ceph DENC encoding/decoding trait and primitive types |
-| `denc-macros` | Derive macros (`ZeroCopyDencode`) for zero-copy POD types |
-| `auth` | CephX authentication protocol, keyring parsing, service tickets |
-| `cephconfig` | `ceph.conf` parser |
-| `crush` | CRUSH map decoding and object placement |
-| `msgr2` | Messenger protocol v2 — framing, crypto, session negotiation |
-| `monclient` | Monitor client — MonMap, OSDMap, cluster commands |
-| `osdclient` | OSD client — object read/write/stat/delete |
-| `dencoder` | CLI tool: decode and inspect Ceph binary corpus files |
-| `rados` | CLI tool: RADOS object operations (put/get/stat/rm/ls) |
+| `rados` | Main public library crate. Contains the former `denc`, `auth`, `cephconfig`, `crush`, `msgr2`, `monclient`, and `osdclient` crates as internal modules, plus the internal `dencoder` binary. |
+| `rados-denc-macros` | Proc-macro crate providing DENC derive macros. |
+| `examples` | Non-published root examples package, including the `rados` CLI example. |
 
-## Quick Start
+Within `rados`, the main internal modules are:
 
-### `rados` CLI
+- `rados::denc`
+- `rados::auth`
+- `rados::cephconfig`
+- `rados::crush`
+- `rados::msgr2`
+- `rados::monclient`
+- `rados::osdclient`
+
+## Quick start
+
+### `rados` library
+
+```toml
+[dependencies]
+rados = { path = "rados" }
+```
+
+Start with `OSDClient`, `IoCtx`, `RadosObject`, and `list_objects_stream`, then drop down into `rados::monclient` or `rados::msgr2` when you need lower-level control.
+
+### `rados` CLI example
+
+The CLI moved out of the workspace crates into the root `examples` package:
 
 ```bash
 # Write an object from a local file
-cargo run -p rados -- -p mypool put myobject /path/to/file
+cargo run -p examples --example rados -- -p mypool put myobject /path/to/file
 
 # Read an object to stdout
-cargo run -p rados -- -p mypool get myobject -
+cargo run -p examples --example rados -- -p mypool get myobject -
 
 # Stat an object
-cargo run -p rados -- -p mypool stat myobject
+cargo run -p examples --example rados -- -p mypool stat myobject
 
 # Remove an object
-cargo run -p rados -- -p mypool rm myobject
+cargo run -p examples --example rados -- -p mypool rm myobject
 
 # List objects in a pool
-cargo run -p rados -- -p mypool ls
+cargo run -p examples --example rados -- -p mypool ls
 ```
 
-By default the `rados` binary reads `CEPH_CONF` (or `/etc/ceph/ceph.conf`). Pass `-c /path/to/ceph.conf` to override.
+By default the example reads `CEPH_CONF` (or `/etc/ceph/ceph.conf`). Pass `-c /path/to/ceph.conf` to override.
 
-### `dencoder` CLI
+### `dencoder` internal tool
 
-A Rust reimplementation of `ceph-dencoder` for inspecting binary corpus files:
+A Rust reimplementation of `ceph-dencoder` now lives inside the `rados` package:
 
 ```bash
 # Decode a binary corpus file and print as JSON
-cargo run -p dencoder -- type OSDMap import /path/to/corpus/file decode dump_json
+cargo run -p rados --bin dencoder -- type OSDMap import /path/to/corpus/file decode dump_json
 
 # List all supported types
-cargo run -p dencoder -- list_types
+cargo run -p rados --bin dencoder -- list_types
 ```
 
-## Integration Tests
+## Integration tests
 
 Integration tests require a running Ceph cluster. Point `CEPH_CONF` at your cluster config:
 
 ```bash
 export CEPH_CONF=/path/to/ceph.conf
 
-cargo test -p monclient --tests -- --ignored --nocapture
-cargo test -p osdclient  --tests -- --ignored --nocapture
-cargo test -p msgr2      --tests -- --ignored --nocapture
+cargo test -p rados --test msgr2_connection_tests -- --ignored --nocapture
+cargo test -p rados --test monclient_command_operations -- --ignored --test-threads=1 --nocapture
+cargo test -p rados --test osdclient_integration_test -- --ignored --nocapture
+cargo test -p rados --test osdclient_object_io_test -- --ignored --nocapture
+cargo test -p rados --test osdclient_pool_operations -- --ignored --nocapture
+cargo test -p rados --test osdclient_rados_operations -- --ignored --nocapture
+```
+
+For the dencoder corpus comparison test:
+
+```bash
+cargo test -p rados --test dencoder_corpus_comparison_test -- --ignored --nocapture
 ```
 
 A Docker-based single-node Ceph cluster for local development is available under `docker/`:
