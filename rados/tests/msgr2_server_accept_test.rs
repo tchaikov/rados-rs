@@ -3,8 +3,8 @@
 //! These tests verify that the server-side implementation can accept
 //! incoming connections and complete the msgr2 handshake.
 
-use rados::msgr2::ConnectionConfig;
 use rados::msgr2::Connection;
+use rados::msgr2::ConnectionConfig;
 use tokio::net::TcpListener;
 
 /// Test basic server-side connection acceptance

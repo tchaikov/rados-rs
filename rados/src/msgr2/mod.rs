@@ -33,11 +33,11 @@ pub use frames::{
 pub use header::MsgHeader;
 pub use map_channel::{MapMessage, MapReceiver, MapSender, map_channel};
 pub use message::{Message, MessagePriority, MessageType, MsgFooter};
+pub use priority_queue::PriorityQueue;
+pub use protocol::Connection;
 pub use revocation::{
     MessageHandle, MessageId, MessageStatus, RevocationManager, RevocationResult, RevocationStats,
 };
-pub use priority_queue::PriorityQueue;
-pub use protocol::Connection;
 pub use state_machine::StateKind;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use throttle::{MessageThrottle, ThrottleConfig, ThrottleStats};

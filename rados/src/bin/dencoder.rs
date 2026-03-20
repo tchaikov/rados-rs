@@ -19,9 +19,12 @@
 //!   list_types         - List all available types
 
 use bytes::Bytes;
-use rados::{Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode};
 use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
+use rados::{
+    Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError,
+    UTime, UuidD, VersionedEncode,
+};
 use serde::Serialize;
 use std::any::Any;
 use std::fmt;
