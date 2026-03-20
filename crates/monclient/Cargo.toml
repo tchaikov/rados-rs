@@ -3,6 +3,10 @@ name = "monclient"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Ceph monitor client implementation"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 tokio = { workspace = true }
@@ -21,10 +25,10 @@ futures = { workspace = true }
 dashmap = "6.0"
 
 # Internal dependencies
-msgr2 = { path = "../msgr2" }
-auth = { path = "../auth" }
-denc = { path = "../denc" }
-cephconfig = { path = "../cephconfig" }
+msgr2 = { path = "../msgr2", version = "0.1.0" }
+auth = { path = "../auth", version = "0.1.0" }
+denc = { path = "../denc", version = "0.1.0" }
+cephconfig = { path = "../cephconfig", version = "0.1.0" }
 hex = "0.4"
 
 # DNS SRV resolution

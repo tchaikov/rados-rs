@@ -3,11 +3,15 @@ name = "msgr2"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Ceph messenger v2 protocol implementation"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-denc = { path = "../denc" }
-auth = { path = "../auth" }
-cephconfig = { path = "../cephconfig" }
+denc = { path = "../denc", version = "0.1.0" }
+auth = { path = "../auth", version = "0.1.0" }
+cephconfig = { path = "../cephconfig", version = "0.1.0" }
 zerocopy = { version = "0.8", features = ["derive"] }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["net", "io-util", "rt-multi-thread", "macros"] }
@@ -32,7 +36,7 @@ flate2 = "1.0"
 
 [dev-dependencies]
 tempfile = "3"
-cephconfig = { path = "../cephconfig" }
+cephconfig = { path = "../cephconfig", version = "0.1.0" }
 criterion = { version = "0.5", features = ["html_reports"] }
 
 [[bench]]

@@ -3,6 +3,10 @@ name = "denc-macros"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Derive macros for denc zero-copy encoding types"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [lib]
 proc-macro = true

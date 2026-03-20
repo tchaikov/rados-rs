@@ -3,6 +3,10 @@ name = "denc"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+description = "Ceph DENC encoding and decoding primitives"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
 bytes = { workspace = true }
@@ -10,7 +14,7 @@ thiserror = { workspace = true }
 paste = "1.0"
 serde = { workspace = true }
 serde_json = { workspace = true }
-denc-macros = { path = "../denc-macros" }
+denc-macros = { path = "../denc-macros", version = "0.1.0" }
 zerocopy = { version = "0.8", features = ["derive"] }
 bitflags = { workspace = true }
 

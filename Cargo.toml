@@ -17,6 +17,9 @@ resolver = "3"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
+license = "MIT"
+repository = "https://github.com/tchaikov/rados-rs"
+homepage = "https://github.com/tchaikov/rados-rs"
 
 [workspace.dependencies]
 thiserror = "1.0"

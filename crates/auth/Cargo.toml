@@ -4,9 +4,12 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 description = "Authentication protocols implementation for Ceph clusters"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
 
 [dependencies]
-denc = { path = "../denc" }
+denc = { path = "../denc", version = "0.1.0" }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 base64 = { workspace = true }
