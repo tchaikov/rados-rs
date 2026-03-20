@@ -31,9 +31,12 @@ pub const CEPH_OSD_BACKOFF_OP_UNBLOCK: u8 = 3;
 
 /// Message priority levels (from include/msgr.h)
 /// Priority is stored in the message header, not the message payload
+#[allow(dead_code)]
 pub const CEPH_MSG_PRIO_LOW: i32 = 64;
 pub const CEPH_MSG_PRIO_DEFAULT: i32 = 127;
+#[allow(dead_code)]
 pub const CEPH_MSG_PRIO_HIGH: i32 = 196;
+#[allow(dead_code)]
 pub const CEPH_MSG_PRIO_HIGHEST: i32 = 255;
 
 /// Size of the ceph_osd_op union field (largest variant: extent = 3×u64 + u32)
@@ -163,6 +166,7 @@ impl MOSDOp {
 
 /// MOSDOpReply message - OSD to Client (message type 43)
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MOSDOpReply {
     pub object: ObjectId,
     pub pgid: StripedPgId,
@@ -183,7 +187,7 @@ impl MOSDOpReply {
     pub const COMPAT_VERSION: u16 = 2;
 
     /// Convert to OpResult
-    pub fn to_op_result(self) -> OpResult {
+    pub fn into_op_result(self) -> OpResult {
         OpResult {
             result: self.result,
             // Use user_version as the primary version - this is the object version
@@ -225,6 +229,7 @@ impl MOSDBackoff {
     pub const VERSION: u16 = 1;
 
     /// Message compat version (from MOSDBackoff.h COMPAT_VERSION)
+    #[allow(dead_code)]
     pub const COMPAT_VERSION: u16 = 1;
 
     /// Create a new MOSDBackoff message

@@ -58,6 +58,7 @@ const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 /// Following Ceph pattern for explicit connection state tracking.
 /// Provides better observability and clearer semantics than implicit state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum ConnectionState {
     /// Initial state - not yet connected
     Disconnected,
@@ -98,7 +99,6 @@ struct IoTaskContext {
 }
 
 // Re-export BackoffEntry for backward compatibility
-pub use crate::osdclient::backoff::BackoffEntry as OSDBackoff;
 
 /// Per-OSD connection and request tracking
 pub struct OSDSession {
@@ -136,6 +136,7 @@ pub struct OSDSession {
 }
 
 /// Tracking information for a pending operation
+#[allow(dead_code)]
 pub struct PendingOp {
     pub tid: u64,
     pub reqid: RequestId,
@@ -450,11 +451,13 @@ impl OSDSession {
     // ===========================================================================
 
     /// Check if this session has a pending operation with the given tid
+    #[allow(dead_code)]
     pub async fn has_pending_op(&self, tid: u64) -> bool {
         self.pending_ops.contains_key(&tid)
     }
 
     /// Get a clone of pending_ops for iteration (used by OSDClient for message routing)
+    #[allow(dead_code)]
     pub fn pending_ops(&self) -> Arc<DashMap<u64, PendingOp>> {
         Arc::clone(&self.pending_ops)
     }
@@ -714,7 +717,7 @@ impl OSDSession {
         }
 
         // Normal completion
-        let result = reply.to_op_result();
+        let result = reply.into_op_result();
         let _ = pending_op.result_tx.send(Ok(result));
         None
     }
@@ -970,6 +973,7 @@ impl OSDSession {
     ///
     /// Provides explicit state information for observability and debugging.
     /// Following Ceph pattern for explicit connection state tracking.
+    #[allow(dead_code)]
     pub async fn connection_state(&self) -> ConnectionState {
         self.session_info.read().await.conn_state
     }

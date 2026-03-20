@@ -158,6 +158,7 @@ pub struct StateMachine {
     last_keepalive_ack: Option<std::time::Instant>,
 }
 
+#[allow(dead_code)]
 impl StateMachine {
     /// Create a new state machine for client connection
     pub fn new_client(config: crate::msgr2::ConnectionConfig) -> Self {

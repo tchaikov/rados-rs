@@ -70,6 +70,7 @@ pub struct BackoffTracker {
     entries: BTreeMap<BackoffKey, BackoffEntry>,
 }
 
+#[allow(dead_code)]
 impl BackoffTracker {
     /// Create a new empty backoff tracker
     pub fn new() -> Self {
