@@ -42,8 +42,8 @@ pub use pg_nls_response::{ListObjectImpl, PgNlsResponse};
 pub use pgmap_types::{ObjectstorePerfStat, PoolStat};
 pub use snapshot::SnapId;
 pub use types::{
-    OSDOp, ObjectId, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult, SparseExtent,
-    SparseReadResult, StatResult, StripedPgId, WriteResult,
+    OSDOp, ObjectId, ObjectLocator, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult,
+    SparseExtent, SparseReadResult, StatResult, StripedPgId, WriteResult,
 };
 
 // Re-export Result type alias from error module

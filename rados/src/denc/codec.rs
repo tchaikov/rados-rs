@@ -565,26 +565,26 @@ pub trait VersionedEncode: Sized {
 #[macro_export]
 macro_rules! impl_denc_for_versioned {
     ($type:ty) => {
-        impl $crate::denc::codec::Denc for $type {
+        impl $crate::Denc for $type {
             const USES_VERSIONING: bool = true;
 
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
                 features: u64,
-            ) -> std::result::Result<(), $crate::denc::error::RadosError> {
-                <Self as $crate::denc::codec::VersionedEncode>::encode_versioned(self, buf, features)
+            ) -> std::result::Result<(), $crate::RadosError> {
+                <Self as $crate::VersionedEncode>::encode_versioned(self, buf, features)
             }
 
             fn decode<B: bytes::Buf>(
                 buf: &mut B,
                 features: u64,
-            ) -> std::result::Result<Self, $crate::denc::error::RadosError> {
-                <Self as $crate::denc::codec::VersionedEncode>::decode_versioned(buf, features)
+            ) -> std::result::Result<Self, $crate::RadosError> {
+                <Self as $crate::VersionedEncode>::decode_versioned(buf, features)
             }
 
             fn encoded_size(&self, features: u64) -> Option<usize> {
-                <Self as $crate::denc::codec::VersionedEncode>::encoded_size_versioned(self, features)
+                <Self as $crate::VersionedEncode>::encoded_size_versioned(self, features)
             }
         }
     };

@@ -10,7 +10,7 @@
 
 pub mod auth;
 pub mod cephconfig;
-pub mod crush;
+pub(crate) mod crush;
 pub mod denc;
 pub mod monclient;
 pub mod msgr2;
@@ -27,8 +27,11 @@ pub use denc::{
     HObject, HasEncodingMetadata, MonCephRelease, MonFeature, MonInfo, MonMap, OsdId, Padding,
     PoolId, RadosError, SIGNIFICANT_FEATURES, SNAP_DIR, SNAP_HEAD, StructVDenc, UTime, UuidD,
     Version, VersionedDenc, VersionedEncode, ZeroCopyDencode, encode_with_capacity,
-    get_significant_features, has_feature, has_significant_feature, zero_copy, zerocopy,
+    get_significant_features, has_feature, has_significant_feature,
 };
+// Submodule re-exports required for macro hygiene: ZeroCopyDencode derive generates
+// `$crate::zero_copy::ZeroCopyDencode` and `$crate::zerocopy::{IntoBytes,FromBytes}`.
+pub use denc::{zero_copy, zerocopy};
 pub use monclient::{AuthConfig, MonClient, MonClientConfig, MonClientError, PoolOpResult};
 pub use msgr2::{
     MapMessage, MapReceiver, MapSender, MessageThrottle, Msgr2Error, ThrottleConfig, map_channel,

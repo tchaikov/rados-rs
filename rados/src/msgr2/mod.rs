@@ -7,19 +7,19 @@
 pub mod banner;
 pub mod ceph_message;
 pub mod compression;
-pub mod crypto;
+pub(crate) mod crypto;
 pub mod error;
 pub mod frames;
 pub mod header;
-pub mod io_loop;
+pub(crate) mod io_loop;
 pub mod map_channel;
 pub mod message;
 pub(crate) mod phase;
 pub mod priority_queue;
-pub mod protocol;
+pub(crate) mod protocol;
 pub mod revocation;
 pub mod split;
-pub mod state_machine;
+pub(crate) mod state_machine;
 pub mod throttle;
 
 // Re-export public API

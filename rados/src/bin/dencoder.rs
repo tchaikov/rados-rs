@@ -139,7 +139,7 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
 
         // Level 3: Complex types
         "pg_merge_meta_t" => Some(type_info_denc::<PgMergeMeta>()),
-        "object_locator_t" => Some(type_info_denc::<rados::crush::ObjectLocator>()),
+        "object_locator_t" => Some(type_info_denc::<rados::osdclient::ObjectLocator>()),
         "objectstore_perf_stat_t" => Some(type_info_denc::<ObjectstorePerfStat>()),
         "pool_stat_t" => Some(type_info_denc::<PoolStat>()),
         "hobject_t" => Some(type_info_denc::<HObject>()),
