@@ -10,7 +10,7 @@
 
 pub mod auth;
 pub mod cephconfig;
-pub(crate) mod crush;
+pub mod crush;
 pub mod denc;
 pub mod monclient;
 pub mod msgr2;

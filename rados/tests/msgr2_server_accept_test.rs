@@ -4,7 +4,7 @@
 //! incoming connections and complete the msgr2 handshake.
 
 use rados::msgr2::ConnectionConfig;
-use rados::msgr2::protocol::Connection;
+use rados::msgr2::Connection;
 use tokio::net::TcpListener;
 
 /// Test basic server-side connection acceptance
@@ -78,11 +78,11 @@ async fn test_server_accept_basic() {
     // Both should be in Ready state
     assert_eq!(
         server_conn.current_state_kind(),
-        rados::msgr2::state_machine::StateKind::Ready
+        rados::msgr2::StateKind::Ready
     );
     assert_eq!(
         client_conn.current_state_kind(),
-        rados::msgr2::state_machine::StateKind::Ready
+        rados::msgr2::StateKind::Ready
     );
 
     tracing::info!("✓ Test passed: Server and client both reached Ready state");
@@ -158,11 +158,11 @@ async fn test_server_accept_with_auth() {
     // Verify both connections are in Ready state
     assert_eq!(
         server_conn.current_state_kind(),
-        rados::msgr2::state_machine::StateKind::Ready
+        rados::msgr2::StateKind::Ready
     );
     assert_eq!(
         client_conn.current_state_kind(),
-        rados::msgr2::state_machine::StateKind::Ready
+        rados::msgr2::StateKind::Ready
     );
 
     tracing::info!("✓ Test passed: Server and client both reached Ready state with Cephx auth");

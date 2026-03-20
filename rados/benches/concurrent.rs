@@ -1,5 +1,5 @@
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
-use rados::osdclient::messages::MOSDOp;
+use rados::osdclient::MOSDOp;
 use rados::osdclient::types::{OSDOp, ObjectId, RequestId, StripedPgId};
 use std::sync::Arc;
 use tokio::runtime::Runtime;

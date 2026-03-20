@@ -21,11 +21,11 @@ use crate::msgr2::{
     state_machine::StateMachine,
 };
 
-pub mod auth;
-pub mod compression;
-pub mod hello;
-pub mod session;
-pub mod sign;
+pub(crate) mod auth;
+pub(crate) mod compression;
+pub(crate) mod hello;
+pub(crate) mod session;
+pub(crate) mod sign;
 
 // ── Core types ───────────────────────────────────────────────────────────────
 

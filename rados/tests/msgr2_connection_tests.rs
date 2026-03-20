@@ -18,7 +18,7 @@
 //! Authentication settings are read from ceph.conf automatically.
 //!
 
-use rados::msgr2::protocol::Connection;
+use rados::msgr2::Connection;
 use rados::msgr2::{AuthMethod, ConnectionConfig};
 use std::env;
 use std::net::SocketAddr;

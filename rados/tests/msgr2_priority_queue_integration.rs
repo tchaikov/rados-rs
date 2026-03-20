@@ -9,7 +9,7 @@ use rados::msgr2::message::{CEPH_MSG_PING, Message, MessagePriority};
 
 #[test]
 fn test_priority_queue_basic_ordering() {
-    let mut queue = rados::msgr2::protocol::PriorityQueue::new();
+    let mut queue = rados::msgr2::PriorityQueue::new();
 
     // Simulate a scenario where we have bulk data operations
     // and heartbeat messages in the queue
@@ -37,7 +37,7 @@ fn test_priority_queue_basic_ordering() {
 
 #[test]
 fn test_priority_queue_mixed_priorities() {
-    let mut queue = rados::msgr2::protocol::PriorityQueue::new();
+    let mut queue = rados::msgr2::PriorityQueue::new();
 
     // Create messages with all three priority levels
     let low_msg = Message::new(1, Bytes::from("low")).with_priority(MessagePriority::Low);
@@ -57,7 +57,7 @@ fn test_priority_queue_mixed_priorities() {
 
 #[test]
 fn test_priority_queue_maintains_fifo_within_priority() {
-    let mut queue = rados::msgr2::protocol::PriorityQueue::new();
+    let mut queue = rados::msgr2::PriorityQueue::new();
 
     // Add multiple normal priority messages
     for i in 0..10 {
@@ -88,7 +88,7 @@ fn test_priority_queue_maintains_fifo_within_priority() {
 
 #[test]
 fn test_priority_queue_iter_priority_order() {
-    let mut queue = rados::msgr2::protocol::PriorityQueue::new();
+    let mut queue = rados::msgr2::PriorityQueue::new();
 
     // Add messages in various priorities
     queue.push_back(Message::new(1, Bytes::new()).with_priority(MessagePriority::Low));
@@ -104,7 +104,7 @@ fn test_priority_queue_iter_priority_order() {
 
 #[test]
 fn test_heartbeat_not_delayed_by_bulk() {
-    let mut queue = rados::msgr2::protocol::PriorityQueue::new();
+    let mut queue = rados::msgr2::PriorityQueue::new();
 
     // Simulate 100 bulk data messages queued
     for i in 0..100 {

@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use rados::msgr2::ceph_message::CephMessagePayload;
-use rados::osdclient::messages::MOSDOp;
+use rados::osdclient::MOSDOp;
 use rados::osdclient::types::{OSDOp, ObjectId, RequestId, StripedPgId};
 
 fn bench_osdop_read(c: &mut Criterion) {

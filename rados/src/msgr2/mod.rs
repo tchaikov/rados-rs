@@ -18,7 +18,7 @@ pub(crate) mod phase;
 pub(crate) mod priority_queue;
 pub(crate) mod protocol;
 pub mod revocation;
-pub mod split;
+pub(crate) mod split;
 pub(crate) mod state_machine;
 pub mod throttle;
 
@@ -36,7 +36,9 @@ pub use message::{Message, MessagePriority, MessageType, MsgFooter};
 pub use revocation::{
     MessageHandle, MessageId, MessageStatus, RevocationManager, RevocationResult, RevocationStats,
 };
-pub use split::{RecvHalf, SendHalf, SharedState};
+pub use priority_queue::PriorityQueue;
+pub use protocol::Connection;
+pub use state_machine::StateKind;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use throttle::{MessageThrottle, ThrottleConfig, ThrottleStats};
 

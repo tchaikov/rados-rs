@@ -19,14 +19,8 @@
 //!   list_types         - List all available types
 
 use bytes::Bytes;
-use rados::denc::entity_addr::EntityAddr;
-use rados::denc::error::RadosError;
-use rados::denc::hobject::HObject;
-use rados::denc::monmap::*;
-use rados::denc::{Denc, VersionedEncode};
-use rados::denc::{EVersion, UTime, UuidD};
-use rados::osdclient::PgNlsResponse;
-use rados::osdclient::osdmap::*;
+use rados::{Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode};
+use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use serde::Serialize;
 use std::any::Any;

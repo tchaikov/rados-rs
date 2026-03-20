@@ -17,7 +17,7 @@ pub mod error;
 pub mod ioctx;
 pub mod list_stream;
 pub mod lock;
-pub mod messages;
+pub(crate) mod messages;
 pub mod object_io;
 pub mod operation;
 pub mod osdmap;
@@ -45,6 +45,8 @@ pub use types::{
     OSDOp, ObjectId, ObjectLocator, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult,
     SparseExtent, SparseReadResult, StatResult, StripedPgId, WriteResult,
 };
+
+pub use messages::MOSDOp;
 
 // Re-export Result type alias from error module
 pub use error::Result;
