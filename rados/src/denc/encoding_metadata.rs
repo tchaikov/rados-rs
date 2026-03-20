@@ -82,9 +82,9 @@ pub trait HasEncodingMetadata {
 #[macro_export]
 macro_rules! mark_simple_encoding {
     ($type:ty) => {
-        impl $crate::encoding_metadata::HasEncodingMetadata for $type {
-            fn encoding_metadata() -> $crate::encoding_metadata::EncodingMetadata {
-                $crate::encoding_metadata::EncodingMetadata::SIMPLE
+        impl $crate::denc::encoding_metadata::HasEncodingMetadata for $type {
+            fn encoding_metadata() -> $crate::denc::encoding_metadata::EncodingMetadata {
+                $crate::denc::encoding_metadata::EncodingMetadata::SIMPLE
             }
         }
     };
@@ -108,9 +108,9 @@ macro_rules! mark_simple_encoding {
 #[macro_export]
 macro_rules! mark_versioned_encoding {
     ($type:ty) => {
-        impl $crate::encoding_metadata::HasEncodingMetadata for $type {
-            fn encoding_metadata() -> $crate::encoding_metadata::EncodingMetadata {
-                $crate::encoding_metadata::EncodingMetadata::VERSIONED
+        impl $crate::denc::encoding_metadata::HasEncodingMetadata for $type {
+            fn encoding_metadata() -> $crate::denc::encoding_metadata::EncodingMetadata {
+                $crate::denc::encoding_metadata::EncodingMetadata::VERSIONED
             }
         }
     };
@@ -134,9 +134,9 @@ macro_rules! mark_versioned_encoding {
 #[macro_export]
 macro_rules! mark_feature_dependent_encoding {
     ($type:ty) => {
-        impl $crate::encoding_metadata::HasEncodingMetadata for $type {
-            fn encoding_metadata() -> $crate::encoding_metadata::EncodingMetadata {
-                $crate::encoding_metadata::EncodingMetadata::FEATURE_DEPENDENT
+        impl $crate::denc::encoding_metadata::HasEncodingMetadata for $type {
+            fn encoding_metadata() -> $crate::denc::encoding_metadata::EncodingMetadata {
+                $crate::denc::encoding_metadata::EncodingMetadata::FEATURE_DEPENDENT
             }
         }
     };
