@@ -219,12 +219,9 @@ fn check_ceph_dencoder() -> Result<PathBuf, String> {
 fn get_rust_dencoder() -> Result<PathBuf, String> {
     // Try to find the dencoder binary
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let debug_path = manifest_dir
-        .parent()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join("target/debug/dencoder");
+    // manifest_dir is the package root (rados/); one level up is the workspace root.
+    let workspace_root = manifest_dir.parent().unwrap();
+    let debug_path = workspace_root.join("target/debug/dencoder");
 
     if debug_path.exists() {
         return Ok(debug_path);
@@ -234,7 +231,7 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
     eprintln!("Building dencoder...");
     let output = Command::new("cargo")
         .args(["build", "--bin", "dencoder"])
-        .current_dir(manifest_dir.parent().unwrap().parent().unwrap())
+        .current_dir(workspace_root)
         .output()
         .map_err(|e| format!("Failed to build dencoder: {}", e))?;
 
