@@ -12,7 +12,7 @@
 
 pub(crate) mod backoff;
 pub mod client;
-pub mod denc_types;
+pub(crate) mod denc_types;
 pub mod error;
 pub mod ioctx;
 pub mod list_stream;
@@ -23,7 +23,7 @@ pub mod operation;
 pub mod osdmap;
 pub mod pg_nls_response;
 pub mod pgmap_types;
-pub mod session;
+pub(crate) mod session;
 pub mod snapshot;
 pub(crate) mod throttle;
 pub(crate) mod tracker;

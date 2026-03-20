@@ -27,7 +27,7 @@ use rados::denc::{Denc, VersionedEncode};
 use rados::denc::{EVersion, UTime, UuidD};
 use rados::osdclient::PgNlsResponse;
 use rados::osdclient::osdmap::*;
-use rados::osdclient::{OSDMap, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
+use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use serde::Serialize;
 use std::any::Any;
 use std::fmt;
@@ -139,7 +139,7 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
 
         // Level 3: Complex types
         "pg_merge_meta_t" => Some(type_info_denc::<PgMergeMeta>()),
-        "object_locator_t" => Some(type_info_denc::<rados::osdclient::ObjectLocator>()),
+        "object_locator_t" => Some(type_info_denc::<ObjectLocator>()),
         "objectstore_perf_stat_t" => Some(type_info_denc::<ObjectstorePerfStat>()),
         "pool_stat_t" => Some(type_info_denc::<PoolStat>()),
         "hobject_t" => Some(type_info_denc::<HObject>()),

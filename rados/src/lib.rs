@@ -38,8 +38,8 @@ pub use msgr2::{
 };
 pub use osdclient::{
     BuiltOp, IoCtx, LockFlags, LockRequest, LockType, OSDClient, OSDClientConfig, OSDClientError,
-    OSDMap, OSDMapIncremental, ObjectId, ObjectstorePerfStat, OpBuilder, OpCode, OpState, OpTarget,
-    OsdOpFlags, PgMergeMeta, PgNlsResponse, PgPool, PoolInfo, PoolSnapInfo, PoolStat, RadosObject,
-    ReadResult, SnapId, SparseExtent, SparseReadResult, StatResult, StripedPgId, UnlockRequest,
-    WriteResult, list_objects_stream,
+    OSDMap, OSDMapIncremental, ObjectId, ObjectLocator, ObjectstorePerfStat, OpBuilder, OpCode,
+    OpState, OpTarget, OsdOpFlags, PgMergeMeta, PgNlsResponse, PgPool, PoolInfo, PoolSnapInfo,
+    PoolStat, RadosObject, ReadResult, SnapId, SparseExtent, SparseReadResult, StatResult,
+    StripedPgId, UnlockRequest, WriteResult, list_objects_stream,
 };

@@ -15,7 +15,7 @@ pub(crate) mod io_loop;
 pub mod map_channel;
 pub mod message;
 pub(crate) mod phase;
-pub mod priority_queue;
+pub(crate) mod priority_queue;
 pub(crate) mod protocol;
 pub mod revocation;
 pub mod split;
