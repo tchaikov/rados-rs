@@ -14,12 +14,12 @@ use crate::denc::{Denc, VersionedEncode};
 
 use crate::osdclient::backoff::BackoffEntry;
 use crate::osdclient::error::{OSDClientError, Result};
-use crate::osdclient::messages::{HASH_CALCULATE_FROM_NAME, MOSDOp};
+use crate::osdclient::messages::MOSDOp;
 use crate::osdclient::session::OSDSession;
 use crate::osdclient::throttle::Throttle;
 use crate::osdclient::tracker::{Tracker, TrackerConfig};
 use crate::osdclient::types::{
-    ListObjectEntry, ListResult, OSDOp, ObjectId, OsdOpFlags, PoolFlags, ReadResult,
+    ListObjectEntry, ListResult, OSDOp, ObjectId, ObjectLocator, OsdOpFlags, PoolFlags, ReadResult,
     RequestRedirect, StatResult, StripedPgId, WriteResult, calc_op_budget,
 };
 
@@ -454,12 +454,7 @@ impl OSDClient {
             .ok_or(OSDClientError::PoolNotFound(pool))?;
 
         // Create object locator
-        let locator = crate::crush::placement::ObjectLocator {
-            pool_id: pool,
-            key: String::new(),
-            namespace: String::new(),
-            hash: HASH_CALCULATE_FROM_NAME,
-        };
+        let locator = ObjectLocator::new(pool);
 
         // Get CRUSH map
         let crush_map = osdmap

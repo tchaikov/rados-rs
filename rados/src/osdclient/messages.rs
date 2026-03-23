@@ -5,7 +5,7 @@
 use crate::UTime;
 use crate::osdclient::osdmap::PgId;
 use crate::osdclient::types::{
-    OSDOp, ObjectId, OpReply, OpResult, RequestId, RequestRedirect, StripedPgId,
+    OSDOp, ObjectId, ObjectLocator, OpReply, OpResult, RequestId, RequestRedirect, StripedPgId,
 };
 
 use crate::msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
@@ -335,7 +335,7 @@ impl CephMessagePayload for MOSDOp {
 
         // 9. object_locator_t (using Denc encoding)
         // Note: hash=-1 means "calculate from object name" which is the normal case
-        let locator = crate::crush::ObjectLocator {
+        let locator = ObjectLocator {
             pool_id: self.object.pool,
             key: self.object.key.clone(),
             namespace: self.object.namespace.clone(),
