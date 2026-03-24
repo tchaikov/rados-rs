@@ -12,6 +12,10 @@ use crate::crush::types::CrushMap;
 use crate::denc::{Denc, FixedSize, RadosError, VersionedEncode};
 use bytes::{Buf, BufMut};
 
+/// Sentinel value for `ObjectLocator::hash` meaning "calculate hash from object name".
+/// Reference: linux/net/ceph/osd_client.c encode_request_partial()
+pub(crate) const HASH_CALCULATE_FROM_NAME: i64 = -1;
+
 /// Object locator information
 /// Matches C++ object_locator_t from ~/dev/ceph/src/osd/osd_types.h
 /// Contains pool ID, namespace, key, and hash for object placement
@@ -35,7 +39,7 @@ impl ObjectLocator {
             pool_id,
             key: String::new(),
             namespace: String::new(),
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         }
     }
 
@@ -45,7 +49,7 @@ impl ObjectLocator {
             pool_id,
             key: String::new(),
             namespace,
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         }
     }
 
@@ -55,7 +59,7 @@ impl ObjectLocator {
             pool_id,
             key,
             namespace: String::new(),
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         }
     }
 
@@ -84,7 +88,7 @@ impl Default for ObjectLocator {
             pool_id: u64::MAX,
             key: String::new(),
             namespace: String::new(),
-            hash: -1,
+            hash: HASH_CALCULATE_FROM_NAME,
         }
     }
 }

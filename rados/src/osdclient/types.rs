@@ -1125,10 +1125,8 @@ pub struct SparseReadResult {
 pub struct OpResult {
     /// Overall result code (0 = success)
     pub result: i32,
-    /// Object version
+    /// Object version (user_version from OSD reply)
     pub version: u64,
-    /// User version
-    pub user_version: u64,
     /// Per-operation results
     pub ops: Vec<OpReply>,
     /// Redirect information (for EC pools)

@@ -12,7 +12,6 @@
 use dashmap::DashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -66,8 +65,6 @@ pub(crate) enum ConnectionState {
     Connecting,
     /// Connection established and operational
     Connected,
-    /// Attempting to reconnect after failure
-    Reconnecting,
     /// Connection closed (terminal state)
     Closed,
 }
@@ -139,14 +136,9 @@ pub(crate) struct PendingOp {
     pub tid: u64,
     pub reqid: RequestId,
     pub result_tx: oneshot::Sender<Result<OpResult>>,
-    pub submitted_at: Instant,
     /// Number of times this operation has been attempted
     /// Used to validate retry_attempt in replies
     pub attempts: i32,
-    /// Pool ID for OSDMap rescanning
-    pub pool_id: u64,
-    /// Object ID for OSDMap rescanning
-    pub object_id: String,
     /// OSDMap epoch this operation was submitted against
     pub osdmap_epoch: u32,
     /// Full operation for potential resubmission
@@ -448,18 +440,6 @@ impl OSDSession {
     // Public accessor methods for OSDClient to use
     // ===========================================================================
 
-    /// Check if this session has a pending operation with the given tid
-    #[allow(dead_code)]
-    pub(crate) async fn has_pending_op(&self, tid: u64) -> bool {
-        self.pending_ops.contains_key(&tid)
-    }
-
-    /// Get a clone of pending_ops for iteration (used by OSDClient for message routing)
-    #[allow(dead_code)]
-    pub(crate) fn pending_ops(&self) -> Arc<DashMap<u64, PendingOp>> {
-        Arc::clone(&self.pending_ops)
-    }
-
     /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
     pub fn backoff_tracker(&self) -> Arc<tokio::sync::RwLock<BackoffTracker>> {
         Arc::clone(&self.backoff_tracker)
@@ -635,10 +615,7 @@ impl OSDSession {
                     tid,
                     reqid: op_arc.reqid.clone(),
                     result_tx: tx,
-                    submitted_at: Instant::now(),
                     attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                    pool_id: op_arc.object.pool,
-                    object_id: op_arc.object.oid.clone(),
                     osdmap_epoch: op_arc.osdmap_epoch,
                     op: op_arc.clone(),
                     state: crate::osdclient::types::OpState::Queued,
@@ -997,7 +974,12 @@ impl OSDSession {
             .iter()
             .map(|entry| {
                 let (tid, op) = entry.pair();
-                (*tid, op.pool_id, op.object_id.clone(), op.osdmap_epoch)
+                (
+                    *tid,
+                    op.op.object.pool,
+                    op.op.object.oid.clone(),
+                    op.osdmap_epoch,
+                )
             })
             .collect()
     }

@@ -242,11 +242,7 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
         ));
     }
 
-    if debug_path.exists() {
-        Ok(debug_path)
-    } else {
-        Err("dencoder binary not found after build".to_string())
-    }
+    Ok(debug_path)
 }
 
 /// Run ceph-dencoder on a corpus file and get JSON output.

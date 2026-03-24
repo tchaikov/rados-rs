@@ -50,9 +50,7 @@ pub const CEPH_OSD_OP_SIZE: usize = std::mem::size_of::<u16>()
     + std::mem::size_of::<u32>();
 /// Size of BlkinTraceInfo on the wire: 3 × u64
 const BLKIN_TRACE_INFO_SIZE: usize = std::mem::size_of::<crate::osdclient::types::BlkinTraceInfo>();
-/// Sentinel value meaning "calculate hash from object name"
-/// Reference: linux/net/ceph/osd_client.c encode_request_partial()
-pub(crate) const HASH_CALCULATE_FROM_NAME: i64 = -1;
+use crate::crush::placement::HASH_CALCULATE_FROM_NAME;
 
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
@@ -190,10 +188,9 @@ impl MOSDOpReply {
     pub fn into_op_result(self) -> OpResult {
         OpResult {
             result: self.result,
-            // Use user_version as the primary version - this is the object version
-            // that clients should see. The replay_version is used internally by OSDs.
+            // Use user_version: this is the object version clients see.
+            // replay_version is used internally by OSDs and is not surfaced.
             version: self.user_version,
-            user_version: self.user_version,
             ops: self.ops,
             redirect: self.redirect,
         }
