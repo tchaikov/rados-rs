@@ -47,8 +47,6 @@ use crate::msgr2::message::MessagePriority;
 const SEND_CHANNEL_BUFFER_SIZE: usize = 100;
 /// Maximum redirect loop count before failing an operation
 const MAX_REDIRECTS: u32 = 10;
-/// Maximum retry attempts per operation
-const DEFAULT_MAX_ATTEMPTS: i32 = 10;
 /// Default keepalive interval for OSD connections (seconds)
 const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 
@@ -79,15 +77,8 @@ struct SessionInfo {
 struct IoTaskContext {
     osd_id: i32,
     pending_ops: Arc<DashMap<u64, PendingOp>>,
-    #[allow(dead_code)]
-    backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::osdclient::client::OSDClient>,
-    /// Session incarnation for this connection
-    /// Shared with OSDSession to detect stale operations.
-    /// Currently validated in handle_reply and timeout callback.
-    #[allow(dead_code)]
-    incarnation: Arc<AtomicU32>,
     /// Session information (connection state and peer address)
     session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
     /// Shutdown token for graceful termination
@@ -130,7 +121,6 @@ pub struct OSDSession {
 }
 
 /// Tracking information for a pending operation
-#[allow(dead_code)]
 pub(crate) struct PendingOp {
     pub tid: u64,
     pub result_tx: oneshot::Sender<Result<OpResult>>,
@@ -146,10 +136,6 @@ pub(crate) struct PendingOp {
     pub state: crate::osdclient::types::OpState,
     /// Target information
     pub target: crate::osdclient::types::OpTarget,
-    /// Whether operation should be resent
-    pub should_resend: bool,
-    /// Maximum retry attempts
-    pub max_attempts: i32,
     /// Operation priority (set in message header)
     /// Default is CEPH_MSG_PRIO_DEFAULT (127)
     pub priority: i32,
@@ -309,10 +295,8 @@ impl OSDSession {
         let context = IoTaskContext {
             osd_id: self.osd_id,
             pending_ops: Arc::clone(&self.pending_ops),
-            backoff_tracker: Arc::clone(&self.backoff_tracker),
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
-            incarnation: Arc::clone(&self.incarnation),
             session_info: Arc::clone(&self.session_info),
             shutdown_token,
         };
@@ -582,8 +566,7 @@ impl OSDSession {
         let tid = op.reqid.tid;
 
         // Check if operation is blocked by backoff
-        let hobj = hobj_from_op(&op);
-        if self.is_blocked_by_backoff(&op.pgid, &hobj).await {
+        if self.is_blocked_by_backoff(&op).await {
             return Err(OSDClientError::Backoff(format!(
                 "Operation blocked by OSD backoff: pgid={:?}, object={}",
                 op.pgid, op.object.oid
@@ -621,8 +604,6 @@ impl OSDSession {
                         self.osd_id,
                         vec![self.osd_id],
                     ),
-                    should_resend: false,
-                    max_attempts: DEFAULT_MAX_ATTEMPTS,
                     // Store priority for retries (set in message header, not MOSDOp payload)
                     priority,
                     // Capture current session incarnation
@@ -942,11 +923,16 @@ impl OSDSession {
 
     /// Check if an operation is blocked by an active backoff
     ///
-    /// Uses efficient range lookup matching Ceph's _send_op() logic
-    /// Reference: ~/dev/ceph/src/osdc/Objecter.cc _send_op()
-    async fn is_blocked_by_backoff(&self, pgid: &StripedPgId, hobj: &crate::HObject) -> bool {
+    /// Fast path: skips hobj construction entirely when no backoffs are active
+    /// (the common case on a healthy cluster).
+    /// Reference: Ceph Objecter _send_op()
+    async fn is_blocked_by_backoff(&self, op: &MOSDOp) -> bool {
         let tracker = self.backoff_tracker.read().await;
-        tracker.is_blocked(pgid, hobj).is_some()
+        if tracker.is_empty() {
+            return false;
+        }
+        let hobj = hobj_from_op(op);
+        tracker.is_blocked(&op.pgid, &hobj).is_some()
     }
 
     // === OSDMap Rescanning Support ===
@@ -1005,8 +991,7 @@ impl OSDSession {
         pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
 
         // Check if operation is blocked by backoff
-        let hobj = hobj_from_op(&pending_op.op);
-        if self.is_blocked_by_backoff(&pending_op.op.pgid, &hobj).await {
+        if self.is_blocked_by_backoff(&pending_op.op).await {
             // Cancel the operation with backoff error
             let _ = pending_op
                 .result_tx

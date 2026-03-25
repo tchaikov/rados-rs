@@ -331,7 +331,7 @@ impl CephMessagePayload for MOSDOp {
 
         // 9. object_locator_t (using Denc encoding)
         // Note: hash=-1 means "calculate from object name" which is the normal case
-        let locator = ObjectLocator::from_object_id(&self.object);
+        let locator = ObjectLocator::from(&self.object);
 
         locator.encode(&mut buf, 0)?;
 

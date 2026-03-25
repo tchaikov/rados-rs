@@ -407,6 +407,17 @@ impl BlkinTraceInfo {
 // Re-export ObjectLocator from rados-crush (canonical definition with Denc implementation)
 pub use crate::crush::placement::ObjectLocator;
 
+impl From<&ObjectId> for ObjectLocator {
+    fn from(id: &ObjectId) -> Self {
+        ObjectLocator {
+            pool_id: id.pool,
+            key: id.key.clone(),
+            namespace: id.namespace.clone(),
+            hash: crate::crush::placement::HASH_CALCULATE_FROM_NAME,
+        }
+    }
+}
+
 /// Request redirect (corresponds to request_redirect_t in Ceph)
 ///
 /// Used in MOSDOpReply to indicate that the request should be redirected
