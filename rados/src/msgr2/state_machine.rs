@@ -39,51 +39,6 @@ pub enum StateKind {
 }
 
 impl StateKind {
-    /// Check if this state is an authentication state
-    pub fn is_auth_state(&self) -> bool {
-        matches!(
-            self,
-            StateKind::AuthConnecting
-                | StateKind::AuthConnectingSign
-                | StateKind::AuthAccepting
-                | StateKind::AuthAcceptingSign
-        )
-    }
-
-    /// Check if this state is a connecting (client) state
-    pub fn is_connecting_state(&self) -> bool {
-        matches!(
-            self,
-            StateKind::BannerConnecting
-                | StateKind::HelloConnecting
-                | StateKind::AuthConnecting
-                | StateKind::AuthConnectingSign
-                | StateKind::CompressionConnecting
-                | StateKind::SessionConnecting
-        )
-    }
-
-    /// Check if this state is an accepting (server) state
-    pub fn is_accepting_state(&self) -> bool {
-        matches!(
-            self,
-            StateKind::BannerAccepting
-                | StateKind::HelloAccepting
-                | StateKind::AuthAccepting
-                | StateKind::AuthAcceptingSign
-                | StateKind::CompressionAccepting
-                | StateKind::SessionAccepting
-        )
-    }
-
-    /// Check if authentication is complete (past auth states)
-    pub fn is_authenticated(&self) -> bool {
-        matches!(
-            self,
-            StateKind::CompressionConnecting | StateKind::SessionConnecting | StateKind::Ready
-        )
-    }
-
     /// Get the state name as a string (for debugging/logging)
     pub fn as_str(&self) -> &'static str {
         match self {

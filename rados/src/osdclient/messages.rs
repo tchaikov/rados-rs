@@ -50,7 +50,6 @@ pub const CEPH_OSD_OP_SIZE: usize = std::mem::size_of::<u16>()
     + std::mem::size_of::<u32>();
 /// Size of BlkinTraceInfo on the wire: 3 × u64
 const BLKIN_TRACE_INFO_SIZE: usize = std::mem::size_of::<crate::osdclient::types::BlkinTraceInfo>();
-use crate::crush::placement::HASH_CALCULATE_FROM_NAME;
 
 /// MOSDOp message - Client to OSD (message type 42)
 #[derive(Debug, Clone)]
@@ -332,12 +331,7 @@ impl CephMessagePayload for MOSDOp {
 
         // 9. object_locator_t (using Denc encoding)
         // Note: hash=-1 means "calculate from object name" which is the normal case
-        let locator = ObjectLocator {
-            pool_id: self.object.pool,
-            key: self.object.key.clone(),
-            namespace: self.object.namespace.clone(),
-            hash: HASH_CALCULATE_FROM_NAME,
-        };
+        let locator = ObjectLocator::from_object_id(&self.object);
 
         locator.encode(&mut buf, 0)?;
 

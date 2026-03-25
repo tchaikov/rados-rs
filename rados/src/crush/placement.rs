@@ -73,6 +73,19 @@ impl ObjectLocator {
         }
     }
 
+    /// Create an object locator from an ObjectId
+    ///
+    /// Copies pool, key, and namespace from the object ID.
+    /// Hash is set to the sentinel value (calculate from name).
+    pub fn from_object_id(id: &crate::osdclient::types::ObjectId) -> Self {
+        ObjectLocator {
+            pool_id: id.pool,
+            key: id.key.clone(),
+            namespace: id.namespace.clone(),
+            hash: HASH_CALCULATE_FROM_NAME,
+        }
+    }
+
     /// Check if the locator is empty (has sentinel values)
     pub fn is_empty(&self) -> bool {
         self.pool_id == u64::MAX

@@ -20,7 +20,7 @@ use crate::auth::EntityType;
 use crate::osdclient::backoff::BackoffTracker;
 use crate::osdclient::error::{OSDClientError, Result};
 use crate::osdclient::messages::{MOSDOp, MOSDOpReply};
-use crate::osdclient::types::{OpResult, RequestId, StripedPgId};
+use crate::osdclient::types::{OpResult, StripedPgId};
 
 /// Build an HObject from MOSDOp fields for backoff range checking
 ///
@@ -57,7 +57,6 @@ const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 /// Following Ceph pattern for explicit connection state tracking.
 /// Provides better observability and clearer semantics than implicit state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub(crate) enum ConnectionState {
     /// Initial state - not yet connected
     Disconnected,
@@ -134,7 +133,6 @@ pub struct OSDSession {
 #[allow(dead_code)]
 pub(crate) struct PendingOp {
     pub tid: u64,
-    pub reqid: RequestId,
     pub result_tx: oneshot::Sender<Result<OpResult>>,
     /// Number of times this operation has been attempted
     /// Used to validate retry_attempt in replies
@@ -604,7 +602,6 @@ impl OSDSession {
 
         // Track the operation
         // Note: We store Arc<MOSDOp> to avoid cloning the entire operation on retries.
-        // The reqid and object_id are cloned here but only once per operation submission.
         // Wrap op in Arc first to avoid partial move issues
         let op_arc = Arc::new(op);
 
@@ -613,7 +610,6 @@ impl OSDSession {
                 tid,
                 PendingOp {
                     tid,
-                    reqid: op_arc.reqid.clone(),
                     result_tx: tx,
                     attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
                     osdmap_epoch: op_arc.osdmap_epoch,
@@ -711,8 +707,8 @@ impl OSDSession {
                 tid, pending_op.sent_incarnation, current_incarnation
             );
             debug!(
-                "Stale operation details: tid={}, reqid={}, attempts={}, osdmap_epoch={}",
-                tid, pending_op.reqid.tid, pending_op.attempts, pending_op.osdmap_epoch
+                "Stale operation details: tid={}, attempts={}, osdmap_epoch={}",
+                tid, pending_op.attempts, pending_op.osdmap_epoch
             );
             return false;
         }
@@ -942,15 +938,6 @@ impl OSDSession {
     /// Used to validate that the session's address matches the current OSDMap.
     pub async fn get_peer_address(&self) -> Option<crate::EntityAddr> {
         self.session_info.read().await.peer_addr.clone()
-    }
-
-    /// Get the current connection state
-    ///
-    /// Provides explicit state information for observability and debugging.
-    /// Following Ceph pattern for explicit connection state tracking.
-    #[allow(dead_code)]
-    pub(crate) async fn connection_state(&self) -> ConnectionState {
-        self.session_info.read().await.conn_state
     }
 
     /// Check if an operation is blocked by an active backoff

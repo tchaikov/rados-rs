@@ -192,58 +192,6 @@ impl BackoffTracker {
     pub fn clear(&mut self) {
         self.entries.clear();
     }
-
-    /// Iterate over all backoffs in a PG that overlap with a given range
-    ///
-    /// Used to find operations to resend after UNBLOCK
-    pub fn iter_overlapping<'a>(
-        &'a self,
-        pgid: &StripedPgId,
-        begin: &'a crate::HObject,
-        end: &'a crate::HObject,
-    ) -> impl Iterator<Item = &'a BackoffEntry> {
-        // Create range bounds for this PG
-        let start_key = BackoffKey {
-            pgid: *pgid,
-            begin: min_hobject(),
-        };
-
-        let end_key = BackoffKey {
-            pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
-            begin: min_hobject(),
-        };
-
-        self.entries
-            .range(start_key..end_key)
-            .filter_map(move |(_, entry)| {
-                // Check for overlap: entry overlaps if entry.end > begin && entry.begin < end
-                if entry.end > *begin && entry.begin < *end {
-                    Some(entry)
-                } else {
-                    None
-                }
-            })
-    }
-
-    /// Get all backoffs for a specific PG
-    ///
-    /// Used when resending operations after UNBLOCK
-    pub fn get_pg_backoffs(&self, pgid: &StripedPgId) -> impl Iterator<Item = &BackoffEntry> {
-        // Create range bounds for this PG
-        let start_key = BackoffKey {
-            pgid: *pgid,
-            begin: min_hobject(),
-        };
-
-        let end_key = BackoffKey {
-            pgid: StripedPgId::new(pgid.pool + 1, 0, -1),
-            begin: min_hobject(),
-        };
-
-        self.entries
-            .range(start_key..end_key)
-            .map(|(_, entry)| entry)
-    }
 }
 
 #[cfg(test)]
