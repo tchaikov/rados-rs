@@ -395,7 +395,7 @@ impl CephXAuthorizeA {
     crate = "crate",
     struct_v = 2,
     min_struct_v = 2,
-    ceph_release = "Octopus v15+"
+    ceph_release = "Quincy v17+"
 )]
 pub struct CephXAuthorizeB {
     struct_v: u8,

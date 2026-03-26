@@ -92,7 +92,7 @@ impl VersionedEncode for PgNlsResponse {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "PgNlsResponse", "Octopus v15+");
+        crate::denc::check_min_version!(version, 1, "PgNlsResponse", "Quincy v17+");
         let handle = <HObject as Denc>::decode(buf, features)?;
         let entries = <Vec<ListObjectImpl> as Denc>::decode(buf, features)?;
         Ok(Self { handle, entries })

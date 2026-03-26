@@ -1216,7 +1216,7 @@ impl OSDClient {
             }
 
             // The OSD always returns the correct next cursor — use it directly.
-            // This is the "SORTBITWISE" path used by modern Ceph (Octopus+):
+            // This is the "SORTBITWISE" path used by modern Ceph (Quincy+):
             //   list_context->pos = response.handle
             let next_handle = response.handle;
 

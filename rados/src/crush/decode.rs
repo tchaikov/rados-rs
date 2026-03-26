@@ -79,7 +79,7 @@ impl CrushMap {
         // Decode name maps.
         //
         // We intentionally require the fixed int32_t encoding here. Ceph switched
-        // CrushWrapper::encode() to int32_t in 2012, and Octopus+ monitors only
+        // CrushWrapper::encode() to int32_t in 2012, and Quincy+ monitors only
         // send that corrected form in live OSDMaps. The only incompatible inputs
         // are historical serialized CRUSH blobs produced by pre-fix encoders on
         // affected architectures; those artifacts are outside this project's

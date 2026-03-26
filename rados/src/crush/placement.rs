@@ -158,7 +158,7 @@ impl crate::FixedSize for PgId {
     const SIZE: usize = 17;
 }
 
-/// Matches C++ object_locator_t encoding (v6, Octopus v15+)
+/// Matches C++ object_locator_t encoding (v6, Quincy v17+)
 impl VersionedEncode for ObjectLocator {
     fn encoding_version(&self, _features: u64) -> u8 {
         6
@@ -196,8 +196,8 @@ impl VersionedEncode for ObjectLocator {
         struct_v: u8,
         _compat_version: u8,
     ) -> std::result::Result<Self, RadosError> {
-        // Minimum supported project release boundary (Octopus v15+)
-        crate::denc::check_min_version!(struct_v, 6, "ObjectLocator", "Octopus v15+");
+        // Minimum supported project release boundary (Quincy v17+)
+        crate::denc::check_min_version!(struct_v, 6, "ObjectLocator", "Quincy v17+");
 
         let pool_id = i64::decode(buf, features)? as u64;
         let _preferred = i32::decode(buf, features)?;

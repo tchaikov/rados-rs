@@ -3,7 +3,7 @@
 /// Check minimum supported version for decoding
 ///
 /// This macro enforces minimum version requirements for types that no longer
-/// support pre-Octopus (v15) Ceph releases within the current project
+/// support pre-Quincy (v17) Ceph releases within the current project
 /// compatibility boundary. It provides a consistent error
 /// message format across all types.
 ///
@@ -18,8 +18,8 @@
 ///     version: u8,
 ///     _compat_version: u8,
 /// ) -> Result<Self, RadosError> {
-///     // Reject versions outside the supported floor (Octopus v15+)
-///     check_min_version!(version, 5, "ObjectLocator", "Octopus v15+");
+///     // Reject versions outside the supported floor (Quincy v17+)
+///     check_min_version!(version, 5, "ObjectLocator", "Quincy v17+");
 ///
 ///     // Continue with decoding...
 /// }

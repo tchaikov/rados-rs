@@ -9,7 +9,7 @@ A native Rust implementation of the RADOS (Reliable Autonomic Distributed Object
 - **msgr2**: Complete Ceph messenger protocol v2 with AES-128-GCM encryption and CRC32C
 - **CephX**: Full authentication and service ticket handling
 - **OSD operations**: Write, read, stat, delete on RADOS objects
-- **Ceph Octopus+**: Supports Octopus (v15, March 2020) and all later releases
+- **Ceph Quincy+**: Supports Quincy (v17, April 2022) and all later releases
 
 ## Workspace layout
 
@@ -107,14 +107,12 @@ docker compose -f docker-compose.ceph.yml up -d
 
 ## Compatibility
 
-**Minimum Ceph Version**: Octopus (v15, March 2020)
+**Minimum Ceph Version**: Quincy (v17, April 2022)
 
-Nautilus and older releases are outside the supported compatibility boundary.
+Pacific and older releases are outside the supported compatibility boundary.
 
 | Release | Version | Date |
 |---|---|---|
-| Octopus | v15 | March 2020 |
-| Pacific | v16 | March 2021 |
 | Quincy | v17 | April 2022 |
 | Reef | v18 | September 2023 |
 | Squid | v19 | September 2024 |

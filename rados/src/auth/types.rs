@@ -262,7 +262,7 @@ impl Default for CephXTicketBlob {
     crate = "crate",
     struct_v = 2,
     min_struct_v = 2,
-    ceph_release = "Octopus v15+"
+    ceph_release = "Quincy v17+"
 )]
 pub struct AuthTicket {
     struct_v: u8,

@@ -169,18 +169,16 @@ fn list_types() {
         "  entity_addr_t     - Entity address [versioned, modern encode with legacy decode compatibility]"
     );
     println!("  pool_snap_info_t  - Pool snapshot info [versioned]");
-    println!("  osd_xinfo_t       - Extended OSD info [versioned, Octopus+ encode contract]");
+    println!("  osd_xinfo_t       - Extended OSD info [versioned, Quincy+ encode contract]");
     println!();
     println!("LEVEL 3: Complex types");
     println!("  Test these ONLY after Level 1 & 2 are validated");
     println!("  pg_merge_meta_t   - PG merge metadata [versioned]");
     println!("  object_locator_t  - Object placement information [versioned]");
     println!(
-        "  objectstore_perf_stat_t - Objectstore latency stats [versioned, Octopus+ encode contract]"
+        "  objectstore_perf_stat_t - Objectstore latency stats [versioned, Quincy+ encode contract]"
     );
-    println!(
-        "  pool_stat_t       - Aggregate per-pool stats [versioned, Octopus+ encode contract]"
-    );
+    println!("  pool_stat_t       - Aggregate per-pool stats [versioned, Quincy+ encode contract]");
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
