@@ -294,7 +294,6 @@ struct VersionTracker {
 }
 
 impl MonClient {
-
     /// Create a new MonClient with optional OSDMap routing
     ///
     /// # Arguments
