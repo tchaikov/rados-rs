@@ -21,9 +21,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tokio::sync::oneshot;
-use tokio::sync::{Mutex, RwLock, broadcast, mpsc};
-use tokio::task::JoinSet;
+use tokio::sync::{RwLock, broadcast, mpsc};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 use tracing::{debug, error, info, trace, warn};
 
 /// Decode a typed message payload from a raw msgr2 message.
@@ -159,8 +159,9 @@ pub struct MonClient {
     /// Latest OSDMap
     latest_osdmap: Arc<RwLock<Option<crate::monclient::MOSDMap>>>,
 
-    /// Background tasks (tick loop + drain loop)
-    tasks: Arc<Mutex<JoinSet<()>>>,
+    /// Tracks background tasks (tick loop + drain loop) for graceful shutdown.
+    /// TaskTracker::spawn takes &self so no mutex is needed.
+    tracker: TaskTracker,
 
     /// Shutdown token — cancel to stop all background tasks
     shutdown_token: CancellationToken,
@@ -293,13 +294,6 @@ struct VersionTracker {
 }
 
 impl MonClient {
-    async fn spawn_tracked_task<F>(&self, task: F)
-    where
-        F: std::future::Future<Output = ()> + Send + 'static,
-    {
-        let mut tasks = self.tasks.lock().await;
-        tasks.spawn(task);
-    }
 
     /// Create a new MonClient with optional OSDMap routing
     ///
@@ -380,7 +374,7 @@ impl MonClient {
             auth_state: Arc::new(RwLock::new(auth_state)),
             runtime_config: Arc::new(RwLock::new(runtime_config_init)),
             latest_osdmap: Arc::new(RwLock::new(None)),
-            tasks: Arc::new(Mutex::new(JoinSet::new())),
+            tracker: TaskTracker::new(),
             shutdown_token: shutdown_token.clone(),
             map_events,
             osdmap_tx,
@@ -396,24 +390,21 @@ impl MonClient {
         //   Some(Some(m))→ message ready
         let client_weak = Arc::downgrade(&client);
         let drain_token = shutdown_token.clone();
-        client
-            .spawn_tracked_task(async move {
-                while let Some(Some(msg)) = drain_token.run_until_cancelled(mon_msg_rx.recv()).await
-                {
-                    if let Some(client_arc) = client_weak.upgrade() {
-                        if let Err(e) = client_arc.dispatch_message(msg).await {
-                            error!("Failed to dispatch monitor message: {}", e);
-                        }
-                    } else {
-                        info!("MonClient dropped, terminating drain task");
-                        break;
+        client.tracker.spawn(async move {
+            while let Some(Some(msg)) = drain_token.run_until_cancelled(mon_msg_rx.recv()).await {
+                if let Some(client_arc) = client_weak.upgrade() {
+                    if let Err(e) = client_arc.dispatch_message(msg).await {
+                        error!("Failed to dispatch monitor message: {}", e);
                     }
-                    // Yield after each message to avoid starving other tasks.
-                    tokio::task::yield_now().await;
+                } else {
+                    info!("MonClient dropped, terminating drain task");
+                    break;
                 }
-                info!("MonClient drain task terminated");
-            })
-            .await;
+                // Yield after each message to avoid starving other tasks.
+                tokio::task::yield_now().await;
+            }
+            info!("MonClient drain task terminated");
+        });
 
         Ok(client)
     }
@@ -499,14 +490,8 @@ impl MonClient {
         }
 
         // Await all background tasks (already signalled by the early cancel above).
-        let mut tasks = self.tasks.lock().await;
-        while let Some(result) = tasks.join_next().await {
-            if let Err(e) = result
-                && !e.is_cancelled()
-            {
-                warn!("Background task panicked during shutdown: {:?}", e);
-            }
-        }
+        self.tracker.close();
+        self.tracker.wait().await;
 
         info!("MonClient shutdown complete");
         Ok(())
@@ -1004,8 +989,8 @@ impl MonClient {
         // Explicit tick_interval overrides adaptive scheduling when set
         let explicit_tick_interval = self.config.tick_interval;
 
-        // Spawn into the shared JoinSet so shutdown() can await all tasks together.
-        self.spawn_tracked_task(async move {
+        // Spawn into TaskTracker so shutdown() can await all tasks together.
+        self.tracker.spawn(async move {
             info!("Tick loop started");
 
             // run_until_cancelled returns None when the token fires, Some(()) after
@@ -1041,8 +1026,7 @@ impl MonClient {
             }
 
             info!("Tick loop terminated");
-        })
-        .await;
+        });
         info!("Started tick loop");
         Ok(())
     }
