@@ -198,7 +198,7 @@ impl VersionedEncode for ObjectStatSum {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 14, "ObjectStatSum", "Octopus v15+");
+        crate::denc::check_min_version!(version, 14, "ObjectStatSum", "Quincy v17+");
 
         // Base fields for version 14: 30 × i64 + 4 × i32 (excludes v16-v20 fields)
         if buf.remaining() < OBJECT_STAT_SUM_V14_MIN_SIZE {
@@ -415,7 +415,7 @@ impl Denc for ObjectStatCollection {
 
 /// Pool statistics
 /// C++ definition: pool_stat_t in osd/osd_types.h
-/// Active encode always uses version 7 for Octopus+ peers.
+/// Active encode always uses version 7 for Quincy+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub struct PoolStat {
@@ -573,7 +573,7 @@ pub struct Pow2Hist {
 
 /// Object store performance statistics
 /// C++ definition: objectstore_perf_stat_t in osd/osd_types.h
-/// Active encode always uses version 2 nanosecond counters for Octopus+ peers.
+/// Active encode always uses version 2 nanosecond counters for Quincy+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
 pub struct ObjectstorePerfStat {
@@ -1740,9 +1740,9 @@ impl VersionedEncode for PgStat {
         self.scrub_sched_status.is_periodic.encode(buf, features)?;
 
         self.objects_scrubbed.encode(buf, features)?;
-        buf.put_f64_le(self.scrub_duration);
+        self.scrub_duration.encode(buf, features)?;
         self.objects_trimmed.encode(buf, features)?;
-        buf.put_f64_le(self.snaptrim_duration);
+        self.snaptrim_duration.encode(buf, features)?;
         self.log_dups_size.encode(buf, features)?;
 
         // Encode pg_scrubbing_status_t fields (last 3, v30+)
@@ -1765,7 +1765,7 @@ impl VersionedEncode for PgStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 22, "PgStat", "Octopus v15+");
+        crate::denc::check_min_version!(version, 22, "PgStat", "Quincy v17+");
 
         let pg_version = EVersion::decode(buf, features)?;
         let reported_seq = Version::decode(buf, features)?;
@@ -1832,9 +1832,9 @@ impl VersionedEncode for PgStat {
         let scrub_is_periodic = bool::decode(buf, features)?;
 
         let objects_scrubbed = i64::decode(buf, features)?;
-        let scrub_duration = buf.get_f64_le();
+        let scrub_duration = f64::decode(buf, features)?;
         let objects_trimmed = i64::decode(buf, features)?;
-        let snaptrim_duration = buf.get_f64_le();
+        let snaptrim_duration = f64::decode(buf, features)?;
         let log_dups_size = i64::decode(buf, features)?;
 
         // Decode pg_scrubbing_status_t fields (last 3, v30+)
@@ -1999,7 +1999,7 @@ impl VersionedEncode for PgMapDigest {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "PgMapDigest", "Octopus v15+");
+        crate::denc::check_min_version!(version, 1, "PgMapDigest", "Quincy v17+");
 
         let num_pg = i64::decode(buf, features)?;
         let num_pg_active = i64::decode(buf, features)?;

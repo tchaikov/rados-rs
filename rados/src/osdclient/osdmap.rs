@@ -8,7 +8,7 @@
 
 use crate::crush::CrushMap;
 use crate::denc::{
-    Denc, EntityAddr, EntityAddrvec, FixedSize, Padding, RadosError, VersionedEncode,
+    Denc, EntityAddr, EntityAddrvec, FixedSize, RadosError, VersionedEncode,
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding,
 };
 use bytes::{Buf, BufMut, Bytes};
@@ -446,7 +446,7 @@ impl Serialize for OsdXInfo {
 }
 
 impl VersionedEncode for OsdXInfo {
-    // Octopus+ peers always use version 4 on encode. Older versions remain decode-compatible.
+    // Quincy+ peers always use version 4 on encode. Older versions remain decode-compatible.
     const FEATURE_DEPENDENT: bool = false;
 
     fn encoding_version(&self, _features: u64) -> u8 {
@@ -465,14 +465,14 @@ impl VersionedEncode for OsdXInfo {
     ) -> Result<(), RadosError> {
         self.down_stamp.encode(buf, features)?;
 
-        // Convert laggy_probability to u32 as in C++
+        // laggy_probability is stored as a fixed-point u32 on the wire
         let lp = (self.laggy_probability * 0xffffffffu32 as f32) as u32;
-        buf.put_u32_le(lp);
-        buf.put_u32_le(self.laggy_interval);
-        buf.put_u64_le(self.features);
-        buf.put_u32_le(self.old_weight);
+        lp.encode(buf, features)?;
+        self.laggy_interval.encode(buf, features)?;
+        self.features.encode(buf, features)?;
+        self.old_weight.encode(buf, features)?;
         self.last_purged_snaps_scrub.encode(buf, features)?;
-        buf.put_u32_le(self.dead_epoch.as_u32());
+        self.dead_epoch.encode(buf, features)?;
 
         Ok(())
     }
@@ -483,7 +483,7 @@ impl VersionedEncode for OsdXInfo {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OsdXInfo", "Octopus v15+");
+        crate::denc::check_min_version!(version, 1, "OsdXInfo", "Quincy v17+");
         // Version 1+ fields
         let down_stamp = UTime::decode(buf, features)?;
 
@@ -877,8 +877,7 @@ impl VersionedEncode for PoolSnapInfo {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Write directly to buf parameter
-        buf.put_u64_le(self.snapid);
+        self.snapid.encode(buf, features)?;
         self.stamp.encode(buf, features)?;
         self.name.encode(buf, features)?;
         Ok(())
@@ -890,7 +889,7 @@ impl VersionedEncode for PoolSnapInfo {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        let snapid = buf.get_u64_le();
+        let snapid = u64::decode(buf, features)?;
         let stamp = UTime::decode(buf, features)?;
         let name = String::decode(buf, features)?;
         Ok(PoolSnapInfo {
@@ -944,7 +943,7 @@ impl PgPool {
 }
 
 impl VersionedEncode for PgPool {
-    // Octopus+ peers only need the modern 29/30/32 encode variants.
+    // Quincy+ peers only need the modern 29/30/32 encode variants.
     const FEATURE_DEPENDENT: bool = true;
 
     fn encoding_version(&self, features: u64) -> u8 {
@@ -976,104 +975,87 @@ impl VersionedEncode for PgPool {
         let canonical_last_force_op_resend = self.canonical_last_force_op_resend();
 
         // Basic fields (always present in ENCODE_START format)
-        buf.put_u8(self.pool_type);
-        buf.put_u8(self.size);
-        buf.put_u8(self.crush_rule); // Fixed: u8 not i32
-        buf.put_u8(self.object_hash); // Fixed: u8 not u32
-        buf.put_u32_le(self.pg_num);
-        buf.put_u32_le(self.pgp_num);
-        buf.put_u32_le(self.lpg_num); // always 0
-        buf.put_u32_le(self.lpgp_num); // always 0
-        buf.put_u32_le(self.last_change.as_u32());
-        buf.put_u64_le(self.snap_seq);
-        buf.put_u32_le(self.snap_epoch.as_u32());
-
-        // Encode snaps and removed_snaps using generic implementations
+        self.pool_type.encode(buf, features)?;
+        self.size.encode(buf, features)?;
+        self.crush_rule.encode(buf, features)?;
+        self.object_hash.encode(buf, features)?;
+        self.pg_num.encode(buf, features)?;
+        self.pgp_num.encode(buf, features)?;
+        self.lpg_num.encode(buf, features)?;
+        self.lpgp_num.encode(buf, features)?;
+        self.last_change.encode(buf, features)?;
+        self.snap_seq.encode(buf, features)?;
+        self.snap_epoch.encode(buf, features)?;
         self.snaps.encode(buf, features)?;
-
         self.removed_snaps.encode(buf, features)?;
-
-        buf.put_u64_le(self.auid);
-
-        // Flags (version dependent)
-        buf.put_u64_le(self.flags);
-
-        buf.put_u32_le(0); // crash_replay_interval - always 0, not stored in struct
-        buf.put_u8(self.min_size);
-        buf.put_u64_le(self.quota_max_bytes);
-        buf.put_u64_le(self.quota_max_objects);
-
-        // Encode tiers using generic Vec implementation
+        self.auid.encode(buf, features)?;
+        self.flags.encode(buf, features)?;
+        0u32.encode(buf, features)?; // crash_replay_interval - always 0, not stored in struct
+        self.min_size.encode(buf, features)?;
+        self.quota_max_bytes.encode(buf, features)?;
+        self.quota_max_objects.encode(buf, features)?;
         self.tiers.encode(buf, features)?;
-
-        buf.put_i64_le(self.tier_of);
-        buf.put_u8(self.cache_mode);
-        buf.put_i64_le(self.read_tier);
-        buf.put_i64_le(self.write_tier);
-
-        // Encode properties using generic BTreeMap implementation
+        self.tier_of.encode(buf, features)?;
+        self.cache_mode.encode(buf, features)?;
+        self.read_tier.encode(buf, features)?;
+        self.write_tier.encode(buf, features)?;
         self.properties.encode(buf, features)?;
-
-        // Hit set params
         self.hit_set_params.encode(buf, features)?;
-
-        buf.put_u32_le(self.hit_set_period);
-        buf.put_u32_le(self.hit_set_count);
-        buf.put_u32_le(self.stripe_width);
-        buf.put_u64_le(self.target_max_bytes);
-        buf.put_u64_le(self.target_max_objects);
-        buf.put_u32_le(self.cache_target_dirty_ratio_micro);
-        buf.put_u32_le(self.cache_target_full_ratio_micro);
-        buf.put_u32_le(self.cache_min_flush_age);
-        buf.put_u32_le(self.cache_min_evict_age);
-
+        self.hit_set_period.encode(buf, features)?;
+        self.hit_set_count.encode(buf, features)?;
+        self.stripe_width.encode(buf, features)?;
+        self.target_max_bytes.encode(buf, features)?;
+        self.target_max_objects.encode(buf, features)?;
+        self.cache_target_dirty_ratio_micro.encode(buf, features)?;
+        self.cache_target_full_ratio_micro.encode(buf, features)?;
+        self.cache_min_flush_age.encode(buf, features)?;
+        self.cache_min_evict_age.encode(buf, features)?;
         self.erasure_code_profile.encode(buf, features)?;
+        canonical_last_force_op_resend.encode(buf, features)?;
+        self.min_read_recency_for_promote.encode(buf, features)?;
+        self.expected_num_objects.encode(buf, features)?;
+        self.cache_target_dirty_high_ratio_micro
+            .encode(buf, features)?;
+        self.min_write_recency_for_promote.encode(buf, features)?;
+        self.use_gmt_hitset.encode(buf, features)?;
+        self.fast_read.encode(buf, features)?;
+        self.hit_set_grade_decay_rate.encode(buf, features)?;
+        self.hit_set_search_last_n.encode(buf, features)?;
 
-        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
-        buf.put_i32_le(self.min_read_recency_for_promote);
-        buf.put_u64_le(self.expected_num_objects);
-
-        buf.put_u32_le(self.cache_target_dirty_high_ratio_micro);
-        buf.put_i32_le(self.min_write_recency_for_promote);
-        buf.put_u8(if self.use_gmt_hitset { 1 } else { 0 });
-        buf.put_u8(if self.fast_read { 1 } else { 0 });
-        buf.put_i32_le(self.hit_set_grade_decay_rate);
-        buf.put_u32_le(self.hit_set_search_last_n);
-
-        // Pool opts - encoded with version header
-        buf.put_u8(2); // opts version
+        // Pool opts - encoded with an inline version header (not a VersionedEncode container)
+        buf.put_u8(2); // opts struct_v
         buf.put_u8(1); // opts compat_version
         let opts_len = self.opts_data.len() as u32;
-        buf.put_u32_le(opts_len);
+        opts_len.encode(buf, features)?;
         buf.put_slice(&self.opts_data);
 
-        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
+        canonical_last_force_op_resend.encode(buf, features)?;
         self.application_metadata.encode(buf, features)?;
         self.create_time.encode(buf, features)?;
-        buf.put_u32_le(self.pg_num_target);
-        buf.put_u32_le(self.pgp_num_target);
-        buf.put_u32_le(self.pg_num_pending);
-        buf.put_u32_le(0); // pg_num_dec_last_epoch_started (always 0)
-        buf.put_u32_le(0); // pg_num_dec_last_epoch_clean (always 0)
-        buf.put_u32_le(canonical_last_force_op_resend.as_u32());
-        buf.put_u8(self.pg_autoscale_mode);
+        self.pg_num_target.encode(buf, features)?;
+        self.pgp_num_target.encode(buf, features)?;
+        self.pg_num_pending.encode(buf, features)?;
+        0u32.encode(buf, features)?; // pg_num_dec_last_epoch_started (always 0)
+        0u32.encode(buf, features)?; // pg_num_dec_last_epoch_clean (always 0)
+        canonical_last_force_op_resend.encode(buf, features)?;
+        self.pg_autoscale_mode.encode(buf, features)?;
         self.last_pg_merge_meta.encode(buf, features)?;
 
         if version == Self::VERSION_OCTOPUS_STRETCH {
-            buf.put_u32_le(self.peering_crush_bucket_count);
-            buf.put_u32_le(self.peering_crush_bucket_target);
-            buf.put_u32_le(self.peering_crush_bucket_barrier);
-            buf.put_i32_le(self.peering_crush_mandatory_member);
+            self.peering_crush_bucket_count.encode(buf, features)?;
+            self.peering_crush_bucket_target.encode(buf, features)?;
+            self.peering_crush_bucket_barrier.encode(buf, features)?;
+            self.peering_crush_mandatory_member.encode(buf, features)?;
         } else if version == Self::VERSION_CURRENT {
             // Encode optional peering_crush_data (only if stretch pool)
             if self.is_stretch_pool() {
-                buf.put_u8(1); // Some
-                buf.put_u32_le(self.peering_crush_bucket_count);
-                buf.put_u32_le(self.peering_crush_bucket_target);
-                buf.put_u32_le(self.peering_crush_bucket_barrier);
-                buf.put_i32_le(self.peering_crush_mandatory_member);
+                true.encode(buf, features)?; // Some
+                self.peering_crush_bucket_count.encode(buf, features)?;
+                self.peering_crush_bucket_target.encode(buf, features)?;
+                self.peering_crush_bucket_barrier.encode(buf, features)?;
+                self.peering_crush_mandatory_member.encode(buf, features)?;
             } else {
-                buf.put_u8(0); // None
+                false.encode(buf, features)?; // None
             }
             self.nonprimary_shards.encode(buf, features)?;
         }
@@ -1088,7 +1070,7 @@ impl VersionedEncode for PgPool {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, Self::COMPAT_VERSION, "pg_pool_t", "Octopus v15+");
+        crate::denc::check_min_version!(version, Self::COMPAT_VERSION, "pg_pool_t", "Quincy v17+");
 
         let mut pool = PgPool::default();
 
@@ -1376,9 +1358,6 @@ pub struct PgMergeMeta {
     pub last_epoch_clean: Epoch,
     pub source_version: EVersion,
     pub target_version: EVersion,
-    // Extra fields found in corpus data (purpose unknown)
-    pub extra_field: Padding<u32>,
-    pub extra_padding: Padding<u8>,
 }
 
 // Custom Serialize implementation to match ceph-dencoder format
@@ -1411,8 +1390,6 @@ impl Serialize for PgMergeMeta {
         );
         state.serialize_field("target_version", &target_version_str)?;
 
-        // Skip extra_field and extra_padding (they're Padding types)
-
         state.end()
     }
 }
@@ -1432,25 +1409,12 @@ impl VersionedEncode for PgMergeMeta {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Write directly to buf parameter
-
-        // Encode all fields in order
         self.source_pgid.encode(buf, features)?;
-
-        buf.put_u32_le(self.ready_epoch.as_u32());
-        buf.put_u32_le(self.last_epoch_started.as_u32());
-        buf.put_u32_le(self.last_epoch_clean.as_u32());
-
+        self.ready_epoch.encode(buf, features)?;
+        self.last_epoch_started.encode(buf, features)?;
+        self.last_epoch_clean.encode(buf, features)?;
         self.source_version.encode(buf, features)?;
-
         self.target_version.encode(buf, features)?;
-
-        // Only add extra bytes if they are non-zero (they exist in corpus but may not be standard)
-        if *self.extra_field != 0 || *self.extra_padding != 0 {
-            buf.put_u32_le(*self.extra_field);
-            buf.put_u8(*self.extra_padding);
-        }
-
         Ok(())
     }
 
@@ -1461,29 +1425,18 @@ impl VersionedEncode for PgMergeMeta {
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         let source_pgid = PgId::decode(buf, features)?;
-        let ready_epoch = u32::decode(buf, features)?;
-        let last_epoch_started = u32::decode(buf, features)?;
-        let last_epoch_clean = u32::decode(buf, features)?;
+        let ready_epoch = Epoch::decode(buf, features)?;
+        let last_epoch_started = Epoch::decode(buf, features)?;
+        let last_epoch_clean = Epoch::decode(buf, features)?;
         let source_version = EVersion::decode(buf, features)?;
         let target_version = EVersion::decode(buf, features)?;
-
-        // In corpus data, there are 5 extra bytes at the end
-        let mut extra_field = Padding::zero();
-        let mut extra_padding = Padding::zero();
-        if buf.remaining() >= 5 {
-            *extra_field = u32::decode(buf, features)?;
-            *extra_padding = u8::decode(buf, features)?;
-        }
-
         Ok(PgMergeMeta {
             source_pgid,
-            ready_epoch: crate::Epoch::new(ready_epoch),
-            last_epoch_started: crate::Epoch::new(last_epoch_started),
-            last_epoch_clean: crate::Epoch::new(last_epoch_clean),
+            ready_epoch,
+            last_epoch_started,
+            last_epoch_clean,
             source_version,
             target_version,
-            extra_field,
-            extra_padding,
         })
     }
 
@@ -1674,7 +1627,7 @@ impl VersionedEncode for OSDMapIncrementalClientSection {
             version,
             1,
             "OSDMapIncremental::ClientSection",
-            "Octopus v15+"
+            "Quincy v17+"
         );
         let mut section = Self {
             fsid: UuidD::decode(buf, features)?,
@@ -1815,12 +1768,7 @@ impl VersionedEncode for OSDMapIncrementalOsdSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(
-            version,
-            1,
-            "OSDMapIncremental::OsdSection",
-            "Octopus v15+"
-        );
+        crate::denc::check_min_version!(version, 1, "OSDMapIncremental::OsdSection", "Quincy v17+");
         let mut section = Self {
             new_hb_back_up: BTreeMap::decode(buf, features)?,
             new_up_thru: BTreeMap::decode(buf, features)?,
@@ -1945,7 +1893,7 @@ impl VersionedEncode for OSDMapClientSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OSDMapClientSection", "Octopus v15+");
+        crate::denc::check_min_version!(version, 1, "OSDMapClientSection", "Quincy v17+");
         let mut section = Self {
             fsid: UuidD::decode(buf, features)?,
             epoch: Epoch::decode(buf, features)?,
@@ -2088,7 +2036,7 @@ impl VersionedEncode for OSDMapOsdSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OSDMapOsdSection", "Octopus v15+");
+        crate::denc::check_min_version!(version, 1, "OSDMapOsdSection", "Quincy v17+");
         let mut section = Self {
             osd_addrs_hb_back: Vec::decode(buf, features)?,
             osd_info: Vec::decode(buf, features)?,
@@ -2204,7 +2152,7 @@ impl OSDMapIncremental {
             }));
         }
 
-        crate::denc::check_min_version!(struct_v, 7, "OSDMapIncremental", "Octopus v15+");
+        crate::denc::check_min_version!(struct_v, 7, "OSDMapIncremental", "Quincy v17+");
 
         // Extract outer content into Bytes
         let outer_bytes = buf.copy_to_bytes(struct_len);
@@ -2875,7 +2823,7 @@ impl VersionedEncode for OSDMap {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 7, "OSDMap", "Octopus v15+");
+        crate::denc::check_min_version!(version, 7, "OSDMap", "Quincy v17+");
         let client = OSDMapClientSection::decode_versioned(buf, features)?;
         let osd = OSDMapOsdSection::decode_versioned(buf, features)?;
 
@@ -2956,7 +2904,7 @@ mark_versioned_encoding!(ExplicitObjectHitSetParams);
 mark_versioned_encoding!(BloomHitSetParams);
 mark_versioned_encoding!(HitSetParams);
 
-// Level 1/2: Versioned but not feature-dependent under the Octopus+ encode contract
+// Level 1/2: Versioned but not feature-dependent under the Quincy+ encode contract
 mark_versioned_encoding!(OsdXInfo);
 // Level 2/3: Feature-dependent types (encoding changes based on features)
 mark_feature_dependent_encoding!(PgPool);
