@@ -389,39 +389,27 @@ impl MonClient {
             monmap_notify: Arc::new(tokio::sync::Notify::new()),
         });
 
-        // Spawn drain task for monitor messages
+        // Spawn drain task for monitor messages.
+        // run_until_cancelled wraps recv() in Option<Option<_>>:
+        //   None         → token cancelled (shutdown)
+        //   Some(None)   → channel closed (MonClient dropped)
+        //   Some(Some(m))→ message ready
         let client_weak = Arc::downgrade(&client);
         let drain_token = shutdown_token.clone();
         client
             .spawn_tracked_task(async move {
-                loop {
-                    tokio::select! {
-                        _ = drain_token.cancelled() => {
-                            info!("MonClient drain task received shutdown signal");
-                            break;
+                while let Some(Some(msg)) = drain_token.run_until_cancelled(mon_msg_rx.recv()).await
+                {
+                    if let Some(client_arc) = client_weak.upgrade() {
+                        if let Err(e) = client_arc.dispatch_message(msg).await {
+                            error!("Failed to dispatch monitor message: {}", e);
                         }
-                        msg = mon_msg_rx.recv() => {
-                            match msg {
-                                Some(msg) => {
-                                    if let Some(client_arc) = client_weak.upgrade() {
-                                        if let Err(e) = client_arc.dispatch_message(msg).await {
-                                            error!("Failed to dispatch monitor message: {}", e);
-                                        }
-                                    } else {
-                                        info!("MonClient dropped, terminating drain task");
-                                        break;
-                                    }
-
-                                    // Yield after processing each message to avoid starving other tasks
-                                    tokio::task::yield_now().await;
-                                }
-                                None => {
-                                    info!("MonClient message channel closed, drain task exiting");
-                                    break;
-                                }
-                            }
-                        }
+                    } else {
+                        info!("MonClient dropped, terminating drain task");
+                        break;
                     }
+                    // Yield after each message to avoid starving other tasks.
+                    tokio::task::yield_now().await;
                 }
                 info!("MonClient drain task terminated");
             })
@@ -1020,42 +1008,35 @@ impl MonClient {
         self.spawn_tracked_task(async move {
             info!("Tick loop started");
 
-            loop {
-                // Adaptive tick interval: hunt faster when hunting, ping when connected.
-                // Matches C++ MonClient::schedule_tick() adaptive logic.
-                let interval = match explicit_tick_interval {
-                    Some(explicit) => explicit,
-                    None => {
-                        let conn_state = connection_state.read().await;
-                        let runtime_cfg = runtime_config.read().await;
-                        if conn_state.hunting {
-                            runtime_cfg
-                                .mon_client_hunt_interval
-                                .mul_f64(conn_state.reopen_interval_multiplier)
-                        } else {
-                            runtime_cfg.mon_client_ping_interval
+            // run_until_cancelled returns None when the token fires, Some(()) after
+            // sleep elapses.  This collapses the select! + is_cancelled guard into a
+            // single expression with unambiguous semantics.
+            while tick_token
+                .run_until_cancelled(async {
+                    // Adaptive tick interval: hunt faster when hunting, slower when
+                    // connected.  Matches C++ MonClient::schedule_tick() logic.
+                    let interval = match explicit_tick_interval {
+                        Some(explicit) => explicit,
+                        None => {
+                            let conn_state = connection_state.read().await;
+                            let runtime_cfg = runtime_config.read().await;
+                            if conn_state.hunting {
+                                runtime_cfg
+                                    .mon_client_hunt_interval
+                                    .mul_f64(conn_state.reopen_interval_multiplier)
+                            } else {
+                                runtime_cfg.mon_client_ping_interval
+                            }
                         }
-                    }
-                };
-
-                tokio::select! {
-                    _ = tick_token.cancelled() => {
-                        info!("Tick loop received shutdown signal");
-                        break;
-                    }
-                    _ = tokio::time::sleep(interval) => {}
-                }
-
-                if tick_token.is_cancelled() {
-                    break;
-                }
-
-                // Perform tick operations
+                    };
+                    tokio::time::sleep(interval).await;
+                })
+                .await
+                .is_some()
+            {
                 if let Err(e) = self_clone.tick().await {
                     error!("Error in tick: {}", e);
                 }
-
-                // Yield to allow other tasks to run
                 tokio::task::yield_now().await;
             }
 
