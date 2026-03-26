@@ -483,39 +483,26 @@ impl VersionedEncode for OsdXInfo {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OsdXInfo", "Quincy v17+");
-        // Version 1+ fields
+        // Quincy always emits v4 (SERVER_OCTOPUS guaranteed); all fields present.
+        crate::denc::check_min_version!(version, 4, "OsdXInfo", "Quincy v17+");
         let down_stamp = UTime::decode(buf, features)?;
-
         let lp = u32::decode(buf, features)?;
         let laggy_probability = lp as f32 / 0xffffffffu32 as f32;
-
         let laggy_interval = u32::decode(buf, features)?;
+        let osd_features = u64::decode(buf, features)?;
+        let old_weight = u32::decode(buf, features)?;
+        let last_purged_snaps_scrub = UTime::decode(buf, features)?;
+        let dead_epoch = Epoch::decode(buf, features)?;
 
-        let mut xinfo = OsdXInfo {
+        Ok(OsdXInfo {
             down_stamp,
             laggy_probability,
             laggy_interval,
-            ..Default::default()
-        };
-
-        // Version 2+ fields
-        if version >= 2 {
-            xinfo.features = u64::decode(buf, features)?;
-        }
-
-        // Version 3+ fields
-        if version >= 3 {
-            xinfo.old_weight = u32::decode(buf, features)?;
-        }
-
-        // Version 4+ fields
-        if version >= 4 {
-            xinfo.last_purged_snaps_scrub = UTime::decode(buf, features)?;
-            xinfo.dead_epoch = Epoch::decode(buf, features)?;
-        }
-
-        Ok(xinfo)
+            features: osd_features,
+            old_weight,
+            last_purged_snaps_scrub,
+            dead_epoch,
+        })
     }
 
     fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
@@ -1070,11 +1057,12 @@ impl VersionedEncode for PgPool {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, Self::COMPAT_VERSION, "pg_pool_t", "Quincy v17+");
+        // Quincy always emits v29 (non-stretch) or v30 (stretch pool); all fields through
+        // v28 are unconditional, v29+ remain guarded for newer-cluster compatibility.
+        crate::denc::check_min_version!(version, 29, "pg_pool_t", "Quincy v17+");
 
         let mut pool = PgPool::default();
 
-        // Basic fields (always present -- version-conditional assignments follow)
         pool.pool_type = u8::decode(buf, features)?;
         pool.size = u8::decode(buf, features)?;
         pool.crush_rule = u8::decode(buf, features)?;
@@ -1086,214 +1074,82 @@ impl VersionedEncode for PgPool {
         pool.last_change = Epoch::decode(buf, features)?;
         pool.snap_seq = u64::decode(buf, features)?;
         pool.snap_epoch = Epoch::decode(buf, features)?;
-
-        // Version-dependent fields following C++ decode logic
-        if version >= 3 {
-            // Decode snaps map using generic implementation
-            pool.snaps = BTreeMap::decode(buf, features)?;
-
-            // Decode removed_snaps using generic implementation
-            pool.removed_snaps = Vec::decode(buf, features)?;
-
-            pool.auid = u64::decode(buf, features)?;
-        } else {
-            // For older versions, use different encoding format
-            return Err(RadosError::Protocol(
-                "Version < 3 not supported yet".to_string(),
-            ));
-        }
-
-        if version >= 4 {
-            pool.flags = u64::decode(buf, features)?;
-
-            // Read crash_replay_interval but don't store it (matches C++ behavior)
-            let _crash_replay_interval = u32::decode(buf, features)?;
-        } else {
-            pool.flags = 0;
-        }
-
-        if version >= 7 {
-            pool.min_size = u8::decode(buf, features)?;
-        } else {
-            pool.min_size = if pool.size > 0 {
-                pool.size - pool.size / 2
-            } else {
-                0
-            };
-        }
-
-        if version >= 8 {
-            pool.quota_max_bytes = u64::decode(buf, features)?;
-            pool.quota_max_objects = u64::decode(buf, features)?;
-        } else {
-            pool.quota_max_bytes = 0;
-            pool.quota_max_objects = 0;
-        }
-
-        if version >= 9 {
-            // Decode tiers using generic Vec implementation
-            pool.tiers = Vec::decode(buf, features)?;
-
-            pool.tier_of = i64::decode(buf, features)?;
-            pool.cache_mode = u8::decode(buf, features)?;
-            pool.read_tier = i64::decode(buf, features)?;
-            pool.write_tier = i64::decode(buf, features)?;
-        } else {
-            pool.tiers = Vec::new();
-            pool.tier_of = -1;
-            pool.cache_mode = 0;
-            pool.read_tier = -1;
-            pool.write_tier = -1;
-        }
-
-        if version >= 10 {
-            // Decode properties using generic BTreeMap implementation
-            pool.properties = BTreeMap::decode(buf, features)?;
-        } else {
-            pool.properties = BTreeMap::new();
-        }
-
-        if version >= 11 {
-            // Debug code removed - cannot index into generic Buf trait
-
-            // Decode HitSetParams using the proper implementation
-            pool.hit_set_params = HitSetParams::decode_versioned(buf, features)?;
-
-            pool.hit_set_period = u32::decode(buf, features)?;
-            pool.hit_set_count = u32::decode(buf, features)?;
-        } else {
-            pool.hit_set_params = HitSetParams::None;
-            pool.hit_set_period = 0;
-            pool.hit_set_count = 0;
-        }
-
-        if version >= 12 {
-            pool.stripe_width = u32::decode(buf, features)?;
-        } else {
-            pool.stripe_width = 0;
-        }
-
-        if version >= 13 {
-            pool.target_max_bytes = u64::decode(buf, features)?;
-            pool.target_max_objects = u64::decode(buf, features)?;
-            pool.cache_target_dirty_ratio_micro = u32::decode(buf, features)?;
-            pool.cache_target_full_ratio_micro = u32::decode(buf, features)?;
-            pool.cache_min_flush_age = u32::decode(buf, features)?;
-            pool.cache_min_evict_age = u32::decode(buf, features)?;
-        } else {
-            pool.target_max_bytes = 0;
-            pool.target_max_objects = 0;
-            pool.cache_target_dirty_ratio_micro = 0;
-            pool.cache_target_full_ratio_micro = 0;
-            pool.cache_min_flush_age = 0;
-            pool.cache_min_evict_age = 0;
-        }
-
-        if version >= 14 {
-            pool.erasure_code_profile = String::decode(buf, features)?;
-        } else {
-            pool.erasure_code_profile = String::new();
-        }
-
-        if version >= 15 {
-            pool.last_force_op_resend_preluminous = Epoch::decode(buf, features)?;
-        } else {
-            pool.last_force_op_resend_preluminous = crate::Epoch::new(0);
-        }
-
-        if version >= 16 {
-            pool.min_read_recency_for_promote = i32::decode(buf, features)?;
-        } else {
-            pool.min_read_recency_for_promote = 1;
-        }
-
-        if version >= 17 {
-            pool.expected_num_objects = u64::decode(buf, features)?;
-        } else {
-            pool.expected_num_objects = 0;
-        }
-
-        // Version-dependent fields
-        if version >= 19 {
-            pool.cache_target_dirty_high_ratio_micro = u32::decode(buf, features)?;
-        }
-        if version >= 20 {
-            pool.min_write_recency_for_promote = i32::decode(buf, features)?;
-        }
-        if version >= 21 {
-            pool.use_gmt_hitset = bool::decode(buf, features)?;
-        }
-        if version >= 22 {
-            pool.fast_read = bool::decode(buf, features)?;
-        }
-        if version >= 23 {
-            pool.hit_set_grade_decay_rate = i32::decode(buf, features)?;
-            pool.hit_set_search_last_n = u32::decode(buf, features)?;
-        } else {
-            pool.hit_set_grade_decay_rate = 0;
-            pool.hit_set_search_last_n = 1;
-        }
-
-        // For now, let's be more permissive with remaining fields
-        // If we can't decode them properly, skip them
-        if version >= 24 && buf.remaining() > 4 {
-            // Pool opts (simplified as raw data for now)
-
-            if buf.remaining() >= 8 {
-                // Debug array removed - cannot index generic Buf
+        // v3+
+        pool.snaps = BTreeMap::decode(buf, features)?;
+        pool.removed_snaps = Vec::decode(buf, features)?;
+        pool.auid = u64::decode(buf, features)?;
+        // v4+
+        pool.flags = u64::decode(buf, features)?;
+        let _crash_replay_interval = u32::decode(buf, features)?;
+        // v7+
+        pool.min_size = u8::decode(buf, features)?;
+        // v8+
+        pool.quota_max_bytes = u64::decode(buf, features)?;
+        pool.quota_max_objects = u64::decode(buf, features)?;
+        // v9+
+        pool.tiers = Vec::decode(buf, features)?;
+        pool.tier_of = i64::decode(buf, features)?;
+        pool.cache_mode = u8::decode(buf, features)?;
+        pool.read_tier = i64::decode(buf, features)?;
+        pool.write_tier = i64::decode(buf, features)?;
+        // v10+
+        pool.properties = BTreeMap::decode(buf, features)?;
+        // v11+
+        pool.hit_set_params = HitSetParams::decode_versioned(buf, features)?;
+        pool.hit_set_period = u32::decode(buf, features)?;
+        pool.hit_set_count = u32::decode(buf, features)?;
+        // v12+
+        pool.stripe_width = u32::decode(buf, features)?;
+        // v13+
+        pool.target_max_bytes = u64::decode(buf, features)?;
+        pool.target_max_objects = u64::decode(buf, features)?;
+        pool.cache_target_dirty_ratio_micro = u32::decode(buf, features)?;
+        pool.cache_target_full_ratio_micro = u32::decode(buf, features)?;
+        pool.cache_min_flush_age = u32::decode(buf, features)?;
+        pool.cache_min_evict_age = u32::decode(buf, features)?;
+        // v14+
+        pool.erasure_code_profile = String::decode(buf, features)?;
+        // v15+
+        pool.last_force_op_resend_preluminous = Epoch::decode(buf, features)?;
+        // v16+
+        pool.min_read_recency_for_promote = i32::decode(buf, features)?;
+        // v17+
+        pool.expected_num_objects = u64::decode(buf, features)?;
+        // v19+
+        pool.cache_target_dirty_high_ratio_micro = u32::decode(buf, features)?;
+        // v20+
+        pool.min_write_recency_for_promote = i32::decode(buf, features)?;
+        // v21+
+        pool.use_gmt_hitset = bool::decode(buf, features)?;
+        // v22+
+        pool.fast_read = bool::decode(buf, features)?;
+        // v23+
+        pool.hit_set_grade_decay_rate = i32::decode(buf, features)?;
+        pool.hit_set_search_last_n = u32::decode(buf, features)?;
+        // v24+: opts (versioned sub-encoding stored as raw bytes)
+        {
+            let _opts_version = buf.get_u8();
+            let _opts_compat_version = buf.get_u8();
+            let opts_len = buf.get_u32_le() as usize;
+            if opts_len <= buf.remaining() {
+                pool.opts_data = vec![0u8; opts_len];
+                buf.copy_to_slice(&mut pool.opts_data);
             }
-
-            // opts is versioned encoded - read version header first
-            if buf.remaining() >= 6 {
-                // Need at least 6 bytes for version header
-                let _version = buf.get_u8();
-                let _compat_version = buf.get_u8();
-                let opts_len = buf.get_u32_le() as usize;
-
-                if opts_len <= buf.remaining() && opts_len < 10000 {
-                    // Reasonable limit
-                    pool.opts_data = vec![0u8; opts_len];
-                    if opts_len > 0 {
-                        buf.copy_to_slice(&mut pool.opts_data);
-                    }
-                } else {
-                    pool.opts_data = Vec::new();
-                }
-            } else {
-                pool.opts_data = Vec::new();
-            }
-        } else {
-            pool.opts_data = Vec::new();
         }
-
-        // Try to continue with remaining fields if there are enough bytes
-        if version >= 25 && buf.remaining() >= 4 {
-            pool.last_force_op_resend_prenautilus = Epoch::decode(buf, features)?;
-        } else {
-            pool.last_force_op_resend_prenautilus = pool.last_force_op_resend_preluminous;
-        }
-
-        // Version 26+ fields
-        if version >= 26 {
-            // Application metadata (BTreeMap<String, String>)
-            pool.application_metadata = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 27 {
-            // Create time
-            pool.create_time = UTime::decode(buf, features)?;
-        }
-
-        if version >= 28 {
-            // Version 28 fields
-            pool.pg_num_target = u32::decode(buf, features)?;
-            pool.pgp_num_target = u32::decode(buf, features)?;
-            pool.pg_num_pending = u32::decode(buf, features)?;
-            let _pg_num_dec_last_epoch_started = u32::decode(buf, features)?; // Always 0 in recent versions
-            let _pg_num_dec_last_epoch_clean = u32::decode(buf, features)?; // Always 0 in recent versions
-            pool.last_force_op_resend = Epoch::decode(buf, features)?;
-            pool.pg_autoscale_mode = u8::decode(buf, features)?;
-        }
+        // v25+
+        pool.last_force_op_resend_prenautilus = Epoch::decode(buf, features)?;
+        // v26+
+        pool.application_metadata = BTreeMap::decode(buf, features)?;
+        // v27+
+        pool.create_time = UTime::decode(buf, features)?;
+        // v28+
+        pool.pg_num_target = u32::decode(buf, features)?;
+        pool.pgp_num_target = u32::decode(buf, features)?;
+        pool.pg_num_pending = u32::decode(buf, features)?;
+        let _pg_num_dec_last_epoch_started = u32::decode(buf, features)?;
+        let _pg_num_dec_last_epoch_clean = u32::decode(buf, features)?;
+        pool.last_force_op_resend = Epoch::decode(buf, features)?;
+        pool.pg_autoscale_mode = u8::decode(buf, features)?;
 
         if version >= 29 {
             pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
@@ -1623,9 +1479,10 @@ impl VersionedEncode for OSDMapIncrementalClientSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        // Quincy always emits v8 (SERVER_NAUTILUS guaranteed); all fields through v8 present.
         crate::denc::check_min_version!(
             version,
-            1,
+            8,
             "OSDMapIncremental::ClientSection",
             "Quincy v17+"
         );
@@ -1639,61 +1496,26 @@ impl VersionedEncode for OSDMapIncrementalClientSection {
             crush: Bytes::decode(buf, features)?,
             new_max_osd: i32::decode(buf, features)?,
             new_pools: BTreeMap::decode(buf, features)?,
+            new_pool_names: BTreeMap::decode(buf, features)?,
+            old_pools: Vec::decode(buf, features)?,
+            new_up_client: BTreeMap::decode(buf, features)?,
+            new_state: BTreeMap::decode(buf, features)?,
+            new_weight: BTreeMap::decode(buf, features)?,
+            new_pg_temp: BTreeMap::decode(buf, features)?,
+            new_primary_temp: BTreeMap::decode(buf, features)?,
+            new_primary_affinity: BTreeMap::decode(buf, features)?,
+            new_erasure_code_profiles: BTreeMap::decode(buf, features)?,
+            old_erasure_code_profiles: Vec::decode(buf, features)?,
+            new_pg_upmap: BTreeMap::decode(buf, features)?,
+            old_pg_upmap: Vec::decode(buf, features)?,
+            new_pg_upmap_items: BTreeMap::decode(buf, features)?,
+            old_pg_upmap_items: Vec::decode(buf, features)?,
+            new_removed_snaps: BTreeMap::decode(buf, features)?,
+            new_purged_snaps: BTreeMap::decode(buf, features)?,
+            new_last_up_change: UTime::decode(buf, features)?,
+            new_last_in_change: UTime::decode(buf, features)?,
             ..Default::default()
         };
-
-        if version == 5 {
-            let map: BTreeMap<i64, String> = BTreeMap::decode(buf, features)?;
-            section.new_pool_names = map.into_iter().map(|(k, v)| (k as u64, v)).collect();
-        } else if version >= 6 {
-            section.new_pool_names = BTreeMap::decode(buf, features)?;
-        }
-
-        if version < 6 {
-            let ids: Vec<i64> = Vec::decode(buf, features)?;
-            section.old_pools = ids.into_iter().map(|k| k as u64).collect();
-        } else {
-            section.old_pools = Vec::decode(buf, features)?;
-        }
-
-        section.new_up_client = BTreeMap::decode(buf, features)?;
-
-        if version >= 5 {
-            section.new_state = BTreeMap::decode(buf, features)?;
-        } else {
-            let old_state: BTreeMap<i32, u8> = BTreeMap::decode(buf, features)?;
-            section.new_state = old_state.into_iter().map(|(k, v)| (k, v as u32)).collect();
-        }
-
-        section.new_weight = BTreeMap::decode(buf, features)?;
-        section.new_pg_temp = BTreeMap::decode(buf, features)?;
-        section.new_primary_temp = BTreeMap::decode(buf, features)?;
-
-        if version >= 2 {
-            section.new_primary_affinity = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 3 {
-            section.new_erasure_code_profiles = BTreeMap::decode(buf, features)?;
-            section.old_erasure_code_profiles = Vec::decode(buf, features)?;
-        }
-
-        if version >= 4 {
-            section.new_pg_upmap = BTreeMap::decode(buf, features)?;
-            section.old_pg_upmap = Vec::decode(buf, features)?;
-            section.new_pg_upmap_items = BTreeMap::decode(buf, features)?;
-            section.old_pg_upmap_items = Vec::decode(buf, features)?;
-        }
-
-        if version >= 6 {
-            section.new_removed_snaps = BTreeMap::decode(buf, features)?;
-            section.new_purged_snaps = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 8 {
-            section.new_last_up_change = UTime::decode(buf, features)?;
-            section.new_last_in_change = UTime::decode(buf, features)?;
-        }
 
         if version >= 9 {
             section.new_pg_upmap_primary = BTreeMap::decode(buf, features)?;
@@ -1768,7 +1590,8 @@ impl VersionedEncode for OSDMapIncrementalOsdSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OSDMapIncremental::OsdSection", "Quincy v17+");
+        // Quincy always emits v9 (SERVER_NAUTILUS guaranteed); all fields through v9 present.
+        crate::denc::check_min_version!(version, 9, "OSDMapIncremental::OsdSection", "Quincy v17+");
         let mut section = Self {
             new_hb_back_up: BTreeMap::decode(buf, features)?,
             new_up_thru: BTreeMap::decode(buf, features)?,
@@ -1781,34 +1604,16 @@ impl VersionedEncode for OSDMapIncrementalOsdSection {
             new_uuid: BTreeMap::decode(buf, features)?,
             new_xinfo: BTreeMap::decode(buf, features)?,
             new_hb_front_up: BTreeMap::decode(buf, features)?,
+            encode_features: u64::decode(buf, features)?,
+            new_nearfull_ratio: f32::decode(buf, features)?,
+            new_full_ratio: f32::decode(buf, features)?,
+            new_backfillfull_ratio: f32::decode(buf, features)?,
+            new_require_min_compat_client: u8::decode(buf, features)?,
+            new_require_osd_release: u8::decode(buf, features)?,
+            new_crush_node_flags: BTreeMap::decode(buf, features)?,
+            new_device_class_flags: BTreeMap::decode(buf, features)?,
             ..Default::default()
         };
-
-        if version >= 2 {
-            section.encode_features = u64::decode(buf, features)?;
-        }
-
-        if version >= 3 {
-            section.new_nearfull_ratio = f32::decode(buf, features)?;
-            section.new_full_ratio = f32::decode(buf, features)?;
-        }
-
-        if version >= 4 {
-            section.new_backfillfull_ratio = f32::decode(buf, features)?;
-        }
-
-        if version >= 6 {
-            section.new_require_min_compat_client = u8::decode(buf, features)?;
-            section.new_require_osd_release = u8::decode(buf, features)?;
-        }
-
-        if version >= 8 {
-            section.new_crush_node_flags = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 9 {
-            section.new_device_class_flags = BTreeMap::decode(buf, features)?;
-        }
 
         if version >= 10 {
             section.change_stretch_mode = bool::decode(buf, features)?;
@@ -1893,7 +1698,8 @@ impl VersionedEncode for OSDMapClientSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OSDMapClientSection", "Quincy v17+");
+        // Quincy always emits v9 (SERVER_NAUTILUS guaranteed); all fields through v9 present.
+        crate::denc::check_min_version!(version, 9, "OSDMapClientSection", "Quincy v17+");
         let mut section = Self {
             fsid: UuidD::decode(buf, features)?,
             epoch: Epoch::decode(buf, features)?,
@@ -1904,28 +1710,14 @@ impl VersionedEncode for OSDMapClientSection {
             pool_max: i32::decode(buf, features)?,
             flags: u32::decode(buf, features)?,
             max_osd: i32::decode(buf, features)?,
+            osd_state: Vec::decode(buf, features)?,
+            osd_weight: Vec::decode(buf, features)?,
+            osd_addrs_client: Vec::decode(buf, features)?,
+            pg_temp: BTreeMap::decode(buf, features)?,
+            primary_temp: BTreeMap::decode(buf, features)?,
+            osd_primary_affinity: Vec::decode(buf, features)?,
             ..Default::default()
         };
-
-        if version >= 5 {
-            section.osd_state = Vec::decode(buf, features)?;
-        } else {
-            let old_osd_state = Vec::<u8>::decode(buf, features)?;
-            section.osd_state = old_osd_state.into_iter().map(u32::from).collect();
-        }
-
-        section.osd_weight = Vec::decode(buf, features)?;
-
-        if version >= 8 {
-            section.osd_addrs_client = Vec::decode(buf, features)?;
-        } else {
-            section.osd_addrs_client = decode_legacy_entity_addrvecs(buf, features)?;
-        }
-
-        section.pg_temp = BTreeMap::decode(buf, features)?;
-        section.primary_temp = BTreeMap::decode(buf, features)?;
-
-        section.osd_primary_affinity = Vec::decode(buf, features)?;
 
         let crush_bytes = Bytes::decode(buf, features)?;
         if !crush_bytes.is_empty() {
@@ -1940,25 +1732,13 @@ impl VersionedEncode for OSDMapClientSection {
         }
 
         section.erasure_code_profiles = BTreeMap::decode(buf, features)?;
-
-        if version >= 4 {
-            section.pg_upmap = BTreeMap::decode(buf, features)?;
-            section.pg_upmap_items = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 6 {
-            section.crush_version = i32::decode(buf, features)?;
-        }
-
-        if version >= 7 {
-            section.new_removed_snaps = BTreeMap::decode(buf, features)?;
-            section.new_purged_snaps = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 9 {
-            section.last_up_change = UTime::decode(buf, features)?;
-            section.last_in_change = UTime::decode(buf, features)?;
-        }
+        section.pg_upmap = BTreeMap::decode(buf, features)?;
+        section.pg_upmap_items = BTreeMap::decode(buf, features)?;
+        section.crush_version = i32::decode(buf, features)?;
+        section.new_removed_snaps = BTreeMap::decode(buf, features)?;
+        section.new_purged_snaps = BTreeMap::decode(buf, features)?;
+        section.last_up_change = UTime::decode(buf, features)?;
+        section.last_in_change = UTime::decode(buf, features)?;
 
         if version >= 10 {
             section.pg_upmap_primaries = BTreeMap::decode(buf, features)?;
@@ -1970,14 +1750,6 @@ impl VersionedEncode for OSDMapClientSection {
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
         None
     }
-}
-
-fn decode_legacy_entity_addrvecs<B: Buf>(
-    buf: &mut B,
-    features: u64,
-) -> Result<Vec<EntityAddrvec>, RadosError> {
-    let addrs = Vec::<EntityAddr>::decode(buf, features)?;
-    Ok(addrs.into_iter().map(EntityAddrvec::with_addr).collect())
 }
 
 #[derive(Default)]
@@ -2036,7 +1808,8 @@ impl VersionedEncode for OSDMapOsdSection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "OSDMapOsdSection", "Quincy v17+");
+        // Quincy always emits v9 (SERVER_NAUTILUS guaranteed); all fields through v9 present.
+        crate::denc::check_min_version!(version, 9, "OSDMapOsdSection", "Quincy v17+");
         let mut section = Self {
             osd_addrs_hb_back: Vec::decode(buf, features)?,
             osd_info: Vec::decode(buf, features)?,
@@ -2047,34 +1820,16 @@ impl VersionedEncode for OSDMapOsdSection {
             osd_uuid: Vec::decode(buf, features)?,
             osd_xinfo: Vec::decode(buf, features)?,
             osd_addrs_hb_front: Vec::decode(buf, features)?,
+            nearfull_ratio: f32::decode(buf, features)?,
+            full_ratio: f32::decode(buf, features)?,
+            backfillfull_ratio: f32::decode(buf, features)?,
+            require_min_compat_client: CephRelease::decode(buf, features)?,
+            require_osd_release: CephRelease::decode(buf, features)?,
+            removed_snaps_queue: Vec::decode(buf, features)?,
+            crush_node_flags: BTreeMap::decode(buf, features)?,
+            device_class_flags: BTreeMap::decode(buf, features)?,
             ..Default::default()
         };
-
-        if version >= 2 {
-            section.nearfull_ratio = f32::decode(buf, features)?;
-            section.full_ratio = f32::decode(buf, features)?;
-        }
-
-        if version >= 3 {
-            section.backfillfull_ratio = f32::decode(buf, features)?;
-        }
-
-        if version >= 5 {
-            section.require_min_compat_client = CephRelease::decode(buf, features)?;
-            section.require_osd_release = CephRelease::decode(buf, features)?;
-        }
-
-        if version >= 6 {
-            section.removed_snaps_queue = Vec::decode(buf, features)?;
-        }
-
-        if version >= 8 {
-            section.crush_node_flags = BTreeMap::decode(buf, features)?;
-        }
-
-        if version >= 9 {
-            section.device_class_flags = BTreeMap::decode(buf, features)?;
-        }
 
         if version >= 10 {
             section.stretch_mode_enabled = bool::decode(buf, features)?;

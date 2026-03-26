@@ -8,11 +8,6 @@ use bytes::{Buf, BufMut};
 const OBJECT_STAT_SUM_ENCODED_SIZE: usize =
     36 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
 
-/// Wire size of ObjectStatSum at version 14 (minimum supported):
-/// 30 × i64 + 4 × i32 (excludes v16-v20 fields)
-const OBJECT_STAT_SUM_V14_MIN_SIZE: usize =
-    30 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
-
 /// Number of u32 fields in OsdStatInterfaces (1 + 3×6 + 1 = 21 fields for
 /// last_update, back_{pingtime,min,max}[3], back_last, front_{pingtime,min,max}[3], front_last)
 const OSD_STAT_INTERFACES_NUM_FIELDS: usize = 21;
@@ -198,14 +193,14 @@ impl VersionedEncode for ObjectStatSum {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 14, "ObjectStatSum", "Quincy v17+");
+        // Quincy always emits v20; all 40 fields are always present.
+        crate::denc::check_min_version!(version, 20, "ObjectStatSum", "Quincy v17+");
 
-        // Base fields for version 14: 30 × i64 + 4 × i32 (excludes v16-v20 fields)
-        if buf.remaining() < OBJECT_STAT_SUM_V14_MIN_SIZE {
+        if buf.remaining() < OBJECT_STAT_SUM_ENCODED_SIZE {
             return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for ObjectStatSum v{}: need at least {}, have {}",
+                "Insufficient bytes for ObjectStatSum v{}: need {}, have {}",
                 version,
-                OBJECT_STAT_SUM_V14_MIN_SIZE,
+                OBJECT_STAT_SUM_ENCODED_SIZE,
                 buf.remaining()
             )));
         }
@@ -245,28 +240,13 @@ impl VersionedEncode for ObjectStatSum {
         let num_objects_pinned = buf.get_i64_le();
         let num_objects_missing = buf.get_i64_le();
 
-        // Version 16+ has num_legacy_snapsets
-        let num_legacy_snapsets = if version >= 16 {
-            buf.get_i64_le()
-        } else {
-            num_object_clones // upper bound fallback
-        };
-
-        // Version 17+ has num_large_omap_objects
-        let num_large_omap_objects = if version >= 17 { buf.get_i64_le() } else { 0 };
-
-        // Version 18+ has num_objects_manifest
-        let num_objects_manifest = if version >= 18 { buf.get_i64_le() } else { 0 };
-
-        // Version 19+ has num_omap_bytes and num_omap_keys
-        let (num_omap_bytes, num_omap_keys) = if version >= 19 {
-            (buf.get_i64_le(), buf.get_i64_le())
-        } else {
-            (0, 0)
-        };
-
-        // Version 20+ has num_objects_repaired
-        let num_objects_repaired = if version >= 20 { buf.get_i64_le() } else { 0 };
+        // Fields present since v16-v20; Quincy always emits v20 so all are unconditional.
+        let num_legacy_snapsets = buf.get_i64_le();
+        let num_large_omap_objects = buf.get_i64_le();
+        let num_objects_manifest = buf.get_i64_le();
+        let num_omap_bytes = buf.get_i64_le();
+        let num_omap_keys = buf.get_i64_le();
+        let num_objects_repaired = buf.get_i64_le();
 
         Ok(ObjectStatSum {
             num_bytes,
@@ -475,26 +455,15 @@ impl VersionedEncode for PoolStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        // Quincy always emits v7; all fields are always present.
+        crate::denc::check_min_version!(version, 7, "PoolStat", "Quincy v17+");
         let stats = ObjectStatCollection::decode(buf, features)?;
         let log_size = buf.get_i64_le();
         let ondisk_log_size = buf.get_i64_le();
-
-        // Version 5+ has up and acting fields
-        let (up, acting) = if version >= 5 {
-            (buf.get_i32_le(), buf.get_i32_le())
-        } else {
-            (0, 0)
-        };
-
-        // Version 6+ has store_stats
-        let store_stats = if version >= 6 {
-            StoreStatfs::decode(buf, features)?
-        } else {
-            StoreStatfs::default()
-        };
-
-        // Version 7+ has num_store_stats
-        let num_store_stats = if version >= 7 { buf.get_i32_le() } else { 0 };
+        let up = buf.get_i32_le();
+        let acting = buf.get_i32_le();
+        let store_stats = StoreStatfs::decode(buf, features)?;
+        let num_store_stats = buf.get_i32_le();
 
         Ok(PoolStat {
             stats,
@@ -520,18 +489,7 @@ impl Denc for PoolStat {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < 1 {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for PoolStat version".into(),
-            ));
-        }
-
-        if buf.chunk()[0] < 5 {
-            let version = buf.get_u8();
-            Self::decode_content(buf, features, version, 0)
-        } else {
-            Self::decode_versioned(buf, features)
-        }
+        Self::decode_versioned(buf, features)
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
@@ -1220,44 +1178,6 @@ mod tests {
     }
 
     #[test]
-    fn test_pool_stat_legacy_decode_v4() {
-        let original = PoolStat {
-            stats: ObjectStatCollection {
-                sum: ObjectStatSum {
-                    num_bytes: 1024000,
-                    num_objects: 50,
-                    ..Default::default()
-                },
-            },
-            store_stats: StoreStatfs {
-                total: 1000000,
-                available: 500000,
-                ..Default::default()
-            },
-            log_size: 1000,
-            ondisk_log_size: 1200,
-            up: 3,
-            acting: 3,
-            num_store_stats: 3,
-        };
-
-        let mut buf_legacy = BytesMut::new();
-        buf_legacy.put_u8(4);
-        original.stats.encode(&mut buf_legacy, 0).unwrap();
-        buf_legacy.put_i64_le(original.log_size);
-        buf_legacy.put_i64_le(original.ondisk_log_size);
-
-        let decoded_legacy = PoolStat::decode(&mut buf_legacy, 0).unwrap();
-        assert_eq!(decoded_legacy.stats, original.stats);
-        assert_eq!(decoded_legacy.log_size, original.log_size);
-        assert_eq!(decoded_legacy.ondisk_log_size, original.ondisk_log_size);
-        assert_eq!(decoded_legacy.up, 0);
-        assert_eq!(decoded_legacy.acting, 0);
-        assert!(decoded_legacy.store_stats.is_zero());
-        assert_eq!(decoded_legacy.num_store_stats, 0);
-    }
-
-    #[test]
     fn test_pool_stat_default() {
         let pool_stat = PoolStat::default();
         assert!(pool_stat.is_zero());
@@ -1765,7 +1685,8 @@ impl VersionedEncode for PgStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 22, "PgStat", "Quincy v17+");
+        // Quincy always emits v29; all fields decoded below are always present.
+        crate::denc::check_min_version!(version, 29, "PgStat", "Quincy v17+");
 
         let pg_version = EVersion::decode(buf, features)?;
         let reported_seq = Version::decode(buf, features)?;
