@@ -322,6 +322,12 @@ async fn io_task(
     'outer: loop {
         // Phase 1: Drain all pending commands into the priority queue (non-blocking)
         loop {
+            // Check cancellation on each iteration so a large backlog of queued
+            // commands (e.g. keepalives) does not delay shutdown.
+            if shutdown_token.is_cancelled() {
+                tracing::debug!("I/O task: cancelled during drain loop");
+                break 'outer;
+            }
             match cmd_rx.try_recv() {
                 Ok(IoCommand::SendMessage(msg, reply)) => {
                     outbound.push_back(OutboundEntry { msg, reply });
