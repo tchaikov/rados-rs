@@ -44,7 +44,8 @@ use crate::msgr2::priority_queue::{Prioritized, PriorityQueue};
 use crate::msgr2::throttle::MessageThrottle;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use tokio::sync::{Mutex, Notify, mpsc};
+use tokio::sync::{Mutex, mpsc};
+use tokio_util::sync::CancellationToken;
 
 /// Shared state between SendHalf and RecvHalf
 ///
@@ -113,7 +114,6 @@ enum IoCommand {
     SendMessage(Message, tokio::sync::oneshot::Sender<Result<()>>),
     /// Send a pre-built frame directly (used for keepalive, not priority-queued)
     SendFrame(Frame, tokio::sync::oneshot::Sender<Result<()>>),
-    Shutdown,
 }
 
 /// The sending half of a split connection
@@ -126,8 +126,8 @@ pub struct SendHalf {
     shared: Arc<Mutex<SharedState>>,
     /// Optional message throttle
     throttle: Option<MessageThrottle>,
-    /// Notify when shutdown is requested
-    shutdown: Arc<Notify>,
+    /// CancellationToken to signal the I/O task to stop
+    shutdown_token: CancellationToken,
 }
 
 /// The receiving half of a split connection
@@ -197,7 +197,7 @@ impl SendHalf {
 
     /// Request shutdown of the connection
     pub fn shutdown(&self) {
-        self.shutdown.notify_one();
+        self.shutdown_token.cancel();
     }
 
     /// Get access to shared state
@@ -226,8 +226,7 @@ impl RecvHalf {
 
 impl Drop for SendHalf {
     fn drop(&mut self) {
-        // Try to send shutdown command, ignore errors if channel is closed
-        let _ = self.cmd_tx.try_send(IoCommand::Shutdown);
+        self.shutdown_token.cancel();
     }
 }
 
@@ -316,7 +315,7 @@ async fn io_task(
     msg_tx: mpsc::Sender<Result<Message>>,
     shared: Arc<Mutex<SharedState>>,
     throttle: Option<MessageThrottle>,
-    shutdown: Arc<Notify>,
+    shutdown_token: CancellationToken,
 ) {
     let mut outbound: PriorityQueue<OutboundEntry> = PriorityQueue::new();
 
@@ -337,10 +336,6 @@ async fn io_task(
                         break 'outer;
                     }
                 }
-                Ok(IoCommand::Shutdown) => {
-                    tracing::debug!("I/O task: shutdown command received");
-                    return;
-                }
                 Err(_) => break, // Channel empty or closed
             }
         }
@@ -359,7 +354,7 @@ async fn io_task(
 
         // Phase 3: Nothing pending — block in select!
         tokio::select! {
-            _ = shutdown.notified() => {
+            _ = shutdown_token.cancelled() => {
                 tracing::debug!("I/O task: shutdown requested");
                 break;
             }
@@ -380,7 +375,7 @@ async fn io_task(
                             break;
                         }
                     }
-                    Some(IoCommand::Shutdown) | None => {
+                    None => {
                         tracing::debug!("I/O task: command channel closed");
                         break;
                     }
@@ -480,7 +475,7 @@ impl SplitBuilder {
     /// Build the SendHalf and RecvHalf, spawning the I/O task
     pub fn build(self) -> (SendHalf, RecvHalf) {
         let shared = Arc::new(Mutex::new(self.shared));
-        let shutdown = Arc::new(Notify::new());
+        let shutdown_token = CancellationToken::new();
 
         // Create channels
         let (cmd_tx, cmd_rx) = mpsc::channel(32);
@@ -488,7 +483,7 @@ impl SplitBuilder {
 
         // Spawn I/O task
         let io_shared = shared.clone();
-        let io_shutdown = shutdown.clone();
+        let io_shutdown = shutdown_token.clone();
         let io_throttle = self.throttle.clone();
         tokio::spawn(async move {
             io_task(
@@ -506,7 +501,7 @@ impl SplitBuilder {
             cmd_tx,
             shared: shared.clone(),
             throttle: self.throttle.clone(),
-            shutdown,
+            shutdown_token,
         };
 
         let recv_half = RecvHalf {
