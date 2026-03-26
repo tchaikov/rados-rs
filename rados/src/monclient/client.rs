@@ -476,6 +476,12 @@ impl MonClient {
 
         info!("Shutting down MonClient");
 
+        // Signal shutdown immediately so that concurrent tick() / drain loops
+        // notice before we start tearing down connections.
+        // Mirrors C++ MonClient::shutdown() setting `stopping = true` first.
+        // See: https://github.com/ceph/ceph/pull/64756
+        self.shutdown_token.cancel();
+
         // Cancel all pending operations by clearing their trackers.
         // Callers blocked on rx.await will receive a RecvError ("Channel closed"),
         // which they handle as an error. This matches C++ MonClient::shutdown()
@@ -504,10 +510,7 @@ impl MonClient {
             con.close().await?;
         }
 
-        // Cancel all background tasks and await them.
-        // The drain task won't stop on its own because MonClient still holds mon_msg_tx;
-        // the cancellation token signals it to exit.
-        self.shutdown_token.cancel();
+        // Await all background tasks (already signalled by the early cancel above).
         let mut tasks = self.tasks.lock().await;
         while let Some(result) = tasks.join_next().await {
             if let Err(e) = result
@@ -1065,6 +1068,11 @@ impl MonClient {
 
     /// Periodic maintenance tick
     async fn tick(&self) -> Result<()> {
+        if self.shutdown_token.is_cancelled() {
+            debug!("Skipping tick during shutdown");
+            return Ok(());
+        }
+
         let (is_hunting, active_con_opt) = {
             let conn_state = self.connection_state.read().await;
             (
