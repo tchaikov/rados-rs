@@ -1,0 +1,33 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "cargo fmt --all",
+            "statusMessage": "Formatting Rust code..."
+          },
+          {
+            "type": "command",
+            "command": "cargo clippy --workspace --all-targets --all-features -- --no-deps -D warnings",
+            "statusMessage": "Running Clippy lints...",
+            "timeout": 120000,
+            "async": true
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if git diff --name-only HEAD 2>/dev/null | grep -q '\\.rs$'; then cargo fmt --all; fi",
+            "statusMessage": "Formatting Rust code modified by shell command..."
+          }
+        ]
+      }
+    ]
+  }
+}
