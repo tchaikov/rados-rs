@@ -168,7 +168,7 @@ impl From<u8> for ElectionStrategy {
 impl_denc_u8_enum!(ElectionStrategy);
 
 /// Monitor information (mon_info_t in C++)
-/// Version 6 encoding format
+/// Encodes at v6 (always, since Quincy requires SERVER_NAUTILUS); decodes v5–v6+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MonInfo {
     pub name: String,
@@ -230,19 +230,17 @@ impl VersionedEncode for MonInfo {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Minimum supported project release boundary (Octopus v15+)
-        // Version 5 remains the wire-format floor we decode for MonInfo.
-        // Version 6 adds time_added (added in Nov 2025, not in released versions yet)
-        crate::denc::check_min_version!(version, 5, "MonInfo", "Octopus v15+");
+        // Quincy (v17) always emits ENCODE_START(5, 1, bl), encoding name,
+        // public_addrs, priority, weight, and crush_loc as a unit.
+        crate::denc::check_min_version!(version, 5, "MonInfo", "Quincy v17+");
 
-        // Decode fields present in v5+
         let name = <String as Denc>::decode(buf, features)?;
         let public_addrs = <EntityAddrvec as Denc>::decode(buf, features)?;
         let priority = <u16 as Denc>::decode(buf, features)?;
         let weight = <u16 as Denc>::decode(buf, features)?;
         let crush_loc = <BTreeMap<String, String> as Denc>::decode(buf, features)?;
 
-        // time_added is only present in v6+ (added Nov 2025)
+        // v6+: time_added (not present in Quincy, added in a later release)
         let time_added =
             crate::denc::decode_if_version!(buf, features, version, >= 6, UTime, UTime::default());
 
@@ -275,7 +273,7 @@ crate::denc::impl_denc_for_versioned!(MonInfo);
 /// Version 9 encoding format
 ///
 /// ## Supported Versions
-/// - **Encoding**: v9 (current Octopus+ layout)
+/// - **Encoding**: v9 (current Quincy+ layout)
 /// - **Decoding**: v6-v9 (modern format with ranks)
 ///
 /// ## Version History
@@ -288,7 +286,7 @@ crate::denc::impl_denc_for_versioned!(MonInfo);
 /// - v9: Added stretch mode fields (stretch_mode_enabled, tiebreaker_mon, stretch_marked_down_mons)
 ///
 /// The implementation focuses on modern formats (v6+) as these are used in
-/// all actively supported Ceph releases (Octopus and later).
+/// all actively supported Ceph releases (Quincy and later).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct MonMap {
     pub fsid: FsId,
@@ -354,13 +352,13 @@ impl VersionedEncode for MonMap {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Minimum supported project release boundary (Octopus v15+)
+        // Minimum supported project release boundary (Quincy v17+)
         // Version 6 remains the wire-format floor we decode for modern MonMap layouts.
         crate::denc::check_min_version!(
             version,
             MONMAP_MIN_DECODE_VERSION,
             "MonMap",
-            "Octopus v15+"
+            "Quincy v17+"
         );
 
         let fsid = <[u8; 16] as Denc>::decode(buf, features)?;
