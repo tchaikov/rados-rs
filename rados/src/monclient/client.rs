@@ -38,6 +38,23 @@ fn decode_message<T: crate::msgr2::ceph_message::CephMessagePayload>(
     T::decode_payload(&header, &msg.front, &msg.middle, &msg.data)
 }
 
+/// Encode a `CephMessagePayload` into a wire `Message`, stamp it with `tid`, and send it.
+///
+/// This is the common send-only primitive used by `send_and_wait` (for `get_version` and
+/// `send_poolop`), by `invoke` (for the initial command send and on-reconnect resend),
+/// and by the reconnect resend loop.  It is a free function because it needs no
+/// `MonClient` state — only the connection and the message data.
+async fn send_msg_with_tid(
+    con: &MonConnection,
+    msg: &impl crate::msgr2::ceph_message::CephMessagePayload,
+    tid: u64,
+) -> Result<()> {
+    let ceph_msg = CephMessage::from_payload(msg, 0, CrcFlags::ALL)?;
+    let mut message = crate::msgr2::message::Message::from_ceph_message(ceph_msg);
+    message.header.set_tid(tid);
+    con.send_message(message).await
+}
+
 /// Broadcast channel capacity for map events (MOSDMap, MConfig, etc.)
 const MAP_EVENT_BROADCAST_CAPACITY: usize = 100;
 /// Message channel capacity for monitor messages
@@ -258,6 +275,8 @@ struct AuthState {
 
 struct CommandTracker {
     result_tx: oneshot::Sender<CommandResult>,
+    /// Original command payload, kept so it can be resent after a reconnect.
+    cmd: MMonCommand,
 }
 
 /// Pool operation result
@@ -803,6 +822,28 @@ impl MonClient {
             self.send_subscriptions().await?;
         }
 
+        // Resend any commands that were in-flight when the previous connection dropped.
+        // Mirrors C++ MonClient::_resend_mon_commands(): iterate pending commands and
+        // retransmit each on the new connection.  The callers' oneshot receivers remain
+        // open, so they transparently receive the reply without knowing a reconnect
+        // occurred.  If a resend itself fails we log and skip — the caller will time out.
+        let to_resend: Vec<(u64, MMonCommand)> = self
+            .commands
+            .iter()
+            .map(|e| (*e.key(), e.value().cmd.clone()))
+            .collect();
+        if !to_resend.is_empty() {
+            info!(
+                "Resending {} pending command(s) after reconnect",
+                to_resend.len()
+            );
+            for (tid, cmd) in to_resend {
+                if let Err(e) = send_msg_with_tid(&mon_con, &cmd, tid).await {
+                    warn!("Failed to resend command tid={}: {}", tid, e);
+                }
+            }
+        }
+
         info!("Successfully connected to mon.{}", rank);
         Ok(())
     }
@@ -948,12 +989,7 @@ impl MonClient {
         tid: u64,
         rx: oneshot::Receiver<T>,
     ) -> Result<T> {
-        let ceph_msg = CephMessage::from_payload(msg, 0, CrcFlags::ALL)?;
-        let mut message = crate::msgr2::message::Message::from_ceph_message(ceph_msg);
-        message.header.set_tid(tid);
-
-        active_con.send_message(message).await?;
-
+        send_msg_with_tid(active_con, msg, tid).await?;
         tokio::time::timeout(self.command_timeout().await, rx)
             .await
             .map_err(|_| MonClientError::Timeout)?
@@ -1421,7 +1457,11 @@ impl MonClient {
             .insert(tid, VersionTracker { result_tx: tx });
 
         let msg = MMonGetVersion::new(tid, what);
-        self.send_and_wait(&active_con, &msg, tid, rx).await
+        self.send_and_wait(&active_con, &msg, tid, rx)
+            .await
+            .inspect_err(|_| {
+                self.version_requests.remove(&tid);
+            })
     }
 
     /// Send a command to the monitor cluster
@@ -1461,12 +1501,27 @@ impl MonClient {
 
         let active_con = self.require_active_con().await?;
         let tid = self.last_command_tid.fetch_add(1, Ordering::SeqCst) + 1;
-        self.commands.insert(tid, CommandTracker { result_tx: tx });
 
         let fsid = self.get_fsid().await;
         debug!("send_command: tid={}, cmd={:?}, fsid={}", tid, cmd, fsid);
         let msg = MMonCommand::new(cmd, inbl, fsid);
-        self.send_and_wait(&active_con, &msg, tid, rx).await
+
+        self.commands.insert(
+            tid,
+            CommandTracker {
+                result_tx: tx,
+                cmd: msg.clone(),
+            },
+        );
+        if let Err(e) = send_msg_with_tid(&active_con, &msg, tid).await {
+            self.commands.remove(&tid);
+            return Err(e);
+        }
+
+        tokio::time::timeout(self.command_timeout().await, rx)
+            .await
+            .map_err(|_| MonClientError::Timeout)?
+            .map_err(|_| MonClientError::Other("Channel closed".into()))
     }
 
     /// Send a pool operation to the monitor cluster
@@ -1480,7 +1535,11 @@ impl MonClient {
         let tid = self.last_poolop_tid.fetch_add(1, Ordering::SeqCst) + 1;
         self.pool_ops.insert(tid, PoolOpTracker { result_tx: tx });
 
-        self.send_and_wait(&active_con, &msg, tid, rx).await
+        self.send_and_wait(&active_con, &msg, tid, rx)
+            .await
+            .inspect_err(|_| {
+                self.pool_ops.remove(&tid);
+            })
     }
 
     /// Send a pool operation and return an error if the reply indicates failure.
