@@ -241,6 +241,13 @@ impl Denc for OSDOp {
                 buf.put_u64_le(0);
                 buf.put_u32_le(0);
             }
+            OpData::AssertVer { ver } => {
+                // assert_ver union: u64 unused + u64 ver + 12 bytes padding = 28 bytes
+                buf.put_u64_le(0); // unused
+                buf.put_u64_le(*ver);
+                buf.put_u64_le(0); // padding
+                buf.put_u32_le(0); // padding
+            }
             OpData::None => {
                 // Empty union - CEPH_OSD_OP_UNION_SIZE bytes of zeros
                 buf.put_u64_le(0);
@@ -268,7 +275,12 @@ impl Denc for OSDOp {
 
         // 3. Union (CEPH_OSD_OP_UNION_SIZE bytes) - decode based on op
         let op_data = match op {
-            OpCode::Read | OpCode::Write | OpCode::WriteFull | OpCode::Truncate | OpCode::Stat => {
+            OpCode::Read
+            | OpCode::Write
+            | OpCode::WriteFull
+            | OpCode::Truncate
+            | OpCode::Append
+            | OpCode::Stat => {
                 // Extent-based operations
                 let offset = buf.get_u64_le();
                 let length = buf.get_u64_le();
@@ -312,6 +324,13 @@ impl Denc for OSDOp {
                 let snapid = buf.get_u64_le();
                 buf.advance(20);
                 OpData::Snap { snapid }
+            }
+            OpCode::AssertVer => {
+                // assert_ver: u64 unused + u64 ver + 12 bytes padding
+                let _unused = buf.get_u64_le();
+                let ver = buf.get_u64_le();
+                buf.advance(12);
+                OpData::AssertVer { ver }
             }
             _ => {
                 // Other operations (including ListSnaps) - skip CEPH_OSD_OP_UNION_SIZE bytes

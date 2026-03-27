@@ -516,6 +516,8 @@ pub enum OpCode {
     Truncate = osd_op!(WR, DATA, 3),
     /// Append data to the end of an object: __CEPH_OSD_OP(WR, DATA, 6)
     Append = osd_op!(WR, DATA, 6),
+    /// Assert object version matches before executing other ops: __CEPH_OSD_OP(RD, DATA, 8)
+    AssertVer = osd_op!(RD, DATA, 8),
     /// Sparse read operation: __CEPH_OSD_OP(RD, DATA, 5)
     SparseRead = osd_op!(RD, DATA, 5),
     /// Delete operation: __CEPH_OSD_OP(WR, DATA, 5)
@@ -560,6 +562,7 @@ impl OpCode {
             0x2202 => Some(OpCode::WriteFull),   // WR | DATA | 2
             0x2203 => Some(OpCode::Truncate),    // WR | DATA | 3
             0x2206 => Some(OpCode::Append),      // WR | DATA | 6
+            0x1208 => Some(OpCode::AssertVer),   // RD | DATA | 8
             0x2205 => Some(OpCode::Delete),      // WR | DATA | 5
             0x220D => Some(OpCode::Create),      // WR | DATA | 13
             0x1301 => Some(OpCode::GetXattr),    // RD | ATTR | 1
@@ -622,6 +625,8 @@ pub enum OpData {
     },
     /// Snapshot rollback target (`ceph_osd_op.snap.snapid`)
     Snap { snapid: u64 },
+    /// Version assertion (`ceph_osd_op.assert_ver.ver`)
+    AssertVer { ver: u64 },
     /// Operations with no specific data
     None,
 }
@@ -810,6 +815,22 @@ impl OSDOp {
             },
             indata: buf.freeze(),
         })
+    }
+
+    /// Create a version assertion operation.
+    ///
+    /// When included in a compound operation, the OSD rejects the entire batch
+    /// with `-ERANGE` if the object's current version differs from `ver`.
+    /// Enables optimistic CAS semantics: read version, modify, submit with assertion.
+    ///
+    /// Matches `ObjectOperation::assert_version()` in C++ librados.
+    pub fn assert_version(ver: u64) -> Self {
+        Self {
+            op: OpCode::AssertVer,
+            flags: 0,
+            op_data: OpData::AssertVer { ver },
+            indata: Bytes::new(),
+        }
     }
 
     /// Create a lock operation (shared helper for exclusive and shared locks)

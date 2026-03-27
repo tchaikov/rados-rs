@@ -141,6 +141,18 @@ impl OpBuilder {
         self
     }
 
+    /// Add a version assertion.
+    ///
+    /// The OSD will reject the whole operation with `-ERANGE` if the object's
+    /// current version differs from `ver`.  Combine with a write to implement
+    /// optimistic CAS without RADOS locks.
+    ///
+    /// Must be placed before the ops it guards (matches C++ ObjectOperation ordering).
+    pub fn assert_version(mut self, ver: u64) -> Self {
+        self.ops.push(OSDOp::assert_version(ver));
+        self
+    }
+
     /// Add a stat operation
     pub fn stat(mut self) -> Self {
         self.ops.push(OSDOp::stat());
