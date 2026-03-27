@@ -167,6 +167,17 @@ impl OpBuilder {
         self
     }
 
+    /// Add a create operation.
+    ///
+    /// When `exclusive` is true, the OSD returns `-EEXIST` if the object
+    /// already exists.  When false the OSD creates the object if absent and
+    /// succeeds silently if it already exists.
+    pub fn create(mut self, exclusive: bool) -> Self {
+        self.ops.push(OSDOp::create(exclusive));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
     /// Add a sparse read operation
     ///
     /// # Arguments

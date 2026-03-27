@@ -101,20 +101,24 @@ impl IoCtx {
     /// # Arguments
     ///
     /// * `oid` - Object name
-    /// * `exclusive` - If true, fail if object already exists (not yet implemented)
+    /// * `exclusive` - If true, fail with `-EEXIST` if the object already exists.
+    ///   If false, the operation is a no-op when the object already exists.
     ///
     /// # Returns
     ///
-    /// Returns Ok(()) on success, error if the object already exists (when exclusive=true)
-    /// or if the operation fails.
-    pub async fn create(&self, oid: &str, _exclusive: bool) -> Result<()> {
-        info!("Creating object {}", oid);
+    /// Returns Ok(()) on success, or an error if the operation fails.
+    pub async fn create(&self, oid: &str, exclusive: bool) -> Result<()> {
+        debug!("Creating object {} (exclusive={})", oid, exclusive);
 
-        // TODO: Use Create opcode with exclusive flag instead of write_full
-        self.client
-            .write_full(self.pool_id, oid, Bytes::new())
-            .await?;
+        let op = OpBuilder::new().create(exclusive).build();
+        let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
 
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "create failed".into(),
+            });
+        }
         Ok(())
     }
 

@@ -754,6 +754,21 @@ impl OSDOp {
         }
     }
 
+    /// Create a create operation.
+    ///
+    /// When `exclusive` is true the OSD sets `CEPH_OSD_OP_FLAG_EXCL` (0x1)
+    /// in the per-op flags field and returns `-EEXIST` if the object already
+    /// exists, matching `ObjectOperation::create(bool excl)` in Objecter.h.
+    pub fn create(exclusive: bool) -> Self {
+        const CEPH_OSD_OP_FLAG_EXCL: u32 = 0x1;
+        Self {
+            op: OpCode::Create,
+            flags: if exclusive { CEPH_OSD_OP_FLAG_EXCL } else { 0 },
+            op_data: OpData::None,
+            indata: Bytes::new(),
+        }
+    }
+
     /// Create a pgls (PG list) operation
     ///
     /// # Arguments
