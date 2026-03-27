@@ -705,6 +705,14 @@ impl OSDClient {
             self.global_id,
         );
 
+        // Initialise snap context from pool (Objecter::_calc_target snapc setup).
+        // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
+        {
+            let (snap_seq, snaps) = osdmap.pool_snap_context(msg.object.pool);
+            msg.snap_seq = snap_seq;
+            msg.snaps = snaps;
+        }
+
         // Redirect/pause retry loop
         loop {
             // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
@@ -737,6 +745,9 @@ impl OSDClient {
                     osdmap.is_pool_full(msg.object.pool),
                 );
                 osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
+                // Prune snap context: remove any snap IDs that were purged in
+                // the new OSDMap — mirrors Objecter::_prune_snapc().
+                osdmap.prune_snap_context(msg.object.pool, &mut msg.snaps);
                 continue;
             }
 

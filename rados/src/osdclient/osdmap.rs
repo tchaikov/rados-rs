@@ -2457,6 +2457,41 @@ impl OSDMap {
             .is_some_and(|p| PoolFlags::from_bits_truncate(p.flags).contains(PoolFlags::EIO))
     }
 
+    /// Return the pool's snap context: `(snap_seq, sorted-desc snap IDs)`.
+    ///
+    /// Returns `(0, vec![])` when the pool has no snaps (the common case for
+    /// plain RBD/CephFS usage).  The list is already stored in descending
+    /// order by the OSD, matching what `Objecter::_calc_target` sends.
+    pub fn pool_snap_context(&self, pool_id: u64) -> (u64, Vec<u64>) {
+        match self.pools.get(&pool_id) {
+            Some(pool) if pool.snap_seq != 0 => {
+                let mut snaps: Vec<u64> = pool.snaps.keys().copied().collect();
+                snaps.sort_unstable_by(|a, b| b.cmp(a)); // descending
+                (pool.snap_seq, snaps)
+            }
+            _ => (0, vec![]),
+        }
+    }
+
+    /// Prune snap IDs removed by `new_removed_snaps` from `snaps`.
+    ///
+    /// Mirrors `Objecter::_prune_snapc()`: removes any snap ID that falls
+    /// inside the removed-snaps interval set for the given pool.  Called
+    /// after each OSDMap update while an op is waiting in the retry loop.
+    pub fn prune_snap_context(&self, pool_id: u64, snaps: &mut Vec<u64>) {
+        if snaps.is_empty() {
+            return;
+        }
+        if let Some(interval_set) = self.new_removed_snaps.get(&pool_id) {
+            snaps.retain(|&s| {
+                !interval_set
+                    .intervals
+                    .iter()
+                    .any(|iv| s >= iv.start && s < iv.start.saturating_add(iv.len))
+            });
+        }
+    }
+
     /// Check if an entity address is in the cluster's blocklist.
     ///
     /// Mirrors `OSDMap::is_blocklisted()` in `src/osd/OSDMap.cc`:
