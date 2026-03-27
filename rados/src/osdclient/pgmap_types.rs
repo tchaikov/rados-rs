@@ -734,9 +734,9 @@ impl VersionedEncode for OsdStat {
         self.num_pgs.encode(buf, features)?;
 
         // More compatibility fields (computed from statfs)
-        let kb_used_data: i64 = (self.statfs.data_stored / 1024) as i64;
-        let kb_used_omap: i64 = (self.statfs.omap_allocated / 1024) as i64;
-        let kb_used_meta: i64 = (self.statfs.internal_metadata / 1024) as i64;
+        let kb_used_data = self.statfs.data_stored / 1024;
+        let kb_used_omap = self.statfs.omap_allocated / 1024;
+        let kb_used_meta = self.statfs.internal_metadata / 1024;
         kb_used_data.encode(buf, features)?;
         kb_used_omap.encode(buf, features)?;
         kb_used_meta.encode(buf, features)?;

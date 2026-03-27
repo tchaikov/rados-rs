@@ -626,11 +626,6 @@ impl IoCtx {
         })
     }
 
-    /// Roll back an object to a pool snapshot (equivalent to `rados_ioctx_snap_rollback`).
-    ///
-    /// # Arguments
-    /// * `oid` - Object name
-    /// * `snap_id` - Snapshot ID to roll back to
     /// Invoke an object class (CLS) method on an object.
     ///
     /// Calls a server-side Ceph object class plugin method co-located with the OSD.
@@ -691,6 +686,11 @@ impl IoCtx {
         Ok(outdata)
     }
 
+    /// Roll back an object to a pool snapshot (equivalent to `rados_ioctx_snap_rollback`).
+    ///
+    /// # Arguments
+    /// * `oid` - Object name
+    /// * `snap_id` - Snapshot ID to roll back to
     pub async fn snap_rollback(
         &self,
         oid: impl Into<String>,

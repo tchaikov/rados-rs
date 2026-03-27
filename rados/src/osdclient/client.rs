@@ -2006,17 +2006,16 @@ impl OSDClient {
         // Check blocklist before publishing the new map so that
         // `scan_requests_on_map_change` below can skip normal resend logic when
         // we are fenced (all ops will be failed unconditionally).
-        if !self.blocklisted.load(Ordering::Relaxed) {
-            if let Some(client_addr) = self.mon_client.get_client_addr().await {
-                if new_map.is_blocklisted(&client_addr) {
-                    error!(
-                        "OSDClient is blocklisted at epoch {} (addr={}), failing all pending ops",
-                        final_epoch, client_addr
-                    );
-                    self.blocklisted.store(true, Ordering::Relaxed);
-                    self.fail_all_pending_ops_blocklisted().await;
-                }
-            }
+        if !self.blocklisted.load(Ordering::Relaxed)
+            && let Some(client_addr) = self.mon_client.get_client_addr().await
+            && new_map.is_blocklisted(&client_addr)
+        {
+            error!(
+                "OSDClient is blocklisted at epoch {} (addr={}), failing all pending ops",
+                final_epoch, client_addr
+            );
+            self.blocklisted.store(true, Ordering::Relaxed);
+            self.fail_all_pending_ops_blocklisted().await;
         }
 
         self.osdmap_tx.send(Some(new_map)).ok();
@@ -2043,10 +2042,10 @@ impl OSDClient {
 
         // Skip the normal rescan if we just got blocklisted — all ops were
         // already failed above.
-        if !self.blocklisted.load(Ordering::Relaxed) {
-            if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
-                warn!("Failed to rescan requests after OSDMap update: {}", e);
-            }
+        if !self.blocklisted.load(Ordering::Relaxed)
+            && let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await
+        {
+            warn!("Failed to rescan requests after OSDMap update: {}", e);
         }
 
         Ok(())
