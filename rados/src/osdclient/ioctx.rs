@@ -604,6 +604,66 @@ impl IoCtx {
     /// # Arguments
     /// * `oid` - Object name
     /// * `snap_id` - Snapshot ID to roll back to
+    /// Invoke an object class (CLS) method on an object.
+    ///
+    /// Calls a server-side Ceph object class plugin method co-located with the OSD.
+    /// Matches `IoCtx::exec()` / `rados_exec()` in librados.
+    ///
+    /// # Arguments
+    /// * `oid` - Object identifier
+    /// * `class` - Object class name (e.g., `"lock"`, `"rbd"`, `"cas"`)
+    /// * `method` - Method name within the class (e.g., `"lock"`, `"unlock"`)
+    /// * `indata` - Serialised input data for the method (may be empty)
+    ///
+    /// # Returns
+    /// The raw output bytes returned by the class method.
+    pub async fn exec(
+        &self,
+        oid: impl Into<String>,
+        class: &str,
+        method: &str,
+        indata: Bytes,
+    ) -> Result<Bytes> {
+        let oid_str = oid.into();
+        debug!(
+            "exec '{}::{}' on object '{}' in pool {}",
+            class, method, oid_str, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .op(OSDOp::call(class, method, indata)?)
+            .build();
+
+        let result = self
+            .client
+            .execute_built_op(self.pool_id, &oid_str, op)
+            .await?;
+
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: format!("exec {}::{} failed", class, method),
+            });
+        }
+
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
+
+        if let Some(op) = result.ops.first()
+            && op.return_code != 0
+        {
+            return Err(OSDClientError::OSDError {
+                code: op.return_code,
+                message: format!("exec {}::{} failed", class, method),
+            });
+        }
+
+        Ok(outdata)
+    }
+
     pub async fn snap_rollback(
         &self,
         oid: impl Into<String>,
