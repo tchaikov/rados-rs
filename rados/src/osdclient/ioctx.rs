@@ -135,6 +135,29 @@ impl IoCtx {
         self.client.write_full(self.pool_id, oid, data).await
     }
 
+    /// Atomically append data to the end of an object.
+    ///
+    /// The OSD determines the actual write offset; the client does not need to
+    /// know or track the current object size.  Matches `IoCtx::append()` /
+    /// `rados_append()` in librados.
+    pub async fn append(&self, oid: &str, data: impl Into<Bytes>) -> Result<WriteResult> {
+        let data = data.into();
+        debug!("Appending {} bytes to object {}", data.len(), oid);
+
+        let op = OpBuilder::new().append(data).build();
+        let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
+
+        if result.result != 0 {
+            return Err(OSDClientError::OSDError {
+                code: result.result,
+                message: "append failed".into(),
+            });
+        }
+        Ok(WriteResult {
+            version: result.version,
+        })
+    }
+
     /// Write data to an object at a specific byte offset
     ///
     /// Unlike [`write_full`], this does not truncate the object; it overwrites

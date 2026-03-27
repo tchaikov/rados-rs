@@ -131,6 +131,16 @@ impl OpBuilder {
         self
     }
 
+    /// Add an append operation (atomically appends data to the end of the object)
+    ///
+    /// # Arguments
+    /// * `data` - Data to append
+    pub fn append(mut self, data: impl Into<Bytes>) -> Self {
+        self.ops.push(OSDOp::append(data.into()));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
     /// Add a stat operation
     pub fn stat(mut self) -> Self {
         self.ops.push(OSDOp::stat());

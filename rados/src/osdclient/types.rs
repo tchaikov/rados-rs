@@ -514,6 +514,8 @@ pub enum OpCode {
     WriteFull = osd_op!(WR, DATA, 2),
     /// Truncate operation: __CEPH_OSD_OP(WR, DATA, 3)
     Truncate = osd_op!(WR, DATA, 3),
+    /// Append data to the end of an object: __CEPH_OSD_OP(WR, DATA, 6)
+    Append = osd_op!(WR, DATA, 6),
     /// Sparse read operation: __CEPH_OSD_OP(RD, DATA, 5)
     SparseRead = osd_op!(RD, DATA, 5),
     /// Delete operation: __CEPH_OSD_OP(WR, DATA, 5)
@@ -557,6 +559,7 @@ impl OpCode {
             0x2201 => Some(OpCode::Write),       // WR | DATA | 1
             0x2202 => Some(OpCode::WriteFull),   // WR | DATA | 2
             0x2203 => Some(OpCode::Truncate),    // WR | DATA | 3
+            0x2206 => Some(OpCode::Append),      // WR | DATA | 6
             0x2205 => Some(OpCode::Delete),      // WR | DATA | 5
             0x220D => Some(OpCode::Create),      // WR | DATA | 13
             0x1301 => Some(OpCode::GetXattr),    // RD | ATTR | 1
@@ -671,6 +674,25 @@ impl OSDOp {
     pub fn write_full(data: Bytes) -> Self {
         Self {
             op: OpCode::WriteFull,
+            flags: 0,
+            op_data: OpData::Extent {
+                offset: 0,
+                length: data.len() as u64,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
+            indata: data,
+        }
+    }
+
+    /// Create an append operation.
+    ///
+    /// Atomically appends `data` to the end of the object without specifying
+    /// an explicit offset.  The OSD determines the actual write position.
+    /// Matches `CEPH_OSD_OP_APPEND` (`__CEPH_OSD_OP(WR, DATA, 6)`).
+    pub fn append(data: Bytes) -> Self {
+        Self {
+            op: OpCode::Append,
             flags: 0,
             op_data: OpData::Extent {
                 offset: 0,
