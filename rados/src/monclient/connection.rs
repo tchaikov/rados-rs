@@ -91,6 +91,9 @@ pub struct MonConnection {
 
     /// Token for signaling shutdown to background task
     shutdown_token: CancellationToken,
+
+    /// Our own entity address as sent in CLIENT_IDENT (used for blocklist detection).
+    client_addr: crate::EntityAddr,
 }
 
 impl MonConnection {
@@ -120,9 +123,10 @@ impl MonConnection {
 
         tracing::info!("Session established with monitor rank {}", params.rank);
 
-        // Get the global_id from the connection
+        // Get the global_id and our own address from the connection
         let global_id = connection.global_id();
         let peer_supported_features = connection.negotiated_features();
+        let client_addr = connection.client_addr();
         tracing::debug!("Retrieved global_id {} from connection", global_id);
         tracing::debug!(
             "Negotiated monitor features 0x{:x} (stateful_sub={})",
@@ -207,6 +211,7 @@ impl MonConnection {
             send_tx,
             task_handle: Arc::new(Mutex::new(Some(handle))),
             shutdown_token,
+            client_addr,
         };
 
         tracing::debug!("MonConnection created for rank {}", rank);
@@ -228,6 +233,12 @@ impl MonConnection {
     pub fn supports_stateful_subscriptions(&self) -> bool {
         (self.peer_supported_features & crate::denc::features::CephFeatures::SERVER_JEWEL.bits())
             != 0
+    }
+
+    /// Get our own entity address (as sent in CLIENT_IDENT).
+    /// Used to check against the OSDMap blocklist.
+    pub fn client_addr(&self) -> &crate::EntityAddr {
+        &self.client_addr
     }
 
     /// Check if the background I/O task has finished

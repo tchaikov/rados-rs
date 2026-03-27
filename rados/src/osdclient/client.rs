@@ -6,6 +6,7 @@ use crate::monclient::MOSDMap;
 use crate::msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{RwLock, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -73,6 +74,9 @@ pub struct OSDClient {
     shutdown_token: CancellationToken,
     /// Weak self-reference for session creation
     self_weak: std::sync::Weak<Self>,
+    /// Set to true once we detect our address in the OSDMap blocklist.
+    /// After that, all new operations fail immediately with `Blocklisted`.
+    blocklisted: AtomicBool,
 }
 
 /// Await an OSD operation result with a timeout, mapping all error layers to `OSDClientError`.
@@ -175,6 +179,7 @@ impl OSDClient {
                 map_tx: osdmap_tx,
                 shutdown_token: CancellationToken::new(),
                 self_weak: weak.clone(),
+                blocklisted: AtomicBool::new(false),
             }
         });
 
@@ -643,6 +648,11 @@ impl OSDClient {
         timeout: Option<std::time::Duration>,
         priority: i32,
     ) -> Result<crate::osdclient::types::OpResult> {
+        // Fail immediately if the client has been fenced by the cluster.
+        if self.blocklisted.load(Ordering::Relaxed) {
+            return Err(OSDClientError::Blocklisted);
+        }
+
         // Create initial object ID
         let mut object = ObjectId::new(pool, oid);
         object.calculate_hash();
@@ -1927,6 +1937,23 @@ impl OSDClient {
         new_map: Arc<crate::osdclient::osdmap::OSDMap>,
     ) -> Result<()> {
         let final_epoch = new_map.epoch;
+
+        // Check blocklist before publishing the new map so that
+        // `scan_requests_on_map_change` below can skip normal resend logic when
+        // we are fenced (all ops will be failed unconditionally).
+        if !self.blocklisted.load(Ordering::Relaxed) {
+            if let Some(client_addr) = self.mon_client.get_client_addr().await {
+                if new_map.is_blocklisted(&client_addr) {
+                    error!(
+                        "OSDClient is blocklisted at epoch {} (addr={}), failing all pending ops",
+                        final_epoch, client_addr
+                    );
+                    self.blocklisted.store(true, Ordering::Relaxed);
+                    self.fail_all_pending_ops_blocklisted().await;
+                }
+            }
+        }
+
         self.osdmap_tx.send(Some(new_map)).ok();
 
         info!(
@@ -1949,12 +1976,36 @@ impl OSDClient {
             );
         }
 
-        // Rescan pending operations
-        if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
-            warn!("Failed to rescan requests after OSDMap update: {}", e);
+        // Skip the normal rescan if we just got blocklisted — all ops were
+        // already failed above.
+        if !self.blocklisted.load(Ordering::Relaxed) {
+            if let Err(e) = self.scan_requests_on_map_change(final_epoch.as_u32()).await {
+                warn!("Failed to rescan requests after OSDMap update: {}", e);
+            }
         }
 
         Ok(())
+    }
+
+    /// Fail all pending ops across every session with `Blocklisted`.
+    ///
+    /// Called once when the client detects its address in the OSDMap blocklist
+    /// so callers receive an immediate error rather than a timeout.
+    async fn fail_all_pending_ops_blocklisted(&self) {
+        let session_snapshot = self.collect_session_snapshot().await;
+        for (_osd_id, session) in session_snapshot {
+            let tids: Vec<u64> = session
+                .get_pending_ops_metadata()
+                .await
+                .into_iter()
+                .map(|(tid, _, _, _)| tid)
+                .collect();
+            for tid in tids {
+                if let Some(op) = session.remove_pending_op(tid).await {
+                    let _ = op.result_tx.send(Err(OSDClientError::Blocklisted));
+                }
+            }
+        }
     }
 
     /// Handle OSDMap message (moved from MonClient)

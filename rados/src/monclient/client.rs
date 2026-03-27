@@ -1666,6 +1666,19 @@ impl MonClient {
         self.entity_name.to_string()
     }
 
+    /// Get our own entity address from the active monitor connection.
+    ///
+    /// This is the address we sent in CLIENT_IDENT and what the cluster uses for
+    /// blocklist entries when fencing this client.  Returns `None` if no monitor
+    /// connection is currently active.
+    pub async fn get_client_addr(&self) -> Option<crate::EntityAddr> {
+        let conn_state = self.connection_state.read().await;
+        conn_state
+            .active_con
+            .as_ref()
+            .map(|c| c.client_addr().clone())
+    }
+
     /// Get a ServiceAuthProvider for connecting to OSDs/MDSs/MGRs
     ///
     /// This creates an authorizer-based auth provider using the service tickets

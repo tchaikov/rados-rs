@@ -29,6 +29,9 @@ pub enum OSDClientError {
     #[error("No OSDs available")]
     NoOSDs,
 
+    #[error("Client is blocklisted (fenced) by the cluster")]
+    Blocklisted,
+
     #[error("{0}")]
     Other(String),
 
@@ -91,7 +94,7 @@ impl OSDClientError {
     pub fn category(&self) -> ErrorCategory {
         match self {
             Self::Timeout(_) | Self::Connection(_) => ErrorCategory::Transient,
-            Self::ObjectNotFound(_) | Self::PoolNotFound(_) | Self::Auth(_) => {
+            Self::ObjectNotFound(_) | Self::PoolNotFound(_) | Self::Auth(_) | Self::Blocklisted => {
                 ErrorCategory::Permanent
             }
             Self::Backoff(_) => ErrorCategory::RetriableWithBackoff,

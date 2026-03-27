@@ -1614,6 +1614,11 @@ impl Connection {
         self.state.state_machine.negotiated_features()
     }
 
+    /// Get the client entity address (our local address as sent in CLIENT_IDENT).
+    pub fn client_addr(&self) -> crate::EntityAddr {
+        self.state.state_machine.client_addr_clone()
+    }
+
     /// Send a keepalive frame to the peer
     ///
     /// This sends a Keepalive2 frame with the current timestamp.

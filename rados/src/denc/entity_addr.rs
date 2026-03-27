@@ -163,6 +163,31 @@ impl EntityAddr {
         matches!(self.addr_type, EntityAddrType::Legacy)
     }
 
+    /// Return a copy normalised to TYPE_ANY, as Nautilus+ stores all blocklist
+    /// entries with type ANY regardless of the original connection type.
+    pub fn as_type_any(&self) -> Self {
+        Self {
+            addr_type: EntityAddrType::Any,
+            ..self.clone()
+        }
+    }
+
+    /// Return a copy with port and nonce zeroed out — used for whole-IP
+    /// blocklist checks (`ceph osd blocklist add <ip>:0/0`).
+    pub fn as_ip_only(&self) -> Self {
+        let mut data = self.sockaddr_data.clone();
+        // bytes 2-3 are the port in network byte order; zero them out
+        if data.len() >= 4 {
+            data[2] = 0;
+            data[3] = 0;
+        }
+        Self {
+            addr_type: EntityAddrType::Any,
+            nonce: 0,
+            sockaddr_data: data,
+        }
+    }
+
     /// Create from SocketAddr
     pub fn from_socket_addr(addr_type: EntityAddrType, addr: std::net::SocketAddr) -> Self {
         use std::net::IpAddr;

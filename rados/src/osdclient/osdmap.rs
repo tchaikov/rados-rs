@@ -2417,6 +2417,26 @@ impl OSDMap {
         !self.is_up(osd_id)
     }
 
+    /// Check if an entity address is in the cluster's blocklist.
+    ///
+    /// Mirrors `OSDMap::is_blocklisted()` in `src/osd/OSDMap.cc`:
+    /// 1. Normalise type to ANY (Nautilus+ stores all entries as TYPE_ANY).
+    /// 2. Check for an exact match (same ip:port:nonce).
+    /// 3. Check for a whole-IP match (port=0, nonce=0 entry).
+    ///
+    /// Range blocklist (CIDR) is not yet implemented.
+    pub fn is_blocklisted(&self, addr: &EntityAddr) -> bool {
+        if self.blocklist.is_empty() {
+            return false;
+        }
+        let normalised = addr.as_type_any();
+        if self.blocklist.contains_key(&normalised) {
+            return true;
+        }
+        let ip_only = addr.as_ip_only();
+        self.blocklist.contains_key(&ip_only)
+    }
+
     /// Check if an OSD exists in the cluster.
     ///
     /// Reference: Ceph `OSDMap::exists(int osd)` in `src/osd/OSDMap.h`
