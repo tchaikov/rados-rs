@@ -282,6 +282,19 @@ impl OSDClient {
         .map_err(|_| OSDClientError::Timeout(timeout))?
     }
 
+    /// Wait for any OSDMap with an epoch strictly greater than `current`'s epoch.
+    ///
+    /// Used to block an operation that is paused (pool-pause / pool-full) until
+    /// the cluster state changes.  Bounded by `timeout` to prevent infinite waits.
+    async fn wait_for_newer_osdmap(
+        &self,
+        current: &Arc<crate::osdclient::osdmap::OSDMap>,
+        timeout: std::time::Duration,
+    ) -> Result<Arc<crate::osdclient::osdmap::OSDMap>> {
+        let target_epoch = current.epoch.as_u32() + 1;
+        self.wait_for_epoch(target_epoch, timeout).await
+    }
+
     /// Subscribe to OSDMap updates and wait until the monitor's current epoch arrives.
     pub async fn wait_for_latest_osdmap(
         &self,
@@ -667,8 +680,13 @@ impl OSDClient {
             self.throttle.current_bytes()
         );
 
+        // Compute an absolute deadline once so that pause-wait loops don't
+        // inadvertently extend the total operation time beyond the timeout.
+        let effective_timeout = timeout.unwrap_or_else(|| self.tracker.operation_timeout());
+        let deadline = std::time::Instant::now() + effective_timeout;
+
         // Get OSDMap epoch from OSDClient's own osdmap (not from MonClient)
-        let osdmap = self.get_osdmap().await?;
+        let mut osdmap = self.get_osdmap().await?;
 
         // Build initial message
         let flags = MOSDOp::calculate_flags(&ops);
@@ -687,8 +705,33 @@ impl OSDClient {
             self.global_id,
         );
 
-        // Redirect retry loop
+        // Redirect/pause retry loop
         loop {
+            // Check pool-pause and pool-full state before sending.
+            // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
+            let is_write = MOSDOp::calculate_flags(&ops)
+                & crate::osdclient::types::OsdOpFlags::WRITE.bits()
+                != 0;
+            let is_read = !is_write;
+            let paused = (is_read && osdmap.is_pauserd())
+                || (is_write && (osdmap.is_pausewr() || osdmap.is_pool_full(msg.object.pool)));
+            if paused {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(OSDClientError::Timeout(effective_timeout));
+                }
+                info!(
+                    "Op on pool {} is paused (pauserd={}, pausewr={}, pool_full={}); \
+                     waiting for OSDMap update",
+                    msg.object.pool,
+                    osdmap.is_pauserd(),
+                    osdmap.is_pausewr(),
+                    osdmap.is_pool_full(msg.object.pool),
+                );
+                osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
+                continue;
+            }
+
             // Map to OSDs based on current object
             let (spg, osds) = self
                 .object_to_osds(msg.object.pool, &msg.object.oid)
@@ -710,9 +753,12 @@ impl OSDClient {
             // Submit operation (priority is set in message header)
             let result_rx = session.submit_op(msg.clone(), priority).await?;
 
-            // Wait for result with timeout (per-op override or default from tracker)
-            let effective_timeout = timeout.unwrap_or_else(|| self.tracker.operation_timeout());
-            let result = await_op_result(result_rx, effective_timeout).await?;
+            // Wait for result using the remaining time towards the deadline.
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(OSDClientError::Timeout(effective_timeout));
+            }
+            let result = await_op_result(result_rx, remaining).await?;
 
             // Check for redirect
             if let Some(redirect) = result.redirect {

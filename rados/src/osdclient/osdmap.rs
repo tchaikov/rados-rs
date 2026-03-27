@@ -2417,6 +2417,34 @@ impl OSDMap {
         !self.is_up(osd_id)
     }
 
+    // OSDMap-level flag constants (from include/rados.h)
+    const FLAG_FULL: u32 = 1 << 1; // cluster full (deprecated since Mimic)
+    const FLAG_PAUSERD: u32 = 1 << 2; // pause all reads
+    const FLAG_PAUSEWR: u32 = 1 << 3; // pause all writes
+
+    /// True if read operations should be queued cluster-wide (`CEPH_OSDMAP_PAUSERD`).
+    pub fn is_pauserd(&self) -> bool {
+        self.flags & Self::FLAG_PAUSERD != 0
+    }
+
+    /// True if write operations should be queued cluster-wide (`CEPH_OSDMAP_PAUSEWR` or
+    /// the legacy `CEPH_OSDMAP_FULL` flag).
+    pub fn is_pausewr(&self) -> bool {
+        self.flags & (Self::FLAG_PAUSEWR | Self::FLAG_FULL) != 0
+    }
+
+    /// True if the given pool is full (no writes accepted).
+    ///
+    /// Checks both the `FULL` and `FULL_QUOTA` pool flags, matching
+    /// `Objecter::_osdmap_pool_full()` in C++.
+    pub fn is_pool_full(&self, pool_id: u64) -> bool {
+        use crate::osdclient::types::PoolFlags;
+        self.pools.get(&pool_id).is_some_and(|p| {
+            let flags = PoolFlags::from_bits_truncate(p.flags);
+            flags.intersects(PoolFlags::FULL | PoolFlags::FULL_QUOTA)
+        })
+    }
+
     /// Check if an entity address is in the cluster's blocklist.
     ///
     /// Mirrors `OSDMap::is_blocklisted()` in `src/osd/OSDMap.cc`:
