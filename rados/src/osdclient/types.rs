@@ -125,6 +125,8 @@ bitflags::bitflags! {
         const INCOMPLETE_CLONES = 1 << 3;
         /// Pool is currently running out of quota, will set FULL too
         const FULL_QUOTA = 1 << 10;
+        /// All client ops fail immediately with -EIO
+        const EIO = 1 << 16;
     }
 }
 

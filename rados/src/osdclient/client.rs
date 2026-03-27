@@ -707,6 +707,14 @@ impl OSDClient {
 
         // Redirect/pause retry loop
         loop {
+            // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
+            if osdmap.is_pool_eio(msg.object.pool) {
+                return Err(OSDClientError::OSDError {
+                    code: -libc::EIO,
+                    message: format!("pool {} has EIO flag set", msg.object.pool),
+                });
+            }
+
             // Check pool-pause and pool-full state before sending.
             // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
             let is_write = MOSDOp::calculate_flags(&ops)

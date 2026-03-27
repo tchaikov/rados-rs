@@ -2445,6 +2445,18 @@ impl OSDMap {
         })
     }
 
+    /// Returns true if the pool has the EIO flag set.
+    ///
+    /// Mirrors `pg_pool_t::FLAG_EIO` (`1<<16`) checked in
+    /// `Objecter::_calc_target()` → `RECALC_OP_TARGET_POOL_EIO`.
+    /// All client ops targeting this pool must fail immediately with -EIO.
+    pub fn is_pool_eio(&self, pool_id: u64) -> bool {
+        use crate::osdclient::types::PoolFlags;
+        self.pools
+            .get(&pool_id)
+            .is_some_and(|p| PoolFlags::from_bits_truncate(p.flags).contains(PoolFlags::EIO))
+    }
+
     /// Check if an entity address is in the cluster's blocklist.
     ///
     /// Mirrors `OSDMap::is_blocklisted()` in `src/osd/OSDMap.cc`:
