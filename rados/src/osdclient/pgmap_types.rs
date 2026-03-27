@@ -139,114 +139,105 @@ impl VersionedEncode for ObjectStatSum {
     fn encode_content<B: BufMut>(
         &self,
         buf: &mut B,
-        _features: u64,
+        features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Encode all 38 fields in order (36 × i64 + 4 × i32)
-        buf.put_i64_le(self.num_bytes);
-        buf.put_i64_le(self.num_objects);
-        buf.put_i64_le(self.num_object_clones);
-        buf.put_i64_le(self.num_object_copies);
-        buf.put_i64_le(self.num_objects_missing_on_primary);
-        buf.put_i64_le(self.num_objects_degraded);
-        buf.put_i64_le(self.num_objects_unfound);
-        buf.put_i64_le(self.num_rd);
-        buf.put_i64_le(self.num_rd_kb);
-        buf.put_i64_le(self.num_wr);
-        buf.put_i64_le(self.num_wr_kb);
-        buf.put_i64_le(self.num_scrub_errors);
-        buf.put_i64_le(self.num_objects_recovered);
-        buf.put_i64_le(self.num_bytes_recovered);
-        buf.put_i64_le(self.num_keys_recovered);
-        buf.put_i64_le(self.num_shallow_scrub_errors);
-        buf.put_i64_le(self.num_deep_scrub_errors);
-        buf.put_i64_le(self.num_objects_dirty);
-        buf.put_i64_le(self.num_whiteouts);
-        buf.put_i64_le(self.num_objects_omap);
-        buf.put_i64_le(self.num_objects_hit_set_archive);
-        buf.put_i64_le(self.num_objects_misplaced);
-        buf.put_i64_le(self.num_bytes_hit_set_archive);
-        buf.put_i64_le(self.num_flush);
-        buf.put_i64_le(self.num_flush_kb);
-        buf.put_i64_le(self.num_evict);
-        buf.put_i64_le(self.num_evict_kb);
-        buf.put_i64_le(self.num_promote);
-        buf.put_i32_le(self.num_flush_mode_high);
-        buf.put_i32_le(self.num_flush_mode_low);
-        buf.put_i32_le(self.num_evict_mode_some);
-        buf.put_i32_le(self.num_evict_mode_full);
-        buf.put_i64_le(self.num_objects_pinned);
-        buf.put_i64_le(self.num_objects_missing);
-        buf.put_i64_le(self.num_legacy_snapsets);
-        buf.put_i64_le(self.num_large_omap_objects);
-        buf.put_i64_le(self.num_objects_manifest);
-        buf.put_i64_le(self.num_omap_bytes);
-        buf.put_i64_le(self.num_omap_keys);
-        buf.put_i64_le(self.num_objects_repaired);
+        // Encode all 40 fields in order (36 × i64 + 4 × i32)
+        self.num_bytes.encode(buf, features)?;
+        self.num_objects.encode(buf, features)?;
+        self.num_object_clones.encode(buf, features)?;
+        self.num_object_copies.encode(buf, features)?;
+        self.num_objects_missing_on_primary.encode(buf, features)?;
+        self.num_objects_degraded.encode(buf, features)?;
+        self.num_objects_unfound.encode(buf, features)?;
+        self.num_rd.encode(buf, features)?;
+        self.num_rd_kb.encode(buf, features)?;
+        self.num_wr.encode(buf, features)?;
+        self.num_wr_kb.encode(buf, features)?;
+        self.num_scrub_errors.encode(buf, features)?;
+        self.num_objects_recovered.encode(buf, features)?;
+        self.num_bytes_recovered.encode(buf, features)?;
+        self.num_keys_recovered.encode(buf, features)?;
+        self.num_shallow_scrub_errors.encode(buf, features)?;
+        self.num_deep_scrub_errors.encode(buf, features)?;
+        self.num_objects_dirty.encode(buf, features)?;
+        self.num_whiteouts.encode(buf, features)?;
+        self.num_objects_omap.encode(buf, features)?;
+        self.num_objects_hit_set_archive.encode(buf, features)?;
+        self.num_objects_misplaced.encode(buf, features)?;
+        self.num_bytes_hit_set_archive.encode(buf, features)?;
+        self.num_flush.encode(buf, features)?;
+        self.num_flush_kb.encode(buf, features)?;
+        self.num_evict.encode(buf, features)?;
+        self.num_evict_kb.encode(buf, features)?;
+        self.num_promote.encode(buf, features)?;
+        self.num_flush_mode_high.encode(buf, features)?;
+        self.num_flush_mode_low.encode(buf, features)?;
+        self.num_evict_mode_some.encode(buf, features)?;
+        self.num_evict_mode_full.encode(buf, features)?;
+        self.num_objects_pinned.encode(buf, features)?;
+        self.num_objects_missing.encode(buf, features)?;
+        self.num_legacy_snapsets.encode(buf, features)?;
+        self.num_large_omap_objects.encode(buf, features)?;
+        self.num_objects_manifest.encode(buf, features)?;
+        self.num_omap_bytes.encode(buf, features)?;
+        self.num_omap_keys.encode(buf, features)?;
+        self.num_objects_repaired.encode(buf, features)?;
 
         Ok(())
     }
 
     fn decode_content<B: Buf>(
         buf: &mut B,
-        _features: u64,
+        features: u64,
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         // Quincy always emits v20; all 40 fields are always present.
         crate::denc::check_min_version!(version, 20, "ObjectStatSum", "Quincy v17+");
 
-        if buf.remaining() < OBJECT_STAT_SUM_ENCODED_SIZE {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for ObjectStatSum v{}: need {}, have {}",
-                version,
-                OBJECT_STAT_SUM_ENCODED_SIZE,
-                buf.remaining()
-            )));
-        }
-
-        let num_bytes = buf.get_i64_le();
-        let num_objects = buf.get_i64_le();
-        let num_object_clones = buf.get_i64_le();
-        let num_object_copies = buf.get_i64_le();
-        let num_objects_missing_on_primary = buf.get_i64_le();
-        let num_objects_degraded = buf.get_i64_le();
-        let num_objects_unfound = buf.get_i64_le();
-        let num_rd = buf.get_i64_le();
-        let num_rd_kb = buf.get_i64_le();
-        let num_wr = buf.get_i64_le();
-        let num_wr_kb = buf.get_i64_le();
-        let num_scrub_errors = buf.get_i64_le();
-        let num_objects_recovered = buf.get_i64_le();
-        let num_bytes_recovered = buf.get_i64_le();
-        let num_keys_recovered = buf.get_i64_le();
-        let num_shallow_scrub_errors = buf.get_i64_le();
-        let num_deep_scrub_errors = buf.get_i64_le();
-        let num_objects_dirty = buf.get_i64_le();
-        let num_whiteouts = buf.get_i64_le();
-        let num_objects_omap = buf.get_i64_le();
-        let num_objects_hit_set_archive = buf.get_i64_le();
-        let num_objects_misplaced = buf.get_i64_le();
-        let num_bytes_hit_set_archive = buf.get_i64_le();
-        let num_flush = buf.get_i64_le();
-        let num_flush_kb = buf.get_i64_le();
-        let num_evict = buf.get_i64_le();
-        let num_evict_kb = buf.get_i64_le();
-        let num_promote = buf.get_i64_le();
-        let num_flush_mode_high = buf.get_i32_le();
-        let num_flush_mode_low = buf.get_i32_le();
-        let num_evict_mode_some = buf.get_i32_le();
-        let num_evict_mode_full = buf.get_i32_le();
-        let num_objects_pinned = buf.get_i64_le();
-        let num_objects_missing = buf.get_i64_le();
+        let num_bytes = i64::decode(buf, features)?;
+        let num_objects = i64::decode(buf, features)?;
+        let num_object_clones = i64::decode(buf, features)?;
+        let num_object_copies = i64::decode(buf, features)?;
+        let num_objects_missing_on_primary = i64::decode(buf, features)?;
+        let num_objects_degraded = i64::decode(buf, features)?;
+        let num_objects_unfound = i64::decode(buf, features)?;
+        let num_rd = i64::decode(buf, features)?;
+        let num_rd_kb = i64::decode(buf, features)?;
+        let num_wr = i64::decode(buf, features)?;
+        let num_wr_kb = i64::decode(buf, features)?;
+        let num_scrub_errors = i64::decode(buf, features)?;
+        let num_objects_recovered = i64::decode(buf, features)?;
+        let num_bytes_recovered = i64::decode(buf, features)?;
+        let num_keys_recovered = i64::decode(buf, features)?;
+        let num_shallow_scrub_errors = i64::decode(buf, features)?;
+        let num_deep_scrub_errors = i64::decode(buf, features)?;
+        let num_objects_dirty = i64::decode(buf, features)?;
+        let num_whiteouts = i64::decode(buf, features)?;
+        let num_objects_omap = i64::decode(buf, features)?;
+        let num_objects_hit_set_archive = i64::decode(buf, features)?;
+        let num_objects_misplaced = i64::decode(buf, features)?;
+        let num_bytes_hit_set_archive = i64::decode(buf, features)?;
+        let num_flush = i64::decode(buf, features)?;
+        let num_flush_kb = i64::decode(buf, features)?;
+        let num_evict = i64::decode(buf, features)?;
+        let num_evict_kb = i64::decode(buf, features)?;
+        let num_promote = i64::decode(buf, features)?;
+        let num_flush_mode_high = i32::decode(buf, features)?;
+        let num_flush_mode_low = i32::decode(buf, features)?;
+        let num_evict_mode_some = i32::decode(buf, features)?;
+        let num_evict_mode_full = i32::decode(buf, features)?;
+        let num_objects_pinned = i64::decode(buf, features)?;
+        let num_objects_missing = i64::decode(buf, features)?;
 
         // Fields present since v16-v20; Quincy always emits v20 so all are unconditional.
-        let num_legacy_snapsets = buf.get_i64_le();
-        let num_large_omap_objects = buf.get_i64_le();
-        let num_objects_manifest = buf.get_i64_le();
-        let num_omap_bytes = buf.get_i64_le();
-        let num_omap_keys = buf.get_i64_le();
-        let num_objects_repaired = buf.get_i64_le();
+        let num_legacy_snapsets = i64::decode(buf, features)?;
+        let num_large_omap_objects = i64::decode(buf, features)?;
+        let num_objects_manifest = i64::decode(buf, features)?;
+        let num_omap_bytes = i64::decode(buf, features)?;
+        let num_omap_keys = i64::decode(buf, features)?;
+        let num_objects_repaired = i64::decode(buf, features)?;
 
         Ok(ObjectStatSum {
             num_bytes,
@@ -347,7 +338,7 @@ impl VersionedEncode for ObjectStatCollection {
         // Encode the sum
         self.sum.encode(buf, features)?;
         // Encode dummy u32 (legacy field)
-        buf.put_u32_le(0);
+        0u32.encode(buf, features)?;
         Ok(())
     }
 
@@ -365,7 +356,7 @@ impl VersionedEncode for ObjectStatCollection {
         }
 
         let sum = ObjectStatSum::decode(buf, features)?;
-        let _dummy = buf.get_u32_le(); // Ignore legacy field
+        let _dummy = u32::decode(buf, features)?; // legacy field
 
         Ok(ObjectStatCollection { sum })
     }
@@ -440,12 +431,12 @@ impl VersionedEncode for PoolStat {
     ) -> Result<(), RadosError> {
         // Encode all fields
         self.stats.encode(buf, features)?;
-        buf.put_i64_le(self.log_size);
-        buf.put_i64_le(self.ondisk_log_size);
-        buf.put_i32_le(self.up);
-        buf.put_i32_le(self.acting);
+        self.log_size.encode(buf, features)?;
+        self.ondisk_log_size.encode(buf, features)?;
+        self.up.encode(buf, features)?;
+        self.acting.encode(buf, features)?;
         self.store_stats.encode(buf, features)?;
-        buf.put_i32_le(self.num_store_stats);
+        self.num_store_stats.encode(buf, features)?;
         Ok(())
     }
 
@@ -458,12 +449,12 @@ impl VersionedEncode for PoolStat {
         // Quincy always emits v7; all fields are always present.
         crate::denc::check_min_version!(version, 7, "PoolStat", "Quincy v17+");
         let stats = ObjectStatCollection::decode(buf, features)?;
-        let log_size = buf.get_i64_le();
-        let ondisk_log_size = buf.get_i64_le();
-        let up = buf.get_i32_le();
-        let acting = buf.get_i32_le();
+        let log_size = i64::decode(buf, features)?;
+        let ondisk_log_size = i64::decode(buf, features)?;
+        let up = i32::decode(buf, features)?;
+        let acting = i32::decode(buf, features)?;
         let store_stats = StoreStatfs::decode(buf, features)?;
-        let num_store_stats = buf.get_i32_le();
+        let num_store_stats = i32::decode(buf, features)?;
 
         Ok(PoolStat {
             stats,
@@ -577,30 +568,30 @@ impl VersionedEncode for ObjectstorePerfStat {
     fn encode_content<B: BufMut>(
         &self,
         buf: &mut B,
-        _features: u64,
+        features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        buf.put_u64_le(self.os_commit_latency_ns);
-        buf.put_u64_le(self.os_apply_latency_ns);
+        self.os_commit_latency_ns.encode(buf, features)?;
+        self.os_apply_latency_ns.encode(buf, features)?;
         Ok(())
     }
 
     fn decode_content<B: Buf>(
         buf: &mut B,
-        _features: u64,
+        features: u64,
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
         if version >= 2 {
-            let os_commit_latency_ns = buf.get_u64_le();
-            let os_apply_latency_ns = buf.get_u64_le();
+            let os_commit_latency_ns = u64::decode(buf, features)?;
+            let os_apply_latency_ns = u64::decode(buf, features)?;
             Ok(ObjectstorePerfStat {
                 os_commit_latency_ns,
                 os_apply_latency_ns,
             })
         } else {
-            let commit_ms = buf.get_u32_le();
-            let apply_ms = buf.get_u32_le();
+            let commit_ms = u32::decode(buf, features)?;
+            let apply_ms = u32::decode(buf, features)?;
             Ok(ObjectstorePerfStat {
                 os_commit_latency_ns: commit_ms as u64 * 1_000_000,
                 os_apply_latency_ns: apply_ms as u64 * 1_000_000,
@@ -632,69 +623,29 @@ pub struct OsdStatInterfaces {
 }
 
 impl Denc for OsdStatInterfaces {
-    fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
-        buf.put_u32_le(self.last_update);
-        for &val in &self.back_pingtime {
-            buf.put_u32_le(val);
-        }
-        for &val in &self.back_min {
-            buf.put_u32_le(val);
-        }
-        for &val in &self.back_max {
-            buf.put_u32_le(val);
-        }
-        buf.put_u32_le(self.back_last);
-        for &val in &self.front_pingtime {
-            buf.put_u32_le(val);
-        }
-        for &val in &self.front_min {
-            buf.put_u32_le(val);
-        }
-        for &val in &self.front_max {
-            buf.put_u32_le(val);
-        }
-        buf.put_u32_le(self.front_last);
-
+    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
+        self.last_update.encode(buf, features)?;
+        self.back_pingtime.encode(buf, features)?;
+        self.back_min.encode(buf, features)?;
+        self.back_max.encode(buf, features)?;
+        self.back_last.encode(buf, features)?;
+        self.front_pingtime.encode(buf, features)?;
+        self.front_min.encode(buf, features)?;
+        self.front_max.encode(buf, features)?;
+        self.front_last.encode(buf, features)?;
         Ok(())
     }
 
-    fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        if buf.remaining() < OSD_STAT_INTERFACES_SIZE {
-            return Err(RadosError::Protocol(format!(
-                "Insufficient bytes for OsdStatInterfaces: need {}, have {}",
-                OSD_STAT_INTERFACES_SIZE,
-                buf.remaining()
-            )));
-        }
-
-        let last_update = buf.get_u32_le();
-        let mut back_pingtime = [0u32; 3];
-        for val in &mut back_pingtime {
-            *val = buf.get_u32_le();
-        }
-        let mut back_min = [0u32; 3];
-        for val in &mut back_min {
-            *val = buf.get_u32_le();
-        }
-        let mut back_max = [0u32; 3];
-        for val in &mut back_max {
-            *val = buf.get_u32_le();
-        }
-        let back_last = buf.get_u32_le();
-        let mut front_pingtime = [0u32; 3];
-        for val in &mut front_pingtime {
-            *val = buf.get_u32_le();
-        }
-        let mut front_min = [0u32; 3];
-        for val in &mut front_min {
-            *val = buf.get_u32_le();
-        }
-        let mut front_max = [0u32; 3];
-        for val in &mut front_max {
-            *val = buf.get_u32_le();
-        }
-        let front_last = buf.get_u32_le();
-
+    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
+        let last_update = u32::decode(buf, features)?;
+        let back_pingtime = <[u32; 3]>::decode(buf, features)?;
+        let back_min = <[u32; 3]>::decode(buf, features)?;
+        let back_max = <[u32; 3]>::decode(buf, features)?;
+        let back_last = u32::decode(buf, features)?;
+        let front_pingtime = <[u32; 3]>::decode(buf, features)?;
+        let front_min = <[u32; 3]>::decode(buf, features)?;
+        let front_max = <[u32; 3]>::decode(buf, features)?;
+        let front_last = u32::decode(buf, features)?;
         Ok(OsdStatInterfaces {
             last_update,
             back_pingtime,
@@ -760,49 +711,49 @@ impl VersionedEncode for OsdStat {
     ) -> Result<(), RadosError> {
         // For compatibility, encode kb/kb_used/kb_avail (computed from statfs)
         // Note: We'll use dummy values for now since we need statfs methods
-        let kb = (self.statfs.total / 1024) as i64;
-        let kb_used = ((self.statfs.total - self.statfs.available) / 1024) as i64;
-        let kb_avail = (self.statfs.available / 1024) as i64;
-        buf.put_i64_le(kb);
-        buf.put_i64_le(kb_used);
-        buf.put_i64_le(kb_avail);
+        let kb: i64 = (self.statfs.total / 1024) as i64;
+        let kb_used: i64 = ((self.statfs.total - self.statfs.available) / 1024) as i64;
+        let kb_avail: i64 = (self.statfs.available / 1024) as i64;
+        kb.encode(buf, features)?;
+        kb_used.encode(buf, features)?;
+        kb_avail.encode(buf, features)?;
 
-        buf.put_i32_le(self.snap_trim_queue_len);
-        buf.put_i32_le(self.num_snap_trimming);
+        self.snap_trim_queue_len.encode(buf, features)?;
+        self.num_snap_trimming.encode(buf, features)?;
 
         self.hb_peers.encode(buf, features)?;
 
         // Legacy field: num_hb_out (always empty vector)
-        buf.put_u32_le(0);
+        0u32.encode(buf, features)?;
 
         self.op_queue_age_hist.encode(buf, features)?;
         self.os_perf_stat.encode(buf, features)?;
 
-        buf.put_u32_le(self.up_from);
-        buf.put_u64_le(self.seq);
-        buf.put_u32_le(self.num_pgs);
+        self.up_from.encode(buf, features)?;
+        self.seq.encode(buf, features)?;
+        self.num_pgs.encode(buf, features)?;
 
         // More compatibility fields (computed from statfs)
-        let kb_used_data = self.statfs.data_stored / 1024;
-        let kb_used_omap = self.statfs.omap_allocated / 1024;
-        let kb_used_meta = self.statfs.internal_metadata / 1024;
-        buf.put_i64_le(kb_used_data);
-        buf.put_i64_le(kb_used_omap);
-        buf.put_i64_le(kb_used_meta);
+        let kb_used_data: i64 = (self.statfs.data_stored / 1024) as i64;
+        let kb_used_omap: i64 = (self.statfs.omap_allocated / 1024) as i64;
+        let kb_used_meta: i64 = (self.statfs.internal_metadata / 1024) as i64;
+        kb_used_data.encode(buf, features)?;
+        kb_used_omap.encode(buf, features)?;
+        kb_used_meta.encode(buf, features)?;
 
         self.statfs.encode(buf, features)?;
 
         self.os_alerts.encode(buf, features)?;
 
-        buf.put_u64_le(self.num_shards_repaired);
-        buf.put_u32_le(self.num_osds);
-        buf.put_u32_le(self.num_per_pool_osds);
-        buf.put_u32_le(self.num_per_pool_omap_osds);
+        self.num_shards_repaired.encode(buf, features)?;
+        self.num_osds.encode(buf, features)?;
+        self.num_per_pool_osds.encode(buf, features)?;
+        self.num_per_pool_omap_osds.encode(buf, features)?;
 
-        // Encode hb_pingtime map
-        buf.put_i32_le(self.hb_pingtime.len() as i32);
+        // Encode hb_pingtime map (BTreeMap<i32, OsdStatInterfaces> with i32 length prefix)
+        (self.hb_pingtime.len() as i32).encode(buf, features)?;
         for (osd_id, interfaces) in &self.hb_pingtime {
-            buf.put_i32_le(*osd_id);
+            osd_id.encode(buf, features)?;
             interfaces.encode(buf, features)?;
         }
 
@@ -815,13 +766,13 @@ impl VersionedEncode for OsdStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Legacy compatibility fields
-        let _kb = buf.get_i64_le();
-        let _kb_used = buf.get_i64_le();
-        let _kb_avail = buf.get_i64_le();
+        // Legacy compatibility fields (always present; values ignored)
+        let _kb = i64::decode(buf, features)?;
+        let _kb_used = i64::decode(buf, features)?;
+        let _kb_avail = i64::decode(buf, features)?;
 
-        let snap_trim_queue_len = buf.get_i32_le();
-        let num_snap_trimming = buf.get_i32_le();
+        let snap_trim_queue_len = i32::decode(buf, features)?;
+        let num_snap_trimming = i32::decode(buf, features)?;
 
         let hb_peers = Vec::<i32>::decode(buf, features)?;
 
@@ -840,17 +791,29 @@ impl VersionedEncode for OsdStat {
             ObjectstorePerfStat::default()
         };
 
-        let up_from = if version >= 7 { buf.get_u32_le() } else { 0 };
+        let up_from = if version >= 7 {
+            u32::decode(buf, features)?
+        } else {
+            0
+        };
 
-        let seq = if version >= 8 { buf.get_u64_le() } else { 0 };
+        let seq = if version >= 8 {
+            u64::decode(buf, features)?
+        } else {
+            0
+        };
 
-        let num_pgs = if version >= 9 { buf.get_u32_le() } else { 0 };
+        let num_pgs = if version >= 9 {
+            u32::decode(buf, features)?
+        } else {
+            0
+        };
 
         // More compatibility fields (ignored)
-        let (_kb_used_data, _kb_used_omap, _kb_used_meta) = if version >= 10 {
-            (buf.get_i64_le(), buf.get_i64_le(), buf.get_i64_le())
-        } else {
-            (0, 0, 0)
+        if version >= 10 {
+            let _kb_used_data = i64::decode(buf, features)?;
+            let _kb_used_omap = i64::decode(buf, features)?;
+            let _kb_used_meta = i64::decode(buf, features)?;
         };
 
         let statfs = if version >= 10 {
@@ -865,13 +828,29 @@ impl VersionedEncode for OsdStat {
             std::collections::BTreeMap::new()
         };
 
-        let num_shards_repaired = if version >= 12 { buf.get_u64_le() } else { 0 };
+        let num_shards_repaired = if version >= 12 {
+            u64::decode(buf, features)?
+        } else {
+            0
+        };
 
-        let num_osds = if version >= 13 { buf.get_u32_le() } else { 0 };
+        let num_osds = if version >= 13 {
+            u32::decode(buf, features)?
+        } else {
+            0
+        };
 
-        let num_per_pool_osds = if version >= 13 { buf.get_u32_le() } else { 0 };
+        let num_per_pool_osds = if version >= 13 {
+            u32::decode(buf, features)?
+        } else {
+            0
+        };
 
-        let num_per_pool_omap_osds = if version >= 14 { buf.get_u32_le() } else { 0 };
+        let num_per_pool_omap_osds = if version >= 14 {
+            u32::decode(buf, features)?
+        } else {
+            0
+        };
 
         // Decode hb_pingtime map
         let hb_pingtime = if version >= 13 {
