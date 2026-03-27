@@ -723,9 +723,10 @@ impl OSDClient {
             // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
             let is_write = flags & crate::osdclient::types::OsdOpFlags::WRITE.bits() != 0;
             let is_read = !is_write;
+            let pauserd = osdmap.is_pauserd();
+            let pausewr = osdmap.is_pausewr();
             let pool_full = osdmap.is_pool_full(msg.object.pool);
-            let paused = (is_read && osdmap.is_pauserd())
-                || (is_write && (osdmap.is_pausewr() || pool_full));
+            let paused = (is_read && pauserd) || (is_write && (pausewr || pool_full));
             if paused {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
@@ -734,10 +735,7 @@ impl OSDClient {
                 info!(
                     "Op on pool {} is paused (pauserd={}, pausewr={}, pool_full={}); \
                      waiting for OSDMap update",
-                    msg.object.pool,
-                    osdmap.is_pauserd(),
-                    osdmap.is_pausewr(),
-                    pool_full,
+                    msg.object.pool, pauserd, pausewr, pool_full,
                 );
                 osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
                 // Prune snap context: remove any snap IDs that were purged in
