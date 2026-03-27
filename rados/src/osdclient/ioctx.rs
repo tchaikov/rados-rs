@@ -112,13 +112,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().create(exclusive).build();
         let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
-
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "create failed".into(),
-            });
-        }
+        OSDClient::check_op_result(&result, "create")?;
         Ok(())
     }
 
@@ -150,13 +144,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().append(data).build();
         let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
-
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: "append failed".into(),
-            });
-        }
+        OSDClient::check_op_result(&result, "append")?;
         Ok(WriteResult {
             version: result.version,
         })
@@ -661,28 +649,12 @@ impl IoCtx {
             .execute_built_op(self.pool_id, &oid_str, op)
             .await?;
 
-        if result.result != 0 {
-            return Err(OSDClientError::OSDError {
-                code: result.result,
-                message: format!("exec {}::{} failed", class, method),
-            });
-        }
-
+        OSDClient::check_op_result(&result, &format!("exec {}::{}", class, method))?;
         let outdata = result
             .ops
             .first()
             .map(|op| op.outdata.clone())
             .unwrap_or_default();
-
-        if let Some(op) = result.ops.first()
-            && op.return_code != 0
-        {
-            return Err(OSDClientError::OSDError {
-                code: op.return_code,
-                message: format!("exec {}::{} failed", class, method),
-            });
-        }
-
         Ok(outdata)
     }
 

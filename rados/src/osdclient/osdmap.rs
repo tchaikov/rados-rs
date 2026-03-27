@@ -2433,16 +2433,23 @@ impl OSDMap {
         self.flags & (Self::FLAG_PAUSEWR | Self::FLAG_FULL) != 0
     }
 
+    /// Returns the parsed `PoolFlags` for the given pool, or empty if unknown.
+    fn pool_flags(&self, pool_id: u64) -> crate::osdclient::types::PoolFlags {
+        use crate::osdclient::types::PoolFlags;
+        self.pools
+            .get(&pool_id)
+            .map(|p| PoolFlags::from_bits_truncate(p.flags))
+            .unwrap_or_else(PoolFlags::empty)
+    }
+
     /// True if the given pool is full (no writes accepted).
     ///
     /// Checks both the `FULL` and `FULL_QUOTA` pool flags, matching
     /// `Objecter::_osdmap_pool_full()` in C++.
     pub fn is_pool_full(&self, pool_id: u64) -> bool {
         use crate::osdclient::types::PoolFlags;
-        self.pools.get(&pool_id).is_some_and(|p| {
-            let flags = PoolFlags::from_bits_truncate(p.flags);
-            flags.intersects(PoolFlags::FULL | PoolFlags::FULL_QUOTA)
-        })
+        self.pool_flags(pool_id)
+            .intersects(PoolFlags::FULL | PoolFlags::FULL_QUOTA)
     }
 
     /// Returns true if the pool has the EIO flag set.
@@ -2452,9 +2459,7 @@ impl OSDMap {
     /// All client ops targeting this pool must fail immediately with -EIO.
     pub fn is_pool_eio(&self, pool_id: u64) -> bool {
         use crate::osdclient::types::PoolFlags;
-        self.pools
-            .get(&pool_id)
-            .is_some_and(|p| PoolFlags::from_bits_truncate(p.flags).contains(PoolFlags::EIO))
+        self.pool_flags(pool_id).contains(PoolFlags::EIO)
     }
 
     /// Return the pool's snap context: `(snap_seq, sorted-desc snap IDs)`.
@@ -2465,8 +2470,8 @@ impl OSDMap {
     pub fn pool_snap_context(&self, pool_id: u64) -> (u64, Vec<u64>) {
         match self.pools.get(&pool_id) {
             Some(pool) if pool.snap_seq != 0 => {
-                let mut snaps: Vec<u64> = pool.snaps.keys().copied().collect();
-                snaps.sort_unstable_by(|a, b| b.cmp(a)); // descending
+                // BTreeMap keys are ascending; .rev() gives descending without a sort.
+                let snaps: Vec<u64> = pool.snaps.keys().copied().rev().collect();
                 (pool.snap_seq, snaps)
             }
             _ => (0, vec![]),
