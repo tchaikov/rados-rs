@@ -111,6 +111,15 @@ impl IoCtx {
         self.locator_key = key.into();
     }
 
+    /// Advance the epoch barrier on the underlying OSD client.
+    ///
+    /// No ops from this context will be sent until the OSDMap epoch is at
+    /// least `epoch`.  This is a one-way ratchet shared with the client.
+    /// Mirrors `IoCtx::set_epoch_barrier()` in librados.
+    pub fn set_epoch_barrier(&self, epoch: u32) {
+        self.client.set_epoch_barrier(epoch);
+    }
+
     /// Build a full [`ObjectId`](crate::osdclient::types::ObjectId) incorporating
     /// the current namespace and locator key.
     fn object_id(&self, oid: &str) -> crate::osdclient::types::ObjectId {

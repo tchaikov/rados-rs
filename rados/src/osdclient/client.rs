@@ -6,7 +6,7 @@ use crate::monclient::MOSDMap;
 use crate::msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use tokio::sync::{RwLock, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -77,6 +77,12 @@ pub struct OSDClient {
     /// Set to true once we detect our address in the OSDMap blocklist.
     /// After that, all new operations fail immediately with `Blocklisted`.
     blocklisted: AtomicBool,
+    /// Minimum OSDMap epoch required before any op is sent.
+    ///
+    /// A one-way ratchet (only advances forward).  When non-zero, ops are
+    /// held in the pause-wait loop until `osdmap.epoch >= epoch_barrier`.
+    /// Mirrors `Objecter::epoch_barrier` / `set_epoch_barrier()` in C++.
+    epoch_barrier: AtomicU32,
 }
 
 /// Await an OSD operation result with a timeout, mapping all error layers to `OSDClientError`.
@@ -180,6 +186,7 @@ impl OSDClient {
                 shutdown_token: CancellationToken::new(),
                 self_weak: weak.clone(),
                 blocklisted: AtomicBool::new(false),
+                epoch_barrier: AtomicU32::new(0),
             }
         });
 
@@ -737,6 +744,11 @@ impl OSDClient {
                 });
             }
 
+            // Check epoch barrier — block until osdmap.epoch >= barrier.
+            // Mirrors Objecter::_calc_target RECALC_OP_TARGET_BARRIER_NEWER path.
+            let barrier = self.epoch_barrier.load(Ordering::Relaxed);
+            let behind_barrier = barrier != 0 && osdmap.epoch.as_u32() < barrier;
+
             // Check pool-pause and pool-full state before sending.
             // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
             let is_write = flags & crate::osdclient::types::OsdOpFlags::WRITE.bits() != 0;
@@ -744,16 +756,17 @@ impl OSDClient {
             let pauserd = osdmap.is_pauserd();
             let pausewr = osdmap.is_pausewr();
             let pool_full = osdmap.is_pool_full(msg.object.pool);
-            let paused = (is_read && pauserd) || (is_write && (pausewr || pool_full));
+            let paused =
+                behind_barrier || (is_read && pauserd) || (is_write && (pausewr || pool_full));
             if paused {
                 let remaining = deadline.saturating_duration_since(std::time::Instant::now());
                 if remaining.is_zero() {
                     return Err(OSDClientError::Timeout(effective_timeout));
                 }
                 info!(
-                    "Op on pool {} is paused (pauserd={}, pausewr={}, pool_full={}); \
-                     waiting for OSDMap update",
-                    msg.object.pool, pauserd, pausewr, pool_full,
+                    "Op on pool {} is paused (barrier={}, behind_barrier={}, pauserd={}, \
+                     pausewr={}, pool_full={}); waiting for OSDMap update",
+                    msg.object.pool, barrier, behind_barrier, pauserd, pausewr, pool_full,
                 );
                 osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
                 // Prune snap context: remove any snap IDs that were purged in
@@ -833,6 +846,17 @@ impl OSDClient {
             });
         }
         Ok(())
+    }
+
+    /// Advance the epoch barrier to `epoch` (no-op if `epoch` ≤ current barrier).
+    ///
+    /// Ops will be held in the pause-wait loop until the current OSDMap epoch
+    /// is at least `epoch`.  This is a one-way ratchet — calling it with a
+    /// lower epoch than the current barrier has no effect.
+    ///
+    /// Mirrors `Objecter::set_epoch_barrier()` in C++.
+    pub fn set_epoch_barrier(&self, epoch: u32) {
+        self.epoch_barrier.fetch_max(epoch, Ordering::Relaxed);
     }
 
     /// Read data from an object
