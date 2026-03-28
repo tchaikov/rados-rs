@@ -160,6 +160,12 @@ bitflags::bitflags! {
         const KNOWN_REDIR = 0x400000;
         /// Client understands pool EIO flag
         const SUPPORTSPOOLEIO = 0x8000000;
+        /// Attempt op even if pool is full (OSD still rejects if cluster is full).
+        /// Mirrors `CEPH_OSD_FLAG_FULL_TRY`.
+        const FULL_TRY = 0x800000;
+        /// Force op even if cluster is full.
+        /// Mirrors `CEPH_OSD_FLAG_FULL_FORCE`.
+        const FULL_FORCE = 0x1000000;
     }
 }
 

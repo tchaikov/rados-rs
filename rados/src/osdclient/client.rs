@@ -650,7 +650,8 @@ impl OSDClient {
         } else {
             built_op.priority
         };
-        self.execute_op(object, built_op.into_ops(), timeout, priority)
+        let extra_flags = built_op.flags;
+        self.execute_op(object, built_op.into_ops(), timeout, priority, extra_flags)
             .await
     }
 
@@ -675,6 +676,7 @@ impl OSDClient {
         ops: Vec<OSDOp>,
         timeout: Option<std::time::Duration>,
         priority: i32,
+        extra_flags: crate::osdclient::types::OsdOpFlags,
     ) -> Result<crate::osdclient::types::OpResult> {
         // Fail immediately if the client has been fenced by the cluster.
         if self.blocklisted.load(Ordering::Relaxed) {
@@ -702,7 +704,8 @@ impl OSDClient {
         let mut osdmap = self.get_osdmap().await?;
 
         // Build initial message
-        let flags = MOSDOp::calculate_flags(&ops);
+        // OR in caller-supplied extra flags (e.g. BALANCE_READS, FULL_TRY, FULL_FORCE).
+        let flags = MOSDOp::calculate_flags(&ops) | extra_flags.bits();
         let mut msg = MOSDOp::new(
             self.config.client_inc,
             osdmap.epoch.as_u32(),
@@ -751,11 +754,14 @@ impl OSDClient {
 
             // Check pool-pause and pool-full state before sending.
             // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
-            let is_write = flags & crate::osdclient::types::OsdOpFlags::WRITE.bits() != 0;
+            // FULL_TRY/FULL_FORCE bypass the pool-full check (respects_full logic).
+            use crate::osdclient::types::OsdOpFlags;
+            let is_write = flags & OsdOpFlags::WRITE.bits() != 0;
             let is_read = !is_write;
             let pauserd = osdmap.is_pauserd();
             let pausewr = osdmap.is_pausewr();
-            let pool_full = osdmap.is_pool_full(msg.object.pool);
+            let respects_full = flags & (OsdOpFlags::FULL_TRY | OsdOpFlags::FULL_FORCE).bits() == 0;
+            let pool_full = respects_full && osdmap.is_pool_full(msg.object.pool);
             let paused =
                 behind_barrier || (is_read && pauserd) || (is_write && (pausewr || pool_full));
             if paused {
@@ -873,6 +879,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 
@@ -925,6 +932,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 
@@ -994,6 +1002,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 
@@ -1020,6 +1029,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 
@@ -1040,6 +1050,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 
@@ -1065,6 +1076,7 @@ impl OSDClient {
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                crate::osdclient::types::OsdOpFlags::empty(),
             )
             .await?;
 

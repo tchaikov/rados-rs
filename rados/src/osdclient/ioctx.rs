@@ -12,7 +12,9 @@ use crate::osdclient::client::OSDClient;
 use crate::osdclient::error::{OSDClientError, Result};
 use crate::osdclient::operation::OpBuilder;
 use crate::osdclient::snapshot::SnapId;
-use crate::osdclient::types::{OSDOp, ReadResult, SparseReadResult, StatResult, WriteResult};
+use crate::osdclient::types::{
+    OSDOp, OsdOpFlags, ReadResult, SparseReadResult, StatResult, WriteResult,
+};
 
 /// Maximum entries per PGLS request for object listing pagination
 const MAX_ENTRIES_PER_REQUEST: usize = 100;
@@ -64,6 +66,10 @@ pub struct IoCtx {
     /// When set, all objects in this context are placed on the same PG as
     /// objects whose oid equals this key. Mirrors `IoCtxImpl::oloc.key`.
     locator_key: String,
+
+    /// Extra flags OR'd into every operation's flags.
+    /// Mirrors `IoCtxImpl::extra_op_flags` in librados.
+    extra_op_flags: OsdOpFlags,
 }
 
 impl IoCtx {
@@ -86,6 +92,7 @@ impl IoCtx {
             pool_name: tokio::sync::OnceCell::new(),
             namespace: String::new(),
             locator_key: String::new(),
+            extra_op_flags: OsdOpFlags::empty(),
         })
     }
 
@@ -118,6 +125,36 @@ impl IoCtx {
     /// Mirrors `IoCtx::set_epoch_barrier()` in librados.
     pub fn set_epoch_barrier(&self, epoch: u32) {
         self.client.set_epoch_barrier(epoch);
+    }
+
+    /// Allow writes even when the pool is full.
+    ///
+    /// Sets `CEPH_OSD_FLAG_FULL_TRY` on all ops from this context.
+    /// The OSD will still reject if the entire cluster is full.
+    /// Matches `IoCtx::set_pool_full_try()` in librados.
+    pub fn set_full_try(&mut self) {
+        self.extra_op_flags |= OsdOpFlags::FULL_TRY;
+    }
+
+    /// Force writes even when the cluster is full.
+    ///
+    /// Sets `CEPH_OSD_FLAG_FULL_FORCE` on all ops from this context.
+    /// Used for administrative recovery operations.
+    /// Matches `IoCtx::set_pool_full_force()` in librados.
+    pub fn set_full_force(&mut self) {
+        self.extra_op_flags |= OsdOpFlags::FULL_FORCE;
+    }
+
+    /// Execute a pre-built operation, applying this context's extra flags.
+    async fn execute(
+        &self,
+        oid: &str,
+        mut op: crate::osdclient::operation::BuiltOp,
+    ) -> crate::osdclient::error::Result<crate::osdclient::types::OpResult> {
+        op.flags |= self.extra_op_flags;
+        self.client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await
     }
 
     /// Build a full [`ObjectId`](crate::osdclient::types::ObjectId) incorporating
@@ -158,10 +195,7 @@ impl IoCtx {
         debug!("Creating object {} (exclusive={})", oid, exclusive);
 
         let op = OpBuilder::new().create(exclusive).build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "create")?;
         Ok(())
     }
@@ -181,10 +215,7 @@ impl IoCtx {
         debug!("Writing {} bytes to object {}", data.len(), oid);
 
         let op = OpBuilder::new().write_full(data).build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "write_full")?;
         Ok(WriteResult {
             version: result.version,
@@ -201,10 +232,7 @@ impl IoCtx {
         debug!("Appending {} bytes to object {}", data.len(), oid);
 
         let op = OpBuilder::new().append(data).build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "append")?;
         Ok(WriteResult {
             version: result.version,
@@ -230,10 +258,7 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new().write(offset, data).build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "write")?;
         Ok(WriteResult {
             version: result.version,
@@ -258,10 +283,7 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new().read(offset, length).build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "read")?;
         let outdata = result
             .ops
@@ -337,10 +359,7 @@ impl IoCtx {
         debug!("Getting stats for object {}", oid);
 
         let op = OpBuilder::new().stat().build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "stat")?;
         let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
         let stat_data = crate::osdclient::denc_types::OsdStatData::decode(&mut &outdata[..], 0)?;
@@ -363,10 +382,7 @@ impl IoCtx {
         info!("Removing object {}", oid);
 
         let op = OpBuilder::new().delete().build();
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(oid), op)
-            .await?;
+        let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "remove")?;
         Ok(())
     }
@@ -471,9 +487,7 @@ impl IoCtx {
             .op(OSDOp::lock_exclusive(name, cookie, description, duration)?)
             .build();
 
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 
@@ -516,9 +530,7 @@ impl IoCtx {
             )?)
             .build();
 
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 
@@ -538,9 +550,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)?).build();
 
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 
@@ -568,10 +578,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)?).build();
 
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        let result = self.execute(&oid_str, op).await?;
 
         Ok(result.first_outdata()?.clone())
     }
@@ -600,9 +607,7 @@ impl IoCtx {
             .op(OSDOp::set_xattr(name_str, value)?)
             .build();
 
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 
@@ -626,9 +631,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 
@@ -650,10 +653,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::list_xattrs()).build();
 
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        let result = self.execute(&oid_str, op).await?;
 
         // Parse outdata as list of strings
         let mut data = &result.first_outdata()?[..];
@@ -741,10 +741,7 @@ impl IoCtx {
             .op(OSDOp::call(class, method, indata)?)
             .build();
 
-        let result = self
-            .client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        let result = self.execute(&oid_str, op).await?;
 
         OSDClient::check_op_result(&result, &format!("exec {}::{}", class, method))?;
         let outdata = result
@@ -773,9 +770,7 @@ impl IoCtx {
         );
 
         let op = OpBuilder::new().rollback(snap_id).build();
-        self.client
-            .execute_built_op_with_id(self.object_id(&oid_str), op)
-            .await?;
+        self.execute(&oid_str, op).await?;
         Ok(())
     }
 }
@@ -789,6 +784,7 @@ impl Clone for IoCtx {
             pool_name: tokio::sync::OnceCell::new(),
             namespace: self.namespace.clone(),
             locator_key: self.locator_key.clone(),
+            extra_op_flags: self.extra_op_flags,
         }
     }
 }
