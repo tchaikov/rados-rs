@@ -620,10 +620,21 @@ impl OSDClient {
     ///
     /// let result = client.execute_built_op(pool_id, "my-object", op).await?;
     /// ```
+    /// Execute a pre-built operation with a plain pool/oid address.
     pub async fn execute_built_op(
         &self,
         pool: u64,
         oid: &str,
+        built_op: crate::osdclient::operation::BuiltOp,
+    ) -> Result<crate::osdclient::types::OpResult> {
+        self.execute_built_op_with_id(ObjectId::new(pool, oid), built_op)
+            .await
+    }
+
+    /// Execute a pre-built operation with a full [`ObjectId`] (supports namespace and locator key).
+    pub async fn execute_built_op_with_id(
+        &self,
+        object: ObjectId,
         built_op: crate::osdclient::operation::BuiltOp,
     ) -> Result<crate::osdclient::types::OpResult> {
         let timeout = built_op.timeout;
@@ -632,31 +643,28 @@ impl OSDClient {
         } else {
             built_op.priority
         };
-        self.execute_op(pool, oid, built_op.into_ops(), timeout, priority)
+        self.execute_op(object, built_op.into_ops(), timeout, priority)
             .await
     }
 
     /// Execute an OSD operation with automatic redirect handling
     ///
     /// This is the common pattern for all OSD operations:
-    /// 1. Create object ID and calculate hash
-    /// 2. Acquire throttle permit
-    /// 3. Get OSDMap epoch
-    /// 4. Build MOSDOp message
-    /// 5. Redirect retry loop with automatic session management
-    /// 6. Return OpResult for caller to process
+    /// 1. Acquire throttle permit
+    /// 2. Get OSDMap epoch
+    /// 3. Build MOSDOp message
+    /// 4. Redirect retry loop with automatic session management
+    /// 5. Return OpResult for caller to process
     ///
     /// # Arguments
-    /// * `pool` - Pool ID
-    /// * `oid` - Object name
+    /// * `object` - Full object address (pool, oid, namespace, locator key)
     /// * `ops` - Operations to execute
     ///
     /// # Returns
     /// Returns the OpResult after handling all redirects
     async fn execute_op(
         &self,
-        pool: u64,
-        oid: &str,
+        mut object: ObjectId,
         ops: Vec<OSDOp>,
         timeout: Option<std::time::Duration>,
         priority: i32,
@@ -666,8 +674,6 @@ impl OSDClient {
             return Err(OSDClientError::Blocklisted);
         }
 
-        // Create initial object ID
-        let mut object = ObjectId::new(pool, oid);
         object.calculate_hash();
 
         // Calculate operation budget and acquire throttle permit
@@ -839,8 +845,7 @@ impl OSDClient {
         let ops = vec![OSDOp::read(offset, len)];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                ObjectId::new(pool, oid),
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
@@ -873,16 +878,26 @@ impl OSDClient {
         offset: u64,
         len: u64,
     ) -> Result<crate::osdclient::types::SparseReadResult> {
+        self.sparse_read_with_id(ObjectId::new(pool, oid), offset, len)
+            .await
+    }
+
+    /// Sparse read with a full [`ObjectId`] (supports namespace and locator key).
+    pub async fn sparse_read_with_id(
+        &self,
+        object: ObjectId,
+        offset: u64,
+        len: u64,
+    ) -> Result<crate::osdclient::types::SparseReadResult> {
         debug!(
             "sparse_read pool={} oid={} offset={} len={}",
-            pool, oid, offset, len
+            object.pool, object.oid, offset, len
         );
 
         let ops = vec![OSDOp::sparse_read(offset, len)];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                object,
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
@@ -951,8 +966,7 @@ impl OSDClient {
         let ops = vec![OSDOp::write(offset, data)];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                ObjectId::new(pool, oid),
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
@@ -978,8 +992,7 @@ impl OSDClient {
         let ops = vec![OSDOp::write_full(data)];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                ObjectId::new(pool, oid),
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
@@ -999,8 +1012,7 @@ impl OSDClient {
         let ops = vec![OSDOp::stat()];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                ObjectId::new(pool, oid),
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
@@ -1025,8 +1037,7 @@ impl OSDClient {
         let ops = vec![OSDOp::delete()];
         let result = self
             .execute_op(
-                pool,
-                oid,
+                ObjectId::new(pool, oid),
                 ops,
                 None,
                 crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,

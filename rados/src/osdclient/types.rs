@@ -237,13 +237,29 @@ impl ObjectId {
         }
     }
 
-    /// Calculate the hash for CRUSH placement using Ceph's rjenkins hash
+    /// Calculate the hash for CRUSH placement using Ceph's rjenkins hash.
+    ///
+    /// Mirrors `OSDMap::map_to_pg` / `pg_pool_t::hash_key`:
+    /// - If a locator `key` is set, hash the key instead of the oid.
+    /// - If a `namespace` is set, prepend `ns + '\x1f'` before hashing.
     pub fn calculate_hash(&mut self) {
         use crate::crush::hash::ceph_str_hash_rjenkins;
 
-        // Hash the object name using Ceph's rjenkins hash function
-        // This matches the behavior of ceph_str_hash_rjenkins() in Ceph
-        self.hash = ceph_str_hash_rjenkins(self.oid.as_bytes());
+        let target = if self.key.is_empty() {
+            &self.oid
+        } else {
+            &self.key
+        };
+
+        self.hash = if self.namespace.is_empty() {
+            ceph_str_hash_rjenkins(target.as_bytes())
+        } else {
+            // Matches pg_pool_t::hash_key: ns + '\x1f' + key_or_oid
+            let mut buf = self.namespace.as_bytes().to_vec();
+            buf.push(0x1f);
+            buf.extend_from_slice(target.as_bytes());
+            ceph_str_hash_rjenkins(&buf)
+        };
     }
 }
 

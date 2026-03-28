@@ -7,6 +7,7 @@ use bytes::Bytes;
 use std::sync::Arc;
 use tracing::{debug, info};
 
+use crate::Denc;
 use crate::osdclient::client::OSDClient;
 use crate::osdclient::error::{OSDClientError, Result};
 use crate::osdclient::operation::OpBuilder;
@@ -54,6 +55,15 @@ pub struct IoCtx {
 
     /// Pool name (cached, initialized on first access)
     pool_name: tokio::sync::OnceCell<String>,
+
+    /// Namespace applied to every object operation (empty = default namespace).
+    /// Mirrors `IoCtxImpl::oloc.nspace` in librados.
+    namespace: String,
+
+    /// Locator key for CRUSH placement (empty = hash the oid directly).
+    /// When set, all objects in this context are placed on the same PG as
+    /// objects whose oid equals this key. Mirrors `IoCtxImpl::oloc.key`.
+    locator_key: String,
 }
 
 impl IoCtx {
@@ -74,12 +84,40 @@ impl IoCtx {
             client,
             pool_id,
             pool_name: tokio::sync::OnceCell::new(),
+            namespace: String::new(),
+            locator_key: String::new(),
         })
     }
 
     /// Get the pool ID
     pub fn pool_id(&self) -> u64 {
         self.pool_id
+    }
+
+    /// Set the namespace applied to all object operations on this context.
+    ///
+    /// Matches `IoCtx::set_namespace()` / `rados_ioctx_set_namespace()` in librados.
+    /// Use an empty string to return to the default (no) namespace.
+    pub fn set_namespace(&mut self, namespace: impl Into<String>) {
+        self.namespace = namespace.into();
+    }
+
+    /// Set the locator key for CRUSH placement.
+    ///
+    /// When set, objects are placed on the same PG as objects whose oid equals
+    /// this key, regardless of the actual oid. Matches `IoCtx::locator_set_key()` /
+    /// `rados_ioctx_locator_set_key()` in librados. Use an empty string to disable.
+    pub fn set_locator_key(&mut self, key: impl Into<String>) {
+        self.locator_key = key.into();
+    }
+
+    /// Build a full [`ObjectId`](crate::osdclient::types::ObjectId) incorporating
+    /// the current namespace and locator key.
+    fn object_id(&self, oid: &str) -> crate::osdclient::types::ObjectId {
+        let mut id = crate::osdclient::types::ObjectId::new(self.pool_id, oid);
+        id.namespace = self.namespace.clone();
+        id.key = self.locator_key.clone();
+        id
     }
 
     /// Get the pool name (cached)
@@ -111,7 +149,10 @@ impl IoCtx {
         debug!("Creating object {} (exclusive={})", oid, exclusive);
 
         let op = OpBuilder::new().create(exclusive).build();
-        let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
         OSDClient::check_op_result(&result, "create")?;
         Ok(())
     }
@@ -130,7 +171,15 @@ impl IoCtx {
         let data = data.into();
         debug!("Writing {} bytes to object {}", data.len(), oid);
 
-        self.client.write_full(self.pool_id, oid, data).await
+        let op = OpBuilder::new().write_full(data).build();
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
+        OSDClient::check_op_result(&result, "write_full")?;
+        Ok(WriteResult {
+            version: result.version,
+        })
     }
 
     /// Atomically append data to the end of an object.
@@ -143,7 +192,10 @@ impl IoCtx {
         debug!("Appending {} bytes to object {}", data.len(), oid);
 
         let op = OpBuilder::new().append(data).build();
-        let result = self.client.execute_built_op(self.pool_id, oid, op).await?;
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
         OSDClient::check_op_result(&result, "append")?;
         Ok(WriteResult {
             version: result.version,
@@ -168,7 +220,15 @@ impl IoCtx {
             offset
         );
 
-        self.client.write(self.pool_id, oid, offset, data).await
+        let op = OpBuilder::new().write(offset, data).build();
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
+        OSDClient::check_op_result(&result, "write")?;
+        Ok(WriteResult {
+            version: result.version,
+        })
     }
 
     /// Read data from an object
@@ -188,7 +248,21 @@ impl IoCtx {
             oid, offset, length
         );
 
-        self.client.read(self.pool_id, oid, offset, length).await
+        let op = OpBuilder::new().read(offset, length).build();
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
+        OSDClient::check_op_result(&result, "read")?;
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
+        Ok(ReadResult {
+            data: outdata,
+            version: result.version,
+        })
     }
 
     /// Sparse read data from an object
@@ -237,7 +311,7 @@ impl IoCtx {
         );
 
         self.client
-            .sparse_read(self.pool_id, oid, offset, length)
+            .sparse_read_with_id(self.object_id(oid), offset, length)
             .await
     }
 
@@ -253,7 +327,18 @@ impl IoCtx {
     pub async fn stat(&self, oid: &str) -> Result<StatResult> {
         debug!("Getting stats for object {}", oid);
 
-        self.client.stat(self.pool_id, oid).await
+        let op = OpBuilder::new().stat().build();
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
+        OSDClient::check_op_result(&result, "stat")?;
+        let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
+        let stat_data = crate::osdclient::denc_types::OsdStatData::decode(&mut &outdata[..], 0)?;
+        Ok(StatResult {
+            size: stat_data.size,
+            mtime: stat_data.mtime,
+        })
     }
 
     /// Remove an object
@@ -268,7 +353,12 @@ impl IoCtx {
     pub async fn remove(&self, oid: &str) -> Result<()> {
         info!("Removing object {}", oid);
 
-        self.client.delete(self.pool_id, oid).await?;
+        let op = OpBuilder::new().delete().build();
+        let result = self
+            .client
+            .execute_built_op_with_id(self.object_id(oid), op)
+            .await?;
+        OSDClient::check_op_result(&result, "remove")?;
         Ok(())
     }
 
@@ -373,7 +463,7 @@ impl IoCtx {
             .build();
 
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -418,7 +508,7 @@ impl IoCtx {
             .build();
 
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -440,7 +530,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)?).build();
 
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -471,7 +561,7 @@ impl IoCtx {
 
         let result = self
             .client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
 
         Ok(result.first_outdata()?.clone())
@@ -502,7 +592,7 @@ impl IoCtx {
             .build();
 
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -528,7 +618,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -543,8 +633,6 @@ impl IoCtx {
     ///
     /// Vector of attribute names
     pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
-        use crate::Denc;
-
         let oid_str = oid.into();
         debug!(
             "Listing xattrs for object '{}' in pool {}",
@@ -555,7 +643,7 @@ impl IoCtx {
 
         let result = self
             .client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
 
         // Parse outdata as list of strings
@@ -646,7 +734,7 @@ impl IoCtx {
 
         let result = self
             .client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
 
         OSDClient::check_op_result(&result, &format!("exec {}::{}", class, method))?;
@@ -677,7 +765,7 @@ impl IoCtx {
 
         let op = OpBuilder::new().rollback(snap_id).build();
         self.client
-            .execute_built_op(self.pool_id, &oid_str, op)
+            .execute_built_op_with_id(self.object_id(&oid_str), op)
             .await?;
         Ok(())
     }
@@ -690,6 +778,8 @@ impl Clone for IoCtx {
             client: Arc::clone(&self.client),
             pool_id: self.pool_id,
             pool_name: tokio::sync::OnceCell::new(),
+            namespace: self.namespace.clone(),
+            locator_key: self.locator_key.clone(),
         }
     }
 }
