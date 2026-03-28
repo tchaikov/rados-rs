@@ -161,8 +161,12 @@ impl IoCtx {
     /// the current namespace and locator key.
     fn object_id(&self, oid: &str) -> crate::osdclient::types::ObjectId {
         let mut id = crate::osdclient::types::ObjectId::new(self.pool_id, oid);
-        id.namespace = self.namespace.clone();
-        id.key = self.locator_key.clone();
+        if !self.namespace.is_empty() {
+            id.namespace = self.namespace.clone();
+        }
+        if !self.locator_key.is_empty() {
+            id.key = self.locator_key.clone();
+        }
         id
     }
 
@@ -341,9 +345,34 @@ impl IoCtx {
             oid, offset, length
         );
 
-        self.client
-            .sparse_read_with_id(self.object_id(oid), offset, length)
-            .await
+        let op = OpBuilder::new().sparse_read(offset, length).build();
+        let result = self.execute(oid, op).await?;
+        OSDClient::check_op_result(&result, "sparse_read")?;
+
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
+
+        if outdata.is_empty() {
+            return Ok(SparseReadResult {
+                extents: vec![],
+                data: bytes::Bytes::new(),
+                version: result.version,
+            });
+        }
+
+        let mut buf = outdata;
+        use crate::osdclient::types::SparseExtent;
+        let extents = Vec::<SparseExtent>::decode(&mut buf, 0)?;
+        let data = bytes::Bytes::decode(&mut buf, 0)?;
+
+        Ok(SparseReadResult {
+            extents,
+            data,
+            version: result.version,
+        })
     }
 
     /// Get object metadata (size and mtime)

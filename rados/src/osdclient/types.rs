@@ -261,9 +261,12 @@ impl ObjectId {
             ceph_str_hash_rjenkins(target.as_bytes())
         } else {
             // Matches pg_pool_t::hash_key: ns + '\x1f' + key_or_oid
-            let mut buf = self.namespace.as_bytes().to_vec();
+            let ns = self.namespace.as_bytes();
+            let tgt = target.as_bytes();
+            let mut buf = Vec::with_capacity(ns.len() + 1 + tgt.len());
+            buf.extend_from_slice(ns);
             buf.push(0x1f);
-            buf.extend_from_slice(target.as_bytes());
+            buf.extend_from_slice(tgt);
             ceph_str_hash_rjenkins(&buf)
         };
     }

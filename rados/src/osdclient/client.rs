@@ -725,10 +725,15 @@ impl OSDClient {
         // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
         (msg.snap_seq, msg.snaps) = osdmap.pool_snap_context(msg.object.pool);
 
+        // Pre-compute flag-derived booleans that are constant across iterations.
+        use crate::osdclient::types::OsdOpFlags;
+        let is_write = flags & OsdOpFlags::WRITE.bits() != 0;
+        let is_read = !is_write;
+        let respects_full = flags & (OsdOpFlags::FULL_TRY | OsdOpFlags::FULL_FORCE).bits() == 0;
+
         // Set mtime for write ops — mirrors librados setting real_clock::now() when
         // the caller provides no explicit mtime. Reads carry UTime::zero().
-        let is_write_op = flags & crate::osdclient::types::OsdOpFlags::WRITE.bits() != 0;
-        if is_write_op {
+        if is_write {
             msg.mtime = crate::UTime::now();
         }
 
@@ -754,13 +759,8 @@ impl OSDClient {
 
             // Check pool-pause and pool-full state before sending.
             // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
-            // FULL_TRY/FULL_FORCE bypass the pool-full check (respects_full logic).
-            use crate::osdclient::types::OsdOpFlags;
-            let is_write = flags & OsdOpFlags::WRITE.bits() != 0;
-            let is_read = !is_write;
             let pauserd = osdmap.is_pauserd();
             let pausewr = osdmap.is_pausewr();
-            let respects_full = flags & (OsdOpFlags::FULL_TRY | OsdOpFlags::FULL_FORCE).bits() == 0;
             let pool_full = respects_full && osdmap.is_pool_full(msg.object.pool);
             let paused =
                 behind_barrier || (is_read && pauserd) || (is_write && (pausewr || pool_full));
