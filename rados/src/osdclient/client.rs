@@ -718,6 +718,11 @@ impl OSDClient {
 
         // Redirect/pause retry loop
         loop {
+            // Refresh the epoch in the message to reflect the current OSDMap.
+            // C++ _prepare_osd_op reads osdmap->get_epoch() at send time; after a
+            // pause-wait that loads a newer map we must do the same.
+            msg.osdmap_epoch = osdmap.epoch.as_u32();
+
             // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
             if osdmap.is_pool_eio(msg.object.pool) {
                 return Err(OSDClientError::OSDError {
