@@ -918,7 +918,7 @@ impl PgPool {
         false
     }
 
-    fn canonical_last_force_op_resend(&self) -> Epoch {
+    pub(crate) fn canonical_last_force_op_resend(&self) -> Epoch {
         if self.last_force_op_resend.as_u32() != 0 {
             self.last_force_op_resend
         } else if self.last_force_op_resend_prenautilus.as_u32() != 0 {

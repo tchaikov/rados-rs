@@ -1588,7 +1588,7 @@ impl OSDClient {
         let metadata = session.get_pending_ops_metadata().await;
         let mut placement_cache = HashMap::new();
 
-        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
+        for (tid, pool_id, object_id, op_osdmap_epoch) in metadata {
             // Check if pool deleted
             if !osdmap.pools.contains_key(&pool_id) {
                 if let Some(pending_op) = session.remove_pending_op(tid).await {
@@ -1599,12 +1599,21 @@ impl OSDClient {
                 continue;
             }
 
+            // Check if the pool's admin-forced resend epoch falls after this op
+            // was sent.  Mirrors Objecter::_calc_target step 4: if
+            // last_force_op_resend is in (op_epoch, new_epoch] the op must be
+            // resubmitted even if its primary OSD has not changed.
+            let force_resend = osdmap.pools.get(&pool_id).is_some_and(|p| {
+                let lf = p.canonical_last_force_op_resend().as_u32();
+                lf > op_osdmap_epoch && lf <= new_epoch
+            });
+
             // Check if target changed
             let new_osds =
                 self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
             let new_primary = new_osds.first().copied().unwrap_or(-1);
 
-            if new_primary != osd_id
+            if (new_primary != osd_id || force_resend)
                 && let Some(mut op) = session.remove_pending_op(tid).await
             {
                 op.state = crate::osdclient::types::OpState::NeedsResend;
