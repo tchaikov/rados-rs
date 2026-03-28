@@ -62,6 +62,17 @@ impl UTime {
     pub const fn new(sec: u32, nsec: u32) -> Self {
         Self { sec, nsec }
     }
+
+    /// Current wall-clock time, matching `ceph::real_clock::now()`.
+    pub fn now() -> Self {
+        let d = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        Self {
+            sec: d.as_secs() as u32,
+            nsec: d.subsec_nanos(),
+        }
+    }
 }
 
 /// UUID structure (uuid_d in C++)

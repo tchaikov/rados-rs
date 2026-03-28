@@ -709,6 +709,13 @@ impl OSDClient {
         // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
         (msg.snap_seq, msg.snaps) = osdmap.pool_snap_context(msg.object.pool);
 
+        // Set mtime for write ops — mirrors librados setting real_clock::now() when
+        // the caller provides no explicit mtime. Reads carry UTime::zero().
+        let is_write_op = flags & crate::osdclient::types::OsdOpFlags::WRITE.bits() != 0;
+        if is_write_op {
+            msg.mtime = crate::UTime::now();
+        }
+
         // Redirect/pause retry loop
         loop {
             // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
