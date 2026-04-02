@@ -622,7 +622,9 @@ impl<T: Denc> Denc for Vec<T> {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         let len = <u32 as Denc>::decode(buf, features)? as usize;
-        let mut vec = Vec::with_capacity(len);
+        // Cap pre-allocation to avoid OOM from adversarial length prefixes.
+        // The actual loop will still decode `len` items (or fail on short buffer).
+        let mut vec = Vec::with_capacity(len.min(4096));
 
         for _ in 0..len {
             vec.push(<T as Denc>::decode(buf, features)?);
@@ -740,7 +742,7 @@ macro_rules! impl_denc_map {
 
             fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
                 let len = <u32 as Denc>::decode(buf, features)? as usize;
-                let mut map = Self::with_capacity(len);
+                let mut map = Self::with_capacity(len.min(4096));
                 for _ in 0..len {
                     let key = <K as Denc>::decode(buf, features)?;
                     let value = <V as Denc>::decode(buf, features)?;

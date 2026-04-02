@@ -282,7 +282,9 @@ impl EntityAddr {
         let mut sockaddr_data = vec![0u8; elen];
         content.copy_to_slice(&mut sockaddr_data);
 
-        // Note: take() already consumed the bytes from buf, no need to advance
+        // DECODE_FINISH: skip any trailing bytes for forward compatibility
+        // (take() shares the buffer; unconsumed bytes must be advanced past)
+        content.advance(content.remaining());
 
         Ok(Self {
             addr_type,
