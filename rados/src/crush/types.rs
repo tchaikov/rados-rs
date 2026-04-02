@@ -142,6 +142,9 @@ pub struct CrushMap {
     pub chooseleaf_vary_r: u8,
     pub chooseleaf_stable: u8,
     pub allowed_bucket_algs: u32,
+    /// MSR tunables (Reef+)
+    pub msr_descents: u32,
+    pub msr_collision_tries: u32,
     /// Device classes (Luminous+)
     /// Maps device/OSD ID to class ID
     pub class_map: HashMap<i32, i32>,
@@ -171,6 +174,8 @@ impl CrushMap {
             chooseleaf_vary_r: 0,
             chooseleaf_stable: 0,
             allowed_bucket_algs: 0,
+            msr_descents: 100,
+            msr_collision_tries: 100,
             class_map: HashMap::new(),
             class_name: HashMap::new(),
             class_bucket: HashMap::new(),

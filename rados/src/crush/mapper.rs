@@ -94,8 +94,8 @@ pub fn crush_do_rule(
     let mut choose_tries = map.choose_total_tries;
     let mut chooseleaf_vary_r = map.chooseleaf_vary_r;
     let mut chooseleaf_stable = map.chooseleaf_stable;
-    let mut msr_descents = 1u32;
-    let mut msr_collision_tries = 0u32;
+    let mut msr_descents = map.msr_descents;
+    let mut msr_collision_tries = map.msr_collision_tries;
 
     for step in &rule.steps {
         match step.op {

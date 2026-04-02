@@ -134,10 +134,16 @@ fn bucket_straw2_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
     bucket.items[high]
 }
 
-/// Uniform bucket selection (O(1), simple permutation)
-/// All items have equal weight
+/// Uniform bucket selection (O(1), simple hash).
+///
+/// NOTE: This is a simplified implementation that does NOT match the C++
+/// `bucket_perm_choose` permutation scheme used for uniform buckets.
+/// Uniform buckets are deprecated since Hammer (2015) and no modern Ceph
+/// cluster uses them — all clusters use straw2.  Since our minimum Ceph
+/// version is Quincy (v17), this code path is effectively dead.  If uniform
+/// bucket support is ever needed, this must be replaced with the full
+/// stateful Fisher-Yates permutation from `crush/mapper.c`.
 fn bucket_uniform_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
-    // Simplified uniform selection using hash
     let hash = crush_hash32_2(x, r);
     let index = (hash % bucket.size) as usize;
     bucket.items[index]

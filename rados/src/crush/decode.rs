@@ -122,8 +122,35 @@ impl CrushMap {
             map.class_bucket = HashMap::decode(data, 0)?;
         }
 
-        // Skip remaining data (choose args, MSR tunables, etc.)
-        // These are optional and not yet implemented
+        // Skip choose_args (complex per-bucket weight sets, not needed for placement).
+        if data.remaining() > 0 {
+            let choose_args_size = u32::decode(data, 0)?;
+            for _ in 0..choose_args_size {
+                let _choose_args_index = u64::decode(data, 0)?;
+                let size = u32::decode(data, 0)?;
+                for _ in 0..size {
+                    let _bucket_index = u32::decode(data, 0)?;
+                    let weight_set_positions = u32::decode(data, 0)?;
+                    for _ in 0..weight_set_positions {
+                        let ws_size = u32::decode(data, 0)?;
+                        for _ in 0..ws_size {
+                            let _weight = u32::decode(data, 0)?;
+                        }
+                    }
+                    let ids_size = u32::decode(data, 0)?;
+                    for _ in 0..ids_size {
+                        let _id = i32::decode(data, 0)?;
+                    }
+                }
+            }
+        }
+
+        // Decode MSR tunables (Reef+) — comes after choose_args on the wire.
+        // C++ default (set_default_msr_tunables): 100/100.
+        if data.remaining() >= 8 {
+            map.msr_descents = u32::decode(data, 0)?;
+            map.msr_collision_tries = u32::decode(data, 0)?;
+        }
 
         // Post-decode validation
         validate_crush_map(&map)?;
