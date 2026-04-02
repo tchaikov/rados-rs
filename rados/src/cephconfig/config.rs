@@ -43,7 +43,9 @@ impl CephConfig {
             }
 
             if let Some(eq_pos) = line.find('=') {
-                let key = line[..eq_pos].trim().to_string();
+                // Normalize key: trim whitespace and replace spaces with underscores.
+                // Mirrors C++ ConfUtils::normalize_key_name().
+                let key = line[..eq_pos].trim().replace(' ', "_");
                 let value = line[eq_pos + 1..].trim().to_string();
 
                 sections
@@ -72,12 +74,12 @@ impl CephConfig {
 
     /// Get monitor addresses.
     ///
-    /// Parses the "mon host" configuration option and returns a list of monitor addresses.
+    /// Parses the "mon_host" configuration option and returns a list of monitor addresses.
     /// Supports both v2 and v1 protocol addresses.
     pub fn mon_addrs(&self) -> Result<Vec<String>, ConfigError> {
         let mon_host = self
-            .get_with_fallback(&["global", "client"], "mon host")
-            .ok_or_else(|| ConfigError::MissingOption("mon host".to_string()))?;
+            .get_with_fallback(&["global", "client"], "mon_host")
+            .ok_or_else(|| ConfigError::MissingOption("mon_host".to_string()))?;
 
         let addrs: Vec<String> = mon_host
             .split_whitespace()
@@ -134,7 +136,7 @@ impl CephConfig {
     ///
     /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
     pub fn get_auth_client_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth client required", &["global", "client"])
+        self.resolve_auth_methods("auth_client_required", &["global", "client"])
     }
 
     /// Get required authentication methods for cluster-internal connections.
@@ -144,7 +146,7 @@ impl CephConfig {
     ///
     /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
     pub fn get_auth_cluster_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth cluster required", &["global"])
+        self.resolve_auth_methods("auth_cluster_required", &["global"])
     }
 
     /// Get required authentication methods for service connections (OSD, MDS, MGR to MON).
@@ -154,7 +156,7 @@ impl CephConfig {
     ///
     /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
     pub fn get_auth_service_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth service required", &["global"])
+        self.resolve_auth_methods("auth_service_required", &["global"])
     }
 
     /// Shared helper for all `get_auth_*_required` methods.
@@ -263,7 +265,8 @@ debug mon = 20
             config.get("client", "keyring"),
             Some("/home/kefu/dev/ceph/build/keyring")
         );
-        assert_eq!(config.get("mon", "debug mon"), Some("20"));
+        // Keys are normalized: spaces → underscores (mirrors C++ ConfUtils).
+        assert_eq!(config.get("mon", "debug_mon"), Some("20"));
     }
 
     #[test]
