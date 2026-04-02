@@ -97,44 +97,31 @@ pub enum BucketData {
 /// A CRUSH bucket containing items (devices or other buckets)
 #[derive(Debug, Clone)]
 pub struct CrushBucket {
-    /// Bucket ID (negative for buckets)
     pub id: i32,
-    /// Bucket type in hierarchy (e.g., root, datacenter, rack, host)
+    /// Type in hierarchy (e.g., root, datacenter, rack, host)
     pub bucket_type: i32,
-    /// Selection algorithm
     pub alg: BucketAlgorithm,
-    /// Hash function type (CRUSH_HASH_RJENKINS1 = 0)
     pub hash: u8,
     /// Total weight (16.16 fixed-point)
     pub weight: u32,
-    /// Number of items
     pub size: u32,
-    /// Item IDs (negative = buckets, >= 0 = devices)
+    /// Item IDs (negative = buckets, non-negative = devices)
     pub items: Vec<i32>,
-    /// Algorithm-specific data
     pub data: BucketData,
 }
 
 /// Main CRUSH map structure
 #[derive(Debug, Clone)]
 pub struct CrushMap {
-    /// Maximum number of buckets
     pub max_buckets: i32,
-    /// Maximum number of devices
     pub max_devices: i32,
-    /// Maximum number of rules
     pub max_rules: u32,
-    /// Buckets array (indexed by -1 - bucket_id)
+    /// Indexed by `-1 - bucket_id`
     pub buckets: Vec<Option<CrushBucket>>,
-    /// Rules array
     pub rules: Vec<Option<CrushRule>>,
-    /// Type names (type_id -> name)
     pub type_names: HashMap<i32, String>,
-    /// Bucket/device names (id -> name)
     pub names: HashMap<i32, String>,
-    /// Rule names (rule_id -> name)
     pub rule_names: HashMap<u32, String>,
-    /// Tunables
     pub choose_local_tries: u32,
     pub choose_local_fallback_tries: u32,
     pub choose_total_tries: u32,
@@ -142,16 +129,13 @@ pub struct CrushMap {
     pub chooseleaf_vary_r: u8,
     pub chooseleaf_stable: u8,
     pub allowed_bucket_algs: u32,
-    /// MSR tunables (Reef+)
     pub msr_descents: u32,
     pub msr_collision_tries: u32,
-    /// Device classes (Luminous+)
-    /// Maps device/OSD ID to class ID
+    /// Device/OSD ID -> class ID
     pub class_map: HashMap<i32, i32>,
-    /// Maps class ID to class name (e.g., "ssd", "hdd", "nvme")
+    /// Class ID -> class name (e.g., "ssd", "hdd", "nvme")
     pub class_name: HashMap<i32, String>,
-    /// Shadow bucket mappings: `bucket[id][class_id] = shadow_bucket_id`
-    /// Used for device class-specific CRUSH tree shadows
+    /// `bucket[id][class_id] = shadow_bucket_id` for device-class tree shadows
     pub class_bucket: HashMap<i32, HashMap<i32, i32>>,
 }
 

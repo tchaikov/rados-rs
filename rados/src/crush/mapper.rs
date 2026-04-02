@@ -88,11 +88,9 @@ pub fn crush_do_rule(
 
     result.clear();
 
-    // Working set for intermediate results (pre-sized to avoid realloc in choose loops)
     let mut work: Vec<i32> = Vec::with_capacity(result_max);
     let mut scratch: Vec<i32> = Vec::with_capacity(result_max);
 
-    // Tunable parameters (can be overridden by rule steps)
     // C++ mapper.c: "the original choose_total_tries value was off by one
     // (it counted 'retries' and not 'tries'). add one."
     let mut choose_tries = map.choose_total_tries + 1;
@@ -151,8 +149,6 @@ pub fn crush_do_rule(
                         weights,
                         choose_tries,
                         recurse_to_leaf,
-                        chooseleaf_vary_r,
-                        chooseleaf_stable,
                         0, // top-level call: parent_r = 0
                     )?;
                     scratch.extend_from_slice(&indep_out);
@@ -193,14 +189,12 @@ pub fn crush_do_rule(
                 }
             }
 
-            // Tunable overrides
             RuleOp::SetChooseTries => choose_tries = step.arg1 as u32,
             RuleOp::SetChooseLeafVaryR => chooseleaf_vary_r = step.arg1 as u8,
             RuleOp::SetChooseLeafStable => chooseleaf_stable = step.arg1 as u8,
             RuleOp::SetMsrDescents => msr_descents = step.arg1 as u32,
             RuleOp::SetMsrCollisionTries => msr_collision_tries = step.arg1 as u32,
 
-            // These tunables are parsed but not yet used by the selection algorithms
             RuleOp::SetChooseLeafTries
             | RuleOp::SetChooseLocalTries
             | RuleOp::SetChooseLocalFallbackTries
@@ -237,7 +231,6 @@ fn crush_choose_firstn(
         recurse_to_leaf
     );
 
-    // If bucket_id is a device (>= 0), just return it if it's the right type
     if bucket_id >= 0 {
         if item_type == 0 && !is_out(weights, bucket_id, x) {
             out.push(bucket_id);
@@ -245,7 +238,6 @@ fn crush_choose_firstn(
         return Ok(());
     }
 
-    // Get the bucket
     let bucket = map.get_bucket(bucket_id)?;
     tracing::debug!(
         "Got bucket: id={}, type={}, size={}, items={:?}",
@@ -255,7 +247,6 @@ fn crush_choose_firstn(
         bucket.items
     );
 
-    // For each replica we need to select
     for rep in 0..numrep {
         let mut found = false;
         let r = if stable != 0 { 0 } else { rep as u32 };
@@ -270,7 +261,6 @@ fn crush_choose_firstn(
             item_type
         );
 
-        // Try multiple times to find a valid item
         'tries: for ftotal in 0..tries {
             current_bucket = bucket; // reset to starting bucket each retry (C++ `in = bucket`)
             let r_prime = if vary_r != 0 { r + ftotal } else { r };
@@ -284,9 +274,7 @@ fn crush_choose_firstn(
                 vary_r
             );
 
-            // Inner loop for descending through bucket hierarchy
             loop {
-                // Select an item from the current bucket
                 let item = bucket_choose(current_bucket, x, r_prime);
 
                 tracing::debug!(
@@ -297,7 +285,6 @@ fn crush_choose_firstn(
                     ftotal
                 );
 
-                // Determine item type
                 let itemtype = match get_item_type(map, item) {
                     Some(t) => t,
                     None => {
@@ -313,34 +300,27 @@ fn crush_choose_firstn(
                     item_type
                 );
 
-                // Check if this is the type we're looking for
                 if itemtype != item_type {
                     if item >= 0 {
-                        // Item is a device but wrong type - this shouldn't happen
                         tracing::debug!("Device {} has wrong type", item);
                         continue 'tries;
                     }
-                    // Item is a bucket, descend into it
                     current_bucket = map.get_bucket(item)?;
                     tracing::debug!("Descending into bucket {}", item);
-                    continue; // Continue inner loop with new bucket
+                    continue;
                 }
 
-                // Check if this item is already in the output (collision)
                 if out.contains(&item) {
                     tracing::debug!("Item {} already in output, skipping", item);
                     continue 'tries;
                 }
 
-                // Check if device is out
                 if item >= 0 && is_out(weights, item, x) {
                     tracing::debug!("Device {} is out", item);
                     continue 'tries;
                 }
 
-                // If we need to recurse to leaf (for CHOOSELEAF)
                 if recurse_to_leaf && item < 0 {
-                    // Recursively select a device from this bucket
                     let before_len = out.len();
                     crush_choose_firstn(
                         map, item, x, 1, 0, // Type 0 = device
@@ -356,7 +336,6 @@ fn crush_choose_firstn(
                     }
                 }
 
-                // Success - add this item to output
                 tracing::debug!("Found valid item {}", item);
                 tracing::trace!("crush_choose_firstn: rep={}, item={} SELECTED", rep, item);
                 out.push(item);
@@ -365,7 +344,6 @@ fn crush_choose_firstn(
             }
         }
 
-        // If we couldn't find a valid item after all tries, continue to next replica
         if !found {
             tracing::debug!(
                 "Failed to find item for replica {} after {} tries",
@@ -397,8 +375,6 @@ fn crush_choose_indep(
     weights: &[u32],
     tries: u32,
     recurse_to_leaf: bool,
-    _vary_r: u8,
-    _stable: u8,
     parent_r: i32,
 ) -> Result<()> {
     tracing::debug!(
@@ -409,7 +385,6 @@ fn crush_choose_indep(
         recurse_to_leaf
     );
 
-    // If bucket_id is a device (>= 0), just return it if it's the right type
     if bucket_id >= 0 {
         if item_type == 0 && !is_out(weights, bucket_id, x) && !out.is_empty() {
             out[0] = bucket_id;
@@ -417,7 +392,6 @@ fn crush_choose_indep(
         return Ok(());
     }
 
-    // Get the bucket
     let bucket = map.get_bucket(bucket_id)?;
     tracing::debug!(
         "Got bucket: id={}, type={}, size={}, items={:?}",
@@ -427,19 +401,15 @@ fn crush_choose_indep(
         bucket.items
     );
 
-    // Initialize output with CRUSH_ITEM_UNDEF (not yet resolved).
-    // C++ uses UNDEF to distinguish "slot not yet filled" from "definitively NONE"
-    // so that definitive NONE slots are not retried.
+    // UNDEF distinguishes "slot not yet filled" from definitive NONE (not retried).
     for slot in out.iter_mut().take(numrep) {
         *slot = CRUSH_ITEM_UNDEF;
     }
 
-    // Try multiple times to fill all positions
     for ftotal in 0..tries {
         let mut all_done = true;
 
         for rep in 0..numrep {
-            // Skip positions already resolved (either valid item or definitive NONE)
             if out[rep] != CRUSH_ITEM_UNDEF {
                 continue;
             }
@@ -454,12 +424,10 @@ fn crush_choose_indep(
                 .wrapping_add(parent_r as u32)
                 .wrapping_add((numrep as u32).wrapping_mul(ftotal));
 
-            // Inner loop for descending through bucket hierarchy
             let mut item = CRUSH_ITEM_NONE;
             let mut item_found = false;
 
             loop {
-                // Select an item from the current bucket
                 let candidate = bucket_choose(current_bucket, x, r);
 
                 tracing::debug!(
@@ -470,12 +438,11 @@ fn crush_choose_indep(
                     ftotal
                 );
 
-                // Determine item type
                 let itemtype = match get_item_type(map, candidate) {
                     Some(t) => t,
                     None => {
                         tracing::debug!("Invalid bucket {}", candidate);
-                        out[rep] = CRUSH_ITEM_NONE; // definitive
+                        out[rep] = CRUSH_ITEM_NONE;
                         break;
                     }
                 };
@@ -487,21 +454,17 @@ fn crush_choose_indep(
                     item_type
                 );
 
-                // Check if this is the type we're looking for
                 if itemtype != item_type {
                     if candidate >= 0 {
-                        // Item is a device but wrong type — definitively unmappable
                         tracing::debug!("Device {} has wrong type", candidate);
                         out[rep] = CRUSH_ITEM_NONE;
                         break;
                     }
-                    // Item is a bucket, descend into it
                     current_bucket = map.get_bucket(candidate)?;
                     tracing::debug!("Descending into bucket {}", candidate);
                     continue;
                 }
 
-                // Check for collision with any other output position
                 let collision = out
                     .iter()
                     .enumerate()
@@ -512,15 +475,12 @@ fn crush_choose_indep(
                     break;
                 }
 
-                // Check if device is out
                 if candidate >= 0 && is_out(weights, candidate, x) {
                     tracing::debug!("Device {} is out", candidate);
                     break;
                 }
 
-                // If we need to recurse to leaf (for CHOOSELEAF)
                 if recurse_to_leaf && candidate < 0 {
-                    // Recursively select a device from this bucket using INDEP
                     let mut leaf_out = [CRUSH_ITEM_UNDEF; 1];
                     crush_choose_indep(
                         map,
@@ -532,8 +492,6 @@ fn crush_choose_indep(
                         weights,
                         tries,
                         true,
-                        _vary_r,
-                        _stable,
                         r as i32,
                     )?;
 
@@ -542,7 +500,6 @@ fn crush_choose_indep(
                         break;
                     }
 
-                    // Check leaf for collision with other positions
                     let leaf_collision = out
                         .iter()
                         .enumerate()
@@ -558,7 +515,6 @@ fn crush_choose_indep(
                     break;
                 }
 
-                // Success - found a valid item
                 tracing::debug!("Found valid item {}", candidate);
                 item = candidate;
                 item_found = true;
@@ -576,7 +532,6 @@ fn crush_choose_indep(
         }
     }
 
-    // Convert any remaining UNDEF slots to NONE (definitive "no mapping").
     for slot in out.iter_mut().take(numrep) {
         if *slot == CRUSH_ITEM_UNDEF {
             *slot = CRUSH_ITEM_NONE;
@@ -614,7 +569,6 @@ fn crush_choose_msr(
         collision_tries
     );
 
-    // If bucket_id is a device (>= 0), just return it if it's the right type
     if bucket_id >= 0 {
         if item_type == 0 && !is_out(weights, bucket_id, x) {
             out[0] = bucket_id;
@@ -624,7 +578,6 @@ fn crush_choose_msr(
 
     let bucket = map.get_bucket(bucket_id)?;
 
-    // Track which items have been chosen to avoid duplicates (by item ID)
     let mut chosen_items: Vec<i32> = Vec::with_capacity(numrep);
     let mut collisions = vec![0u32; numrep];
 
@@ -633,26 +586,20 @@ fn crush_choose_msr(
 
         'retry: loop {
             if descent >= descents {
-                // Exceeded descent limit, leave as CRUSH_ITEM_NONE
                 break 'retry;
             }
             descent += 1;
 
-            // MSR hash function: combines rep, descent, and collision count
             let r = rep as u32 + descent * numrep as u32 + collisions[rep];
             let hash = crush_hash32_2(x + r, bucket_id as u32);
-
-            // Select item from bucket using hash
             let item = bucket_choose(bucket, hash, r);
 
-            // Check if we need to recurse or if this is terminal
             let item_type_match = match get_item_type(map, item) {
                 Some(t) => t == item_type || item_type == 0,
                 None => false,
             };
 
             if item < 0 && (recurse_to_leaf || !item_type_match) {
-                // Recurse into child bucket
                 let mut sub_out = [CRUSH_ITEM_NONE; 1];
                 crush_choose_msr(
                     map,
@@ -668,11 +615,9 @@ fn crush_choose_msr(
                 )?;
 
                 if sub_out[0] == CRUSH_ITEM_NONE {
-                    // Recursion failed, try again
                     continue 'retry;
                 }
 
-                // Check for collision on the leaf device (not the bucket)
                 if chosen_items.contains(&sub_out[0]) {
                     collisions[rep] += 1;
                     if collisions[rep] < collision_tries {
@@ -686,14 +631,11 @@ fn crush_choose_msr(
                 break 'retry;
             }
 
-            // For devices (item >= 0) or type-matched buckets:
-            // check is_out only for devices, not intermediate buckets.
             if item >= 0 && is_out(weights, item, x) {
                 continue 'retry;
             }
 
             if item_type_match {
-                // Check for collision
                 if chosen_items.contains(&item) {
                     collisions[rep] += 1;
                     if collisions[rep] < collision_tries {
@@ -705,8 +647,6 @@ fn crush_choose_msr(
                 chosen_items.push(item);
                 break 'retry;
             }
-
-            // Item doesn't match type, try again
         }
     }
 
@@ -850,7 +790,7 @@ mod tests {
         let mut out = vec![CRUSH_ITEM_NONE; 3];
         let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
 
-        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0, 0, 0);
+        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0);
 
         assert!(res.is_ok());
         // All positions should be filled (enough devices available)
@@ -892,8 +832,8 @@ mod tests {
         // Run the same input twice - should produce identical results
         let mut out1 = vec![CRUSH_ITEM_NONE; 3];
         let mut out2 = vec![CRUSH_ITEM_NONE; 3];
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0, 0, 0).unwrap();
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0, 0, 0).unwrap();
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0).unwrap();
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0).unwrap();
         assert_eq!(out1, out2, "same input should produce same output");
     }
 
@@ -933,8 +873,6 @@ mod tests {
             &weights_all_in,
             50,
             false,
-            0,
-            0,
             0,
         )
         .unwrap();

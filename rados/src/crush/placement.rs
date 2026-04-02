@@ -16,19 +16,14 @@ use bytes::{Buf, BufMut};
 /// Reference: linux/net/ceph/osd_client.c encode_request_partial()
 pub(crate) const HASH_CALCULATE_FROM_NAME: i64 = -1;
 
-/// Object locator information
 /// Matches C++ object_locator_t from ~/dev/ceph/src/osd/osd_types.h
-/// Contains pool ID, namespace, key, and hash for object placement
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ObjectLocator {
-    /// Pool ID (u64::MAX for invalid/default)
     pub pool_id: u64,
-    /// Key string (if non-empty) - alternative to hash for placement
+    /// Alternative to hash for placement (mutually exclusive with `hash`)
     pub key: String,
-    /// Object namespace (empty string for default)
     pub namespace: String,
-    /// Hash position (if >= 0) - alternative to key for placement
-    /// Note: You specify either hash or key, not both
+    /// Alternative to key for placement; -1 means "calculate from name"
     pub hash: i64,
 }
 
@@ -94,15 +89,9 @@ impl Default for ObjectLocator {
 }
 
 /// Placement group identifier (pg_t in C++)
-/// Combines pool ID and PG number
-///
-/// This type is defined in the rados-crush crate and has Denc encoding implemented
-/// in the rados-denc crate's crush_types module.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub struct PgId {
-    /// Pool ID
     pub pool: u64,
-    /// PG seed/number within the pool
     pub seed: u32,
 }
 
@@ -252,7 +241,6 @@ pub fn object_to_pg(
         ));
     }
 
-    // Determine what to hash
     let hash_key = if !locator.key.is_empty() {
         locator.key.as_str()
     } else {
@@ -268,7 +256,6 @@ pub fn object_to_pg(
         ceph_str_hash_rjenkins(hash_input.as_bytes())
     };
 
-    // Map to PG number using modulo
     let pg_seed = hash % pg_num;
 
     Ok(PgId::new(locator.pool_id, pg_seed))
@@ -299,21 +286,15 @@ pub fn pg_to_osds(
 ) -> Result<Vec<i32>> {
     let mut result = Vec::new();
 
-    // Calculate placement seed (PS) for CRUSH
-    // When hashpspool flag is set (modern pools), hash the PG seed with pool ID
     // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps()
     let x = if hashpspool {
         // Hash PG seed with pool ID to avoid PG overlap between pools
-        // Ceph uses: crush_hash32_2(CRUSH_HASH_RJENKINS1, pg.seed, pool_id)
-        // Our Rust hash functions are already specialized to rjenkins1
         use crate::crush::hash::crush_hash32_2;
         crush_hash32_2(pg.seed, pg.pool as u32)
     } else {
-        // Legacy: just use PG seed directly
         pg.seed
     };
 
-    // Execute the CRUSH rule
     crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
 
     Ok(result)
@@ -346,12 +327,8 @@ pub fn object_to_osds(
     result_max: usize,
     hashpspool: bool,
 ) -> Result<(PgId, Vec<i32>)> {
-    // First, map object to PG
     let pg = object_to_pg(object_name, locator, pg_num)?;
-
-    // Then, map PG to OSDs
     let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max, hashpspool)?;
-
     Ok((pg, osds))
 }
 

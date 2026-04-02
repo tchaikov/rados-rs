@@ -26,10 +26,8 @@ fn crush_ln(xin: u32) -> u64 {
     let mut x = xin;
     x = x.wrapping_add(1);
 
-    // Normalize input
     let mut iexpon = 15i32;
 
-    // Figure out number of bits we need to shift and do it in one step
     if (x & 0x18000) == 0 {
         let bits = (x & 0x1FFFF).leading_zeros() as i32 - 16;
         x <<= bits;
@@ -161,7 +159,6 @@ fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         _ => unreachable!("bucket_list_choose called on non-List bucket"),
     };
 
-    // Iterate from end to beginning
     for i in (0..bucket.size as usize).rev() {
         let mut w = crush_hash32_4(x, bucket.items[i] as u32, r, bucket.id as u32) as u64;
         w &= 0xffff;
@@ -173,7 +170,6 @@ fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         }
     }
 
-    // Fallback to first item
     bucket.items[0]
 }
 
@@ -194,32 +190,26 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         _ => unreachable!("bucket_tree_choose called on non-Tree bucket"),
     };
 
-    // Validate tree structure: num_nodes must be >= 2 (at least root + one leaf).
     if num_nodes < 2 || bucket.items.is_empty() {
         return CRUSH_ITEM_NONE;
     }
 
-    // Start at root (middle of the 1-indexed array)
     let mut n = (num_nodes >> 1) as i32;
 
-    // Descend until we reach a terminal (leaf) node
     while n & 1 == 0 && (n as usize) < node_weights.len() {
-        // height(n) = trailing zeros
         let h = n.trailing_zeros();
         if h == 0 {
-            break; // safety: should not happen since n is even
+            break;
         }
         let offset = 1i32 << (h - 1);
 
-        // Pick point in [0, w) using hash scaled by node weight
         let w = node_weights[n as usize] as u64;
         let hash = crush_hash32_4(x, n as u32, r, bucket.id as u32) as u64;
         let t = (hash * w) >> 32;
 
-        // Descend left or right based on weighted comparison
         let l = n - offset;
         if l < 0 || l as usize >= node_weights.len() {
-            break; // malformed tree
+            break;
         }
         if t < node_weights[l as usize] as u64 {
             n = l;

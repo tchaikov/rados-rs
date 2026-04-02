@@ -23,15 +23,12 @@ fn decode_n<T: Denc>(buf: &mut impl Buf, count: usize) -> Result<Vec<T>> {
     Ok(vec)
 }
 
-// ============= CrushMap Decoding =============
-
 impl CrushMap {
     /// Decode a CRUSH map from bytes
     ///
     /// This decodes the binary CRUSH map format used by Ceph.
     /// Reference: CrushWrapper::decode() in ~/dev/ceph/src/crush/CrushWrapper.cc
     pub fn decode(data: &mut Bytes) -> Result<Self> {
-        // Read magic number
         let magic = u32::decode(data, 0)?;
         if magic != CRUSH_MAGIC {
             return Err(CrushError::DecodeError(format!(
@@ -40,7 +37,6 @@ impl CrushMap {
             )));
         }
 
-        // Read header
         let max_buckets = i32::decode(data, 0)?;
         let max_rules = u32::decode(data, 0)?;
         let max_devices = i32::decode(data, 0)?;
@@ -50,7 +46,6 @@ impl CrushMap {
         map.max_rules = max_rules;
         map.max_devices = max_devices;
 
-        // Decode buckets
         map.buckets = Vec::with_capacity(max_buckets as usize);
         for _ in 0..max_buckets {
             let alg = u32::decode(data, 0)?;
@@ -63,7 +58,6 @@ impl CrushMap {
             map.buckets.push(Some(bucket));
         }
 
-        // Decode rules
         map.rules = Vec::with_capacity(max_rules as usize);
         for _ in 0..max_rules {
             let exists = u32::decode(data, 0)?;
@@ -88,7 +82,7 @@ impl CrushMap {
         map.names = HashMap::decode(data, 0)?;
         map.rule_names = HashMap::decode(data, 0)?;
 
-        // Decode tunables (optional fields)
+        // Tunables (optional trailing fields)
         if data.remaining() >= 4 {
             map.choose_local_tries = u32::decode(data, 0)?;
         }
@@ -152,7 +146,6 @@ impl CrushMap {
             map.msr_collision_tries = u32::decode(data, 0)?;
         }
 
-        // Post-decode validation
         validate_crush_map(&map)?;
 
         Ok(map)
@@ -345,7 +338,7 @@ impl Denc for CrushRuleStep {
 fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
     let len = u32::decode(data, 0)?;
 
-    // Read legacy rule mask (4 bytes)
+    // Legacy rule mask (4 bytes)
     let rule_id = u8::decode(data, 0)?;
     let rule_type = u8::decode(data, 0)?;
     let _min_size = u8::decode(data, 0)?;
