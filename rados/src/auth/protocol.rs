@@ -288,8 +288,8 @@ pub struct CephXResponseHeader {
 #[denc(
     crate = "crate",
     struct_v = 3,
-    min_struct_v = 2,
-    ceph_release = "Luminous v12+"
+    min_struct_v = 3,
+    ceph_release = "Quincy v17+"
 )]
 pub struct CephXAuthenticate {
     #[serde(skip)]
