@@ -177,36 +177,46 @@ fn bucket_list_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
 }
 
 /// Tree bucket selection (legacy, O(log n))
-/// Binary tree structure with node weights
+///
+/// Mirrors C++ `bucket_tree_choose` in `crush/mapper.c`.
+/// The tree uses a 1-indexed implicit binary tree where:
+/// - `height(n)` = number of trailing zero bits in `n`
+/// - `terminal(n)` = `n` is odd (leaf)
+/// - `left(n)` = `n - (1 << (height(n) - 1))`
+/// - `right(n)` = `n + (1 << (height(n) - 1))`
 fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
-    let node_weights = match &bucket.data {
-        BucketData::Tree { node_weights, .. } => node_weights,
+    let (num_nodes, node_weights) = match &bucket.data {
+        BucketData::Tree {
+            num_nodes,
+            node_weights,
+        } => (*num_nodes, node_weights),
         _ => unreachable!("bucket_tree_choose called on non-Tree bucket"),
     };
 
-    let mut n = bucket.size as usize;
+    // Start at root (middle of the 1-indexed array)
+    let mut n = (num_nodes >> 1) as i32;
 
-    while n > 1 {
-        let left = n >> 1;
-        let right = n - left;
+    // Descend until we reach a terminal (leaf) node
+    while n & 1 == 0 {
+        // height(n) = trailing zeros
+        let h = n.trailing_zeros();
+        let offset = 1i32 << (h - 1);
 
-        let w = crush_hash32_4(x, n as u32, r, bucket.id as u32);
-        let wl = (w & 0xffff) as u64;
-        let wr = (w >> 16) as u64;
+        // Pick point in [0, w) using hash scaled by node weight
+        let w = node_weights[n as usize] as u64;
+        let hash = crush_hash32_4(x, n as u32, r, bucket.id as u32) as u64;
+        let t = (hash * w) >> 32;
 
-        // Get weights for left and right subtrees
-        let left_weight = node_weights[left] as u64;
-        let right_weight = node_weights[right] as u64;
-
-        // Weighted random selection
-        if wl * (left_weight + right_weight) < wr * left_weight {
-            n = left;
+        // Descend left or right based on weighted comparison
+        let l = n - offset;
+        if t < node_weights[l as usize] as u64 {
+            n = l;
         } else {
-            n = right;
+            n += offset; // right
         }
     }
 
-    bucket.items[n >> 1]
+    bucket.items[(n >> 1) as usize]
 }
 
 /// Straw bucket selection (legacy, deprecated)

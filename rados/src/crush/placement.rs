@@ -239,8 +239,18 @@ crate::denc::impl_denc_for_versioned!(ObjectLocator);
 ///
 /// # Returns
 /// PG ID (pool + seed)
-pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> PgId {
+pub fn object_to_pg(
+    object_name: &str,
+    locator: &ObjectLocator,
+    pg_num: u32,
+) -> crate::crush::error::Result<PgId> {
     use crate::crush::hash::ceph_str_hash_rjenkins;
+
+    if pg_num == 0 {
+        return Err(crate::crush::error::CrushError::DecodeError(
+            "pg_num must be non-zero".into(),
+        ));
+    }
 
     // Determine what to hash
     let hash_key = if !locator.key.is_empty() {
@@ -261,7 +271,7 @@ pub fn object_to_pg(object_name: &str, locator: &ObjectLocator, pg_num: u32) -> 
     // Map to PG number using modulo
     let pg_seed = hash % pg_num;
 
-    PgId::new(locator.pool_id, pg_seed)
+    Ok(PgId::new(locator.pool_id, pg_seed))
 }
 
 /// Map a PG to OSDs using CRUSH
@@ -337,7 +347,7 @@ pub fn object_to_osds(
     hashpspool: bool,
 ) -> Result<(PgId, Vec<i32>)> {
     // First, map object to PG
-    let pg = object_to_pg(object_name, locator, pg_num);
+    let pg = object_to_pg(object_name, locator, pg_num)?;
 
     // Then, map PG to OSDs
     let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max, hashpspool)?;
@@ -381,14 +391,14 @@ mod tests {
         let locator = ObjectLocator::new(1);
 
         // Same object should always map to same PG
-        let pg1 = object_to_pg("myobject", &locator, 100);
-        let pg2 = object_to_pg("myobject", &locator, 100);
+        let pg1 = object_to_pg("myobject", &locator, 100).unwrap();
+        let pg2 = object_to_pg("myobject", &locator, 100).unwrap();
         assert_eq!(pg1, pg2);
         assert_eq!(pg1.pool, 1);
         assert!(pg1.seed < 100);
 
         // Different objects should (usually) map to different PGs
-        let pg3 = object_to_pg("otherobject", &locator, 100);
+        let pg3 = object_to_pg("otherobject", &locator, 100).unwrap();
         assert_eq!(pg3.pool, 1);
         assert!(pg3.seed < 100);
     }
@@ -399,8 +409,8 @@ mod tests {
         let loc2 = ObjectLocator::with_namespace(1, "ns1".to_string());
 
         // Same object in different namespaces should map to different PGs
-        let pg1 = object_to_pg("myobject", &loc1, 100);
-        let pg2 = object_to_pg("myobject", &loc2, 100);
+        let pg1 = object_to_pg("myobject", &loc1, 100).unwrap();
+        let pg2 = object_to_pg("myobject", &loc2, 100).unwrap();
 
         // They might be the same by chance, but the hash input is different
         assert_eq!(pg1.pool, pg2.pool);
@@ -548,7 +558,7 @@ mod tests {
         // Map 100 objects and count PG distribution
         for i in 0..100 {
             let object_name = format!("object_{}", i);
-            let pg = object_to_pg(&object_name, &locator, pg_num);
+            let pg = object_to_pg(&object_name, &locator, pg_num).unwrap();
             pg_counts[pg.seed as usize] += 1;
         }
 

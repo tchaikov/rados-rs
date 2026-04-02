@@ -637,21 +637,6 @@ fn crush_choose_msr(
             // Select item from bucket using hash
             let item = bucket_choose(bucket, hash, r);
 
-            // Check if already chosen (collision)
-            if chosen_items.contains(&item) {
-                collisions[rep] += 1;
-                if collisions[rep] < collision_tries {
-                    continue 'retry;
-                }
-                // Exceeded collision tries, leave as CRUSH_ITEM_NONE
-                break 'retry;
-            }
-
-            // Check if item is out
-            if is_out(weights, item, x) {
-                continue 'retry;
-            }
-
             // Check if we need to recurse or if this is terminal
             let item_type_match = match get_item_type(map, item) {
                 Some(t) => t == item_type || item_type == 0,
@@ -674,15 +659,40 @@ fn crush_choose_msr(
                     recurse_to_leaf,
                 )?;
 
-                if sub_out[0] != CRUSH_ITEM_NONE {
-                    out[rep] = sub_out[0];
-                    chosen_items.push(item);
+                if sub_out[0] == CRUSH_ITEM_NONE {
+                    // Recursion failed, try again
+                    continue 'retry;
+                }
+
+                // Check for collision on the leaf device (not the bucket)
+                if chosen_items.contains(&sub_out[0]) {
+                    collisions[rep] += 1;
+                    if collisions[rep] < collision_tries {
+                        continue 'retry;
+                    }
                     break 'retry;
                 }
-                // Recursion failed, try again
+
+                out[rep] = sub_out[0];
+                chosen_items.push(sub_out[0]);
+                break 'retry;
+            }
+
+            // For devices (item >= 0) or type-matched buckets:
+            // check is_out only for devices, not intermediate buckets.
+            if item >= 0 && is_out(weights, item, x) {
                 continue 'retry;
-            } else if item_type_match {
-                // Found a matching item
+            }
+
+            if item_type_match {
+                // Check for collision
+                if chosen_items.contains(&item) {
+                    collisions[rep] += 1;
+                    if collisions[rep] < collision_tries {
+                        continue 'retry;
+                    }
+                    break 'retry;
+                }
                 out[rep] = item;
                 chosen_items.push(item);
                 break 'retry;
