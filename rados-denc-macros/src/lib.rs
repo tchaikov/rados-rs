@@ -471,9 +471,6 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
         where
             #(#where_clauses,)*
         {
-            const USES_VERSIONING: bool = true;
-            #feature_dependent
-
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,
@@ -591,15 +588,11 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
         quote! {}
     };
 
-    let feature_dependent = attrs.feature_dependent_const();
-
     let expanded = quote! {
         impl #krate::Denc for #name
         where
             #(#where_clauses,)*
         {
-            #feature_dependent
-
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,

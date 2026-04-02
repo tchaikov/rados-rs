@@ -1,8 +1,7 @@
 //! Wire-format encode/decode error type.
 //!
 //! `CodecError` covers every failure that can occur inside a [`Denc`] implementation:
-//! buffer underruns, unsupported struct versions, unrecognised discriminants, and
-//! invalid UTF-8.  It is distinct from [`crate::denc::RadosError`] so that high-level
+//! buffer underruns, unsupported struct versions, and invalid UTF-8.  It is distinct from [`crate::denc::RadosError`] so that high-level
 //! callers see a focused type for codec failures while the top-level error enum
 //! stays lean.
 
@@ -23,10 +22,6 @@ pub enum CodecError {
         type_name: &'static str,
         ceph_release: &'static str,
     },
-
-    /// An enum discriminant or tag value was not recognised by this decoder.
-    #[error("Unknown {type_name} value: {value}")]
-    UnknownValue { type_name: &'static str, value: u64 },
 
     /// A byte sequence could not be decoded as valid UTF-8.
     #[error("Invalid UTF-8: {0}")]

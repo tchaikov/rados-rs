@@ -45,23 +45,12 @@ use bytes::{Buf, BufMut};
 /// This trait is designed to eliminate allocation overhead by allowing types
 /// to encode directly into a caller-provided buffer.
 ///
-/// # Compile-Time Properties
-///
-/// - `USES_VERSIONING`: Does this type use ENCODE_START/DECODE_START wrapping?
-/// - `FEATURE_DEPENDENT`: Does the encoding format change based on feature flags?
-///
 /// # Implementation Notes
 ///
 /// Types should implement `encoded_size()` to return `Some(size)` whenever possible,
 /// as this enables optimal preallocation. Return `None` only when the size truly
 /// depends on runtime data that would be expensive to calculate.
 pub trait Denc: Sized {
-    /// Does this type use versioned encoding? (ENCODE_START in C++)
-    const USES_VERSIONING: bool = false;
-
-    /// Does encoding format depend on feature flags? (WRITE_CLASS_ENCODER_FEATURES in C++)
-    const FEATURE_DEPENDENT: bool = false;
-
     /// Encode directly into a mutable buffer
     ///
     /// # Arguments
@@ -600,8 +589,6 @@ pub trait VersionedEncode: Sized {
 macro_rules! impl_denc_for_versioned {
     ($type:ty) => {
         impl $crate::Denc for $type {
-            const USES_VERSIONING: bool = true;
-
             fn encode<B: bytes::BufMut>(
                 &self,
                 buf: &mut B,

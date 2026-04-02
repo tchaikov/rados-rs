@@ -54,28 +54,9 @@
 pub trait ZeroCopyDencode:
     zerocopy::FromBytes + zerocopy::IntoBytes + zerocopy::KnownLayout + zerocopy::Immutable
 {
-    /// Returns true if this type can use zero-copy optimization
-    fn can_use_zerocopy() -> bool {
-        true // Always true — zerocopy handles endianness
-    }
 }
 
 // Implement ZeroCopyDencode for u8 and byte arrays (only field types that aren't
 // zerocopy LE types — the LE types satisfy the supertrait bounds by their own derives)
 impl ZeroCopyDencode for u8 {}
 impl<const N: usize> ZeroCopyDencode for [u8; N] {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_u8_is_zerocopy() {
-        assert!(u8::can_use_zerocopy());
-    }
-
-    #[test]
-    fn test_arrays_are_zerocopy() {
-        assert!(<[u8; 16]>::can_use_zerocopy());
-    }
-}

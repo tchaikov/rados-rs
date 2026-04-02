@@ -174,8 +174,6 @@ const _: () = assert!(CEPH_OSD_OP_SIZE == 38);
 /// Note: The actual payload data (indata) is stored separately in the message
 /// data section and is not part of this structure.
 impl Denc for OSDOp {
-    const USES_VERSIONING: bool = false;
-
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // 1. op (u16)
         buf.put_u16_le(self.op.as_u16());

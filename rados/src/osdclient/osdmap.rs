@@ -1192,9 +1192,6 @@ impl VersionedEncode for PgPool {
 }
 // Manual Denc implementation for PgPool (uses VersionedEncode)
 impl crate::Denc for PgPool {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = <PgPool as VersionedEncode>::FEATURE_DEPENDENT;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }

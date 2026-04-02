@@ -289,8 +289,6 @@ impl VersionedEncode for ObjectStatSum {
 }
 
 impl Denc for ObjectStatSum {
-    const USES_VERSIONING: bool = true;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
@@ -362,8 +360,6 @@ impl VersionedEncode for ObjectStatCollection {
 }
 
 impl Denc for ObjectStatCollection {
-    const USES_VERSIONING: bool = true;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
@@ -468,8 +464,6 @@ impl VersionedEncode for PoolStat {
 }
 
 impl Denc for PoolStat {
-    const USES_VERSIONING: bool = true;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
@@ -888,9 +882,6 @@ impl VersionedEncode for OsdStat {
 }
 
 impl Denc for OsdStat {
-    const USES_VERSIONING: bool = true;
-    const FEATURE_DEPENDENT: bool = true;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
@@ -1408,8 +1399,6 @@ impl VersionedEncode for PgShard {
 }
 
 impl Denc for PgShard {
-    const USES_VERSIONING: bool = true;
-
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         self.encode_versioned(buf, features)
     }
