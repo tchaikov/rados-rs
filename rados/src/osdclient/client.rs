@@ -406,14 +406,11 @@ impl OSDClient {
                 return Ok(existing);
             }
 
-            // Address changed, remove old session
-            info!("Removing old session for OSD {} with stale address", osd_id);
-            let mut sessions = self.sessions.write().await;
-            sessions.remove(&osd_id);
-            drop(sessions);
+            // Address changed — fall through to insert the new session.
+            // The stale session stays in the map so that insert() returns it
+            // and kick_into_session migrates its pending ops.
+            info!("OSD {} address changed, will replace session", osd_id);
         }
-        // Disconnected session stays in the map; it will be replaced below and
-        // its pending ops kicked into the new session after creation.
 
         let old_session = {
             let mut sessions = self.sessions.write().await;
@@ -1698,9 +1695,22 @@ impl OSDClient {
         new_epoch: u32,
     ) -> Result<()> {
         for (new_osd, pending_op) in need_resend {
-            let session = self.get_or_create_session(new_osd).await?;
-            if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
-                warn!("Failed to migrate operation to OSD {}: {}", new_osd, e);
+            match self.get_or_create_session(new_osd).await {
+                Ok(session) => {
+                    if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
+                        warn!("Failed to migrate operation to OSD {}: {}", new_osd, e);
+                    }
+                }
+                Err(e) => {
+                    // Fail this individual op instead of aborting the entire loop.
+                    warn!("Cannot resend op to OSD {}: {}", new_osd, e);
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::Connection(format!(
+                            "OSD {} unavailable: {}",
+                            new_osd, e
+                        ))));
+                }
             }
         }
         Ok(())
