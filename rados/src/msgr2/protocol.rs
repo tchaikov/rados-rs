@@ -1384,15 +1384,20 @@ impl Connection {
         const MAX_BACKOFF_MS: u64 = 1000;
         const JITTER_PERCENT: f64 = 0.3; // ±30% jitter
 
-        for attempt in 0..MAX_RECONNECT_ATTEMPTS {
+        // The loop allows 1 initial try + MAX_RECONNECT_ATTEMPTS retries after reconnect.
+        for attempt in 0..=MAX_RECONNECT_ATTEMPTS {
             match operation(self).await {
                 Ok(result) => return Ok(result),
-                Err(e) if e.is_recoverable() && self.state.can_reconnect() => {
+                Err(e)
+                    if e.is_recoverable()
+                        && self.state.can_reconnect()
+                        && attempt < MAX_RECONNECT_ATTEMPTS =>
+                {
                     tracing::warn!(
                         "{} failed due to connection error (attempt {}/{}): {}",
                         operation_name,
                         attempt + 1,
-                        MAX_RECONNECT_ATTEMPTS,
+                        MAX_RECONNECT_ATTEMPTS + 1,
                         e
                     );
 
@@ -1424,8 +1429,8 @@ impl Connection {
                     // Attempt reconnection
                     if let Err(reconnect_err) = self.reconnect().await {
                         tracing::error!("Reconnection failed: {}", reconnect_err);
-                        // If this was the last attempt, return the reconnection error
-                        if attempt + 1 == MAX_RECONNECT_ATTEMPTS {
+                        // If this was the last reconnect attempt, return the error
+                        if attempt + 1 >= MAX_RECONNECT_ATTEMPTS {
                             return Err(reconnect_err);
                         }
                         // Otherwise, continue to next attempt
@@ -1580,9 +1585,8 @@ impl Connection {
                     return Ok(msg);
                 }
                 Tag::Keepalive2Ack => {
-                    // Handle Keepalive2Ack frame - just continue waiting for Message
-                    // The state machine already updated last_keepalive_ack timestamp
-                    tracing::trace!("Received Keepalive2Ack frame (processed by state machine)");
+                    self.state.state_machine.record_keepalive_ack();
+                    tracing::trace!("Received Keepalive2Ack frame, updated last_keepalive_ack");
                     continue;
                 }
                 _ => {

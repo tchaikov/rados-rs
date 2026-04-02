@@ -221,6 +221,11 @@ impl StateMachine {
         self.last_keepalive_ack
     }
 
+    /// Record that a Keepalive2Ack was received now.
+    pub fn record_keepalive_ack(&mut self) {
+        self.last_keepalive_ack = Some(std::time::Instant::now());
+    }
+
     /// Reset transient per-connection state after a fault.
     ///
     /// Clears crypto/compression handlers and pre-authentication buffers so
