@@ -1809,6 +1809,16 @@ impl MonClient {
         let mut events = self.subscribe_events();
         let deadline = tokio::time::Instant::now() + self.command_timeout().await;
 
+        // Check if the map is already cached (the event may have fired before subscribe_events).
+        {
+            let guard = self.latest_osdmap.read().await;
+            if let Some(ref m) = *guard
+                && u64::from(m.get_last()) >= epoch
+            {
+                return Ok(m.clone());
+            }
+        }
+
         loop {
             tokio::select! {
                 event = events.recv() => {
