@@ -66,6 +66,13 @@ impl CephXServerHandler {
         self.service_secrets.insert(service_id, secret);
     }
 
+    /// Generate a random AES-128 session key.
+    fn random_aes_key() -> CryptoKey {
+        let mut bytes = vec![0u8; AES_KEY_LEN];
+        rand::thread_rng().fill_bytes(&mut bytes);
+        CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(bytes))
+    }
+
     /// Generate a new global_id for a client
     fn allocate_global_id(&mut self) -> u64 {
         let id = self.next_global_id;
@@ -211,9 +218,7 @@ impl CephXServerHandler {
         info!("Server: Client {} authenticated successfully", entity_name);
 
         // 5. Generate session key
-        let mut session_key_bytes = vec![0u8; AES_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut session_key_bytes);
-        let session_key = CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(session_key_bytes));
+        let session_key = Self::random_aes_key();
 
         debug!("Server: Generated session key: {} bytes", session_key.len());
 
@@ -232,10 +237,7 @@ impl CephXServerHandler {
         service_tickets.encode(&mut response, 0)?;
 
         // 8. Generate connection_secret for SECURE mode encryption
-        let mut connection_secret_bytes = vec![0u8; AES_KEY_LEN];
-        rand::thread_rng().fill_bytes(&mut connection_secret_bytes);
-        let connection_secret =
-            CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(connection_secret_bytes));
+        let connection_secret = Self::random_aes_key();
 
         debug!(
             "Server: Generated connection_secret: {} bytes",
@@ -273,10 +275,7 @@ impl CephXServerHandler {
             debug!("Server: Generating ticket for service_id: {}", service_id);
 
             // Generate service session key
-            let mut service_key_bytes = vec![0u8; AES_KEY_LEN];
-            rand::thread_rng().fill_bytes(&mut service_key_bytes);
-            let service_key =
-                CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(service_key_bytes));
+            let service_key = Self::random_aes_key();
 
             // Create the authentication ticket
             let mut ticket = AuthTicket::new(entity_name.clone(), global_id);
