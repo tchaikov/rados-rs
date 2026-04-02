@@ -232,16 +232,24 @@ impl VersionedEncode for MonInfo {
         })
     }
 
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        // All fields are always encoded (v6+)
-        Some(
-            self.name.encoded_size(features)?
-                + self.public_addrs.encoded_size(features)?
-                + 2  // priority (u16)
-                + 2  // weight (u16)
-                + self.crush_loc.encoded_size(features)?
-                + self.time_added.encoded_size(features)?,
-        )
+    fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
+        let mut size =
+            self.name.encoded_size(features)? + self.public_addrs.encoded_size(features)?;
+
+        if version >= 2 {
+            size += 2; // priority (u16)
+        }
+        if version >= 4 {
+            size += 2; // weight (u16)
+        }
+        if version >= 5 {
+            size += self.crush_loc.encoded_size(features)?;
+        }
+        if version >= 6 {
+            size += self.time_added.encoded_size(features)?;
+        }
+
+        Some(size)
     }
 }
 

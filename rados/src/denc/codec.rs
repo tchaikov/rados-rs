@@ -370,24 +370,12 @@ impl Denc for SystemTime {
         let duration = self
             .duration_since(UNIX_EPOCH)
             .map_err(|e| RadosError::Protocol(format!("SystemTime before UNIX_EPOCH: {e}")))?;
-        // Truncate to u32::MAX seconds if necessary (matches Ceph's 2106 limit)
-        let sec = duration.as_secs().min(u32::MAX as u64) as u32;
-        let nsec = duration.subsec_nanos();
-        sec.encode(buf, 0)?;
-        nsec.encode(buf, 0)?;
-        Ok(())
+        duration.encode(buf, 0)
     }
 
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
-        let sec = u32::decode(buf, 0)?;
-        let nsec = u32::decode(buf, 0)?;
-        if nsec >= 1_000_000_000 {
-            return Err(RadosError::InvalidData(format!(
-                "nsec {} out of range (must be < 1_000_000_000)",
-                nsec
-            )));
-        }
-        Ok(UNIX_EPOCH + Duration::new(sec as u64, nsec))
+        let duration = Duration::decode(buf, 0)?;
+        Ok(UNIX_EPOCH + duration)
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

@@ -459,7 +459,6 @@ impl EntityAddrvec {
     }
 }
 
-// Manual Denc implementation for EntityAddrvec
 impl crate::denc::codec::Denc for EntityAddrvec {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // Quincy+ peers always use the addrvec marker on encode.
