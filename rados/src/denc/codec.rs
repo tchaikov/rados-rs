@@ -511,6 +511,16 @@ pub trait VersionedEncode: Sized {
             }));
         }
 
+        // Guard against unreasonably large struct_len (DoS protection).
+        // 64 MiB is far beyond any real Ceph structure; reject early.
+        const MAX_STRUCT_LEN: usize = 64 << 20;
+        if struct_len > MAX_STRUCT_LEN {
+            return Err(RadosError::Codec(CodecError::InsufficientData {
+                needed: struct_len,
+                available: buf.remaining(),
+            }));
+        }
+
         if buf.remaining() < struct_len {
             return Err(RadosError::Codec(CodecError::InsufficientData {
                 needed: struct_len,
