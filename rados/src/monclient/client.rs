@@ -1522,6 +1522,9 @@ impl MonClient {
             .await
             .map_err(|_| MonClientError::Timeout)?
             .map_err(|_| MonClientError::Other("Channel closed".into()))
+            .inspect_err(|_| {
+                self.commands.remove(&tid);
+            })
     }
 
     /// Send a pool operation to the monitor cluster
@@ -1815,9 +1818,10 @@ impl MonClient {
         // Get current version
         let (epoch, _) = self.get_version(MonService::OsdMap).await?;
 
-        // Wait for that version via event channel
+        // Wait for that version via event channel.
+        // Anchor the deadline to now so it doesn't reset on each loop iteration.
         let mut events = self.subscribe_events();
-        let timeout_duration = self.command_timeout().await;
+        let deadline = tokio::time::Instant::now() + self.command_timeout().await;
 
         loop {
             tokio::select! {
@@ -1841,11 +1845,8 @@ impl MonClient {
                         }
                         _ => {}
                     }
-
-                    // Yield after processing event to avoid starving other tasks
-                    tokio::task::yield_now().await;
                 }
-                _ = tokio::time::sleep(timeout_duration) => {
+                _ = tokio::time::sleep_until(deadline) => {
                     return Err(MonClientError::Timeout);
                 }
             }
