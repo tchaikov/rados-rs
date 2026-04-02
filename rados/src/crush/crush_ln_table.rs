@@ -9,7 +9,6 @@
 //
 // RH_LH_tbl[2*k] = 2^48/(1.0+k/128.0)
 // RH_LH_tbl[2*k+1] = 2^48*log2(1.0+k/128.0)
-#[allow(dead_code)]
 pub const RH_LH_TBL: [i64; 258] = [
     0x0001000000000000,
     0x0000000000000000,
@@ -272,7 +271,6 @@ pub const RH_LH_TBL: [i64; 258] = [
 ];
 
 // LL_tbl[k] = 2^48*log2(1.0+k/2^15)
-#[allow(dead_code)]
 pub const LL_TBL: [i64; 256] = [
     0x0000000000000000,
     0x00000002e2a60a00,
