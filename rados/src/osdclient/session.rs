@@ -956,13 +956,13 @@ impl OSDSession {
     ) -> Result<()> {
         let tid = pending_op.tid;
 
-        // Update the operation's OSDMap epoch, cloning only if the Arc is shared.
-        Arc::make_mut(&mut pending_op.op).osdmap_epoch = new_osdmap_epoch;
         pending_op.osdmap_epoch = new_osdmap_epoch;
-
-        // Increment attempts counter (matching C++ Objecter behavior)
         pending_op.attempts += 1;
-        Arc::make_mut(&mut pending_op.op).retry_attempt = pending_op.attempts - 1;
+
+        // Update the wire message, cloning only if the Arc is shared.
+        let op = Arc::make_mut(&mut pending_op.op);
+        op.osdmap_epoch = new_osdmap_epoch;
+        op.retry_attempt = pending_op.attempts - 1;
 
         // Update incarnation to current session incarnation (operation is being resent)
         // This is critical: migrated operations get new incarnation from target session
