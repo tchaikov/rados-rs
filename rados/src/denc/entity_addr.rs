@@ -502,7 +502,7 @@ impl crate::denc::codec::Denc for EntityAddrvec {
             // MSG_ADDR2 format - vector of addresses
             2 => {
                 let count = <u32 as Denc>::decode(buf, 0)? as usize;
-                let mut addrs = Vec::with_capacity(count);
+                let mut addrs = Vec::with_capacity(count.min(32));
 
                 for _ in 0..count {
                     addrs.push(EntityAddr::decode(buf, features)?);
