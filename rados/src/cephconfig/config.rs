@@ -43,11 +43,15 @@ impl CephConfig {
                 // Normalize key: trim whitespace and replace spaces with underscores.
                 // Mirrors C++ ConfUtils::normalize_key_name().
                 let key = line[..eq_pos].trim().replace(' ', "_");
-                // Strip inline comments (';' or '#') — mirrors C++ ConfUtils.
+                // Strip inline comments — C++ only treats ';' or '#' as a comment
+                // start when preceded by whitespace (so paths like /foo#bar are safe).
                 let raw_value = &line[eq_pos + 1..];
-                let value = raw_value
-                    .find(';')
-                    .or_else(|| raw_value.find('#'))
+                let comment_pos = raw_value
+                    .find(" ;")
+                    .or_else(|| raw_value.find("\t;"))
+                    .or_else(|| raw_value.find(" #"))
+                    .or_else(|| raw_value.find("\t#"));
+                let value = comment_pos
                     .map_or(raw_value, |pos| &raw_value[..pos])
                     .trim()
                     .to_string();
@@ -88,7 +92,9 @@ impl CephConfig {
         let addrs: Vec<String> = mon_host
             .split_whitespace()
             .flat_map(|part| {
-                let part = part.trim_start_matches('[').trim_end_matches(']');
+                // Strip at most one pair of brackets (trim_*_matches strips ALL).
+                let part = part.strip_prefix('[').unwrap_or(part);
+                let part = part.strip_suffix(']').unwrap_or(part);
                 part.split(',')
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
