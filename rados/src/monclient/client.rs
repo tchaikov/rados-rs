@@ -551,21 +551,18 @@ impl MonClient {
             return Err(MonClientError::MonitorUnavailable);
         }
 
-        // Apply weighted shuffling
-        let selected_ranks = self.weighted_shuffle(ranks, monmap)?;
-
-        Ok(selected_ranks)
+        Ok(self.weighted_shuffle(ranks, monmap))
     }
 
     /// Shuffle monitor ranks using weighted random selection
     ///
     /// If all weights are zero, uses uniform random shuffling.
     /// Otherwise, uses Fisher-Yates with weighted selection.
-    fn weighted_shuffle(&self, ranks: &[usize], monmap: &MonMapState) -> Result<Vec<usize>> {
+    fn weighted_shuffle(&self, ranks: &[usize], monmap: &MonMapState) -> Vec<usize> {
         let mut selected_ranks = ranks.to_vec();
 
         if selected_ranks.len() <= 1 {
-            return Ok(selected_ranks);
+            return selected_ranks;
         }
 
         // Collect weights for all ranks
@@ -606,7 +603,7 @@ impl MonClient {
             selected_ranks = shuffled;
         }
 
-        Ok(selected_ranks)
+        selected_ranks
     }
 
     /// Attempt to connect to monitors in parallel
@@ -1128,48 +1125,40 @@ impl MonClient {
 
         let lock_err = |e| MonClientError::Other(format!("Failed to lock auth handler: {}", e));
 
-        // Check if tickets need renewal and collect needed keys
-        let renewal_info = {
-            let handler = handler_arc.lock().map_err(lock_err)?;
-            handler.get_session().and_then(|session| {
-                let mut needed_keys = crate::auth::EntityType::empty();
-                for (service_type, ticket_handler) in &session.ticket_handlers {
-                    if ticket_handler.need_key() {
-                        debug!(
-                            "Service ticket for {:?} needs renewal (renew_after reached)",
-                            *service_type
-                        );
-                        needed_keys |= *service_type;
-                    }
-                }
-                if needed_keys.is_empty() {
-                    None
-                } else {
-                    Some((session.global_id, needed_keys))
-                }
-            })
-        };
-
-        let Some((global_id, needed_keys)) = renewal_info else {
-            return Ok(());
-        };
-
-        debug!(
-            "Building ticket renewal request for services: {:?}",
-            needed_keys
-        );
-
-        // Lock the handler again (mutably) to build the ticket renewal request
+        // Check which tickets need renewal and build the request in a single lock.
         let auth_payload = {
-            let mut handler_mut = handler_arc.lock().map_err(lock_err)?;
-            handler_mut.build_ticket_renewal_request(global_id, needed_keys)
-        };
-
-        let auth_payload = match auth_payload {
-            Ok(payload) => payload,
-            Err(e) => {
-                warn!("Failed to build ticket renewal request: {:?}", e);
+            let mut handler = handler_arc.lock().map_err(lock_err)?;
+            let Some(session) = handler.get_session() else {
                 return Ok(());
+            };
+
+            let mut needed_keys = crate::auth::EntityType::empty();
+            for (service_type, ticket_handler) in &session.ticket_handlers {
+                if ticket_handler.need_key() {
+                    debug!(
+                        "Service ticket for {:?} needs renewal (renew_after reached)",
+                        *service_type
+                    );
+                    needed_keys |= *service_type;
+                }
+            }
+
+            if needed_keys.is_empty() {
+                return Ok(());
+            }
+
+            let global_id = session.global_id;
+            debug!(
+                "Building ticket renewal request for services: {:?}",
+                needed_keys
+            );
+
+            match handler.build_ticket_renewal_request(global_id, needed_keys) {
+                Ok(payload) => payload,
+                Err(e) => {
+                    warn!("Failed to build ticket renewal request: {:?}", e);
+                    return Ok(());
+                }
             }
         };
 
@@ -1182,10 +1171,7 @@ impl MonClient {
         if let Err(e) = send_msg_with_tid(active_con, &mauth, 0).await {
             warn!("Failed to send ticket renewal request: {:?}", e);
         } else {
-            info!(
-                "Sent ticket renewal request for services: 0x{:x}",
-                needed_keys
-            );
+            info!("Sent ticket renewal request");
         }
 
         Ok(())
@@ -1193,6 +1179,11 @@ impl MonClient {
 
     /// Dispatch received message to appropriate handler
     async fn dispatch_message(&self, msg: crate::msgr2::message::Message) -> Result<()> {
+        use crate::msgr2::message::{
+            CEPH_MSG_CONFIG, CEPH_MSG_MON_COMMAND_ACK, CEPH_MSG_MON_MAP, CEPH_MSG_OSD_MAP,
+            CEPH_MSG_PING, CEPH_MSG_PING_ACK, CEPH_MSG_POOLOP_REPLY,
+        };
+
         let msg_type = msg.msg_type();
         debug!(
             "Dispatching message type: 0x{:04x} ({}), front.len()={}",
@@ -1202,14 +1193,12 @@ impl MonClient {
         );
 
         match msg_type {
-            crate::msgr2::message::CEPH_MSG_MON_MAP => {
+            CEPH_MSG_MON_MAP => {
                 info!("Received CEPH_MSG_MON_MAP");
                 self.handle_monmap(msg).await?;
             }
-            crate::msgr2::message::CEPH_MSG_PING => {
+            CEPH_MSG_PING => {
                 trace!("Received CEPH_MSG_PING, sending PING_ACK");
-                // Respond to monitor's ping with PING_ACK
-                // Clone connection before async operation to avoid holding lock
                 let active_con = {
                     let conn_state = self.connection_state.read().await;
                     conn_state.active_con.clone()
@@ -1222,10 +1211,9 @@ impl MonClient {
                     }
                 }
             }
-            crate::msgr2::message::CEPH_MSG_PING_ACK => {
-                // PING/PING_ACK are not used between clients and monitors
-                // Only monitors exchange PING messages with each other
-                // Clients use Keepalive2 frames at the msgr2 protocol level
+            CEPH_MSG_PING_ACK => {
+                // Clients use Keepalive2 frames at the msgr2 protocol level;
+                // monitors don't send PING_ACK to clients.
                 trace!(
                     "Received unexpected CEPH_MSG_PING_ACK (monitors don't send these to clients)"
                 );
@@ -1238,19 +1226,19 @@ impl MonClient {
                 debug!("Received CEPH_MSG_MON_GET_VERSION_REPLY");
                 self.handle_version_reply(msg).await?;
             }
-            crate::msgr2::message::CEPH_MSG_MON_COMMAND_ACK => {
+            CEPH_MSG_MON_COMMAND_ACK => {
                 debug!("Received CEPH_MSG_MON_COMMAND_ACK");
                 self.handle_command_ack(msg).await?;
             }
-            crate::msgr2::message::CEPH_MSG_POOLOP_REPLY => {
+            CEPH_MSG_POOLOP_REPLY => {
                 debug!("Received CEPH_MSG_POOLOP_REPLY");
                 self.handle_poolop_reply(msg).await?;
             }
-            crate::msgr2::message::CEPH_MSG_CONFIG => {
+            CEPH_MSG_CONFIG => {
                 debug!("Received CEPH_MSG_CONFIG");
                 self.handle_config(msg).await?;
             }
-            crate::msgr2::message::CEPH_MSG_OSD_MAP => {
+            CEPH_MSG_OSD_MAP => {
                 debug!("Received CEPH_MSG_OSD_MAP");
                 self.handle_osdmap(msg).await?;
             }
@@ -1817,15 +1805,12 @@ impl MonClient {
                     match event {
                         Ok(MapEvent::OsdMapUpdated { epoch: recv_epoch }) => {
                             if recv_epoch >= epoch {
-                                // Map received, extract from state
-                                let latest_osdmap = self.latest_osdmap.read().await;
-                                if let Some(osdmap) = latest_osdmap.clone() {
-                                    return Ok(osdmap);
-                                } else {
-                                    return Err(MonClientError::Other(
+                                let guard = self.latest_osdmap.read().await;
+                                return guard.clone().ok_or_else(|| {
+                                    MonClientError::Other(
                                         "OSDMap event received but map not cached".into()
-                                    ));
-                                }
+                                    )
+                                });
                             }
                         }
                         Err(e) => {
