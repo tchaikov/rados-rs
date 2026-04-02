@@ -197,7 +197,7 @@ fn parse_size(s: &str) -> Result<u64, ConfigError> {
     };
 
     let result = num * multiplier as f64;
-    if !result.is_finite() || result < 0.0 {
+    if !result.is_finite() || result < 0.0 || result > u64::MAX as f64 {
         return Err(ConfigError::ParseError(format!(
             "Size value out of range: {}",
             result

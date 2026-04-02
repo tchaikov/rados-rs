@@ -40,9 +40,12 @@ impl CephConfig {
             }
 
             if let Some(eq_pos) = line.find('=') {
-                // Normalize key: trim whitespace and replace spaces with underscores.
+                // Normalize key: collapse any whitespace run to a single underscore.
                 // Mirrors C++ ConfUtils::normalize_key_name().
-                let key = line[..eq_pos].trim().replace(' ', "_");
+                let key = line[..eq_pos]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join("_");
                 // Strip inline comments — C++ only treats ';' or '#' as a comment
                 // start when preceded by whitespace (so paths like /foo#bar are safe).
                 let raw_value = &line[eq_pos + 1..];
