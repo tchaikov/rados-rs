@@ -27,6 +27,10 @@ macro_rules! impl_denc_newtype {
                 Some(<$inner as FixedSize>::SIZE)
             }
         }
+
+        impl FixedSize for $wrapper {
+            const SIZE: usize = <$inner as FixedSize>::SIZE;
+        }
     };
 }
 
