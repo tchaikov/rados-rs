@@ -592,10 +592,13 @@ impl MonClient {
             let mut remaining_weights = weights;
 
             while !remaining_ranks.is_empty() {
-                let dist = WeightedIndex::new(&remaining_weights).map_err(|e| {
-                    MonClientError::InvalidMonMap(format!("Invalid weights: {}", e))
-                })?;
-                let idx = dist.sample(&mut rng);
+                let idx = match WeightedIndex::new(&remaining_weights) {
+                    Ok(dist) => dist.sample(&mut rng),
+                    Err(_) => {
+                        // Remaining monitors all have zero weight — pick uniformly.
+                        rng.gen_range(0..remaining_ranks.len())
+                    }
+                };
                 shuffled.push(remaining_ranks.remove(idx));
                 remaining_weights.remove(idx);
             }
