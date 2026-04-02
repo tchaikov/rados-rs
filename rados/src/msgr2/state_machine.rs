@@ -113,7 +113,6 @@ pub struct StateMachine {
     last_keepalive_ack: Option<std::time::Instant>,
 }
 
-#[allow(dead_code)]
 impl StateMachine {
     /// Create a new state machine for client connection
     pub fn new_client(config: crate::msgr2::ConnectionConfig) -> Self {
@@ -199,13 +198,7 @@ impl StateMachine {
         self.we_support_compression() && self.peer_supports_compression()
     }
 
-    /// Check if pre-auth recording is enabled
-    pub fn is_pre_auth_enabled(&self) -> bool {
-        self.pre_auth_enabled
-    }
-
-    /// Get the global_id assigned during authentication
-    /// Returns 0 if authentication hasn't completed yet
+    /// Get the global_id assigned during authentication.
     pub fn global_id(&self) -> u64 {
         self.global_id
     }
@@ -233,6 +226,7 @@ impl StateMachine {
     /// identity fields (client/server cookies, global_id) are intentionally
     /// preserved so that SESSION_RECONNECT can be attempted if the peer
     /// supports it.
+    #[allow(dead_code)] // Reconnection primitive, not yet wired up
     pub fn fault_reset(&mut self) {
         self.frame_decryptor = None;
         self.frame_encryptor = None;
@@ -259,11 +253,6 @@ impl StateMachine {
     /// Store the connection secret (used for reconnection state).
     pub fn set_connection_secret(&mut self, secret: Option<Bytes>) {
         self.connection_secret = secret;
-    }
-
-    /// Record the server cookie assigned in SERVER_IDENT.
-    pub fn set_server_cookie(&mut self, cookie: u64) {
-        self.server_cookie = cookie;
     }
 
     /// Transition the state machine to the Ready state after session establishment.
@@ -294,29 +283,9 @@ impl StateMachine {
         self.client_addr.clone().unwrap_or_default()
     }
 
-    /// Client cookie for this connection.
-    pub fn client_cookie(&self) -> u64 {
-        self.client_cookie
-    }
-
     /// Server cookie (0 if not yet assigned by the peer).
     pub fn server_cookie(&self) -> u64 {
         self.server_cookie
-    }
-
-    /// Current global sequence number.
-    pub fn global_seq(&self) -> u64 {
-        self.global_seq
-    }
-
-    /// Current connection sequence number.
-    pub fn connect_seq(&self) -> u64 {
-        self.connect_seq
-    }
-
-    /// Current incoming message sequence number.
-    pub fn in_seq(&self) -> u64 {
-        self.in_seq
     }
 
     /// Preferred connection modes from config.
@@ -449,11 +418,6 @@ impl StateMachine {
         peer.contains(crate::msgr2::FeatureSet::REVISION_1)
     }
 
-    /// Check if compression is enabled
-    pub fn has_compression(&self) -> bool {
-        self.compression_ctx.is_some()
-    }
-
     /// Get compression context reference
     pub fn compression_ctx(&self) -> Option<&crate::msgr2::compression::CompressionContext> {
         self.compression_ctx.as_ref()
@@ -520,20 +484,9 @@ impl StateMachine {
         &self.pre_auth_txbuf
     }
 
-    /// Get session key for HMAC computation
-    pub fn get_session_key(&self) -> Option<&Bytes> {
-        self.session_key.as_ref()
-    }
-
     /// Get a clone of the auth provider from the connection config.
     pub fn get_auth_provider(&self) -> Option<Box<dyn crate::auth::AuthProvider>> {
         self.config.auth_provider.clone()
-    }
-
-    /// Clear pre-auth buffers (after AUTH_SIGNATURE exchange)
-    pub fn clear_pre_auth_buffers(&mut self) {
-        self.pre_auth_rxbuf.clear();
-        self.pre_auth_txbuf.clear();
     }
 
     /// Compute HMAC-SHA256 over `data` using `key`.  Returns 32 zero bytes when `key` is `None`.

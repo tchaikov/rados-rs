@@ -756,8 +756,10 @@ impl Connection {
     /// - IPv4: ss_family (2 bytes LE) + port (2 bytes BE) + IP (4 bytes) + padding (8 bytes)
     /// - IPv6: ss_family (2 bytes LE) + port (2 bytes BE) + flowinfo (4 bytes BE) + IP (16 bytes) + scope_id (4 bytes BE)
     fn socket_to_entity_addr(addr: SocketAddr) -> crate::EntityAddr {
-        let mut entity_addr = crate::EntityAddr::new();
-        entity_addr.addr_type = crate::EntityAddrType::Msgr2;
+        let mut entity_addr = crate::EntityAddr {
+            addr_type: crate::EntityAddrType::Msgr2,
+            ..Default::default()
+        };
 
         match addr {
             SocketAddr::V4(v4) => {
@@ -1590,7 +1592,7 @@ impl Connection {
                     return Ok(msg);
                 }
                 Tag::Keepalive2Ack => {
-                    self.state.state_machine.record_keepalive_ack();
+                    self.state.record_keepalive_ack();
                     tracing::trace!("Received Keepalive2Ack frame, updated last_keepalive_ack");
                     continue;
                 }
