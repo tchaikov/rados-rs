@@ -9,7 +9,9 @@ use crate::denc::constants::crush::{FIXED_POINT_MASK, FIXED_POINT_ONE};
 
 /// Sentinel value for "no item selected" in INDEP mode
 /// Matches CRUSH_ITEM_NONE in Ceph (crush.h)
-const CRUSH_ITEM_NONE: i32 = 0x7fffffff;
+pub(crate) const CRUSH_ITEM_NONE: i32 = 0x7fffffff;
+/// Internal sentinel: slot not yet resolved (distinct from CRUSH_ITEM_NONE which is definitive).
+const CRUSH_ITEM_UNDEF: i32 = 0x7ffffffe;
 
 /// Calculate the number of replicas/items to select based on rule step argument
 ///
@@ -149,6 +151,7 @@ pub fn crush_do_rule(
                         recurse_to_leaf,
                         chooseleaf_vary_r,
                         chooseleaf_stable,
+                        0, // top-level call: parent_r = 0
                     )?;
                     scratch.extend_from_slice(&indep_out);
                 }
@@ -393,6 +396,7 @@ fn crush_choose_indep(
     recurse_to_leaf: bool,
     _vary_r: u8,
     _stable: u8,
+    parent_r: i32,
 ) -> Result<()> {
     tracing::debug!(
         "crush_choose_indep: bucket_id={}, numrep={}, item_type={}, recurse_to_leaf={}",
@@ -420,9 +424,11 @@ fn crush_choose_indep(
         bucket.items
     );
 
-    // Initialize output with CRUSH_ITEM_NONE
+    // Initialize output with CRUSH_ITEM_UNDEF (not yet resolved).
+    // C++ uses UNDEF to distinguish "slot not yet filled" from "definitively NONE"
+    // so that definitive NONE slots are not retried.
     for slot in out.iter_mut().take(numrep) {
-        *slot = CRUSH_ITEM_NONE;
+        *slot = CRUSH_ITEM_UNDEF;
     }
 
     // Try multiple times to fill all positions
@@ -430,8 +436,8 @@ fn crush_choose_indep(
         let mut all_done = true;
 
         for rep in 0..numrep {
-            // Skip positions that already have a valid item
-            if out[rep] != CRUSH_ITEM_NONE {
+            // Skip positions already resolved (either valid item or definitive NONE)
+            if out[rep] != CRUSH_ITEM_UNDEF {
                 continue;
             }
 
@@ -439,11 +445,11 @@ fn crush_choose_indep(
 
             let mut current_bucket = bucket;
 
-            // In INDEP mode, r starts at numrep * ftotal + rep
-            // This ensures each position gets a different hash input
-            let r = (numrep as u32)
-                .wrapping_mul(ftotal)
-                .wrapping_add(rep as u32);
+            // r = rep + parent_r + numrep * ftotal
+            // Matches C++ crush_choose_indep (non-uniform bucket path).
+            let r = (rep as u32)
+                .wrapping_add(parent_r as u32)
+                .wrapping_add((numrep as u32).wrapping_mul(ftotal));
 
             // Inner loop for descending through bucket hierarchy
             let mut item = CRUSH_ITEM_NONE;
@@ -466,6 +472,7 @@ fn crush_choose_indep(
                     Some(t) => t,
                     None => {
                         tracing::debug!("Invalid bucket {}", candidate);
+                        out[rep] = CRUSH_ITEM_NONE; // definitive
                         break;
                     }
                 };
@@ -480,8 +487,9 @@ fn crush_choose_indep(
                 // Check if this is the type we're looking for
                 if itemtype != item_type {
                     if candidate >= 0 {
-                        // Item is a device but wrong type
+                        // Item is a device but wrong type — definitively unmappable
                         tracing::debug!("Device {} has wrong type", candidate);
+                        out[rep] = CRUSH_ITEM_NONE;
                         break;
                     }
                     // Item is a bucket, descend into it
@@ -510,7 +518,7 @@ fn crush_choose_indep(
                 // If we need to recurse to leaf (for CHOOSELEAF)
                 if recurse_to_leaf && candidate < 0 {
                     // Recursively select a device from this bucket using INDEP
-                    let mut leaf_out = [CRUSH_ITEM_NONE; 1];
+                    let mut leaf_out = [CRUSH_ITEM_UNDEF; 1];
                     crush_choose_indep(
                         map,
                         candidate,
@@ -523,9 +531,10 @@ fn crush_choose_indep(
                         true,
                         _vary_r,
                         _stable,
+                        r as i32,
                     )?;
 
-                    if leaf_out[0] == CRUSH_ITEM_NONE {
+                    if leaf_out[0] == CRUSH_ITEM_NONE || leaf_out[0] == CRUSH_ITEM_UNDEF {
                         tracing::debug!("Failed to find leaf in bucket {}", candidate);
                         break;
                     }
@@ -564,14 +573,10 @@ fn crush_choose_indep(
         }
     }
 
-    // Log unfilled positions
-    for (rep, &item) in out.iter().enumerate().take(numrep) {
-        if item == CRUSH_ITEM_NONE {
-            tracing::debug!(
-                "Failed to find item for position {} after {} tries",
-                rep,
-                tries
-            );
+    // Convert any remaining UNDEF slots to NONE (definitive "no mapping").
+    for slot in out.iter_mut().take(numrep) {
+        if *slot == CRUSH_ITEM_UNDEF {
+            *slot = CRUSH_ITEM_NONE;
         }
     }
 
@@ -842,7 +847,7 @@ mod tests {
         let mut out = vec![CRUSH_ITEM_NONE; 3];
         let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
 
-        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0, 0);
+        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0, 0, 0);
 
         assert!(res.is_ok());
         // All positions should be filled (enough devices available)
@@ -884,8 +889,8 @@ mod tests {
         // Run the same input twice - should produce identical results
         let mut out1 = vec![CRUSH_ITEM_NONE; 3];
         let mut out2 = vec![CRUSH_ITEM_NONE; 3];
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0, 0).unwrap();
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0, 0).unwrap();
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0, 0, 0).unwrap();
+        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0, 0, 0).unwrap();
         assert_eq!(out1, out2, "same input should produce same output");
     }
 
@@ -925,6 +930,7 @@ mod tests {
             &weights_all_in,
             50,
             false,
+            0,
             0,
             0,
         )

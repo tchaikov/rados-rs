@@ -2,6 +2,7 @@
 // Reference: ~/dev/ceph/src/crush/mapper.c
 
 use crate::crush::hash::{crush_hash32_2, crush_hash32_3, crush_hash32_4};
+use crate::crush::mapper::CRUSH_ITEM_NONE;
 use crate::crush::types::{BucketAlgorithm, BucketData, CrushBucket};
 use crate::denc::constants::crush::{FIXED_POINT_MASK, LN_LOOKUP_OFFSET};
 
@@ -193,13 +194,21 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         _ => unreachable!("bucket_tree_choose called on non-Tree bucket"),
     };
 
+    // Validate tree structure: num_nodes must be >= 2 (at least root + one leaf).
+    if num_nodes < 2 || bucket.items.is_empty() {
+        return CRUSH_ITEM_NONE;
+    }
+
     // Start at root (middle of the 1-indexed array)
     let mut n = (num_nodes >> 1) as i32;
 
     // Descend until we reach a terminal (leaf) node
-    while n & 1 == 0 {
+    while n & 1 == 0 && (n as usize) < node_weights.len() {
         // height(n) = trailing zeros
         let h = n.trailing_zeros();
+        if h == 0 {
+            break; // safety: should not happen since n is even
+        }
         let offset = 1i32 << (h - 1);
 
         // Pick point in [0, w) using hash scaled by node weight
@@ -209,6 +218,9 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
 
         // Descend left or right based on weighted comparison
         let l = n - offset;
+        if l < 0 || l as usize >= node_weights.len() {
+            break; // malformed tree
+        }
         if t < node_weights[l as usize] as u64 {
             n = l;
         } else {
@@ -216,7 +228,12 @@ fn bucket_tree_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         }
     }
 
-    bucket.items[(n >> 1) as usize]
+    let item_idx = (n >> 1) as usize;
+    if item_idx < bucket.items.len() {
+        bucket.items[item_idx]
+    } else {
+        CRUSH_ITEM_NONE
+    }
 }
 
 /// Straw bucket selection (legacy, deprecated)
