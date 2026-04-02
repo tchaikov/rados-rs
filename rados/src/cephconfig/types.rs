@@ -224,6 +224,12 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, ConfigError> {
         }
     };
 
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(ConfigError::ParseError(format!(
+            "Duration value out of range: {}",
+            seconds
+        )));
+    }
     Ok(std::time::Duration::from_secs_f64(seconds))
 }
 

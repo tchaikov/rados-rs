@@ -6,9 +6,7 @@ use std::path::Path;
 
 use crate::cephconfig::ConfigError;
 
-// Auth method constants (from include/auth/Auth.h)
-const CEPH_AUTH_NONE: u32 = 0x1;
-const CEPH_AUTH_CEPHX: u32 = 0x2;
+use crate::auth::protocol::{CEPH_AUTH_CEPHX, CEPH_AUTH_NONE};
 const CEPH_AUTH_GSS: u32 = 0x4;
 
 /// Represents a parsed Ceph configuration.
@@ -121,7 +119,7 @@ impl CephConfig {
 
     /// Get entity name (defaults to "client.admin" if not specified).
     pub fn entity_name(&self) -> String {
-        self.get_with_fallback(&["client", "global"], "entity name")
+        self.get_with_fallback(&["client", "global"], "entity_name")
             .unwrap_or("client.admin")
             .to_string()
     }
@@ -139,27 +137,7 @@ impl CephConfig {
         self.resolve_auth_methods("auth_client_required", &["global", "client"])
     }
 
-    /// Get required authentication methods for cluster-internal connections.
-    ///
-    /// Checks "auth_supported" first (if set, applies to all connections),
-    /// otherwise checks "auth_cluster_required".
-    ///
-    /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
-    pub fn get_auth_cluster_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth_cluster_required", &["global"])
-    }
-
-    /// Get required authentication methods for service connections (OSD, MDS, MGR to MON).
-    ///
-    /// Checks "auth_supported" first (if set, applies to all connections),
-    /// otherwise checks "auth_service_required".
-    ///
-    /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
-    pub fn get_auth_service_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth_service_required", &["global"])
-    }
-
-    /// Shared helper for all `get_auth_*_required` methods.
+    /// Shared helper for `get_auth_client_required`.
     ///
     /// First checks "auth_supported" in global. If that yields results, returns them.
     /// Otherwise looks up `fallback_key` in the given `fallback_sections`.
