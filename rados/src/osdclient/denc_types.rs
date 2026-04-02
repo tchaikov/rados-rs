@@ -4,7 +4,7 @@
 //! MOSDOp encoding, following Ceph's encoding patterns.
 
 use crate::denc::error::RadosError;
-use crate::denc::{Denc, VersionedEncode};
+use crate::denc::{Denc, FixedSize, VersionedEncode};
 use bytes::{Buf, BufMut};
 
 use crate::osdclient::osdmap::PgId;
@@ -35,16 +35,12 @@ impl VersionedEncode for StripedPgId {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Encode pgid (pg_t)
         let pgid = PgId {
             pool: self.pool,
             seed: self.seed,
         };
         pgid.encode(buf, features)?;
-
-        // Encode shard (i8)
         self.shard.encode(buf, 0)?;
-
         Ok(())
     }
 
@@ -54,10 +50,7 @@ impl VersionedEncode for StripedPgId {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Decode pgid (pg_t)
         let pgid = PgId::decode(buf, features)?;
-
-        // Decode shard (i8)
         let shard = i8::decode(buf, 0)?;
 
         Ok(StripedPgId {
@@ -67,13 +60,8 @@ impl VersionedEncode for StripedPgId {
         })
     }
 
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        // pg_t + shard
-        let pgid = PgId {
-            pool: self.pool,
-            seed: self.seed,
-        };
-        Some(pgid.encoded_size(features)? + self.shard.encoded_size(0)?)
+    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
+        Some(PgId::SIZE + 1) // pg_t (17 bytes) + shard (i8)
     }
 }
 
@@ -110,15 +98,9 @@ impl VersionedEncode for RequestRedirect {
         features: u64,
         _version: u8,
     ) -> Result<(), RadosError> {
-        // Encode redirect_locator (object_locator_t)
         self.redirect_locator.encode(buf, features)?;
-
-        // Encode redirect_object (String)
         self.redirect_object.encode(buf, features)?;
-
-        // Encode legacy field (u32, always 0)
-        0u32.encode(buf, 0)?;
-
+        0u32.encode(buf, 0)?; // legacy field
         Ok(())
     }
 
@@ -128,13 +110,8 @@ impl VersionedEncode for RequestRedirect {
         _version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        // Decode redirect_locator (object_locator_t)
         let redirect_locator = ObjectLocator::decode(buf, features)?;
-
-        // Decode redirect_object (String)
         let redirect_object = String::decode(buf, features)?;
-
-        // Decode legacy field (u32, ignore)
         let _legacy = u32::decode(buf, 0)?;
 
         Ok(RequestRedirect {

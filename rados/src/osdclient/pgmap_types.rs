@@ -70,7 +70,7 @@ impl StoreStatfs {
 
 /// Object statistics summary
 /// C++ definition: object_stat_sum_t in osd/osd_types.h
-/// Version 20, encodes 38 fields (34 i64 + 4 i32)
+/// Version 20, encodes 40 fields (36 i64 + 4 i32)
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct ObjectStatSum {
@@ -284,7 +284,7 @@ impl VersionedEncode for ObjectStatSum {
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
+        Some(OBJECT_STAT_SUM_ENCODED_SIZE)
     }
 }
 
@@ -355,7 +355,8 @@ impl VersionedEncode for ObjectStatCollection {
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
+        // ObjectStatSum (versioned header + content) + legacy u32
+        Some(6 + OBJECT_STAT_SUM_ENCODED_SIZE + 4)
     }
 }
 
@@ -1394,7 +1395,7 @@ impl VersionedEncode for PgShard {
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
+        Some(5) // i32 + i8
     }
 }
 
