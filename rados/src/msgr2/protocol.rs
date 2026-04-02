@@ -129,8 +129,7 @@ impl FrameIO {
         frame: &Frame,
         state_machine: &mut StateMachine,
     ) -> Result<()> {
-        // Step 1: Apply compression if enabled
-        // Use Cow to avoid cloning in the common case where compression fails/disabled
+        // Cow avoids cloning when compression is disabled or doesn't help
         let frame_to_send: Cow<Frame> = if let Some(ctx) = state_machine.compression_ctx() {
             match frame.compress(ctx) {
                 Ok(compressed_frame) if compressed_frame.preamble.is_compressed() => {
@@ -141,10 +140,7 @@ impl FrameIO {
                     );
                     Cow::Owned(compressed_frame)
                 }
-                Ok(_) => {
-                    // Compression didn't help or failed, borrow original
-                    Cow::Borrowed(frame)
-                }
+                Ok(_) => Cow::Borrowed(frame),
                 Err(e) => {
                     tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
                     Cow::Borrowed(frame)
@@ -154,11 +150,8 @@ impl FrameIO {
             Cow::Borrowed(frame)
         };
 
-        // Step 2: Apply encryption if enabled
         let is_compressed = frame_to_send.preamble.is_compressed();
         let final_bytes = if !state_machine.has_encryption() {
-            // Convert to wire format with proper preamble, segments, epilogue, and CRCs.
-            // Use msgr2.1 (is_rev1 = true) to match the banner we sent.
             let wire_bytes = frame_to_send.to_wire(true)?;
             tracing::debug!(
                 "Sending frame: tag={:?}, {} segments, {} wire bytes, encrypted=false, compressed={}",
@@ -184,25 +177,21 @@ impl FrameIO {
             let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
             let remaining_size = payload_bytes.len().saturating_sub(Self::INLINE_SIZE);
 
-            // Build preamble block (preamble + inline data + padding if needed)
             let mut preamble_block =
                 BytesMut::with_capacity(crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE);
             preamble_block.extend_from_slice(&preamble_bytes);
             preamble_block.extend_from_slice(&payload_bytes[..inline_size]);
 
-            // Pad to INLINE_SIZE if inline data is shorter
             if inline_size < Self::INLINE_SIZE {
                 preamble_block.extend_from_slice(&ZEROS[..Self::INLINE_SIZE - inline_size]);
             }
 
-            // Encrypt preamble block (32 + 48 = 80 bytes -> 96 bytes with GCM tag)
             let encrypted_preamble = state_machine.encrypt_frame_data(&preamble_block)?;
 
             let mut result =
                 BytesMut::with_capacity(encrypted_preamble.len() + remaining_size + 16);
             result.extend_from_slice(&encrypted_preamble);
 
-            // Encrypt remaining payload if any (starts after first 48 bytes)
             if remaining_size > 0 {
                 let remaining_data = &payload_bytes[Self::INLINE_SIZE..];
                 let encrypted_remaining = state_machine.encrypt_frame_data(remaining_data)?;
@@ -223,14 +212,7 @@ impl FrameIO {
             result.freeze()
         };
 
-        // Record data for AUTH_SIGNATURE computation (after encryption)
         state_machine.record_sent(&final_bytes);
-        tracing::trace!(
-            "Recorded sent frame tag={:?}, {} bytes",
-            frame.preamble.tag,
-            final_bytes.len()
-        );
-
         self.stream.write_all(&final_bytes).await?;
         self.stream.flush().await?;
         Ok(())
@@ -248,7 +230,6 @@ impl FrameIO {
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
         let has_encryption = state_machine.has_encryption();
 
-        // Read preamble block
         let preamble_block_size = if has_encryption {
             crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE + Self::GCM_TAG_SIZE // 96 bytes
         } else {
@@ -258,10 +239,8 @@ impl FrameIO {
         let mut preamble_block_buf = vec![0u8; preamble_block_size];
         self.stream.read_exact(&mut preamble_block_buf).await?;
 
-        // Record data for AUTH_SIGNATURE computation (before decryption)
         state_machine.record_received(&preamble_block_buf);
 
-        // Decrypt preamble block if encrypted
         let preamble_and_inline = if has_encryption {
             let decrypted = state_machine.decrypt_frame_data(&preamble_block_buf)?;
             tracing::debug!(
@@ -274,7 +253,6 @@ impl FrameIO {
             Bytes::from(preamble_block_buf)
         };
 
-        // Extract preamble (first 32 bytes)
         let preamble_bytes = preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE);
         let inline_data = if has_encryption {
             preamble_and_inline.slice(
@@ -285,7 +263,6 @@ impl FrameIO {
             Bytes::new()
         };
 
-        // Parse preamble
         let preamble = Preamble::decode(preamble_bytes)?;
 
         tracing::debug!(
@@ -295,13 +272,11 @@ impl FrameIO {
             &preamble.segments[0..preamble.num_segments as usize]
         );
 
-        // Calculate total segment size
         let total_segment_size: usize = preamble.segments[..preamble.num_segments as usize]
             .iter()
             .map(|s| s.logical_len as usize)
             .sum();
 
-        // Calculate total payload size based on encryption mode and number of segments
         let total_payload_size = if has_encryption && total_segment_size > 0 {
             if preamble.num_segments == 1 {
                 // Secure mode single segment: align to 16-byte boundary
@@ -345,9 +320,7 @@ impl FrameIO {
             });
         }
 
-        // Read remaining segment data if any
         let remaining_needed = if has_encryption {
-            // We already have first 48 bytes inline
             if total_payload_size > Self::INLINE_SIZE {
                 let remaining_plaintext = total_payload_size - Self::INLINE_SIZE;
                 remaining_plaintext + Self::GCM_TAG_SIZE
@@ -362,14 +335,10 @@ impl FrameIO {
             let mut remaining_buf = vec![0u8; remaining_needed];
             self.stream.read_exact(&mut remaining_buf).await?;
 
-            // Record data for AUTH_SIGNATURE computation (before decryption)
             state_machine.record_received(&remaining_buf);
 
             if has_encryption {
-                // Decrypt remaining data
                 let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
-
-                // Combine inline + decrypted remaining
                 let mut combined =
                     BytesMut::with_capacity(Self::INLINE_SIZE + decrypted_remaining.len());
                 combined.extend_from_slice(&inline_data);
@@ -379,13 +348,11 @@ impl FrameIO {
                 Bytes::from(remaining_buf)
             }
         } else if has_encryption {
-            // All data was inline
             inline_data.slice(..total_payload_size)
         } else {
             Bytes::new()
         };
 
-        // Parse segments from the full payload
         let is_rev1 = state_machine.is_rev1();
         let is_multi = preamble.num_segments > 1;
         let mut segments = Vec::with_capacity(preamble.num_segments as usize);
@@ -393,12 +360,10 @@ impl FrameIO {
         for i in 0..preamble.num_segments as usize {
             let segment_len = preamble.segments[i].logical_len as usize;
             if segment_len > 0 {
-                // Extract only the logical length of data (not the padding)
                 let segment_data = full_payload.slice(offset..offset + segment_len);
                 segments.push(segment_data);
 
                 if has_encryption {
-                    // Secure frames: skip 16-byte alignment padding
                     let aligned_len = align_to_crypto_block(segment_len);
                     offset += aligned_len;
                 } else {

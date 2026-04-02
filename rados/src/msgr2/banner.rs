@@ -48,19 +48,12 @@ impl Banner {
         // 4. required features (8 bytes)
         // Total: 26 bytes
 
-        // Send banner prefix "ceph v2"
         dst.extend_from_slice(&self.banner);
-
-        // Send newline
         b'\n'.encode(dst, 0)?;
 
-        // Payload size (always 16 bytes for the two 8-byte feature fields)
+        // Payload: supported_features (8 bytes) + required_features (8 bytes)
         16u16.encode(dst, 0)?;
-
-        // Supported features (8 bytes, little-endian)
         u64::from(self.supported_features).encode(dst, 0)?;
-
-        // Required features (8 bytes, little-endian)
         u64::from(self.required_features).encode(dst, 0)?;
 
         Ok(())
@@ -85,7 +78,6 @@ impl Banner {
             )));
         }
 
-        // Read newline
         let newline = u8::decode(src, 0)?;
         if newline != b'\n' {
             return Err(Error::Protocol(format!(
@@ -94,10 +86,7 @@ impl Banner {
             )));
         }
 
-        // Read payload size (uint16_t)
         let payload_size = u16::decode(src, 0)? as usize;
-
-        // Read payload
         if src.remaining() < payload_size {
             return Err(Error::invalid_data("Incomplete banner payload"));
         }

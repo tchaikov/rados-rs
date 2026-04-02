@@ -397,9 +397,7 @@ impl Preamble {
         self.flags.encode(&mut buf, 0)?;
         self.reserved.encode(&mut buf, 0)?;
 
-        // Calculate CRC using Ceph's non-standard CRC32C algorithm
-        // Ceph's ceph_crc32c() produces different results than standard CRC32C
-        // We need to match Ceph's algorithm: !crc32c_append(0xFFFFFFFF, data)
+        // Ceph's ceph_crc32c(): !crc32c_append(0xFFFFFFFF, data)
         let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
 
         crc.encode(&mut buf, 0)?;
@@ -413,12 +411,9 @@ impl Preamble {
             return Err(RadosError::Protocol("Preamble too short".to_string()));
         }
 
-        // Verify CRC BEFORE decoding (need original buffer)
-        // Calculate CRC over first 28 bytes (everything except CRC field at bytes 28-31)
-        // Use Ceph's non-standard CRC32C algorithm: !crc32c_append(0xFFFFFFFF, data)
+        // Verify CRC before decoding (first 28 bytes, excluding the CRC field itself)
         let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
 
-        // Now decode the fields
         let mut cursor = buf;
         let tag = Tag::try_from(u8::decode(&mut cursor, 0)?)?;
         let num_segments = u8::decode(&mut cursor, 0)?;
@@ -659,8 +654,7 @@ impl FrameAssembler {
         preamble: Preamble,
         segments: &[Bytes],
     ) -> Result<Bytes, RadosError> {
-        // Calculate total size: preamble + all segments + epilogue
-        // epilogue = 1 byte (late_flags) + 4*MAX_NUM_SEGMENTS bytes (crc_values)
+        // epilogue_rev0 = late_flags(1) + crc_values(4 * MAX_NUM_SEGMENTS)
         let epilogue_size = 1 + 4 * MAX_NUM_SEGMENTS;
         let segments_size: usize = segments
             .iter()
@@ -670,10 +664,8 @@ impl FrameAssembler {
         let total_size = PREAMBLE_SIZE + segments_size + epilogue_size;
         let mut frame = BytesMut::with_capacity(total_size);
 
-        // Add preamble
         frame.extend_from_slice(&preamble.encode()?);
 
-        // Add segments and calculate their CRCs
         let mut epilogue = EpilogueCrcRev0 {
             late_flags: 0, // Not aborted
             crc_values: [0; MAX_NUM_SEGMENTS],
@@ -688,7 +680,6 @@ impl FrameAssembler {
             };
         }
 
-        // Add epilogue
         self.write_epilogue_crc_rev0(&epilogue, &mut frame);
 
         Ok(frame.freeze())
@@ -700,7 +691,6 @@ impl FrameAssembler {
         preamble: Preamble,
         segments: &[Bytes],
     ) -> Result<Bytes, RadosError> {
-        // Calculate total size: preamble + segments + first_crc + epilogue (if multi-segment)
         let segments_size: usize = segments
             .iter()
             .take(self.descs.len())
@@ -711,7 +701,7 @@ impl FrameAssembler {
         } else {
             0
         };
-        // epilogue for multi-segment: 1 byte (late_status) + (MAX_NUM_SEGMENTS-1) * 4 bytes (crc_values)
+        // epilogue_rev1: late_status(1) + crc_values((MAX_NUM_SEGMENTS-1) * 4)
         let epilogue_size = if self.descs.len() > 1 {
             1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE
         } else {
@@ -720,15 +710,11 @@ impl FrameAssembler {
         let total_size = PREAMBLE_SIZE + segments_size + first_crc_size + epilogue_size;
         let mut frame = BytesMut::with_capacity(total_size);
 
-        // Add preamble
         frame.extend_from_slice(&preamble.encode()?);
 
-        // Add first segment with its CRC
         if !segments.is_empty() && !segments[0].is_empty() {
             frame.extend_from_slice(&segments[0]);
             let first_crc = if self.with_data_crc {
-                // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
-                // This is the raw CRC without final XOR
                 !crc32c::crc32c(&segments[0])
             } else {
                 0u32
@@ -736,12 +722,10 @@ impl FrameAssembler {
             frame.extend_from_slice(&first_crc.to_le_bytes());
         }
 
-        // If only one segment, we're done (no epilogue in msgr2.1 for single segment)
         if self.descs.len() == 1 {
             return Ok(frame.freeze());
         }
 
-        // Add remaining segments and build epilogue
         let mut epilogue = EpilogueCrcRev1 {
             late_status: FRAME_LATE_STATUS_COMPLETE,
             crc_values: [0; MAX_NUM_SEGMENTS - 1],
@@ -755,15 +739,12 @@ impl FrameAssembler {
         {
             frame.extend_from_slice(segment);
             epilogue.crc_values[i - 1] = if self.with_data_crc {
-                // Ceph uses segment_bl.crc32c(-1) = ceph_crc32c(0xFFFFFFFF, data, len)
-                // This is the raw CRC without final XOR
                 !crc32c::crc32c(segment)
             } else {
                 0
             };
         }
 
-        // Add epilogue
         self.write_epilogue_crc_rev1(&epilogue, &mut frame);
 
         Ok(frame.freeze())

@@ -239,13 +239,12 @@ impl Prioritized for OutboundEntry {
     }
 }
 
-/// Assign seq/ack_seq, record in sent_messages, convert to frame, and send.
-///
 enum SendOutcome {
     Continue,
     Disconnect,
 }
 
+/// Assign seq/ack_seq, record in sent_messages, convert to frame, and send.
 /// The result is always forwarded to the caller via the reply channel.
 async fn send_outbound_entry(
     entry: OutboundEntry,
@@ -420,7 +419,6 @@ async fn io_task(
                                 // Peer is checking our liveness — echo back a Keepalive2Ack
                                 // with the same timestamp per msgr2 spec.
                                 if let Some(payload) = frame.segments.first() {
-                                    use crate::denc::Denc;
                                     use crate::msgr2::frames::{Keepalive2AckFrame, create_frame_from_trait};
                                     let mut buf = payload.as_ref();
                                     if let (Ok(ts_sec), Ok(ts_nsec)) = (

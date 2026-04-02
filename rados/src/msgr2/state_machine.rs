@@ -358,22 +358,9 @@ impl StateMachine {
 
     /// Decrypt frame data if in SECURE mode
     pub fn decrypt_frame_data(&mut self, data: &[u8]) -> Result<Bytes> {
-        tracing::debug!(
-            "decrypt_frame_data called, has_decryptor={}, data_len={}",
-            self.frame_decryptor.is_some(),
-            data.len()
-        );
         if let Some(decryptor) = &mut self.frame_decryptor {
-            tracing::debug!("Attempting AES-GCM decryption of {} bytes", data.len());
-            let result = decryptor.decrypt(data);
-            if let Err(ref e) = result {
-                tracing::debug!("Decryption FAILED: {:?}", e);
-            } else {
-                tracing::debug!("Decryption SUCCESS");
-            }
-            result.map_err(Into::into)
+            decryptor.decrypt(data).map_err(Into::into)
         } else {
-            // No encryption, return as-is
             Ok(Bytes::copy_from_slice(data))
         }
     }
@@ -383,7 +370,6 @@ impl StateMachine {
         if let Some(encryptor) = &mut self.frame_encryptor {
             encryptor.encrypt(data).map_err(Into::into)
         } else {
-            // No encryption, return as-is
             Ok(Bytes::copy_from_slice(data))
         }
     }
@@ -419,16 +405,6 @@ impl StateMachine {
     pub fn record_sent(&mut self, data: &[u8]) {
         if self.pre_auth_enabled {
             self.pre_auth_txbuf.extend_from_slice(data);
-            tracing::trace!(
-                "Pre-auth: recorded {} bytes to txbuf (enabled=true, total={})",
-                data.len(),
-                self.pre_auth_txbuf.len()
-            );
-        } else {
-            tracing::trace!(
-                "Pre-auth: skipped recording {} bytes to txbuf (enabled=false)",
-                data.len()
-            );
         }
     }
 
@@ -436,16 +412,6 @@ impl StateMachine {
     pub fn record_received(&mut self, data: &[u8]) {
         if self.pre_auth_enabled {
             self.pre_auth_rxbuf.extend_from_slice(data);
-            tracing::trace!(
-                "Pre-auth: recorded {} bytes to rxbuf (enabled=true, total={})",
-                data.len(),
-                self.pre_auth_rxbuf.len()
-            );
-        } else {
-            tracing::trace!(
-                "Pre-auth: skipped recording {} bytes to rxbuf (enabled=false)",
-                data.len()
-            );
         }
     }
 

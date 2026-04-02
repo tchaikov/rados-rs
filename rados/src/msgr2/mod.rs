@@ -3,7 +3,6 @@
 //! This crate implements the Ceph msgr2.1 protocol for communication
 //! with Ceph clusters, incorporating our latest protocol discoveries.
 
-// Core modules that work
 pub mod banner;
 pub mod ceph_message;
 pub mod compression;
@@ -22,7 +21,6 @@ pub(crate) mod split;
 pub(crate) mod state_machine;
 pub mod throttle;
 
-// Re-export public API
 pub use banner::{Banner, CEPH_BANNER, CEPH_BANNER_LEN, ConnectMessage, ConnectReplyMessage};
 pub use compression::{CompressionAlgorithm, CompressionStats};
 pub use error::{Msgr2Error, Result};
@@ -44,7 +42,6 @@ pub use throttle::{MessageThrottle, ThrottleConfig, ThrottleStats};
 
 pub use crate::impl_denc_ceph_message;
 
-// Messenger configuration options from ceph.conf
 crate::define_options! {
     /// Messenger configuration options from ceph.conf
     pub struct MessengerOptions {
@@ -54,9 +51,8 @@ crate::define_options! {
     }
 }
 
-// MSGR2 Protocol features (from include/msgr.h)
 bitflags::bitflags! {
-    /// msgr2 protocol feature flags
+    /// msgr2 protocol feature flags (from include/msgr.h)
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct FeatureSet: u64 {
         /// msgr2.1 protocol revision
@@ -602,7 +598,6 @@ impl ConnectionConfig {
     }
 }
 
-/// Parse size string from ceph.conf (e.g., "100M", "1G", "512K")
 #[cfg(test)]
 mod tests {
     use super::*;
