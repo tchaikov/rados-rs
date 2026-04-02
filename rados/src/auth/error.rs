@@ -11,12 +11,6 @@ pub enum CephXError {
     #[error("Invalid key format: {0}")]
     InvalidKey(String),
 
-    #[error("Ticket expired")]
-    TicketExpired,
-
-    #[error("Invalid ticket: {0}")]
-    InvalidTicket(String),
-
     #[error("Protocol error: {0}")]
     ProtocolError(String),
 
@@ -26,14 +20,8 @@ pub enum CephXError {
     #[error("Encoding error: {0}")]
     EncodingError(String),
 
-    #[error("Buffer underflow")]
-    BufferUnderflow,
-
     #[error("Time error: {0}")]
     TimeError(String),
-
-    #[error("Decryption failed: {0}")]
-    DecryptionFailed(String),
 }
 
 /// Result type for CephX operations
