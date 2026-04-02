@@ -419,6 +419,25 @@ async fn io_task(
                                 connection_state.record_keepalive_ack();
                                 tracing::trace!("I/O task: received Keepalive2Ack");
                             }
+                            Tag::Keepalive2 => {
+                                // Peer is checking our liveness — echo back a Keepalive2Ack
+                                // with the same timestamp per msgr2 spec.
+                                if let Some(payload) = frame.segments.first() {
+                                    use crate::denc::Denc;
+                                    use crate::msgr2::frames::{Keepalive2AckFrame, create_frame_from_trait};
+                                    let mut buf = payload.as_ref();
+                                    if let (Ok(ts_sec), Ok(ts_nsec)) = (
+                                        u32::decode(&mut buf, 0),
+                                        u32::decode(&mut buf, 0),
+                                    ) && let Ok(ack) = create_frame_from_trait(
+                                        &Keepalive2AckFrame::new(ts_sec, ts_nsec),
+                                        crate::msgr2::frames::Tag::Keepalive2Ack,
+                                    ) {
+                                        let _ = connection_state.send_frame(&ack).await;
+                                    }
+                                }
+                                tracing::trace!("I/O task: received Keepalive2, sent Keepalive2Ack");
+                            }
                             _ => {
                                 let err = Error::protocol_error(&format!(
                                     "Unexpected frame type: {:?}",
