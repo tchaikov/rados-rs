@@ -1402,13 +1402,9 @@ impl MonClient {
         );
 
         if let Some((_, tracker)) = self.commands.remove(&tid) {
-            // Command output is in the data field; use rs only if data is empty
-            let outs = if !msg.data.is_empty() {
-                String::from_utf8_lossy(&msg.data).to_string()
-            } else {
-                ack.rs
-            };
-            let result = CommandResult::new(ack.r, outs, msg.data);
+            // C++ MonClient passes rs (string status) and data (binary output)
+            // as separate fields. Don't conflate them.
+            let result = CommandResult::new(ack.r, ack.rs, msg.data);
             let _ = tracker.result_tx.send(result);
         } else {
             debug!(
