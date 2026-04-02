@@ -289,13 +289,8 @@ impl IoCtx {
         let op = OpBuilder::new().read(offset, length).build();
         let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "read")?;
-        let outdata = result
-            .ops
-            .first()
-            .map(|op| op.outdata.clone())
-            .unwrap_or_default();
         Ok(ReadResult {
-            data: outdata,
+            data: result.first_outdata()?.clone(),
             version: result.version,
         })
     }
@@ -747,12 +742,7 @@ impl IoCtx {
         let result = self.execute(&oid_str, op).await?;
 
         OSDClient::check_op_result(&result, &format!("exec {}::{}", class, method))?;
-        let outdata = result
-            .ops
-            .first()
-            .map(|op| op.outdata.clone())
-            .unwrap_or_default();
-        Ok(outdata)
+        Ok(result.first_outdata()?.clone())
     }
 
     /// Roll back an object to a pool snapshot (equivalent to `rados_ioctx_snap_rollback`).

@@ -905,14 +905,8 @@ impl OSDClient {
 
         Self::check_op_result(&result, "Read")?;
 
-        let outdata = result
-            .ops
-            .first()
-            .map(|op| op.outdata.clone())
-            .unwrap_or_default();
-
         Ok(ReadResult {
-            data: outdata,
+            data: result.first_outdata()?.clone(),
             version: result.version,
         })
     }
