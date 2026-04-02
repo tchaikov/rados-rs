@@ -283,6 +283,12 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
         }
         BucketAlgorithm::Tree => {
             let num_nodes = u32::decode(data, 0)?;
+            if num_nodes > 10000 {
+                return Err(CrushError::DecodeError(format!(
+                    "Tree num_nodes {} exceeds maximum 10000",
+                    num_nodes
+                )));
+            }
             let node_weights: Vec<u32> = decode_n(data, num_nodes as usize)?;
             BucketData::Tree {
                 num_nodes,

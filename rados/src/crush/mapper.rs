@@ -257,7 +257,7 @@ fn crush_choose_firstn(
     for rep in 0..numrep {
         let mut found = false;
         let r = if stable != 0 { 0 } else { rep as u32 };
-        let mut current_bucket = bucket;
+        let mut current_bucket;
 
         tracing::trace!("=== crush_choose_firstn rep={} START ===", rep);
         tracing::trace!(
@@ -270,6 +270,7 @@ fn crush_choose_firstn(
 
         // Try multiple times to find a valid item
         'tries: for ftotal in 0..tries {
+            current_bucket = bucket; // reset to starting bucket each retry (C++ `in = bucket`)
             let r_prime = if vary_r != 0 { r + ftotal } else { r };
 
             tracing::trace!(

@@ -244,14 +244,14 @@ fn bucket_straw_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
         _ => unreachable!("bucket_straw_choose called on non-Straw bucket"),
     };
 
-    let i = (0..bucket.size as usize)
-        .max_by_key(|&i| {
-            let mut draw = crush_hash32_3(x, bucket.items[i] as u32, r) as u64;
-            draw &= 0xffff;
-            draw.wrapping_mul(straws[i] as u64)
-        })
-        .expect("bucket_straw_choose: size > 0 guaranteed by decode validation");
-    bucket.items[i]
+    match (0..bucket.size as usize).max_by_key(|&i| {
+        let mut draw = crush_hash32_3(x, bucket.items[i] as u32, r) as u64;
+        draw &= 0xffff;
+        draw.wrapping_mul(straws[i] as u64)
+    }) {
+        Some(idx) => bucket.items[idx],
+        None => CRUSH_ITEM_NONE,
+    }
 }
 
 #[cfg(test)]
