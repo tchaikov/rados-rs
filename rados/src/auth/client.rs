@@ -207,7 +207,6 @@ impl CephXClientHandler {
         Ok(key)
     }
 
-    /// Handle server auth response
     pub fn handle_auth_response(&mut self, mut response: Bytes) -> Result<AuthResult> {
         if self.starting {
             debug!(
@@ -238,7 +237,6 @@ impl CephXClientHandler {
         }
     }
 
-    /// Decrypt an EncryptedServiceTicket and extract session key and validity
     fn decrypt_service_ticket(
         &self,
         encrypted_ticket: &crate::auth::protocol::EncryptedServiceTicket,
@@ -439,12 +437,6 @@ impl CephXClientHandler {
 
         let secret_key = self.require_secret_key()?;
 
-        // AUTH_DONE auth_payload structure:
-        // 1. CephXResponseHeader (request_type + status)
-        // 2. ServiceTicketReply (service tickets)
-        // 3. connection_secret bufferlist (encrypted)
-        // 4. extra_tickets bufferlist
-
         let header = CephXResponseHeader::decode(&mut auth_payload, 0)?;
         debug!(
             "CephXResponseHeader: request_type=0x{:04x}, status={}",
@@ -505,7 +497,6 @@ impl CephXClientHandler {
         let connection_secret_bytes =
             self.decode_connection_secret(&mut auth_payload, &auth_session_key)?;
 
-        // Parse extra_tickets if any remain in the payload
         trace!(
             "After connection_secret, auth_payload remaining: {} bytes",
             auth_payload.remaining()
@@ -520,7 +511,6 @@ impl CephXClientHandler {
                 let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
                 trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
 
-                // Extra tickets are encrypted with the AUTH session key
                 match self.decode_extra_tickets(&mut extra_tickets_bl, &auth_session_key) {
                     Ok(extra_handlers) => {
                         ticket_handlers.extend(extra_handlers);
@@ -677,7 +667,6 @@ impl CephXClientHandler {
 
         let ciphertext = session_key.encrypt(&envelope_buf)?;
 
-        // Wire format: u32 len + encrypted data
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
         (ciphertext.len() as u32).encode(&mut result, 0)?;
         result.extend_from_slice(&ciphertext);
@@ -686,12 +675,10 @@ impl CephXClientHandler {
         Ok(result.freeze())
     }
 
-    /// Get the current session if authenticated
     pub fn get_session(&self) -> Option<&CephXSession> {
         self.session.as_ref()
     }
 
-    /// Get mutable session reference
     pub fn get_session_mut(&mut self) -> Option<&mut CephXSession> {
         self.session.as_mut()
     }
@@ -720,7 +707,6 @@ impl CephXClientHandler {
         };
         header.encode(&mut payload, 0)?;
 
-        // The authorizer proves we have a valid AUTH ticket
         let authorizer = self.build_authorizer(EntityType::AUTH, global_id, None)?;
         payload.extend_from_slice(&authorizer);
 
@@ -735,7 +721,6 @@ impl CephXClientHandler {
         Ok(payload.freeze())
     }
 
-    /// Reset the handler for a new authentication attempt
     pub fn reset(&mut self) {
         debug!("Resetting CephX client handler");
         self.server_challenge = None;
@@ -803,8 +788,7 @@ mod tests {
         let request = handler.build_initial_request(global_id).unwrap();
         assert!(!request.is_empty());
 
-        // Check that it starts with auth_mode byte (10 for Mon)
-        assert_eq!(request[0], 10);
+        assert_eq!(request[0], 10); // AuthMode::Mon
     }
 
     #[test]
@@ -815,15 +799,13 @@ mod tests {
         let request = handler.build_initial_request(global_id).unwrap();
         assert!(!request.is_empty());
 
-        // Check that it starts with auth_mode byte (1 for Authorizer)
-        assert_eq!(request[0], 1);
+        assert_eq!(request[0], 1); // AuthMode::Authorizer
     }
 
     #[test]
     fn test_build_authenticate_request_without_server_challenge() {
         let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
 
-        // Should fail without server challenge
         let result = handler.build_authenticate_request();
         assert!(result.is_err());
     }
@@ -833,7 +815,6 @@ mod tests {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
         handler.server_challenge = Some(0x1234567890abcdef);
 
-        // Should fail without secret key
         let result = handler.build_authenticate_request();
         assert!(result.is_err());
     }
@@ -854,7 +835,6 @@ mod tests {
     fn test_reset() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
 
-        // Set some state
         handler.server_challenge = Some(12345);
         handler.starting = false;
         let entity_name = handler.entity_name.clone();
@@ -865,10 +845,7 @@ mod tests {
                 .unwrap(),
         ));
 
-        // Reset
         handler.reset();
-
-        // Check that state is cleared
         assert!(handler.server_challenge.is_none());
         assert!(handler.starting);
         assert!(handler.session.is_none());
@@ -880,7 +857,6 @@ mod tests {
             CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
                 .unwrap();
 
-        // Too short ciphertext (less than AES block size)
         let result = key.decrypt(&[1, 2, 3, 4]);
         assert!(result.is_err());
     }

@@ -19,7 +19,6 @@ pub struct Keyring {
 }
 
 impl Keyring {
-    /// Create a new empty keyring
     pub fn new() -> Self {
         Self {
             keys: HashMap::new(),
@@ -43,12 +42,10 @@ impl Keyring {
         for line in content.lines() {
             let line = line.trim();
 
-            // Skip empty lines and comments
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
 
-            // Check for entity section header [entity.name]
             if line.starts_with('[') && line.ends_with(']') {
                 let entity = line[1..line.len() - 1].to_string();
                 debug!("Found entity: {}", entity);
@@ -56,7 +53,6 @@ impl Keyring {
                 continue;
             }
 
-            // Parse key-value pairs
             if let Some(entity) = &current_entity
                 && let Some((key, value)) = line.split_once('=')
             {
@@ -88,22 +84,18 @@ impl Keyring {
         Ok(keyring)
     }
 
-    /// Get the key for a specific entity
     pub fn get_key(&self, entity: &str) -> Option<&CryptoKey> {
         self.keys.get(entity)
     }
 
-    /// Get capabilities for a specific entity and service
     pub fn get_caps(&self, entity: &str, service: &str) -> Option<&str> {
         self.caps.get(entity)?.get(service).map(String::as_str)
     }
 
-    /// List all entities in this keyring
     pub fn entities(&self) -> impl Iterator<Item = &String> {
         self.keys.keys()
     }
 
-    /// Check if an entity exists in the keyring
     pub fn has_entity(&self, entity: &str) -> bool {
         self.keys.contains_key(entity)
     }

@@ -78,7 +78,6 @@ pub struct MonitorAuthProvider {
 }
 
 impl MonitorAuthProvider {
-    /// Create a new monitor auth provider
     pub fn new(entity_name: &str) -> Result<Self> {
         let handler = crate::auth::client::CephXClientHandler::new(
             entity_name,
@@ -106,13 +105,11 @@ impl MonitorAuthProvider {
         Ok(())
     }
 
-    /// Set the secret key from base64 string
     pub fn set_secret_key_from_base64(&mut self, key_str: &str) -> Result<()> {
         let mut handler = self.lock_handler()?;
         handler.set_secret_key_from_base64(key_str)
     }
 
-    /// Set the secret key from keyring file
     pub fn set_secret_key_from_keyring(&mut self, keyring_path: &str) -> Result<()> {
         use crate::auth::keyring::Keyring;
         let keyring = Keyring::from_file(keyring_path)?;
@@ -127,7 +124,6 @@ impl MonitorAuthProvider {
         Ok(())
     }
 
-    /// Get a reference to the shared handler
     pub fn handler(
         &self,
     ) -> &std::sync::Arc<std::sync::Mutex<crate::auth::client::CephXClientHandler>> {
@@ -220,7 +216,6 @@ impl ServiceAuthProvider {
         lock_cephx_handler(&self.handler)
     }
 
-    /// Get a reference to the shared handler
     pub fn handler(
         &self,
     ) -> &std::sync::Arc<std::sync::Mutex<crate::auth::client::CephXClientHandler>> {

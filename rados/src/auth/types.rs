@@ -54,6 +54,16 @@ impl CryptoKey {
         self.secret.is_empty()
     }
 
+    fn require_aes(&self) -> Result<()> {
+        if self.crypto_type != CEPH_CRYPTO_AES {
+            return Err(CephXError::CryptographicError(format!(
+                "Unsupported crypto type: {}",
+                self.crypto_type
+            )));
+        }
+        Ok(())
+    }
+
     /// Extract the raw 16-byte AES key from the secret.
     ///
     /// Session keys are raw 16-byte keys. Client keys from keyring files
@@ -75,20 +85,13 @@ impl CryptoKey {
         }
     }
 
-    /// Decrypt data using AES-128-CBC
-    /// This corresponds to CryptoKey::decrypt() in C++
+    /// Decrypt data using AES-128-CBC (corresponds to C++ `CryptoKey::decrypt`)
     pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Bytes> {
         use aes::Aes128;
         use cbc::Decryptor;
         use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 
-        if self.crypto_type != CEPH_CRYPTO_AES {
-            return Err(CephXError::CryptographicError(format!(
-                "Unsupported crypto type: {}",
-                self.crypto_type
-            )));
-        }
-
+        self.require_aes()?;
         let key_bytes = self.aes_key_bytes()?;
 
         use crate::auth::protocol::CEPH_AES_IV;
@@ -105,20 +108,13 @@ impl CryptoKey {
         Ok(Bytes::from(buffer))
     }
 
-    /// Encrypt data using AES-128-CBC
-    /// This corresponds to CryptoKey::encrypt() in C++
+    /// Encrypt data using AES-128-CBC (corresponds to C++ `CryptoKey::encrypt`)
     pub fn encrypt(&self, plaintext: &[u8]) -> Result<Bytes> {
         use aes::Aes128;
         use cbc::Encryptor;
         use cbc::cipher::{BlockEncryptMut, KeyIvInit};
 
-        if self.crypto_type != CEPH_CRYPTO_AES {
-            return Err(CephXError::CryptographicError(format!(
-                "Unsupported crypto type: {}",
-                self.crypto_type
-            )));
-        }
-
+        self.require_aes()?;
         let key_bytes = self.aes_key_bytes()?;
 
         use crate::auth::protocol::{AES_BLOCK_LEN, CEPH_AES_IV};
@@ -126,7 +122,6 @@ impl CryptoKey {
         type Aes128CbcEnc = Encryptor<Aes128>;
         let cipher = Aes128CbcEnc::new(key_bytes.into(), CEPH_AES_IV.into());
 
-        // Calculate padded length (must be multiple of AES block size)
         let padded_len = ((plaintext.len() / AES_BLOCK_LEN) + 1) * AES_BLOCK_LEN;
         let mut buffer = vec![0u8; padded_len];
         buffer[..plaintext.len()].copy_from_slice(plaintext);
@@ -212,7 +207,7 @@ pub struct CephXTicketBlob {
     #[serde(skip)]
     struct_v: u8,
     pub secret_id: u64,
-    pub blob: Bytes, // Encrypted ticket data
+    pub blob: Bytes,
 }
 
 impl CephXTicketBlob {
@@ -395,14 +390,12 @@ impl CephXSession {
         }
     }
 
-    /// Get or create a ticket handler for a service
     pub fn get_ticket_handler(&mut self, service_type: EntityType) -> &mut TicketHandler {
         self.ticket_handlers
             .entry(service_type)
             .or_insert_with(|| TicketHandler::new(service_type))
     }
 
-    /// Check if we have a valid ticket for a service
     pub fn has_valid_ticket(&self, service_type: EntityType) -> bool {
         self.ticket_handlers
             .get(&service_type)

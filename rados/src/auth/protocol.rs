@@ -71,9 +71,11 @@ pub struct CephXServiceTicket {
 }
 
 impl CephXServiceTicket {
+    const STRUCT_V: u8 = 1;
+
     pub fn new(session_key: CryptoKey, validity: std::time::Duration) -> Self {
         Self {
-            struct_v: 1,
+            struct_v: Self::STRUCT_V,
             session_key,
             validity,
         }
@@ -119,7 +121,7 @@ impl Denc for ServiceTicketInfo {
         self.encrypted_service_ticket.encode(buf, features)?;
         self.ticket_enc.encode(buf, 0)?;
 
-        // Encode ticket_blob with outer length prefix (C++ encode(bufferlist, bl) pattern)
+        // C++ encode(bufferlist, bl): outer length prefix around the ticket blob
         let mut temp_buf =
             bytes::BytesMut::with_capacity(self.ticket_blob.encoded_size(features).unwrap_or(64));
         self.ticket_blob.encode(&mut temp_buf, features)?;
@@ -133,7 +135,6 @@ impl Denc for ServiceTicketInfo {
         let encrypted_service_ticket = EncryptedServiceTicket::decode(buf, features)?;
         let ticket_enc = u8::decode(buf, 0)?;
 
-        // Decode outer length-prefixed bytes, then decode CephXTicketBlob within them
         let ticket_blob_bytes = Bytes::decode(buf, 0)?;
         let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes.as_ref(), features)?;
 
@@ -185,12 +186,10 @@ pub enum AuthMode {
 }
 
 impl AuthMode {
-    /// Convert to u8 for wire protocol
     pub fn as_u8(self) -> u8 {
         self as u8
     }
 
-    /// Create from u8
     pub fn from_u8(val: u8) -> Option<Self> {
         match val {
             0 => Some(AuthMode::None),
@@ -296,9 +295,9 @@ pub struct CephXAuthenticate {
     #[serde(skip)]
     struct_v: u8,
     pub client_challenge: u64,
-    pub key: u64, // Encrypted session key (result of cephx_calc_client_server_challenge)
+    pub key: u64,
     pub old_ticket: CephXTicketBlob,
-    pub other_keys: u32, // What other service keys we want
+    pub other_keys: u32,
 }
 
 impl CephXAuthenticate {
@@ -642,10 +641,6 @@ mod tests {
         let mut buf = BytesMut::new();
         envelope.encode(&mut buf, 0).unwrap();
 
-        // The envelope includes: struct_v (1) + magic (8) + payload
-        // Bytes encodes as: length (4) + bytes
-        // So total: 1 + 8 + 4 + 5 = 18 bytes
-
         let mut read_buf = buf.freeze();
         let decoded = CephXEncryptedEnvelope::<Bytes>::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.payload, Bytes::from(vec![1, 2, 3, 4, 5]));
@@ -796,14 +791,10 @@ mod tests {
         let mut buf = BytesMut::new();
         auth_b.encode(&mut buf, 0).unwrap();
 
-        // encode() always writes server_challenge_plus_one even when have_challenge is false
-        // So the size is struct_v (1) + nonce (8) + have_challenge (1) + server_challenge_plus_one (8) = 18
-
         let mut read_buf = buf.freeze();
         let decoded = CephXAuthorizeB::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.nonce, 54321);
         assert!(!decoded.have_challenge);
-        // decode reads all fields since struct_v=2; server_challenge_plus_one is 0
         assert_eq!(decoded.server_challenge_plus_one, 0);
     }
 

@@ -40,7 +40,6 @@ pub struct CephXServerHandler {
 }
 
 impl CephXServerHandler {
-    /// Create a new server handler with a keyring
     pub fn new(keyring: Keyring) -> Self {
         Self {
             keyring,
@@ -51,7 +50,6 @@ impl CephXServerHandler {
         }
     }
 
-    /// Set the ticket time-to-live for generated service tickets
     pub fn set_ticket_ttl(&mut self, ttl: Duration) {
         self.ticket_ttl = ttl;
     }
@@ -65,14 +63,12 @@ impl CephXServerHandler {
         self.service_secrets.insert(service_id, secret);
     }
 
-    /// Generate a random AES-128 session key.
     fn random_aes_key() -> CryptoKey {
         let mut bytes = vec![0u8; AES_KEY_LEN];
         rand::thread_rng().fill_bytes(&mut bytes);
         CryptoKey::new(Bytes::from(bytes))
     }
 
-    /// Generate a new global_id for a client
     fn allocate_global_id(&mut self) -> u64 {
         let id = self.next_global_id;
         self.next_global_id += 1;
@@ -86,7 +82,6 @@ impl CephXServerHandler {
     pub fn handle_initial_request(&mut self, payload: &[u8]) -> Result<(EntityName, u64, Bytes)> {
         let mut buf = Bytes::copy_from_slice(payload);
 
-        // 1. Parse auth_mode
         let auth_mode_byte = u8::decode(&mut buf, 0)?;
         let auth_mode = AuthMode::from_u8(auth_mode_byte).ok_or_else(|| {
             CephXError::ProtocolError(format!("Invalid auth mode: {}", auth_mode_byte))
@@ -94,13 +89,10 @@ impl CephXServerHandler {
 
         debug!("Server: Received auth request with mode: {:?}", auth_mode);
 
-        // 2. Parse entity_name
         let entity_name = EntityName::decode(&mut buf, 0)?;
         debug!("Server: Client entity name: {}", entity_name);
 
-        // 3. Parse global_id
         let client_global_id = u64::decode(&mut buf, 0)?;
-
         debug!("Server: Client requested global_id: {}", client_global_id);
 
         // Verify client exists in keyring
@@ -128,7 +120,6 @@ impl CephXServerHandler {
 
         debug!("Server: Generated challenge: {}", server_challenge);
 
-        // Build response: CephXServerChallenge
         let challenge = CephXServerChallenge::new(server_challenge);
 
         let mut response = BytesMut::new();
@@ -149,7 +140,6 @@ impl CephXServerHandler {
     ) -> Result<(CryptoKey, CryptoKey, Bytes)> {
         let mut buf = Bytes::copy_from_slice(payload);
 
-        // 1. Parse CephXRequestHeader
         let header = CephXRequestHeader::decode(&mut buf, 0)?;
 
         debug!(
@@ -164,7 +154,6 @@ impl CephXServerHandler {
             )));
         }
 
-        // 2. Parse CephXAuthenticate
         let authenticate = CephXAuthenticate::decode(&mut buf, 0)?;
 
         debug!(
@@ -176,7 +165,6 @@ impl CephXServerHandler {
             authenticate.other_keys
         );
 
-        // 3. Get client's secret key from keyring
         let client_secret = self
             .keyring
             .get_key(&entity_name.to_string())
@@ -184,14 +172,10 @@ impl CephXServerHandler {
                 CephXError::AuthenticationFailed(format!("No secret for {}", entity_name))
             })?;
 
-        // 4. Verify client's challenge response
-        // Client should have encrypted: server_challenge + 1
         let expected_response = self.server_challenge.ok_or_else(|| {
             CephXError::ProtocolError("Server challenge not set before authenticate".to_string())
         })? + 1;
 
-        // Decrypt client's response using client's secret
-        // The encrypted response is in the 'key' field
         let key_bytes = authenticate.key.to_le_bytes();
         let decrypted = client_secret.decrypt(&key_bytes)?;
 
@@ -216,26 +200,18 @@ impl CephXServerHandler {
 
         info!("Server: Client {} authenticated successfully", entity_name);
 
-        // 5. Generate session key
         let session_key = Self::random_aes_key();
 
         debug!("Server: Generated session key: {} bytes", session_key.len());
 
-        // 6. Generate service tickets
         let service_tickets =
             self.generate_service_tickets(entity_name, global_id, authenticate.other_keys)?;
 
-        // 7. Build response with session key and tickets
         let mut response = BytesMut::new();
-
-        // Encrypt session key with client's secret
         let encrypted_session_key = client_secret.encrypt(&session_key.secret)?;
         encrypted_session_key.encode(&mut response, 0)?;
-
-        // Add service tickets
         service_tickets.encode(&mut response, 0)?;
 
-        // 8. Generate connection_secret for SECURE mode encryption
         let connection_secret = Self::random_aes_key();
 
         debug!(
@@ -246,7 +222,6 @@ impl CephXServerHandler {
         Ok((session_key, connection_secret, response.freeze()))
     }
 
-    /// Generate service tickets for the client
     fn generate_service_tickets(
         &self,
         entity_name: &EntityName,
@@ -273,30 +248,20 @@ impl CephXServerHandler {
 
             debug!("Server: Generating ticket for service_id: {}", service_id);
 
-            // Generate service session key
             let service_key = Self::random_aes_key();
 
-            // Create the authentication ticket
             let mut ticket = AuthTicket::new(entity_name.clone(), global_id);
             ticket.set_validity(valid_from, valid_until);
             ticket.caps = AuthCapsInfo::default();
             ticket.flags = 0;
 
-            // Create the service ticket info
             let ticket_info = CephXServiceTicketInfo::new(ticket, service_key);
 
-            // Encode the ticket info using Denc
             let mut encoded_ticket = BytesMut::new();
             ticket_info.encode(&mut encoded_ticket, 0)?;
 
-            // Encrypt the ticket with the service's secret
             let encrypted_ticket = service_secret.encrypt(&encoded_ticket)?;
-
-            // Create ticket blob
-            let ticket_blob = CephXTicketBlob::new(
-                0, // Not used in basic implementation
-                encrypted_ticket,
-            );
+            let ticket_blob = CephXTicketBlob::new(0, encrypted_ticket);
 
             tickets.push(ticket_blob);
         }
@@ -316,26 +281,14 @@ impl CephXServerHandler {
         service_tickets: Bytes,
     ) -> Result<Bytes> {
         let mut response = BytesMut::new();
-
-        // 1. global_id
         global_id.encode(&mut response, 0)?;
-
-        // 2. connection_mode
         connection_mode.encode(&mut response, 0)?;
-
-        // 3. auth_payload consists of:
-        //    - service_tickets (session key + tickets)
-        //    - connection_secret bufferlist (encrypted with session_key)
-        //    - extra_tickets bufferlist (optional, not implemented yet)
-
         response.extend_from_slice(&service_tickets);
 
-        // 4. Append connection_secret as a bufferlist (u32 len + encrypted data)
-        //    Encrypt connection_secret with session_key
         let encrypted_connection_secret = session_key.encrypt(&connection_secret.secret)?;
         encrypted_connection_secret.encode(&mut response, 0)?;
 
-        // 5. Append empty extra_tickets bufferlist (u32 len = 0)
+        // Empty extra_tickets
         0u32.encode(&mut response, 0)?;
 
         Ok(response.freeze())
