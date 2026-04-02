@@ -196,7 +196,14 @@ fn parse_size(s: &str) -> Result<u64, ConfigError> {
         }
     };
 
-    Ok((num * multiplier as f64) as u64)
+    let result = num * multiplier as f64;
+    if !result.is_finite() || result < 0.0 {
+        return Err(ConfigError::ParseError(format!(
+            "Size value out of range: {}",
+            result
+        )));
+    }
+    Ok(result as u64)
 }
 
 /// Parse duration string with time units.
