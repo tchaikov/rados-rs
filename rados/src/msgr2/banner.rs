@@ -137,6 +137,7 @@ impl Default for Banner {
 #[repr(C)]
 #[derive(
     Debug,
+    Clone,
     Copy,
     crate::ZeroCopyDencode,
     zerocopy::FromBytes,
@@ -199,12 +200,6 @@ impl ConnectMessage {
 
     pub fn decode(src: &mut impl Buf) -> Result<Self> {
         Ok(<Self as crate::Denc>::decode(src, 0)?)
-    }
-}
-
-impl Clone for ConnectMessage {
-    fn clone(&self) -> Self {
-        *self
     }
 }
 

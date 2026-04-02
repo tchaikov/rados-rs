@@ -494,16 +494,6 @@ impl FrameAssembler {
         }
     }
 
-    pub fn get_is_rev1(&self) -> bool {
-        self.is_rev1
-    }
-
-    pub fn set_is_rev1(&mut self, is_rev1: bool) {
-        self.is_rev1 = is_rev1;
-        self.descs.clear();
-        self.flags = 0;
-    }
-
     // Main entry point - takes any FrameTrait and serializes it to wire format
     pub fn to_wire<F: FrameTrait>(
         &mut self,
