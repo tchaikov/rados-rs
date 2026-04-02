@@ -829,10 +829,9 @@ impl OSDClient {
         }
     }
 
-    /// Check an OpResult for errors and return the first op's outdata
+    /// Check an OpResult for errors.
     ///
-    /// Validates both the overall result code and the per-op return code,
-    /// returning the outdata from the first operation on success.
+    /// Validates both the overall result code and the per-op return code.
     pub(crate) fn check_op_result(
         result: &crate::osdclient::types::OpResult,
         op_name: &str,
@@ -936,47 +935,17 @@ impl OSDClient {
             )
             .await?;
 
-        Self::check_op_result(&result, "Sparse read")?;
+        Self::check_op_result(&result, "sparse_read")?;
 
-        // Parse sparse read result from outdata
-        // The outdata contains:
-        // 1. Encoded map<uint64_t, uint64_t> (extent map: offset -> length)
-        // 2. Encoded bufferlist (actual data)
-        use crate::osdclient::types::{SparseExtent, SparseReadResult};
-
-        let outdata = result
-            .ops
-            .first()
-            .map(|op| op.outdata.clone())
-            .unwrap_or_default();
-
-        if outdata.is_empty() {
-            return Ok(SparseReadResult {
-                extents: vec![],
-                data: bytes::Bytes::new(),
-                version: result.version,
-            });
-        }
-
-        let mut buf = outdata;
-
-        // Decode extent map directly as Vec<SparseExtent>
-        let extents = Vec::<SparseExtent>::decode(&mut buf, 0)?;
-
-        // Decode bufferlist (actual data) using Denc
-        let data = bytes::Bytes::decode(&mut buf, 0)?;
+        let sparse = crate::osdclient::types::SparseReadResult::from_op_result(&result)?;
 
         debug!(
             "Sparse read decoded: {} extents, {} data bytes",
-            extents.len(),
-            data.len()
+            sparse.extents.len(),
+            sparse.data.len()
         );
 
-        Ok(SparseReadResult {
-            extents,
-            data,
-            version: result.version,
-        })
+        Ok(sparse)
     }
 
     /// Write data to an object

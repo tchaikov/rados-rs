@@ -1216,6 +1216,39 @@ pub struct SparseReadResult {
     pub version: u64,
 }
 
+impl SparseReadResult {
+    /// Parse a `SparseReadResult` from a completed `OpResult`.
+    ///
+    /// Decodes the extent map and data bufferlist from the first op's outdata.
+    pub(crate) fn from_op_result(result: &OpResult) -> Result<Self, crate::RadosError> {
+        use crate::Denc;
+
+        let outdata = result
+            .ops
+            .first()
+            .map(|op| op.outdata.clone())
+            .unwrap_or_default();
+
+        if outdata.is_empty() {
+            return Ok(SparseReadResult {
+                extents: vec![],
+                data: bytes::Bytes::new(),
+                version: result.version,
+            });
+        }
+
+        let mut buf = outdata;
+        let extents = Vec::<SparseExtent>::decode(&mut buf, 0)?;
+        let data = bytes::Bytes::decode(&mut buf, 0)?;
+
+        Ok(SparseReadResult {
+            extents,
+            data,
+            version: result.version,
+        })
+    }
+}
+
 /// Generic operation result
 #[derive(Debug, Clone)]
 pub struct OpResult {

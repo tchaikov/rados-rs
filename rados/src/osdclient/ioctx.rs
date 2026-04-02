@@ -348,31 +348,7 @@ impl IoCtx {
         let op = OpBuilder::new().sparse_read(offset, length).build();
         let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "sparse_read")?;
-
-        let outdata = result
-            .ops
-            .first()
-            .map(|op| op.outdata.clone())
-            .unwrap_or_default();
-
-        if outdata.is_empty() {
-            return Ok(SparseReadResult {
-                extents: vec![],
-                data: bytes::Bytes::new(),
-                version: result.version,
-            });
-        }
-
-        let mut buf = outdata;
-        use crate::osdclient::types::SparseExtent;
-        let extents = Vec::<SparseExtent>::decode(&mut buf, 0)?;
-        let data = bytes::Bytes::decode(&mut buf, 0)?;
-
-        Ok(SparseReadResult {
-            extents,
-            data,
-            version: result.version,
-        })
+        Ok(SparseReadResult::from_op_result(&result)?)
     }
 
     /// Get object metadata (size and mtime)
