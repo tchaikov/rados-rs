@@ -72,3 +72,59 @@ macro_rules! decode_if_version {
         }
     };
 }
+
+/// Implement `Denc` and `FixedSize` for a `#[repr(u8)]` enum that has a `From<u8>` impl.
+///
+/// The enum must be `Copy` and castable to `u8` via `as u8`.
+///
+/// # Example
+///
+/// ```ignore
+/// #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// #[repr(u8)]
+/// enum MyEnum {
+///     #[default]
+///     A = 0,
+///     B = 1,
+/// }
+///
+/// impl From<u8> for MyEnum {
+///     fn from(v: u8) -> Self {
+///         match v {
+///             1 => MyEnum::B,
+///             _ => MyEnum::A,
+///         }
+///     }
+/// }
+///
+/// impl_denc_u8_enum!(MyEnum);
+/// ```
+#[macro_export]
+macro_rules! impl_denc_u8_enum {
+    ($type:ty) => {
+        impl $crate::Denc for $type {
+            fn encode<B: bytes::BufMut>(
+                &self,
+                buf: &mut B,
+                features: u64,
+            ) -> Result<(), $crate::RadosError> {
+                (*self as u8).encode(buf, features)
+            }
+
+            fn decode<B: bytes::Buf>(
+                buf: &mut B,
+                features: u64,
+            ) -> Result<Self, $crate::RadosError> {
+                Ok(Self::from(u8::decode(buf, features)?))
+            }
+
+            fn encoded_size(&self, _features: u64) -> Option<usize> {
+                Some(1)
+            }
+        }
+
+        impl $crate::denc::codec::FixedSize for $type {
+            const SIZE: usize = 1;
+        }
+    };
+}

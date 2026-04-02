@@ -64,13 +64,6 @@ impl<T> Padding<T> {
     }
 }
 
-impl<T: Default> Padding<T> {
-    /// Create a new padding field with the default value
-    pub fn zero() -> Self {
-        Padding(T::default())
-    }
-}
-
 // Implement Deref and DerefMut for easy access to the inner value
 impl<T> Deref for Padding<T> {
     type Target = T;
@@ -86,7 +79,6 @@ impl<T> DerefMut for Padding<T> {
     }
 }
 
-// Custom Serialize implementation that always skips the field
 impl<T> Serialize for Padding<T> {
     fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -99,7 +91,6 @@ impl<T> Serialize for Padding<T> {
     }
 }
 
-// Implement From for easy construction
 impl<T> From<T> for Padding<T> {
     fn from(value: T) -> Self {
         Padding(value)
@@ -120,7 +111,6 @@ impl<T: Denc> Denc for Padding<T> {
     }
 }
 
-// Implement Display for debugging
 impl<T: fmt::Display> fmt::Display for Padding<T> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "Padding({})", self.0)
@@ -140,8 +130,8 @@ mod tests {
     }
 
     #[test]
-    fn test_padding_zero() {
-        let pad: Padding<u32> = Padding::zero();
+    fn test_padding_default() {
+        let pad: Padding<u32> = Padding::default();
         assert_eq!(*pad, 0);
     }
 

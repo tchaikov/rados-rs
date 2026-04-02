@@ -60,6 +60,6 @@ pub use zerocopy;
 pub use rados_denc_macros::{Denc, StructVDenc, VersionedDenc, ZeroCopyDencode};
 
 pub use crate::{
-    check_min_version, decode_if_version, impl_denc_for_versioned, mark_feature_dependent_encoding,
-    mark_simple_encoding, mark_versioned_encoding,
+    check_min_version, decode_if_version, impl_denc_for_versioned, impl_denc_u8_enum,
+    mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding,
 };

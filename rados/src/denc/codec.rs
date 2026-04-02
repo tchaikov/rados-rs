@@ -627,78 +627,72 @@ macro_rules! impl_denc_for_versioned {
 // ============= Variable-Size Type Implementations =============
 use bytes::Bytes;
 
-// Vec<T> implementation - encodes length as u32 followed by elements
+/// Encode a length-prefixed byte slice: u32 length + raw bytes.
+/// Shared by `Bytes` and `String` Denc implementations.
+fn encode_length_prefixed_bytes<B: BufMut>(
+    data: &[u8],
+    buf: &mut B,
+    features: u64,
+) -> Result<(), RadosError> {
+    (data.len() as u32).encode(buf, features)?;
+    if buf.remaining_mut() < data.len() {
+        return Err(RadosError::Codec(CodecError::InsufficientData {
+            needed: data.len(),
+            available: buf.remaining_mut(),
+        }));
+    }
+    buf.put_slice(data);
+    Ok(())
+}
+
+/// Decode a length-prefixed byte blob: u32 length + raw bytes.
+/// Shared by `Bytes` and `String` Denc implementations.
+fn decode_length_prefixed_bytes<B: Buf>(buf: &mut B, features: u64) -> Result<Bytes, RadosError> {
+    let len = <u32 as Denc>::decode(buf, features)? as usize;
+    if buf.remaining() < len {
+        return Err(RadosError::Codec(CodecError::InsufficientData {
+            needed: len,
+            available: buf.remaining(),
+        }));
+    }
+    Ok(buf.copy_to_bytes(len))
+}
+
 impl<T: Denc> Denc for Vec<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        // Encode length as u32
-        let len = self.len() as u32;
-        Denc::encode(&len, buf, features)?;
-
-        // Encode each element
+        Denc::encode(&(self.len() as u32), buf, features)?;
         for item in self {
             Denc::encode(item, buf, features)?;
         }
-
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         let len = <u32 as Denc>::decode(buf, features)? as usize;
         // Cap pre-allocation to avoid OOM from adversarial length prefixes.
-        // The actual loop will still decode `len` items (or fail on short buffer).
         let mut vec = Vec::with_capacity(len.min(4096));
-
         for _ in 0..len {
             vec.push(<T as Denc>::decode(buf, features)?);
         }
-
         Ok(vec)
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Start with u32 length
         let mut size = 4;
-
-        // Add size of each element
         for item in self {
             size += Denc::encoded_size(item, features)?;
         }
-
         Some(size)
     }
 }
 
-// Bytes implementation - matches Ceph's buffer::ptr encoding
-// Encode: uint32_t length + raw bytes content
 impl Denc for Bytes {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        // Encode length as u32
-        let len = self.len() as u32;
-        Denc::encode(&len, buf, features)?;
-
-        // Copy bytes
-        if buf.remaining_mut() < self.len() {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: self.len(),
-                available: buf.remaining_mut(),
-            }));
-        }
-        buf.put_slice(self);
-
-        Ok(())
+        encode_length_prefixed_bytes(self, buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = <u32 as Denc>::decode(buf, features)? as usize;
-
-        if buf.remaining() < len {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: len,
-                available: buf.remaining(),
-            }));
-        }
-
-        Ok(buf.copy_to_bytes(len))
+        decode_length_prefixed_bytes(buf, features)
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -708,33 +702,11 @@ impl Denc for Bytes {
 
 impl Denc for String {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        // Encode length as u32
-        let len = self.len() as u32;
-        Denc::encode(&len, buf, features)?;
-
-        // Copy string bytes
-        if buf.remaining_mut() < self.len() {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: self.len(),
-                available: buf.remaining_mut(),
-            }));
-        }
-        buf.put_slice(self.as_bytes());
-
-        Ok(())
+        encode_length_prefixed_bytes(self.as_bytes(), buf, features)
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let len = <u32 as Denc>::decode(buf, features)? as usize;
-
-        if buf.remaining() < len {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: len,
-                available: buf.remaining(),
-            }));
-        }
-
-        let bytes = buf.copy_to_bytes(len);
+        let bytes = decode_length_prefixed_bytes(buf, features)?;
         String::from_utf8(bytes.into()).map_err(|e| RadosError::Codec(CodecError::Utf8(e)))
     }
 
@@ -827,57 +799,41 @@ impl_denc_map!(BTreeMap, Ord,);
 // HashMap: hash-based, pre-allocate with the decoded count
 impl_denc_map!(@capacity HashMap, Eq, Eq + std::hash::Hash);
 
-// BTreeSet implementation
 impl<T: Denc + Ord> Denc for std::collections::BTreeSet<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        // Encode length as u32
-        let len = self.len() as u32;
-        Denc::encode(&len, buf, features)?;
-
-        // Encode each element
+        Denc::encode(&(self.len() as u32), buf, features)?;
         for item in self {
             Denc::encode(item, buf, features)?;
         }
-
         Ok(())
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
         let len = <u32 as Denc>::decode(buf, features)? as usize;
         let mut set = std::collections::BTreeSet::new();
-
         for _ in 0..len {
-            let item = <T as Denc>::decode(buf, features)?;
-            set.insert(item);
+            set.insert(<T as Denc>::decode(buf, features)?);
         }
-
         Ok(set)
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
-        // Start with u32 length
         let mut size = 4;
-
-        // Add size of each element
         for item in self {
             size += Denc::encoded_size(item, features)?;
         }
-
         Some(size)
     }
 }
 
-// Option implementation
 impl<T: Denc> Denc for Option<T> {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         match self {
             Some(value) => {
-                // Encode 1 to indicate Some
                 buf.put_u8(1);
                 value.encode(buf, features)?;
             }
             None => {
-                // Encode 0 to indicate None
                 buf.put_u8(0);
             }
         }

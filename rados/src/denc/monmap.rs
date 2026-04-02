@@ -120,30 +120,7 @@ impl From<u8> for MonCephRelease {
     }
 }
 
-// Implement Denc + FixedSize for a #[repr(u8)] enum with a From<u8> impl.
-macro_rules! impl_denc_u8_enum {
-    ($type:ty) => {
-        impl Denc for $type {
-            fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-                (*self as u8).encode(buf, features)
-            }
-
-            fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-                Ok(Self::from(u8::decode(buf, features)?))
-            }
-
-            fn encoded_size(&self, _features: u64) -> Option<usize> {
-                Some(1)
-            }
-        }
-
-        impl crate::denc::codec::FixedSize for $type {
-            const SIZE: usize = 1;
-        }
-    };
-}
-
-impl_denc_u8_enum!(MonCephRelease);
+crate::impl_denc_u8_enum!(MonCephRelease);
 
 /// Election strategy (election_strategy in C++)
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -166,7 +143,7 @@ impl From<u8> for ElectionStrategy {
     }
 }
 
-impl_denc_u8_enum!(ElectionStrategy);
+crate::impl_denc_u8_enum!(ElectionStrategy);
 
 /// Monitor information (mon_info_t in C++)
 /// Encodes at v6 (always, since Quincy requires SERVER_NAUTILUS); decodes v5–v6+

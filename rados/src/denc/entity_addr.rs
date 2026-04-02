@@ -36,7 +36,6 @@ impl TryFrom<u32> for EntityAddrType {
     }
 }
 
-// EntityAddrType is just a u32 enum, so we can implement Denc for it
 impl Denc for EntityAddrType {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
         let val = *self as u32;
@@ -61,14 +60,6 @@ pub struct EntityAddr {
 }
 
 impl EntityAddr {
-    pub fn new() -> Self {
-        Self {
-            addr_type: EntityAddrType::None,
-            nonce: 0,
-            sockaddr_data: Vec::new(),
-        }
-    }
-
     /// Parse address family and port from sockaddr_data.
     ///
     /// Returns `(address_family, port)` if the data is at least 4 bytes,
