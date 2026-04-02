@@ -646,8 +646,8 @@ pub enum OpData {
     },
     /// Object class method call
     Call {
-        class_len: u32,
-        method_len: u32,
+        class_len: u8,
+        method_len: u8,
         indata_len: u32,
     },
     /// Snapshot rollback target (`ceph_osd_op.snap.snapid`)
@@ -851,8 +851,8 @@ impl OSDOp {
             op: OpCode::Call,
             flags: 0,
             op_data: OpData::Call {
-                class_len: class.len() as u32,
-                method_len: method.len() as u32,
+                class_len: class.len() as u8,
+                method_len: method.len() as u8,
                 indata_len: indata.len() as u32,
             },
             indata: buf.freeze(),

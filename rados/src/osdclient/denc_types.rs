@@ -227,12 +227,16 @@ impl Denc for OSDOp {
                 method_len,
                 indata_len,
             } => {
-                buf.put_u32_le(*class_len);
-                buf.put_u32_le(*method_len);
+                // C++ rados.h cls union: u8 class_len + u8 method_len + u8 argc + u32 indata_len
+                buf.put_u8(*class_len);
+                buf.put_u8(*method_len);
+                buf.put_u8(0); // argc (always 0)
                 buf.put_u32_le(*indata_len);
-                // Pad to CEPH_OSD_OP_UNION_SIZE: 4 + 4 + 4 = 12, need 16 more
+                // Pad to CEPH_OSD_OP_UNION_SIZE: 1 + 1 + 1 + 4 = 7, need 21 more
                 buf.put_u64_le(0);
                 buf.put_u64_le(0);
+                buf.put_u32_le(0);
+                buf.put_u8(0);
             }
             OpData::Snap { snapid } => {
                 // ceph_osd_op.snap.snapid (u64) + 20 bytes padding = CEPH_OSD_OP_UNION_SIZE
