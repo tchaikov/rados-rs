@@ -1146,6 +1146,19 @@ pub struct StatResult {
     pub mtime: SystemTime,
 }
 
+impl StatResult {
+    /// Parse a `StatResult` from the first op's outdata in a completed `OpResult`.
+    pub(crate) fn from_op_result(result: &OpResult) -> crate::osdclient::error::Result<Self> {
+        use crate::denc::Denc;
+        let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
+        let stat_data = crate::osdclient::denc_types::OsdStatData::decode(&mut &outdata[..], 0)?;
+        Ok(StatResult {
+            size: stat_data.size,
+            mtime: stat_data.mtime,
+        })
+    }
+}
+
 /// Extent information for sparse read
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SparseExtent {

@@ -23,7 +23,10 @@ pub use crate::denc::{EVersion, Epoch, FsId, UTime, UuidD, Version};
 pub use crate::crush::PgId;
 
 /// Default capacity for the CRUSH placement result LRU cache.
-const CRUSH_CACHE_SIZE: std::num::NonZeroUsize = std::num::NonZeroUsize::new(1000).unwrap();
+const CRUSH_CACHE_SIZE: std::num::NonZeroUsize = match std::num::NonZeroUsize::new(1000) {
+    Some(v) => v,
+    None => unreachable!(),
+};
 
 /// Varint encoding/decoding utilities (matching C++ denc_varint)
 fn decode_varint<B: Buf>(buf: &mut B) -> Result<u64, RadosError> {

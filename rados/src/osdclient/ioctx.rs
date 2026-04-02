@@ -366,12 +366,7 @@ impl IoCtx {
         let op = OpBuilder::new().stat().build();
         let result = self.execute(oid, op).await?;
         OSDClient::check_op_result(&result, "stat")?;
-        let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
-        let stat_data = crate::osdclient::denc_types::OsdStatData::decode(&mut &outdata[..], 0)?;
-        Ok(StatResult {
-            size: stat_data.size,
-            mtime: stat_data.mtime,
-        })
+        StatResult::from_op_result(&result)
     }
 
     /// Remove an object

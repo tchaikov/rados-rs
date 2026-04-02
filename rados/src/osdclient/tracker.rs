@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::{debug, warn};
 
@@ -101,26 +101,25 @@ impl Tracker {
     /// Uses a BTreeMap to efficiently track operations ordered by deadline,
     /// with a HashMap as secondary index for O(1) deadline lookup during untrack.
     /// Sleeps until the next deadline, then processes all expired operations.
+    ///
+    /// Both data structures are plain local variables (not `Arc<RwLock<>>`)
+    /// because `tokio::select!` branches are mutually exclusive within this
+    /// single task -- there is no concurrent access.
     async fn timeout_manager_task(
         mut cmd_rx: mpsc::UnboundedReceiver<TimeoutCommand>,
         timeout_callback: TimeoutCallback,
     ) {
         // Primary index: Map (deadline, osd_id, tid) -> ()
         // BTreeMap keeps entries sorted by key, so first entry is next to timeout
-        type TrackedOps = BTreeMap<(Instant, i32, u64), ()>;
-        let tracked_ops: Arc<RwLock<TrackedOps>> = Arc::new(RwLock::new(BTreeMap::new()));
+        let mut tracked_ops: BTreeMap<(Instant, i32, u64), ()> = BTreeMap::new();
 
         // Secondary index: Map (osd_id, tid) -> deadline
         // Allows O(1) deadline lookup for untrack operations
-        type DeadlineIndex = HashMap<(i32, u64), Instant>;
-        let deadline_index: Arc<RwLock<DeadlineIndex>> = Arc::new(RwLock::new(HashMap::new()));
+        let mut deadline_index: HashMap<(i32, u64), Instant> = HashMap::new();
 
         loop {
             // Get the next deadline, if any
-            let next_deadline = {
-                let ops = tracked_ops.read().await;
-                ops.keys().next().map(|(deadline, _, _)| *deadline)
-            };
+            let next_deadline = tracked_ops.keys().next().map(|(deadline, _, _)| *deadline);
 
             // Wait for either: next timeout, or a command
             tokio::select! {
@@ -135,19 +134,17 @@ impl Tracker {
                 } => {
                     // Process expired operations
                     let now = Instant::now();
-                    let mut ops = tracked_ops.write().await;
-                    let mut index = deadline_index.write().await;
 
                     // Collect all expired operations
-                    let expired: Vec<(Instant, i32, u64)> = ops
+                    let expired: Vec<(Instant, i32, u64)> = tracked_ops
                         .range(..(now, i32::MAX, u64::MAX))
                         .map(|(k, _)| *k)
                         .collect();
 
                     // Remove and timeout each expired operation
                     for (i, &(deadline, osd_id, tid)) in expired.iter().enumerate() {
-                        ops.remove(&(deadline, osd_id, tid));
-                        index.remove(&(osd_id, tid));
+                        tracked_ops.remove(&(deadline, osd_id, tid));
+                        deadline_index.remove(&(osd_id, tid));
                         warn!(
                             "Operation timeout: OSD {} tid={} (deadline exceeded by {:?})",
                             osd_id,
@@ -158,13 +155,7 @@ impl Tracker {
 
                         // Yield every 50 timeouts to avoid blocking other tasks
                         if i > 0 && i % 50 == 0 {
-                            // Drop locks before yielding
-                            drop(ops);
-                            drop(index);
                             tokio::task::yield_now().await;
-                            // Re-acquire locks
-                            ops = tracked_ops.write().await;
-                            index = deadline_index.write().await;
                         }
                     }
                 }
@@ -173,20 +164,15 @@ impl Tracker {
                 cmd = cmd_rx.recv() => {
                     match cmd {
                         Some(TimeoutCommand::Track { tid, osd_id, deadline }) => {
-                            let mut ops = tracked_ops.write().await;
-                            let mut index = deadline_index.write().await;
-                            ops.insert((deadline, osd_id, tid), ());
-                            index.insert((osd_id, tid), deadline);
+                            tracked_ops.insert((deadline, osd_id, tid), ());
+                            deadline_index.insert((osd_id, tid), deadline);
                             debug!("Tracking operation: OSD {} tid={} deadline={:?}", osd_id, tid, deadline);
                         }
                         Some(TimeoutCommand::Untrack { tid, osd_id }) => {
-                            let mut ops = tracked_ops.write().await;
-                            let mut index = deadline_index.write().await;
-
                             // O(1) deadline lookup from secondary index
-                            if let Some(deadline) = index.remove(&(osd_id, tid)) {
+                            if let Some(deadline) = deadline_index.remove(&(osd_id, tid)) {
                                 // O(log n) removal from BTreeMap using full key
-                                ops.remove(&(deadline, osd_id, tid));
+                                tracked_ops.remove(&(deadline, osd_id, tid));
                                 debug!("Untracked operation: OSD {} tid={}", osd_id, tid);
                             } else {
                                 debug!("Untrack called for non-existent operation: OSD {} tid={}", osd_id, tid);

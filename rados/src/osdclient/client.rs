@@ -469,57 +469,26 @@ impl OSDClient {
         pool: u64,
         oid: &str,
     ) -> Result<(StripedPgId, Vec<i32>)> {
-        // Find pool info
         let pool_info = osdmap
             .pools
             .get(&pool)
             .ok_or(OSDClientError::PoolNotFound(pool))?;
 
-        // Create object locator
         let locator = ObjectLocator::new(pool);
 
-        // Get CRUSH map
-        let crush_map = osdmap
-            .crush
-            .as_ref()
-            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
-
-        // Map object to PG and OSDs using CRUSH
         debug!(
             "OSD weights from map (max_osd={}): {:?}",
             osdmap.max_osd, osdmap.osd_weight
         );
 
-        // Check if pool has hashpspool flag (modern pools)
-        let hashpspool =
-            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
+        // Map object name to PG seed
+        let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
+            .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {}", e)))?;
 
-        let (pg, mut osds) = crate::crush::placement::object_to_osds(
-            crush_map,
-            oid,
-            &locator,
-            pool_info.pg_num,
-            pool_info.crush_rule as u32,
-            &osdmap.osd_weight, // Use actual OSD weights from OSDMap (16.16 fixed-point format)
-            pool_info.size as usize,
-            hashpspool,
-        )
-        .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
+        // CRUSH placement + overrides
+        let osds = Self::pg_to_osds_in_map(osdmap, pool_info, pg)?;
 
-        if osds.is_empty() {
-            return Err(OSDClientError::NoOSDs);
-        }
-
-        // Apply PG overrides matching C++ _pg_to_up_acting_osds / _apply_upmap order.
-        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
-
-        if osds.is_empty() {
-            return Err(OSDClientError::NoOSDs);
-        }
-
-        // Convert to StripedPgId
         let spg = StripedPgId::from_pg(pg.pool, pg.seed);
-
         debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
 
         Ok((spg, osds))
@@ -593,6 +562,45 @@ impl OSDClient {
         // Filter out CRUSH_ITEM_NONE (-1) sentinels — these represent incomplete
         // acting set slots (e.g., during degraded state).
         osds.retain(|&osd| osd >= 0);
+    }
+
+    /// Map a PG to its acting OSD set, applying CRUSH placement and all overrides.
+    ///
+    /// Shared helper used by both `object_to_osds_in_map` and `query_pg_objects`.
+    fn pg_to_osds_in_map(
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        pool_info: &crate::osdclient::PgPool,
+        pg: crate::crush::placement::PgId,
+    ) -> Result<Vec<i32>> {
+        let crush_map = osdmap
+            .crush
+            .as_ref()
+            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
+
+        let hashpspool =
+            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
+
+        let mut osds = crate::crush::placement::pg_to_osds(
+            crush_map,
+            pg,
+            pool_info.crush_rule as u32,
+            &osdmap.osd_weight,
+            pool_info.size as usize,
+            hashpspool,
+        )
+        .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
+
+        if osds.is_empty() {
+            return Err(OSDClientError::NoOSDs);
+        }
+
+        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
+
+        if osds.is_empty() {
+            return Err(OSDClientError::NoOSDs);
+        }
+
+        Ok(osds)
     }
 
     /// Apply redirect to an operation
@@ -1044,15 +1052,7 @@ impl OSDClient {
             .await?;
 
         Self::check_op_result(&result, "Stat")?;
-
-        // Parse stat data from outdata using OsdStatData's Denc implementation
-        let outdata = result.ops.first().map(|op| &op.outdata[..]).unwrap_or(&[]);
-        let stat_data = crate::osdclient::denc_types::OsdStatData::decode(&mut &outdata[..], 0)?;
-
-        Ok(StatResult {
-            size: stat_data.size,
-            mtime: stat_data.mtime,
-        })
+        StatResult::from_op_result(&result)
     }
 
     /// Delete an object
@@ -1132,43 +1132,14 @@ impl OSDClient {
     ) -> Result<(crate::osdclient::PgNlsResponse, i32)> {
         // Derive the target PG from the cursor hash — mirrors Objecter::pg_read(current_pg,…)
         let current_pg = Self::hash_to_pg(hobject_cursor.hash, pool_info.pg_num);
-
-        // Create StripedPgId for the current PG
         let spg = StripedPgId::from_pg(pool, current_pg);
-        let hashpspool =
-            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
-        let crush_map = osdmap
-            .crush
-            .as_ref()
-            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
-
-        // Look up which OSDs handle this PG using CRUSH
         let pg = crate::crush::placement::PgId {
             pool,
             seed: current_pg,
         };
 
-        let mut osds = crate::crush::placement::pg_to_osds(
-            crush_map,
-            pg,
-            pool_info.crush_rule as u32,
-            &osdmap.osd_weight,
-            pool_info.size as usize,
-            hashpspool,
-        )
-        .map_err(|e| OSDClientError::Crush(format!("PG->OSD mapping failed: {}", e)))?;
-
-        if osds.is_empty() {
-            return Err(OSDClientError::NoOSDs);
-        }
-
-        // Apply pg_temp / pg_upmap / etc. overrides — same as regular ops.
-        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
-
-        if osds.is_empty() {
-            return Err(OSDClientError::NoOSDs);
-        }
-
+        // CRUSH placement + overrides
+        let osds = Self::pg_to_osds_in_map(osdmap, pool_info, pg)?;
         let primary_osd = osds[0];
 
         // Get session
@@ -1676,16 +1647,18 @@ impl OSDClient {
             return;
         }
 
-        for osd_id in &sessions_to_close {
-            let session = {
-                let mut sessions = self.sessions.write().await;
-                sessions.remove(osd_id)
-            };
+        // Remove all stale sessions in a single lock acquisition
+        let removed: Vec<_> = {
+            let mut sessions = self.sessions.write().await;
+            sessions_to_close
+                .iter()
+                .filter_map(|osd_id| sessions.remove(osd_id).map(|s| (*osd_id, s)))
+                .collect()
+        };
 
-            if let Some(session) = session {
-                info!("Removing stale session for OSD {}", osd_id);
-                session.close().await;
-            }
+        for (osd_id, session) in removed {
+            info!("Removing stale session for OSD {}", osd_id);
+            session.close().await;
         }
     }
 

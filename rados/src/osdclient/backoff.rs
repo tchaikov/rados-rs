@@ -16,7 +16,7 @@
 //! - ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff(), _send_op()
 
 use crate::osdclient::types::StripedPgId;
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tracing::{debug, warn};
 
 /// Composite key for backoff entries: (pgid, begin_hobject)
@@ -65,9 +65,12 @@ pub struct BackoffEntry {
 /// Uses a single BTreeMap with composite key for simpler code and faster lookups.
 #[derive(Debug, Default)]
 pub struct BackoffTracker {
-    /// Map: (pgid, begin_hobject) -> BackoffEntry
-    /// Single BTreeMap enables efficient range queries and simpler code
+    /// Primary index: (pgid, begin_hobject) -> BackoffEntry
+    /// BTreeMap enables efficient range queries for `is_blocked`.
     entries: BTreeMap<BackoffKey, BackoffEntry>,
+    /// Secondary index: backoff_id -> BackoffKey
+    /// Provides O(1) lookup for `remove_by_id` and `get_by_id`.
+    by_id: HashMap<u64, BackoffKey>,
 }
 
 #[allow(dead_code)]
@@ -76,6 +79,7 @@ impl BackoffTracker {
     pub fn new() -> Self {
         Self {
             entries: BTreeMap::new(),
+            by_id: HashMap::new(),
         }
     }
 
@@ -88,13 +92,17 @@ impl BackoffTracker {
             begin: entry.begin.clone(),
         };
 
-        // Check if already registered by looking for existing entry with same ID
-        let is_new = !self.entries.values().any(|e| e.id == entry.id);
+        let is_new = !self.by_id.contains_key(&entry.id);
 
         if !is_new {
             debug!("Backoff id={} already registered, updating", entry.id);
+            // Remove old key from secondary index if the BackoffKey changed
+            if let Some(old_key) = self.by_id.get(&entry.id).filter(|k| **k != key) {
+                self.entries.remove(old_key);
+            }
         }
 
+        self.by_id.insert(entry.id, key.clone());
         self.entries.insert(key, entry);
         is_new
     }
@@ -108,14 +116,10 @@ impl BackoffTracker {
         expected_begin: &crate::HObject,
         expected_end: &crate::HObject,
     ) -> Option<BackoffEntry> {
-        // Find the entry with matching ID
-        let key = self
-            .entries
-            .iter()
-            .find(|(_, entry)| entry.id == id)
-            .map(|(k, _)| k.clone())?;
+        // O(1) lookup via secondary index
+        let key = self.by_id.remove(&id)?;
 
-        // Remove the entry
+        // O(log n) removal from BTreeMap using full key
         let entry = self.entries.remove(&key)?;
 
         // Warn if range doesn't match (but still remove, matching Ceph behavior)
@@ -166,7 +170,8 @@ impl BackoffTracker {
 
     /// Get a backoff by ID
     pub fn get_by_id(&self, id: u64) -> Option<&BackoffEntry> {
-        self.entries.values().find(|e| e.id == id)
+        let key = self.by_id.get(&id)?;
+        self.entries.get(key)
     }
 
     /// Check if there are any active backoffs
@@ -191,6 +196,7 @@ impl BackoffTracker {
     /// Clear all backoffs (used on session reset)
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.by_id.clear();
     }
 }
 
