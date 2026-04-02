@@ -168,7 +168,7 @@ impl Denc for ServiceTicketInfo {
 #[derive(Debug, Clone, crate::StructVDenc)]
 #[denc(crate = "crate", struct_v = 1)]
 pub struct ServiceTicketReply {
-    pub struct_v: u8,
+    struct_v: u8,
     pub tickets: Vec<ServiceTicketInfo>,
 }
 

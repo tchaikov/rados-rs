@@ -216,10 +216,11 @@ pub struct CephXTicketBlob {
 }
 
 impl CephXTicketBlob {
+    const STRUCT_V: u8 = 1;
+
     pub fn new(secret_id: u64, blob: Bytes) -> Self {
-        let struct_v = 1u8;
         Self {
-            struct_v,
+            struct_v: Self::STRUCT_V,
             secret_id,
             blob,
         }
@@ -229,7 +230,7 @@ impl CephXTicketBlob {
 impl Default for CephXTicketBlob {
     fn default() -> Self {
         Self {
-            struct_v: 1u8,
+            struct_v: Self::STRUCT_V,
             secret_id: 0,
             blob: Bytes::new(),
         }

@@ -467,8 +467,7 @@ impl CephXClientHandler {
 
         let ticket_reply = crate::auth::protocol::ServiceTicketReply::decode(&mut auth_payload, 0)?;
         debug!(
-            "service_ticket_reply_v: {}, num_tickets: {}",
-            ticket_reply.struct_v,
+            "service_ticket_reply: num_tickets={}",
             ticket_reply.tickets.len()
         );
 
