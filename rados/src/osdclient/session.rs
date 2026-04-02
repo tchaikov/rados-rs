@@ -758,38 +758,36 @@ impl OSDSession {
         Some((pending_op, new_flags))
     }
 
-    /// Apply redirect information to operation
+    /// Apply redirect information to operation.
+    ///
+    /// Mirrors C++ `request_redirect_t::combine_with_locator()` which
+    /// unconditionally assigns `redirect_locator` → `target_oloc`.
     fn apply_redirect_to_op(
         op: &MOSDOp,
         redirect: &crate::osdclient::types::RequestRedirect,
     ) -> MOSDOp {
         let mut new_mosdop = op.clone();
 
-        // Update object locator with redirect information
-        if redirect.redirect_locator.pool_id != u64::MAX {
-            new_mosdop.object.pool = redirect.redirect_locator.pool_id;
-        }
-        if !redirect.redirect_locator.key.is_empty() {
-            new_mosdop
-                .object
-                .key
-                .clone_from(&redirect.redirect_locator.key);
-        }
-        if !redirect.redirect_locator.namespace.is_empty() {
-            new_mosdop
-                .object
-                .namespace
-                .clone_from(&redirect.redirect_locator.namespace);
-        }
+        // Unconditionally overwrite locator — matches C++ combine_with_locator().
+        new_mosdop.object.pool = redirect.redirect_locator.pool_id;
+        new_mosdop
+            .object
+            .key
+            .clone_from(&redirect.redirect_locator.key);
+        new_mosdop
+            .object
+            .namespace
+            .clone_from(&redirect.redirect_locator.namespace);
+
         if !redirect.redirect_object.is_empty() {
             new_mosdop.object.oid.clone_from(&redirect.redirect_object);
         }
 
-        // Set redirect flags
+        // Set redirect flags (Objecter.cc:3744)
         use crate::osdclient::types::OsdOpFlags;
-        new_mosdop.flags |= OsdOpFlags::REDIRECTED.bits();
-        new_mosdop.flags |= OsdOpFlags::IGNORE_CACHE.bits();
-        new_mosdop.flags |= OsdOpFlags::IGNORE_OVERLAY.bits();
+        let redirect_flags =
+            OsdOpFlags::REDIRECTED | OsdOpFlags::IGNORE_CACHE | OsdOpFlags::IGNORE_OVERLAY;
+        new_mosdop.flags |= redirect_flags.bits();
 
         new_mosdop
     }

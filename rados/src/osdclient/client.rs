@@ -513,43 +513,8 @@ impl OSDClient {
             return Err(OSDClientError::NoOSDs);
         }
 
-        // Check for PG overrides in OSDMap
-        // These override CRUSH placement for various reasons (rebalancing, failures, manual overrides)
-        // Note: crate::crush::PgId and crate::PgId are now the same type (crate::crush::PgId is re-exported by denc)
-
-        // 1. Check pg_upmap (complete acting set override)
-        if let Some(upmap_osds) = osdmap.pg_upmap.get(&pg) {
-            debug!("Using pg_upmap override for PG {:?}: {:?}", pg, upmap_osds);
-            osds = upmap_osds.clone();
-        }
-
-        // 2. Check pg_temp (temporary override during recovery)
-        if let Some(temp_osds) = osdmap.pg_temp.get(&pg) {
-            debug!("Using pg_temp override for PG {:?}: {:?}", pg, temp_osds);
-            osds = temp_osds.clone();
-        }
-
-        // 3. Check pg_upmap_items (fine-grained OSD replacements)
-        if let Some(upmap_items) = osdmap.pg_upmap_items.get(&pg) {
-            debug!("Applying pg_upmap_items to PG {:?}: {:?}", pg, upmap_items);
-            for &(from_osd, to_osd) in upmap_items {
-                if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
-                    osds[pos] = to_osd;
-                }
-            }
-        }
-
-        // 4. Check pg_upmap_primaries (primary OSD override)
-        if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(&pg) {
-            debug!(
-                "Using pg_upmap_primaries override for PG {:?}: primary={}",
-                pg, primary_osd
-            );
-            // Move the primary to front if it's in the set
-            if let Some(pos) = osds.iter().position(|&osd| osd == primary_osd) {
-                osds.swap(0, pos);
-            }
-        }
+        // Apply PG overrides matching C++ _pg_to_up_acting_osds / _apply_upmap order.
+        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
 
         // Convert to StripedPgId
         let spg = StripedPgId::from_pg(pg.pool, pg.seed);
@@ -574,6 +539,55 @@ impl OSDClient {
         let (_, osds) = self.object_to_osds_in_map(osdmap, pool_id, object_id)?;
         cache.insert(key, osds.clone());
         Ok(osds)
+    }
+
+    /// Apply PG placement overrides from the OSDMap.
+    ///
+    /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
+    /// 1. pg_upmap — complete acting set replacement
+    /// 2. pg_upmap_items — fine-grained OSD swaps
+    /// 3. pg_upmap_primaries — primary override
+    /// 4. pg_temp — if present, overrides the entire acting set (highest priority)
+    fn apply_pg_overrides(
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        pg: &crate::crush::placement::PgId,
+        osds: &mut Vec<i32>,
+    ) {
+        // 1. pg_upmap (complete "up" set override)
+        if let Some(upmap_osds) = osdmap.pg_upmap.get(pg) {
+            debug!("Using pg_upmap override for PG {:?}: {:?}", pg, upmap_osds);
+            *osds = upmap_osds.clone();
+        }
+
+        // 2. pg_upmap_items (fine-grained OSD replacements within the "up" set)
+        if let Some(upmap_items) = osdmap.pg_upmap_items.get(pg) {
+            debug!("Applying pg_upmap_items to PG {:?}: {:?}", pg, upmap_items);
+            for &(from_osd, to_osd) in upmap_items {
+                if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
+                    osds[pos] = to_osd;
+                }
+            }
+        }
+
+        // 3. pg_upmap_primaries (primary OSD override)
+        if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(pg) {
+            debug!(
+                "Using pg_upmap_primaries override for PG {:?}: primary={}",
+                pg, primary_osd
+            );
+            if let Some(pos) = osds.iter().position(|&osd| osd == primary_osd) {
+                osds.swap(0, pos);
+            }
+        }
+
+        // 4. pg_temp takes full priority over the "up" set (mirrors C++ _get_temp_osds).
+        // In C++, if pg_temp is non-empty, it becomes the acting set regardless of upmap.
+        if let Some(temp_osds) = osdmap.pg_temp.get(pg)
+            && !temp_osds.is_empty()
+        {
+            debug!("Using pg_temp override for PG {:?}: {:?}", pg, temp_osds);
+            *osds = temp_osds.clone();
+        }
     }
 
     /// Apply redirect to an operation
@@ -1126,7 +1140,7 @@ impl OSDClient {
             seed: current_pg,
         };
 
-        let osds = crate::crush::placement::pg_to_osds(
+        let mut osds = crate::crush::placement::pg_to_osds(
             crush_map,
             pg,
             pool_info.crush_rule as u32,
@@ -1139,6 +1153,9 @@ impl OSDClient {
         if osds.is_empty() {
             return Err(OSDClientError::NoOSDs);
         }
+
+        // Apply pg_temp / pg_upmap / etc. overrides — same as regular ops.
+        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
 
         let primary_osd = osds[0];
 
