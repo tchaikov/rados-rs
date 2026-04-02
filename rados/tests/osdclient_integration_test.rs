@@ -25,6 +25,7 @@
 use bytes::Bytes;
 use std::env;
 use std::sync::Arc;
+use tracing::info;
 use uuid::Uuid;
 
 /// Test configuration
@@ -102,6 +103,25 @@ async fn parse_pool(
     Err(format!("Pool '{}' not found in OSDMap", pool).into())
 }
 
+/// Create pool via monitor command if it doesn't already exist.
+async fn ensure_pool_exists(mon_client: &Arc<rados::monclient::MonClient>, pool_name: &str) {
+    let cmd = vec![format!(
+        r#"{{"prefix": "osd pool create", "pool": "{}"}}"#,
+        pool_name
+    )];
+    let result = mon_client
+        .invoke(cmd, Bytes::new())
+        .await
+        .expect("Failed to send pool create command");
+    assert!(
+        result.retval == 0 || result.retval == -17, // 0 = created, -17 = EEXIST
+        "Pool creation failed with retval={}: {}",
+        result.retval,
+        String::from_utf8_lossy(&result.outbl)
+    );
+    info!("Pool '{}' ready (retval={})", pool_name, result.retval);
+}
+
 /// Setup test environment
 async fn setup() -> (
     Arc<rados::monclient::MonClient>,
@@ -171,10 +191,23 @@ async fn setup() -> (
         .await
         .expect("Failed to receive latest OSDMap");
 
-    // Parse pool (name or ID) to pool ID using OSDClient
-    let pool_id = parse_pool(&config.pool, &osd_client)
-        .await
-        .expect("Failed to parse pool");
+    // Ensure pool exists (create if missing), then resolve to pool ID
+    let pool_id = match parse_pool(&config.pool, &osd_client).await {
+        Ok(id) => id,
+        Err(_) => {
+            info!("Pool '{}' not found, creating it", config.pool);
+            ensure_pool_exists(&mon_client, &config.pool).await;
+            // Wait for OSDMap with the new pool to propagate
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+            osd_client
+                .wait_for_latest_osdmap(tokio::time::Duration::from_secs(10))
+                .await
+                .expect("Failed to receive updated OSDMap after pool creation");
+            parse_pool(&config.pool, &osd_client)
+                .await
+                .expect("Pool still not found after creation")
+        }
+    };
 
     (mon_client, osd_client, pool_id)
 }
