@@ -119,7 +119,7 @@ impl MonitorAuthProvider {
 
         let mut handler = self.lock_handler()?;
 
-        let entity_str = format!("client.{}", handler.entity_name.id);
+        let entity_str = handler.entity_name.to_string();
         let key = keyring.get_key(&entity_str).ok_or_else(|| {
             crate::auth::error::CephXError::InvalidKey(format!("Key not found for {}", entity_str))
         })?;
@@ -160,29 +160,16 @@ impl AuthProvider for MonitorAuthProvider {
         // Lock the handler to handle auth response
         let mut handler = self.lock_handler()?;
 
-        // Distinguish between AUTH_REPLY_MORE (server challenge) and AUTH_DONE (final result)
-        // AUTH_REPLY_MORE: starts with u32 length prefix followed by CephXServerChallenge
-        // AUTH_DONE: starts with CephXResponseHeader (u16 request_type = 0x0100)
-
-        // Peek at the payload to determine the type
-        let mut peek = payload.clone();
-        if peek.len() >= 2 {
-            // Read first u16 to check if it's the request_type
-            let first_u16 = u16::decode(&mut peek, 0)?;
-
-            if first_u16 == crate::auth::protocol::CEPHX_GET_AUTH_SESSION_KEY {
-                // This is AUTH_DONE - handle final authentication
-                handler.handle_auth_done(payload, global_id, con_mode)
-            } else {
-                // This is AUTH_REPLY_MORE - handle server challenge
-                handler.handle_auth_response(payload)?;
-                // Return (None, None) since AUTH_REPLY_MORE doesn't provide keys
-                Ok((None, None))
-            }
+        // Distinguish AUTH_REPLY_MORE from AUTH_DONE using the handler's state
+        // machine — mirrors C++ CephxClientHandler::handle_response() which uses
+        // its `starting` flag rather than peeking at payload bytes.
+        if handler.starting {
+            // AUTH_REPLY_MORE — server challenge (first round)
+            handler.handle_auth_response(payload)?;
+            Ok((None, None))
         } else {
-            Err(crate::auth::error::CephXError::ProtocolError(
-                "Auth response payload too short".into(),
-            ))
+            // AUTH_DONE — final authentication result
+            handler.handle_auth_done(payload, global_id, con_mode)
         }
     }
 
