@@ -8,6 +8,7 @@ use serde::Serialize;
 /// Authentication protocol identifiers (from ceph_fs.h)
 pub const CEPH_AUTH_NONE: u32 = 0x1;
 pub const CEPH_AUTH_CEPHX: u32 = 0x2;
+pub const CEPH_AUTH_GSS: u32 = 0x4;
 
 /// CephX request types
 pub const CEPHX_GET_AUTH_SESSION_KEY: u16 = 0x0100;
