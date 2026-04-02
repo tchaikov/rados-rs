@@ -515,10 +515,12 @@ pub trait VersionedEncode: Sized {
         // 64 MiB is far beyond any real Ceph structure; reject early.
         const MAX_STRUCT_LEN: usize = 64 << 20;
         if struct_len > MAX_STRUCT_LEN {
-            return Err(RadosError::Codec(CodecError::InsufficientData {
-                needed: struct_len,
-                available: buf.remaining(),
-            }));
+            return Err(RadosError::InvalidData(format!(
+                "struct_len {} exceeds maximum {} for {}",
+                struct_len,
+                MAX_STRUCT_LEN,
+                std::any::type_name::<Self>()
+            )));
         }
 
         if buf.remaining() < struct_len {
