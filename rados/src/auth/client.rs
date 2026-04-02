@@ -69,7 +69,6 @@ impl CephXClientHandler {
             session: None,
             secret_key: None,
             auth_mode,
-            // Default matches librados: MON | OSD | MGR
             want_keys: EntityType::MON | EntityType::OSD | EntityType::MGR,
         })
     }
@@ -108,10 +107,7 @@ impl CephXClientHandler {
             self.entity_name, global_id
         );
 
-        // Initial request contains: auth_mode + entity_name + global_id
-        // Pre-allocate: 1 byte (auth_mode) + entity_name size + 8 bytes (global_id)
-        let estimated_size = 1 + 16 + 8; // Conservative estimate
-        let mut payload = BytesMut::with_capacity(estimated_size);
+        let mut payload = BytesMut::with_capacity(1 + 16 + 8);
         self.auth_mode.as_u8().encode(&mut payload, 0)?;
         self.entity_name.encode(&mut payload, 0)?;
         global_id.encode(&mut payload, 0)?;
@@ -135,7 +131,6 @@ impl CephXClientHandler {
 
         let secret_key = self.require_secret_key()?;
 
-        // Generate client challenge
         let mut rng = rand::thread_rng();
         let client_challenge = rng.next_u64();
 
@@ -144,29 +139,23 @@ impl CephXClientHandler {
             client_challenge, server_challenge
         );
 
-        // Calculate session key from challenges
         let session_key =
             self.calculate_session_key(secret_key, server_challenge, client_challenge)?;
 
-        // Build the request header
         let header = CephXRequestHeader {
             request_type: CEPHX_GET_AUTH_SESSION_KEY,
         };
 
-        // Request the configured service tickets alongside AUTH.
         // Mirrors `other_keys = want_keys & ~CEPH_ENTITY_TYPE_AUTH` from the Linux kernel client.
         let other_keys: u32 = (self.want_keys & !EntityType::AUTH).bits();
         let auth_request = CephXAuthenticate::new(
             client_challenge,
             session_key,
-            CephXTicketBlob::default(), // No old ticket for initial auth
+            CephXTicketBlob::default(),
             other_keys,
         );
 
-        // Encode header + authenticate (NO auth_mode for second request)
-        // Pre-allocate: header + authenticate structure
-        let estimated_size = 256; // Conservative estimate for CephXAuthenticate
-        let mut payload = BytesMut::with_capacity(estimated_size);
+        let mut payload = BytesMut::with_capacity(256);
         header.encode(&mut payload, 0)?;
         auth_request.encode(&mut payload, 0)?;
 
@@ -175,8 +164,7 @@ impl CephXClientHandler {
 
     /// Calculate session key from client secret and challenges
     ///
-    /// Implements the CephX challenge calculation algorithm:
-    /// cephx_calc_client_server_challenge() from CephxProtocol.cc
+    /// Implements cephx_calc_client_server_challenge() from CephxProtocol.cc
     fn calculate_session_key(
         &self,
         secret_key: &CryptoKey,
@@ -190,7 +178,6 @@ impl CephXClientHandler {
             server_challenge, client_challenge
         );
 
-        // Create challenge blob wrapped in encrypted envelope
         let envelope = CephXEncryptedEnvelope {
             payload: CephXChallengeBlob {
                 server_challenge,
@@ -198,22 +185,17 @@ impl CephXClientHandler {
             },
         };
 
-        let estimated_size = 32; // struct_v + magic + 2 u64s
-        let mut bl = BytesMut::with_capacity(estimated_size);
+        let mut bl = BytesMut::with_capacity(32);
         envelope.encode(&mut bl, 0)?;
 
-        // Encrypt the envelope using the client's secret key
         let ciphertext = secret_key.encrypt(&bl)?;
 
-        // In C++, encode_encrypt() adds a u32 length prefix to the encrypted data
-        // before XOR folding. We need to replicate this behavior.
-        let estimated_folding_size = 4 + ciphertext.len();
-        let mut folding_buffer = BytesMut::with_capacity(estimated_folding_size);
+        // C++ encode_encrypt() adds a u32 length prefix before XOR folding
+        let mut folding_buffer = BytesMut::with_capacity(4 + ciphertext.len());
         ciphertext.encode(&mut folding_buffer, 0)?;
         let mut folding_data = folding_buffer.freeze();
 
-        // XOR fold the entire buffer (length prefix + encrypted data) to get a 64-bit key
-        // C++ only processes complete 8-byte chunks, ignoring any remaining bytes
+        // XOR fold into 64 bits; C++ only processes complete 8-byte chunks
         let num_complete_chunks = folding_data.len() / 8;
         let mut key = 0u64;
 
@@ -228,14 +210,11 @@ impl CephXClientHandler {
     /// Handle server auth response
     pub fn handle_auth_response(&mut self, mut response: Bytes) -> Result<AuthResult> {
         if self.starting {
-            // First response should be server challenge
             debug!(
                 "Handling initial server challenge ({} bytes)",
                 response.len()
             );
 
-            // AUTH_REPLY_MORE has a u32 length prefix before the actual CephXServerChallenge
-            // Format: [u32 length][u8 struct_v][u64 server_challenge]
             if response.len() < 4 {
                 return Err(CephXError::ProtocolError(
                     "AUTH_REPLY_MORE too short".into(),
@@ -253,9 +232,6 @@ impl CephXClientHandler {
             );
             Ok(AuthResult::NeedMoreData)
         } else {
-            // Subsequent AUTH_REPLY_MORE messages should not occur in the normal flow.
-            // After the initial server challenge, we should get AUTH_DONE instead.
-            // If we reach here, it's an unexpected protocol state.
             Err(CephXError::ProtocolError(
                 "Unexpected AUTH_REPLY_MORE after initial challenge. Expected AUTH_DONE.".into(),
             ))
@@ -270,11 +246,8 @@ impl CephXClientHandler {
     ) -> Result<(CryptoKey, Duration)> {
         use crate::auth::protocol::CephXEncryptedEnvelope;
 
-        // Decrypt the encrypted data
-        let decrypted = secret_key.decrypt(&encrypted_ticket.encrypted_data)?;
-        let mut decrypted_data = decrypted;
+        let mut decrypted_data = secret_key.decrypt(&encrypted_ticket.encrypted_data)?;
 
-        // Decode using CephXEncryptedEnvelope<CephXServiceTicket>
         let envelope = CephXEncryptedEnvelope::<crate::auth::protocol::CephXServiceTicket>::decode(
             &mut decrypted_data,
             0,
@@ -314,7 +287,6 @@ impl CephXClientHandler {
                 }
                 Err(e) => {
                     // Extra tickets may contain invalid/placeholder data
-                    // Return successfully decoded tickets so far
                     debug!(
                         "Stopping at ticket {}/{} due to error: {:?} (decoded {} valid tickets)",
                         i + 1,
@@ -343,19 +315,14 @@ impl CephXClientHandler {
         let (session_key, validity) =
             self.decrypt_service_ticket(&encrypted_ticket, auth_session_key)?;
 
-        // Extract ticket blob bytes (decrypt if encrypted)
         let ticket_enc = u8::decode(buf, 0)?;
         let mut ticket_blob_bytes = if ticket_enc != 0 {
-            // Encrypted: read length-prefixed encrypted data and decrypt
-            // Bytes::decode() is zero-copy when buf is Bytes (just increments refcount)
             let encrypted_bl = Bytes::decode(buf, 0)?;
             session_key.decrypt(&encrypted_bl)?
         } else {
-            // Unencrypted: read length-prefixed data directly
             Bytes::decode(buf, 0)?
         };
 
-        // Decode ticket blob from the extracted bytes
         let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)?;
 
         Ok(DecodedServiceTicket {
@@ -373,25 +340,21 @@ impl CephXClientHandler {
     ) -> Result<Option<Bytes>> {
         use crate::auth::protocol::CephXEncryptedEnvelope;
 
-        // Read outer bufferlist (length-prefixed)
         let mut encrypted_secret_bl = Bytes::decode(payload, 0)?;
         if encrypted_secret_bl.is_empty() {
             return Ok(None);
         }
 
-        // Read inner encrypted data (length-prefixed)
         let encrypted_secret = Bytes::decode(&mut encrypted_secret_bl, 0)?;
         if encrypted_secret.is_empty() {
             return Ok(None);
         }
 
-        // Decrypt connection_secret
         let mut decrypted_secret = session_key.decrypt(&encrypted_secret)?;
 
-        // Decode envelope
         let envelope = CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0)?;
 
-        // Return payload if non-empty (CRC mode has empty connection_secret)
+        // CRC mode has empty connection_secret
         if envelope.payload.is_empty() {
             Ok(None)
         } else {
@@ -440,13 +403,11 @@ impl CephXClientHandler {
             .as_ref()
             .ok_or_else(|| CephXError::AuthenticationFailed("No secret key set".into()))?;
 
-        // Create session if it doesn't exist yet
         let session = self.session.get_or_insert_with(|| {
             debug!("Creating new session with global_id={}", global_id);
             CephXSession::new(self.entity_name.clone(), global_id, secret_key.clone())
         });
 
-        // Store all service tickets in the session
         for ticket in ticket_handlers {
             let handler = session.get_ticket_handler(ticket.service_type);
             debug!(
@@ -479,12 +440,11 @@ impl CephXClientHandler {
         let secret_key = self.require_secret_key()?;
 
         // AUTH_DONE auth_payload structure:
-        // 1. CephXResponseHeader (u16 request_type) - should be CEPHX_GET_AUTH_SESSION_KEY (0x0100)
-        // 2. Service ticket reply (parsed by verify_service_ticket_reply)
-        // 3. connection_secret bufferlist (u32 len + encrypted data)
-        // 4. extra_tickets bufferlist (u32 len + data)
+        // 1. CephXResponseHeader (request_type + status)
+        // 2. ServiceTicketReply (service tickets)
+        // 3. connection_secret bufferlist (encrypted)
+        // 4. extra_tickets bufferlist
 
-        // Decode CephXResponseHeader
         let header = CephXResponseHeader::decode(&mut auth_payload, 0)?;
         debug!(
             "CephXResponseHeader: request_type=0x{:04x}, status={}",
@@ -505,7 +465,6 @@ impl CephXClientHandler {
             )));
         }
 
-        // Decode the service ticket reply using the new Denc structure
         let ticket_reply = crate::auth::protocol::ServiceTicketReply::decode(&mut auth_payload, 0)?;
         debug!(
             "service_ticket_reply_v: {}, num_tickets: {}",
@@ -517,12 +476,10 @@ impl CephXClientHandler {
             return Err(CephXError::ProtocolError("No tickets in AUTH_DONE".into()));
         }
 
-        // Process all service tickets
         let mut ticket_handlers: Vec<DecodedServiceTicket> =
             Vec::with_capacity(ticket_reply.tickets.len());
 
         for ticket_info in ticket_reply.tickets {
-            // Decrypt the encrypted service ticket to get session key and validity
             let (session_key, validity) =
                 self.decrypt_service_ticket(&ticket_info.encrypted_service_ticket, secret_key)?;
 
@@ -539,7 +496,6 @@ impl CephXClientHandler {
             });
         }
 
-        // Extract first ticket's session key (AUTH service) for returning and decryption
         let auth_session_key = ticket_handlers
             .first()
             .ok_or_else(|| CephXError::ProtocolError("No tickets available".into()))?
@@ -547,7 +503,6 @@ impl CephXClientHandler {
             .clone();
         let session_key_bytes = auth_session_key.secret.clone();
 
-        // Decode connection_secret blob (encrypted with session_key)
         let connection_secret_bytes =
             self.decode_connection_secret(&mut auth_payload, &auth_session_key)?;
 
@@ -566,7 +521,7 @@ impl CephXClientHandler {
                 let mut extra_tickets_bl = auth_payload.split_to(extra_tickets_len);
                 trace!("Parsing extra_tickets: {} bytes", extra_tickets_bl.len());
 
-                // Extra tickets are encrypted with the AUTH session key (from first ticket)
+                // Extra tickets are encrypted with the AUTH session key
                 match self.decode_extra_tickets(&mut extra_tickets_bl, &auth_session_key) {
                     Ok(extra_handlers) => {
                         ticket_handlers.extend(extra_handlers);
@@ -578,7 +533,6 @@ impl CephXClientHandler {
             }
         }
 
-        // Store all tickets in session
         self.store_ticket_handlers(ticket_handlers, global_id)?;
 
         Ok((Some(session_key_bytes), connection_secret_bytes))
@@ -602,13 +556,11 @@ impl CephXClientHandler {
             encrypted_payload.len()
         );
 
-        // Get session or return error
         let session = self
             .session
             .as_ref()
             .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
 
-        // Get ticket handler for the service
         let handler = session.ticket_handlers.get(&service_type).ok_or_else(|| {
             CephXError::AuthenticationFailed(format!(
                 "No ticket handler for service {:?}",
@@ -623,14 +575,11 @@ impl CephXClientHandler {
             )));
         }
 
-        // Decode length-prefixed encrypted data using Denc
         let encrypted_data = Bytes::decode(&mut encrypted_payload, 0)?;
         trace!("encrypted_len: {}", encrypted_data.len());
 
-        // Decrypt using session key
         let mut dec_buf = handler.session_key.decrypt(&encrypted_data)?;
 
-        // Decode the encrypted envelope containing CephXAuthorizeReply
         let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)?;
 
         let server_challenge = envelope.payload.nonce_plus_one;
@@ -642,11 +591,6 @@ impl CephXClientHandler {
     /// Build an authorizer for a service (OSD, MDS, etc.)
     /// This is used when connecting to services after obtaining tickets from the monitor
     /// Returns the authorizer buffer to be sent to the service
-    ///
-    /// # Arguments
-    /// * `service_id` - Service type (4=OSD, 2=MDS, etc.)
-    /// * `global_id` - Client global ID
-    /// * `server_challenge` - Optional server challenge (for challenge-response)
     pub fn build_authorizer(
         &mut self,
         service_type: EntityType,
@@ -660,16 +604,13 @@ impl CephXClientHandler {
             service_type, global_id
         );
 
-        // Get session or return error
         let session = self
             .session
             .as_mut()
             .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
 
-        // Get global_id first (before mut borrow)
         let actual_global_id = session.global_id;
 
-        // Get or create ticket handler
         let handler = session.get_ticket_handler(service_type);
 
         let ticket_blob = handler
@@ -693,10 +634,8 @@ impl CephXClientHandler {
             session_key.secret.len()
         );
 
-        // Build CephXAuthorizeA
         let authorize_a = CephXAuthorizeA::new(actual_global_id, service_type.bits(), ticket_blob);
 
-        // Generate nonce and build CephXAuthorizeB
         let mut rng = rand::thread_rng();
         let nonce = rng.next_u64();
         let authorize_b = if let Some(challenge) = server_challenge {
@@ -705,9 +644,7 @@ impl CephXClientHandler {
             CephXAuthorizeB::new(nonce)
         };
 
-        // Encode authorize_a
-        let estimated_size = 128; // Conservative estimate for CephXAuthorizeA
-        let mut authorizer_buf = BytesMut::with_capacity(estimated_size);
+        let mut authorizer_buf = BytesMut::with_capacity(128);
         authorize_a.encode(&mut authorizer_buf, 0)?;
 
         trace!(
@@ -716,12 +653,8 @@ impl CephXClientHandler {
             authorizer_buf.len()
         );
 
-        // Encrypt authorize_b with session key (envelope wrapping happens inside)
         let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b)?;
-
         trace!("encrypted_b length: {}", encrypted_b.len());
-
-        // Append encrypted authorize_b to the authorizer buffer
         authorizer_buf.extend_from_slice(&encrypted_b);
 
         debug!("Built authorizer: {} bytes", authorizer_buf.len());
@@ -736,19 +669,16 @@ impl CephXClientHandler {
     ) -> Result<Bytes> {
         use crate::auth::protocol::CephXEncryptedEnvelope;
 
-        // Wrap authorize_b in encrypted envelope and encode
         let envelope = CephXEncryptedEnvelope {
             payload: authorize_b.clone(),
         };
 
-        let estimated_size = 64; // Conservative estimate for envelope
-        let mut envelope_buf = BytesMut::with_capacity(estimated_size);
+        let mut envelope_buf = BytesMut::with_capacity(64);
         envelope.encode(&mut envelope_buf, 0)?;
 
-        // Encrypt with AES-128-CBC using session key
         let ciphertext = session_key.encrypt(&envelope_buf)?;
 
-        // Add length prefix (wire format: u32 len + encrypted data)
+        // Wire format: u32 len + encrypted data
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
         (ciphertext.len() as u32).encode(&mut result, 0)?;
         result.extend_from_slice(&ciphertext);
@@ -774,13 +704,6 @@ impl CephXClientHandler {
     /// 1. CephXRequestHeader with CEPHX_GET_PRINCIPAL_SESSION_KEY
     /// 2. An authorizer built from the AUTH ticket handler
     /// 3. CephXServiceTicketRequest with the needed service keys bitmask
-    ///
-    /// # Arguments
-    /// * `global_id` - Global ID assigned by monitor
-    /// * `needed_keys` - Bitmask of service types that need renewal (MON|OSD|MDS|MGR)
-    ///
-    /// # Returns
-    /// Returns the encoded ticket renewal request payload
     pub fn build_ticket_renewal_request(
         &mut self,
         global_id: u64,
@@ -791,26 +714,17 @@ impl CephXClientHandler {
             global_id, needed_keys
         );
 
-        // Build the request payload
         let mut payload = BytesMut::with_capacity(256);
 
-        // 1. Encode request header
         let header = crate::auth::protocol::CephXRequestHeader {
             request_type: crate::auth::protocol::CEPHX_GET_PRINCIPAL_SESSION_KEY,
         };
         header.encode(&mut payload, 0)?;
 
-        // 2. Build and encode authorizer from AUTH ticket handler
         // The authorizer proves we have a valid AUTH ticket
-        let authorizer = self.build_authorizer(
-            EntityType::AUTH,
-            global_id,
-            None, // No server challenge for ticket renewal
-        )?;
-
+        let authorizer = self.build_authorizer(EntityType::AUTH, global_id, None)?;
         payload.extend_from_slice(&authorizer);
 
-        // 3. Encode service ticket request with needed keys
         let ticket_request =
             crate::auth::protocol::CephXServiceTicketRequest::new(needed_keys.bits());
         ticket_request.encode(&mut payload, 0)?;

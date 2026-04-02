@@ -137,16 +137,11 @@ impl MonitorAuthProvider {
 
 impl AuthProvider for MonitorAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, _service_id: u32) -> Result<Bytes> {
-        // Lock the handler to build auth payload
         let handler = self.lock_handler()?;
 
-        // For monitors, do full CephX authentication
-        // Check if we've received server challenge
         if handler.server_challenge.is_some() {
-            // Second round - send authenticate request with challenge response
             handler.build_authenticate_request()
         } else {
-            // First round - send initial request
             handler.build_initial_request(global_id)
         }
     }
@@ -157,7 +152,6 @@ impl AuthProvider for MonitorAuthProvider {
         global_id: u64,
         con_mode: u32,
     ) -> Result<(Option<Bytes>, Option<Bytes>)> {
-        // Lock the handler to handle auth response
         let mut handler = self.lock_handler()?;
 
         // Distinguish AUTH_REPLY_MORE from AUTH_DONE using the handler's state
@@ -198,12 +192,10 @@ impl AuthProvider for MonitorAuthProvider {
 #[derive(Debug, Clone)]
 pub struct ServiceAuthProvider {
     handler: std::sync::Arc<std::sync::Mutex<crate::auth::client::CephXClientHandler>>,
-    /// Track if we've already sent an authorizer (to avoid sending twice)
-    authorizer_sent: bool,
     /// Pending server challenge (if received)
     server_challenge: Option<u64>,
-    /// Service ID we're authenticating with (set when build_auth_payload is called)
-    service_id: Option<u32>,
+    /// Service type we're authenticating with (set when build_auth_payload is called)
+    service_type: Option<EntityType>,
 }
 
 impl ServiceAuthProvider {
@@ -217,9 +209,8 @@ impl ServiceAuthProvider {
     ) -> Self {
         Self {
             handler,
-            authorizer_sent: false,
             server_challenge: None,
-            service_id: None,
+            service_type: None,
         }
     }
 
@@ -268,32 +259,16 @@ impl ServiceAuthProvider {
 
 impl AuthProvider for ServiceAuthProvider {
     fn build_auth_payload(&mut self, global_id: u64, service_id: u32) -> Result<Bytes> {
+        let service_type = EntityType::from_bits_retain(service_id);
         debug!(
-            "ServiceAuthProvider::build_auth_payload called with service_id={}, global_id={}",
-            service_id, global_id
+            "ServiceAuthProvider::build_auth_payload: service_type={:?}, global_id={}",
+            service_type, global_id
         );
 
-        // Store service_id for later use in handle_auth_response
-        self.service_id = Some(service_id);
+        self.service_type = Some(service_type);
 
-        // Lock the handler to build authorizer from existing tickets
-        // This is a very fast operation (just crypto operations)
-        let result = {
-            let mut handler = self.lock_handler()?;
-            handler.build_authorizer(
-                EntityType::from_bits_retain(service_id),
-                global_id,
-                self.server_challenge,
-            )
-        };
-
-        if let Err(ref e) = result {
-            debug!("build_authorizer failed: {:?}", e);
-        } else {
-            debug!("build_authorizer succeeded");
-            self.authorizer_sent = true;
-        }
-        result
+        let mut handler = self.lock_handler()?;
+        handler.build_authorizer(service_type, global_id, self.server_challenge)
     }
 
     fn handle_auth_response(
@@ -308,10 +283,9 @@ impl AuthProvider for ServiceAuthProvider {
             con_mode
         );
 
-        // For authorizer-based auth, the first AUTH_REPLY_MORE contains an encrypted
-        // CephXAuthorizeReply with server_challenge. We need to decrypt it and
-        // rebuild the authorizer with the challenge included.
-        // The second AUTH_REPLY_MORE (if any) would be AUTH_DONE.
+        let service_type = self.service_type.ok_or_else(|| {
+            CephXError::ProtocolError("No service_type set in ServiceAuthProvider".into())
+        })?;
 
         // Encrypted authorize challenge: u32 length prefix (4) + 2 AES blocks (32) = 36 bytes.
         // The inner plaintext is: struct_v(1) + magic(8) + CephXAuthorizeReply(1+8) = 18 bytes,
@@ -320,19 +294,9 @@ impl AuthProvider for ServiceAuthProvider {
         if payload.len() == ENCRYPTED_AUTHORIZE_CHALLENGE_LEN {
             debug!("Received encrypted authorize challenge, decrypting...");
 
-            // Get the service_id we're authenticating with
-            let service_id = self.service_id.ok_or_else(|| {
-                CephXError::ProtocolError("No service_id set in ServiceAuthProvider".into())
-            })?;
-
-            // Lock the handler to decrypt the challenge
             let server_challenge = {
                 let handler = self.lock_handler()?;
-                // Decrypt and extract server_challenge
-                handler.decrypt_authorize_challenge(
-                    EntityType::from_bits_retain(service_id),
-                    payload.clone(),
-                )?
+                handler.decrypt_authorize_challenge(service_type, payload.clone())?
             };
 
             debug!(
@@ -340,46 +304,27 @@ impl AuthProvider for ServiceAuthProvider {
                 server_challenge
             );
 
-            // Store the challenge for the next authorizer
             self.server_challenge = Some(server_challenge);
-
-            // Reset the flag so build_auth_payload sends it again with the challenge
-            self.authorizer_sent = false;
-
             return Ok((None, None));
         }
 
         info!(
-            "AUTH_DONE received for OSD: global_id={}, con_mode={}",
-            global_id, con_mode
+            "AUTH_DONE received for service {:?}: global_id={}, con_mode={}",
+            service_type, global_id, con_mode
         );
 
-        // Lock the handler to get the session key
         let handler = self.lock_handler()?;
 
-        // Get the session key for this service from the ticket handler
-        let session_key = if let Some(session) = handler.get_session() {
-            // Get the ticket handler for the connected service
-            let stype = self
-                .service_id
-                .map(EntityType::from_bits_retain)
-                .ok_or_else(|| {
-                    CephXError::ProtocolError("No service_id set in ServiceAuthProvider".into())
-                })?;
-            session
-                .ticket_handlers
-                .get(&stype)
-                .map(|handler| handler.session_key.clone())
-        } else {
-            None
-        };
+        let session_key = handler
+            .get_session()
+            .and_then(|session| session.ticket_handlers.get(&service_type))
+            .map(|th| th.session_key.clone());
 
         debug!(
             "Returning session_key: {} bytes",
             session_key.as_ref().map(|k| k.secret.len()).unwrap_or(0)
         );
 
-        // Extract connection_secret from AUTH_DONE payload using CephXEncryptedEnvelope
         let connection_secret =
             Self::try_extract_connection_secret(con_mode, &payload, session_key.as_ref());
 
@@ -387,22 +332,16 @@ impl AuthProvider for ServiceAuthProvider {
             debug!("Extracted connection_secret: {} bytes", secret.len());
         }
 
-        // Return the session key so AUTH_SIGNATURE can be computed
-        // Also return connection_secret for SECURE mode
         Ok((session_key.map(|k| k.secret.clone()), connection_secret))
     }
 
     fn has_valid_ticket(&self, service_id: u32) -> bool {
-        // Lock the handler to check ticket validity
-        if let Ok(handler) = self.handler.lock() {
-            if let Some(session) = handler.get_session() {
-                session.has_valid_ticket(EntityType::from_bits_retain(service_id))
-            } else {
-                false
-            }
-        } else {
-            false
-        }
+        let Ok(handler) = self.handler.lock() else {
+            return false;
+        };
+        handler
+            .get_session()
+            .is_some_and(|s| s.has_valid_ticket(EntityType::from_bits_retain(service_id)))
     }
 
     fn clone_box(&self) -> Box<dyn AuthProvider> {

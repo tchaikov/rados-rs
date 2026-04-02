@@ -12,9 +12,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) use crate::EntityName;
 pub use crate::EntityType;
 
-/// Global ID type for auth session tracking (raw u64).
-type GlobalId = u64;
-
 /// Cryptographic key for CephX authentication
 ///
 /// Corresponds to C++ `CryptoKey` class in `/src/auth/Crypto.h`
@@ -155,13 +152,10 @@ impl CryptoKey {
 
 impl Denc for CryptoKey {
     fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> std::result::Result<(), RadosError> {
-        // Encode type (u16)
         self.crypto_type.encode(buf, 0)?;
 
-        // Encode created time using SystemTime's Denc implementation
         self.created.encode(buf, features)?;
 
-        // Encode secret length (u16) + secret data
         (self.secret.len() as u16).encode(buf, 0)?;
         buf.put_slice(&self.secret);
         Ok(())
@@ -169,8 +163,6 @@ impl Denc for CryptoKey {
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
         let crypto_type = u16::decode(buf, 0)?;
-
-        // Decode created time using SystemTime's Denc implementation
         let created = SystemTime::decode(buf, features)?;
 
         let secret_len = u16::decode(buf, 0)? as usize;
@@ -396,7 +388,7 @@ impl TicketHandler {
 #[derive(Debug, Clone)]
 pub struct CephXSession {
     pub entity_name: EntityName,
-    pub global_id: GlobalId,
+    pub global_id: u64,
     pub session_key: CryptoKey,
     pub ticket: Option<CephXTicketBlob>,
     /// Ticket handlers for service tickets (OSD, MDS, etc.)
@@ -404,7 +396,7 @@ pub struct CephXSession {
 }
 
 impl CephXSession {
-    pub fn new(entity_name: EntityName, global_id: GlobalId, session_key: CryptoKey) -> Self {
+    pub fn new(entity_name: EntityName, global_id: u64, session_key: CryptoKey) -> Self {
         Self {
             entity_name,
             global_id,
