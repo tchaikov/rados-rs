@@ -166,6 +166,27 @@ impl CrushMap {
 /// - Item references: each item in a bucket is a valid device or bucket
 /// - TAKE rule args: each TAKE step references a valid bucket or device
 fn validate_crush_map(map: &CrushMap) -> Result<()> {
+    // Shared check: item must be a valid device index or an occupied bucket slot.
+    let validate_item_ref = |item: i32, context: &str| -> Result<()> {
+        if item >= 0 {
+            if item >= map.max_devices {
+                return Err(CrushError::DecodeError(format!(
+                    "{} references device {}, but max_devices is {}",
+                    context, item, map.max_devices
+                )));
+            }
+        } else {
+            let idx = (-1 - item) as usize;
+            if idx >= map.buckets.len() || map.buckets[idx].is_none() {
+                return Err(CrushError::DecodeError(format!(
+                    "{} references non-existent bucket {}",
+                    context, item
+                )));
+            }
+        }
+        Ok(())
+    };
+
     for (i, slot) in map.buckets.iter().enumerate() {
         let bucket = match slot {
             Some(b) => b,
@@ -181,45 +202,14 @@ fn validate_crush_map(map: &CrushMap) -> Result<()> {
         }
 
         for &item in &bucket.items {
-            if item >= 0 {
-                if item >= map.max_devices {
-                    return Err(CrushError::DecodeError(format!(
-                        "Bucket {} references device {}, but max_devices is {}",
-                        bucket.id, item, map.max_devices
-                    )));
-                }
-            } else {
-                let target_idx = (-1 - item) as usize;
-                if target_idx >= map.buckets.len() || map.buckets[target_idx].is_none() {
-                    return Err(CrushError::DecodeError(format!(
-                        "Bucket {} references non-existent bucket {}",
-                        bucket.id, item
-                    )));
-                }
-            }
+            validate_item_ref(item, &format!("Bucket {}", bucket.id))?;
         }
     }
 
     for rule in map.rules.iter().flatten() {
         for step in &rule.steps {
             if step.op == RuleOp::Take {
-                let item = step.arg1;
-                if item >= 0 {
-                    if item >= map.max_devices {
-                        return Err(CrushError::DecodeError(format!(
-                            "Rule {} TAKE references device {}, but max_devices is {}",
-                            rule.rule_id, item, map.max_devices
-                        )));
-                    }
-                } else {
-                    let idx = (-1 - item) as usize;
-                    if idx >= map.buckets.len() || map.buckets[idx].is_none() {
-                        return Err(CrushError::DecodeError(format!(
-                            "Rule {} TAKE references non-existent bucket {}",
-                            rule.rule_id, item
-                        )));
-                    }
-                }
+                validate_item_ref(step.arg1, &format!("Rule {} TAKE", rule.rule_id))?;
             }
         }
     }
