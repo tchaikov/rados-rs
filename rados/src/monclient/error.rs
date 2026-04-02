@@ -9,14 +9,8 @@ pub enum MonClientError {
     #[error("Not connected to any monitor")]
     NotConnected,
 
-    #[error("Authentication failed: {0}")]
-    AuthenticationFailed(String),
-
     #[error("Timeout waiting for authentication to complete")]
     AuthenticationTimeout,
-
-    #[error("Command failed with code {code}: {message}")]
-    CommandFailed { code: i32, message: String },
 
     #[error("Timeout waiting for response")]
     Timeout,
@@ -39,17 +33,8 @@ pub enum MonClientError {
     #[error("Configuration error: {0}")]
     ConfigError(String),
 
-    #[error("Shutting down")]
-    ShuttingDown,
-
     #[error("Message error: {0}")]
     MessageError(#[from] crate::msgr2::error::Msgr2Error),
-
-    #[error("Encoding error")]
-    EncodingError,
-
-    #[error("Authentication error: {0}")]
-    AuthError(String),
 
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),

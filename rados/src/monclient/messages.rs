@@ -567,7 +567,7 @@ pub struct MPoolOpReply {
 
     // MPoolOpReply fields
     pub fsid: UuidD,
-    pub reply_code: u32,
+    pub reply_code: i32,
     pub epoch: u32,
     pub response_data: Bytes,
 }
@@ -596,7 +596,7 @@ impl PaxosServiceMessage for MPoolOpReply {
 
     fn decode_message(paxos: PaxosFields, data: &mut &[u8]) -> Result<Self> {
         let fsid = UuidD::decode(data, 0)?;
-        let reply_code = u32::decode(data, 0)?;
+        let reply_code = i32::decode(data, 0)?;
         let epoch = u32::decode(data, 0)?;
         let has_data = u8::decode(data, 0)?;
         let response_data = if has_data != 0 {

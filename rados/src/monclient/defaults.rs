@@ -22,9 +22,6 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
 /// Set to 0 to disable keepalive timeout checking
 pub const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default connection timeout for establishing a monitor session
-pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
-
 /// Backoff multiplier applied to hunt_interval after each failed hunt
 pub const HUNT_INTERVAL_BACKOFF: f64 = 1.5;
 

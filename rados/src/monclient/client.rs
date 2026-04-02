@@ -16,7 +16,6 @@ use crate::msgr2::MapSender;
 use crate::msgr2::ceph_message::{CephMessage, CrcFlags};
 use bytes::Bytes;
 use dashmap::DashMap;
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -70,9 +69,6 @@ pub struct MonClientConfig {
     /// If None, will attempt to auto-detect from /etc/ceph/ceph.conf
     pub auth: Option<crate::monclient::auth_config::AuthConfig>,
 
-    /// Connection timeout
-    pub connect_timeout: Duration,
-
     /// Command timeout
     pub command_timeout: Duration,
 
@@ -122,7 +118,6 @@ impl Default for MonClientConfig {
         Self {
             mon_addrs: Vec::new(),
             auth: None, // Will auto-detect from /etc/ceph/ceph.conf
-            connect_timeout: defaults::CONNECT_TIMEOUT,
             command_timeout: defaults::COMMAND_TIMEOUT,
             hunt_interval: defaults::HUNT_INTERVAL,
             hunt_parallel: defaults::HUNT_PARALLEL,
@@ -235,9 +230,6 @@ impl RuntimeMonClientConfig {
 struct ConnectionState {
     /// Active connection
     active_con: Option<Arc<MonConnection>>,
-
-    /// Pending connections (during hunting)
-    pending_cons: HashMap<usize, Arc<MonConnection>>,
 
     /// Hunting flag
     hunting: bool,
@@ -356,7 +348,6 @@ impl MonClient {
         // Initialize separate state components
         let connection_state = ConnectionState {
             active_con: None,
-            pending_cons: HashMap::new(),
             hunting: false,
             reopen_interval_multiplier: config.hunt_interval_min_multiple,
             last_hunt_attempt: None,
@@ -487,23 +478,14 @@ impl MonClient {
         self.commands.clear();
         self.pool_ops.clear();
 
-        // Take connections to close them after releasing the lock
-        let (active_con, pending_cons) = {
+        // Take the active connection to close it after releasing the lock
+        let active_con = {
             let mut conn_state = self.connection_state.write().await;
-            let active_con = conn_state.active_con.take();
-            let pending_cons: Vec<_> = conn_state
-                .pending_cons
-                .drain()
-                .map(|(_, con)| con)
-                .collect();
-            (active_con, pending_cons)
+            conn_state.active_con.take()
         };
 
-        // Close connections after releasing the lock (close() now awaits task termination)
+        // Close connection after releasing the lock (close() now awaits task termination)
         if let Some(con) = active_con {
-            con.close().await?;
-        }
-        for con in pending_cons {
             con.close().await?;
         }
 
@@ -775,7 +757,6 @@ impl MonClient {
                 // We won the race - set this as the active connection
                 conn_state.active_con = Some(Arc::clone(&mon_con));
                 conn_state.hunting = false;
-                conn_state.pending_cons.clear();
                 conn_state.had_a_connection = true;
 
                 // Un-backoff: reduce the backoff multiplier on successful connection
@@ -1434,8 +1415,7 @@ impl MonClient {
         );
 
         if let Some((_, tracker)) = self.pool_ops.remove(&tid) {
-            let result =
-                PoolOpResult::new(reply.reply_code as i32, reply.epoch, reply.response_data);
+            let result = PoolOpResult::new(reply.reply_code, reply.epoch, reply.response_data);
             let _ = tracker.result_tx.send(result);
         } else {
             debug!(
@@ -1513,15 +1493,8 @@ impl MonClient {
                 cmd: msg.clone(),
             },
         );
-        if let Err(e) = send_msg_with_tid(&active_con, &msg, tid).await {
-            self.commands.remove(&tid);
-            return Err(e);
-        }
-
-        tokio::time::timeout(self.command_timeout().await, rx)
+        self.send_and_wait(&active_con, &msg, tid, rx)
             .await
-            .map_err(|_| MonClientError::Timeout)?
-            .map_err(|_| MonClientError::Other("Channel closed".into()))
             .inspect_err(|_| {
                 self.commands.remove(&tid);
             })
