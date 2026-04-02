@@ -457,12 +457,6 @@ impl OSDClient {
             })
     }
 
-    /// Map an object to OSDs using CRUSH
-    async fn object_to_osds(&self, pool: u64, oid: &str) -> Result<(StripedPgId, Vec<i32>)> {
-        let osdmap = self.get_osdmap().await?;
-        self.object_to_osds_in_map(&osdmap, pool, oid)
-    }
-
     fn object_to_osds_in_map(
         &self,
         osdmap: &crate::osdclient::osdmap::OSDMap,
@@ -808,10 +802,9 @@ impl OSDClient {
                 continue;
             }
 
-            // Map to OSDs based on current object
-            let (spg, osds) = self
-                .object_to_osds(msg.object.pool, &msg.object.oid)
-                .await?;
+            // Map to OSDs based on current object (using the osdmap we already have)
+            let (spg, osds) =
+                self.object_to_osds_in_map(&osdmap, msg.object.pool, &msg.object.oid)?;
             let primary_osd = osds[0];
             msg.pgid = spg;
 
@@ -1605,13 +1598,7 @@ impl OSDClient {
         let mut placement_cache = HashMap::new();
 
         for (tid, pool_id, object_id, op_osdmap_epoch) in metadata {
-            // Check if pool deleted
-            if !osdmap.pools.contains_key(&pool_id) {
-                if let Some(pending_op) = session.remove_pending_op(tid).await {
-                    let _ = pending_op
-                        .result_tx
-                        .send(Err(OSDClientError::PoolNotFound(pool_id)));
-                }
+            if Self::fail_if_pool_deleted(session, tid, pool_id, osdmap).await {
                 continue;
             }
 
@@ -1722,6 +1709,24 @@ impl OSDClient {
         !map_has_match
     }
 
+    /// Fail a pending op whose pool no longer exists, returning true if handled.
+    async fn fail_if_pool_deleted(
+        session: &OSDSession,
+        tid: u64,
+        pool_id: u64,
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+    ) -> bool {
+        if osdmap.pools.contains_key(&pool_id) {
+            return false;
+        }
+        if let Some(pending_op) = session.remove_pending_op(tid).await {
+            let _ = pending_op
+                .result_tx
+                .send(Err(OSDClientError::PoolNotFound(pool_id)));
+        }
+        true
+    }
+
     /// Drain all pending operations from a session that is about to be closed.
     ///
     /// Each operation is either failed (if its pool was deleted) or re-targeted
@@ -1736,12 +1741,7 @@ impl OSDClient {
         let metadata = session.get_pending_ops_metadata().await;
         let mut placement_cache = HashMap::new();
         for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
-            if !osdmap.pools.contains_key(&pool_id) {
-                if let Some(pending_op) = session.remove_pending_op(tid).await {
-                    let _ = pending_op
-                        .result_tx
-                        .send(Err(OSDClientError::PoolNotFound(pool_id)));
-                }
+            if Self::fail_if_pool_deleted(session, tid, pool_id, osdmap).await {
                 continue;
             }
             if let Ok(new_osds) =
@@ -2301,30 +2301,27 @@ impl OSDClient {
             backoff.end,
         );
 
-        match ack.encode_payload(0) {
-            Ok(payload) => {
-                let msg = crate::msgr2::message::Message::new(
-                    crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF,
-                    payload,
-                )
-                .with_version(MOSDBackoff::VERSION);
+        let backoff_id = ack.id;
+        let payload = ack
+            .encode_payload(0)
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode ACK_BLOCK: {}", e)))?;
 
-                let send_tx = session.send_tx();
-                if let Err(e) = send_tx.send(msg).await {
-                    error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
-                } else {
-                    debug!("Sent ACK_BLOCK for backoff id={} to OSD {}", ack.id, osd_id);
-                }
-                Ok(())
-            }
-            Err(e) => {
-                error!("Failed to encode ACK_BLOCK message: {}", e);
-                Err(OSDClientError::Encoding(format!(
-                    "Failed to encode ACK_BLOCK: {}",
-                    e
-                )))
-            }
+        let msg = crate::msgr2::message::Message::new(
+            crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF,
+            payload,
+        )
+        .with_version(MOSDBackoff::VERSION);
+
+        let send_tx = session.send_tx();
+        if let Err(e) = send_tx.send(msg).await {
+            error!("Failed to send ACK_BLOCK to OSD {}: {}", osd_id, e);
+        } else {
+            debug!(
+                "Sent ACK_BLOCK for backoff id={} to OSD {}",
+                backoff_id, osd_id
+            );
         }
+        Ok(())
     }
 
     /// Handle UNBLOCK backoff operation

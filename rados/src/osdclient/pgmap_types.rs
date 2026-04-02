@@ -348,12 +348,7 @@ impl VersionedEncode for ObjectStatCollection {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if version != 2 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported ObjectStatCollection version: {} (expected 2)",
-                version
-            )));
-        }
+        crate::denc::check_min_version!(version, 2, "ObjectStatCollection", "Quincy v17+");
 
         let sum = ObjectStatSum::decode(buf, features)?;
         let _dummy = u32::decode(buf, features)?; // legacy field
@@ -1401,12 +1396,7 @@ impl VersionedEncode for PgShard {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if version != 1 {
-            return Err(RadosError::Protocol(format!(
-                "Unsupported PgShard version: {} (expected 1)",
-                version
-            )));
-        }
+        crate::denc::check_min_version!(version, 1, "PgShard", "Quincy v17+");
         let osd = i32::decode(buf, features)?;
         let shard = ShardId::decode(buf, features)?;
         Ok(PgShard { osd, shard })

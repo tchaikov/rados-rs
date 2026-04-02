@@ -588,33 +588,28 @@ impl OSDSession {
         // Wrap op in Arc first to avoid partial move issues
         let op_arc = Arc::new(op);
 
-        {
-            self.pending_ops.insert(
+        self.pending_ops.insert(
+            tid,
+            PendingOp {
                 tid,
-                PendingOp {
-                    tid,
-                    result_tx: tx,
-                    attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                    osdmap_epoch: op_arc.osdmap_epoch,
-                    op: op_arc.clone(),
-                    state: crate::osdclient::types::OpState::Queued,
-                    target: crate::osdclient::types::OpTarget::new(
-                        op_arc.osdmap_epoch,
-                        op_arc.pgid,
-                        self.osd_id,
-                        vec![self.osd_id],
-                    ),
-                    // Store priority for retries (set in message header, not MOSDOp payload)
-                    priority,
-                    // Capture current session incarnation
-                    // Following Ceph pattern: operation stores incarnation when sent
-                    // Reference: ~/dev/linux/net/ceph/osd_client.c:2348
-                    sent_incarnation: self.incarnation.load(Ordering::SeqCst),
-                    // Start with no redirects
-                    redirect_count: 0,
-                },
-            );
-        }
+                result_tx: tx,
+                attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
+                osdmap_epoch: op_arc.osdmap_epoch,
+                op: op_arc.clone(),
+                state: crate::osdclient::types::OpState::Queued,
+                target: crate::osdclient::types::OpTarget::new(
+                    op_arc.osdmap_epoch,
+                    op_arc.pgid,
+                    self.osd_id,
+                    vec![self.osd_id],
+                ),
+                priority,
+                // Capture current session incarnation
+                // Following Ceph pattern: operation stores incarnation when sent
+                sent_incarnation: self.incarnation.load(Ordering::SeqCst),
+                redirect_count: 0,
+            },
+        );
 
         // Track operation timeout
         if let Some(tracker) = &self.tracker {
@@ -660,8 +655,7 @@ impl OSDSession {
 
         // Handle EAGAIN on replica reads
         if reply.result == crate::osdclient::error::EAGAIN
-            && let Some((new_mosdop, new_flags)) =
-                Self::handle_eagain_retry(tid, &reply, &pending_op)
+            && let Some((new_mosdop, new_flags)) = Self::handle_eagain_retry(tid, &pending_op)
         {
             let mut updated_op = pending_op;
             updated_op.op = Arc::new(new_mosdop);
@@ -772,11 +766,7 @@ impl OSDSession {
     }
 
     /// Handle EAGAIN retry for replica reads
-    fn handle_eagain_retry(
-        tid: u64,
-        _reply: &MOSDOpReply,
-        pending_op: &PendingOp,
-    ) -> Option<(MOSDOp, u32)> {
+    fn handle_eagain_retry(tid: u64, pending_op: &PendingOp) -> Option<(MOSDOp, u32)> {
         use crate::osdclient::types::OsdOpFlags;
         let replica_flags = (OsdOpFlags::BALANCE_READS | OsdOpFlags::LOCALIZE_READS).bits();
 
