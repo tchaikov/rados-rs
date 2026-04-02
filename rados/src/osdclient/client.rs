@@ -516,6 +516,10 @@ impl OSDClient {
         // Apply PG overrides matching C++ _pg_to_up_acting_osds / _apply_upmap order.
         Self::apply_pg_overrides(osdmap, &pg, &mut osds);
 
+        if osds.is_empty() {
+            return Err(OSDClientError::NoOSDs);
+        }
+
         // Convert to StripedPgId
         let spg = StripedPgId::from_pg(pg.pool, pg.seed);
 
@@ -588,6 +592,10 @@ impl OSDClient {
             debug!("Using pg_temp override for PG {:?}: {:?}", pg, temp_osds);
             *osds = temp_osds.clone();
         }
+
+        // Filter out CRUSH_ITEM_NONE (-1) sentinels — these represent incomplete
+        // acting set slots (e.g., during degraded state).
+        osds.retain(|&osd| osd >= 0);
     }
 
     /// Apply redirect to an operation
@@ -595,7 +603,7 @@ impl OSDClient {
     /// This modifies the operation's target object and flags based on the redirect
     /// information from an EC pool. Matches the behavior of `combine_with_locator()`
     /// in C++ Objecter (~/dev/ceph/src/osd/osd_types.h).
-    fn apply_redirect(op: &mut MOSDOp, redirect: &RequestRedirect) {
+    pub(crate) fn apply_redirect(op: &mut MOSDOp, redirect: &RequestRedirect) {
         // Update object locator from redirect
         op.object.pool = redirect.redirect_locator.pool_id;
         op.object.key = redirect.redirect_locator.key.clone();
@@ -1097,12 +1105,14 @@ impl OSDClient {
     ///
     /// Cursor format: decimal representation of the hobject raw hash.
     /// `None` means "start from the very beginning" (hash=0).
-    fn parse_list_cursor(pool: u64, cursor: Option<String>) -> crate::HObject {
+    fn parse_list_cursor(pool: u64, cursor: Option<String>) -> Result<crate::HObject> {
         match cursor {
-            None => crate::HObject::empty_cursor(pool),
+            None => Ok(crate::HObject::empty_cursor(pool)),
             Some(s) => {
-                let hash: u32 = s.parse().unwrap_or(0);
-                crate::HObject::new(pool, String::new(), hash)
+                let hash: u32 = s.parse().map_err(|e| {
+                    OSDClientError::Other(format!("Invalid list cursor '{}': {}", s, e))
+                })?;
+                Ok(crate::HObject::new(pool, String::new(), hash))
             }
         }
     }
@@ -1156,6 +1166,10 @@ impl OSDClient {
 
         // Apply pg_temp / pg_upmap / etc. overrides — same as regular ops.
         Self::apply_pg_overrides(osdmap, &pg, &mut osds);
+
+        if osds.is_empty() {
+            return Err(OSDClientError::NoOSDs);
+        }
 
         let primary_osd = osds[0];
 
@@ -1279,7 +1293,7 @@ impl OSDClient {
         );
 
         // Parse cursor → starting hobject position
-        let mut hobject_cursor = Self::parse_list_cursor(pool, cursor);
+        let mut hobject_cursor = Self::parse_list_cursor(pool, cursor)?;
 
         // Get OSDMap to look up pool info
         let osdmap = self.get_osdmap().await?;
@@ -1649,7 +1663,6 @@ impl OSDClient {
             if (new_primary != osd_id || force_resend)
                 && let Some(mut op) = session.remove_pending_op(tid).await
             {
-                op.state = crate::osdclient::types::OpState::NeedsResend;
                 op.target.update(new_epoch, new_primary, new_osds.clone());
                 op.state = crate::osdclient::types::OpState::Queued;
                 need_resend.push((new_primary, op));
@@ -1752,7 +1765,6 @@ impl OSDClient {
             {
                 let new_primary = new_osds.first().copied().unwrap_or(-1);
                 if let Some(mut op) = session.remove_pending_op(tid).await {
-                    op.state = crate::osdclient::types::OpState::NeedsResend;
                     op.target.update(new_epoch, new_primary, new_osds.clone());
                     op.state = crate::osdclient::types::OpState::Queued;
                     need_resend.push((new_primary, op));

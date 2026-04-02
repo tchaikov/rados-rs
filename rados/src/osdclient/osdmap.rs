@@ -2573,7 +2573,8 @@ impl OSDMap {
         let locator = crate::crush::ObjectLocator::new(pool_id);
 
         // Calculate the PG using the CRUSH placement function
-        let pg = crate::crush::object_to_pg(object_name, &locator, pool.pg_num);
+        let pg = crate::crush::object_to_pg(object_name, &locator, pool.pg_num)
+            .map_err(|e| RadosError::Protocol(format!("PG calculation failed: {}", e)))?;
 
         Ok(PgId {
             pool: pg.pool as u64,

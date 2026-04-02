@@ -758,37 +758,16 @@ impl OSDSession {
         Some((pending_op, new_flags))
     }
 
-    /// Apply redirect information to operation.
+    /// Apply redirect information to operation (clone + mutate).
     ///
-    /// Mirrors C++ `request_redirect_t::combine_with_locator()` which
-    /// unconditionally assigns `redirect_locator` → `target_oloc`.
+    /// Delegates to `OSDClient::apply_redirect` for the actual transformation,
+    /// avoiding duplication of the C++ `combine_with_locator()` logic.
     fn apply_redirect_to_op(
         op: &MOSDOp,
         redirect: &crate::osdclient::types::RequestRedirect,
     ) -> MOSDOp {
         let mut new_mosdop = op.clone();
-
-        // Unconditionally overwrite locator — matches C++ combine_with_locator().
-        new_mosdop.object.pool = redirect.redirect_locator.pool_id;
-        new_mosdop
-            .object
-            .key
-            .clone_from(&redirect.redirect_locator.key);
-        new_mosdop
-            .object
-            .namespace
-            .clone_from(&redirect.redirect_locator.namespace);
-
-        if !redirect.redirect_object.is_empty() {
-            new_mosdop.object.oid.clone_from(&redirect.redirect_object);
-        }
-
-        // Set redirect flags (Objecter.cc:3744)
-        use crate::osdclient::types::OsdOpFlags;
-        let redirect_flags =
-            OsdOpFlags::REDIRECTED | OsdOpFlags::IGNORE_CACHE | OsdOpFlags::IGNORE_OVERLAY;
-        new_mosdop.flags |= redirect_flags.bits();
-
+        crate::osdclient::client::OSDClient::apply_redirect(&mut new_mosdop, redirect);
         new_mosdop
     }
 
@@ -983,6 +962,7 @@ impl OSDSession {
 
         // Increment attempts counter (matching C++ Objecter behavior)
         pending_op.attempts += 1;
+        Arc::make_mut(&mut pending_op.op).retry_attempt = pending_op.attempts - 1;
 
         // Update incarnation to current session incarnation (operation is being resent)
         // This is critical: migrated operations get new incarnation from target session
