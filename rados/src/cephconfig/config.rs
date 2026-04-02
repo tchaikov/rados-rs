@@ -49,11 +49,11 @@ impl CephConfig {
                 // Strip inline comments — C++ only treats ';' or '#' as a comment
                 // start when preceded by whitespace (so paths like /foo#bar are safe).
                 let raw_value = &line[eq_pos + 1..];
-                let comment_pos = raw_value
-                    .find(" ;")
-                    .or_else(|| raw_value.find("\t;"))
-                    .or_else(|| raw_value.find(" #"))
-                    .or_else(|| raw_value.find("\t#"));
+                // Find the earliest whitespace-preceded comment delimiter.
+                let comment_pos = [" ;", "\t;", " #", "\t#"]
+                    .iter()
+                    .filter_map(|pat| raw_value.find(pat))
+                    .min();
                 let value = comment_pos
                     .map_or(raw_value, |pos| &raw_value[..pos])
                     .trim()
@@ -149,27 +149,15 @@ impl CephConfig {
     ///
     /// Reference: AuthRegistry::refresh_config() in src/auth/AuthRegistry.cc
     pub fn get_auth_client_required(&self) -> Vec<u32> {
-        self.resolve_auth_methods("auth_client_required", &["global", "client"])
-    }
-
-    /// Shared helper for `get_auth_client_required`.
-    ///
-    /// First checks "auth_supported" in global. If that yields results, returns them.
-    /// Otherwise looks up `fallback_key` in the given `fallback_sections`.
-    /// Defaults to `[CEPH_AUTH_CEPHX]` if nothing is configured.
-    fn resolve_auth_methods(&self, fallback_key: &str, fallback_sections: &[&str]) -> Vec<u32> {
-        // Check auth_supported first (applies to all if set)
         if let Some(auth_supported) = self.get("global", "auth_supported") {
             let methods = parse_auth_methods(auth_supported);
             if !methods.is_empty() {
                 return methods;
             }
         }
-
         let auth_value = self
-            .get_with_fallback(fallback_sections, fallback_key)
+            .get_with_fallback(&["global", "client"], "auth_client_required")
             .unwrap_or("cephx");
-
         let methods = parse_auth_methods(auth_value);
         if methods.is_empty() {
             vec![CEPH_AUTH_CEPHX]
