@@ -1024,7 +1024,7 @@ impl OSDClient {
             )
             .await?;
 
-        Self::check_op_result(&result, "Write")?;
+        Self::check_op_result(&result, "WriteFull")?;
 
         Ok(WriteResult {
             version: result.version,

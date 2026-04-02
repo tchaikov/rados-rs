@@ -492,7 +492,8 @@ impl IoCtx {
             .op(OSDOp::lock_exclusive(name, cookie, description, duration)?)
             .build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "lock_exclusive")?;
         Ok(())
     }
 
@@ -535,7 +536,8 @@ impl IoCtx {
             )?)
             .build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "lock_shared")?;
         Ok(())
     }
 
@@ -555,7 +557,8 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::unlock(name, cookie)?).build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "unlock")?;
         Ok(())
     }
 

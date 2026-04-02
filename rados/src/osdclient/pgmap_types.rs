@@ -854,7 +854,9 @@ impl VersionedEncode for OsdStat {
 
         // Decode hb_pingtime map
         let hb_pingtime = if version >= 13 {
-            let map_size = i32::decode(buf, features)? as usize;
+            let map_size: usize = i32::decode(buf, features)?
+                .try_into()
+                .map_err(|_| crate::RadosError::InvalidData("negative map size".into()))?;
             let mut map = std::collections::BTreeMap::new();
             for _ in 0..map_size {
                 let osd_id = i32::decode(buf, features)?;

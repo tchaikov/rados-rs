@@ -92,7 +92,7 @@ impl Throttle {
         let bytes_permit = if bytes > 0 {
             Some(
                 self.bytes_sem
-                    .acquire_many(bytes as u32)
+                    .acquire_many((bytes as u64).min(u32::MAX as u64) as u32)
                     .await
                     .map_err(|_| {
                         crate::osdclient::error::OSDClientError::Internal(
@@ -128,7 +128,11 @@ impl Throttle {
 
         // Try to acquire byte budget
         let bytes_permit = if bytes > 0 {
-            Some(self.bytes_sem.try_acquire_many(bytes as u32).ok()?)
+            Some(
+                self.bytes_sem
+                    .try_acquire_many((bytes as u64).min(u32::MAX as u64) as u32)
+                    .ok()?,
+            )
         } else {
             None
         };

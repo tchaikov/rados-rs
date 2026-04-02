@@ -28,7 +28,10 @@ fn poll_join<T>(
     cx: &mut Context<'_>,
     handle: &mut Option<JoinHandle<io::Result<T>>>,
 ) -> Poll<io::Result<T>> {
-    match Pin::new(handle.as_mut().unwrap()).poll(cx) {
+    let Some(h) = handle.as_mut() else {
+        return Poll::Ready(Err(io::Error::other("no in-flight task")));
+    };
+    match Pin::new(h).poll(cx) {
         Poll::Pending => Poll::Pending,
         Poll::Ready(Err(join_err)) => {
             *handle = None;

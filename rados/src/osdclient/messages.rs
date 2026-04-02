@@ -451,7 +451,7 @@ impl CephMessagePayload for MOSDOpReply {
             shard: -1, // Not in pg_t, only in spg_t
         };
 
-        // 3. flags (int64_t)
+        // 3. flags (int64_t on wire; C++ get_flags() returns int, only lower 32 bits used)
         let flags = i64::decode(&mut cursor, 0)? as u32;
 
         // 4. result (errorcode32_t = int32_t)
