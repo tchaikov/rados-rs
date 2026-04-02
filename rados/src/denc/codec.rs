@@ -849,7 +849,7 @@ impl<T: Denc> Denc for Option<T> {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let has_value = buf.get_u8();
+        let has_value = u8::decode(buf, features)?;
         if has_value != 0 {
             let value = T::decode(buf, features)?;
             Ok(Some(value))

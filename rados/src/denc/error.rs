@@ -22,9 +22,6 @@ pub enum RadosError {
     #[error("Invalid data: {0}")]
     InvalidData(String),
 
-    #[error("Encoding/Decoding error: {0}")]
-    Denc(String),
-
     /// A wire-format encode or decode failure from a [`Denc`] implementation.
     #[error(transparent)]
     Codec(#[from] CodecError),

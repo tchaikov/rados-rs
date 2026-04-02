@@ -48,9 +48,10 @@ impl VersionedEncode for MonFeature {
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
-        _version: u8,
+        version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        crate::denc::check_min_version!(version, 1, "MonFeature", "Quincy v17+");
         Ok(MonFeature {
             features: u64::decode(buf, features)?,
         })
