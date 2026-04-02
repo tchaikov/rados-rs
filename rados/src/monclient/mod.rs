@@ -18,7 +18,6 @@
 //!     let config = MonClientConfig {
 //!         mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
 //!         auth: Some(auth),
-//!         connect_timeout: Duration::from_secs(30),
 //!         command_timeout: Duration::from_secs(60),
 //!         hunt_interval: Duration::from_secs(3),
 //!         hunt_parallel: 3,

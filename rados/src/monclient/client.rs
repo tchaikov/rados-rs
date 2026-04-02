@@ -624,21 +624,34 @@ impl MonClient {
             return self.connect_to_mon(selected_ranks[0]).await;
         }
 
-        // Parallel case: try multiple monitors, first one to succeed wins
-        use futures::future::select_ok;
-
-        let futures: Vec<_> = selected_ranks
+        // Parallel case: spawn tasks so we can abort losers after a winner connects.
+        let mut handles: Vec<_> = selected_ranks
             .iter()
             .take(n)
             .map(|&rank| {
                 let client = self.clone();
-                Box::pin(async move { client.connect_to_mon(rank).await })
+                tokio::spawn(async move { client.connect_to_mon(rank).await })
             })
             .collect();
 
-        select_ok(futures).await.map(|_| {
-            info!("Successfully connected to a monitor");
-        })
+        // Wait for the first success, abort all remaining on success.
+        let mut last_err = MonClientError::NotConnected;
+        while !handles.is_empty() {
+            let (result, _index, remaining) = futures::future::select_all(handles).await;
+            match result {
+                Ok(Ok(())) => {
+                    for h in &remaining {
+                        h.abort();
+                    }
+                    info!("Successfully connected to a monitor");
+                    return Ok(());
+                }
+                Ok(Err(e)) => last_err = e,
+                Err(e) => last_err = MonClientError::Other(e.to_string()),
+            }
+            handles = remaining;
+        }
+        Err(last_err)
     }
 
     /// Update hunt backoff state after a hunt attempt
