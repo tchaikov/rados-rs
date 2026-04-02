@@ -93,7 +93,9 @@ pub fn crush_do_rule(
     let mut scratch: Vec<i32> = Vec::with_capacity(result_max);
 
     // Tunable parameters (can be overridden by rule steps)
-    let mut choose_tries = map.choose_total_tries;
+    // C++ mapper.c: "the original choose_total_tries value was off by one
+    // (it counted 'retries' and not 'tries'). add one."
+    let mut choose_tries = map.choose_total_tries + 1;
     let mut chooseleaf_vary_r = map.chooseleaf_vary_r;
     let mut chooseleaf_stable = map.chooseleaf_stable;
     let mut msr_descents = map.msr_descents;
