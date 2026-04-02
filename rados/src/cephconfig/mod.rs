@@ -166,10 +166,6 @@ macro_rules! runtime_config_options {
     };
 }
 
-// ---------------------------------------------------------------------------
-// Integration tests that exercise the full public API
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;

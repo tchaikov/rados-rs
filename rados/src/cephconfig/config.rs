@@ -207,10 +207,6 @@ fn parse_auth_methods(methods_str: &str) -> Vec<u32> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Tests for config parsing and access
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;

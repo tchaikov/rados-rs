@@ -18,9 +18,6 @@ pub enum ConfigError {
 pub trait ConfigValue: Sized + Clone {
     /// Parse from a string value in ceph.conf.
     fn parse_config_value(s: &str) -> Result<Self, ConfigError>;
-
-    /// Get the type name for error messages.
-    fn type_name() -> &'static str;
 }
 
 /// Size value in bytes (supports SI/IEC prefixes: K, M, G, T, KB, MB, GB, TB).
@@ -31,10 +28,6 @@ impl ConfigValue for Size {
     fn parse_config_value(s: &str) -> Result<Self, ConfigError> {
         parse_size(s).map(Size)
     }
-
-    fn type_name() -> &'static str {
-        "size"
-    }
 }
 
 /// Duration value (supports time units: s, ms, us, m, h, d).
@@ -44,10 +37,6 @@ pub struct Duration(pub std::time::Duration);
 impl ConfigValue for Duration {
     fn parse_config_value(s: &str) -> Result<Self, ConfigError> {
         parse_duration(s).map(Duration)
-    }
-
-    fn type_name() -> &'static str {
-        "duration"
     }
 }
 
@@ -60,10 +49,6 @@ impl ConfigValue for Count {
         s.parse()
             .map(Count)
             .map_err(|e| ConfigError::ParseError(format!("Invalid count '{}': {}", s, e)))
-    }
-
-    fn type_name() -> &'static str {
-        "count"
     }
 }
 
@@ -83,10 +68,6 @@ impl ConfigValue for Ratio {
         }
         Ok(Ratio(val))
     }
-
-    fn type_name() -> &'static str {
-        "ratio"
-    }
 }
 
 impl ConfigValue for bool {
@@ -97,19 +78,11 @@ impl ConfigValue for bool {
             _ => Err(ConfigError::ParseError(format!("Invalid bool: {}", s))),
         }
     }
-
-    fn type_name() -> &'static str {
-        "bool"
-    }
 }
 
 impl ConfigValue for String {
     fn parse_config_value(s: &str) -> Result<Self, ConfigError> {
         Ok(s.to_string())
-    }
-
-    fn type_name() -> &'static str {
-        "string"
     }
 }
 
@@ -156,10 +129,6 @@ impl<T: ConfigValue> ConfigOption<T> {
             .unwrap_or_else(|| self.default.clone())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Parsing helpers
-// ---------------------------------------------------------------------------
 
 /// Split a string into a leading numeric part and a trailing unit suffix.
 ///
@@ -240,10 +209,6 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, ConfigError> {
     Ok(std::time::Duration::from_secs_f64(seconds))
 }
 
-// ---------------------------------------------------------------------------
-// Tests for types and parsing
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,7 +274,6 @@ mod tests {
             Size::parse_config_value("1G").unwrap().0,
             1024 * 1024 * 1024
         );
-        assert_eq!(Size::type_name(), "size");
     }
 
     #[test]
@@ -322,7 +286,6 @@ mod tests {
             Duration::parse_config_value("5m").unwrap().0,
             std::time::Duration::from_secs(300)
         );
-        assert_eq!(Duration::type_name(), "duration");
     }
 
     #[test]
@@ -330,7 +293,6 @@ mod tests {
         assert_eq!(Count::parse_config_value("100").unwrap().0, 100);
         assert_eq!(Count::parse_config_value("0").unwrap().0, 0);
         assert!(Count::parse_config_value("abc").is_err());
-        assert_eq!(Count::type_name(), "count");
     }
 
     #[test]
@@ -340,7 +302,6 @@ mod tests {
         assert_eq!(Ratio::parse_config_value("1.0").unwrap().0, 1.0);
         assert!(Ratio::parse_config_value("1.5").is_err());
         assert!(Ratio::parse_config_value("-0.1").is_err());
-        assert_eq!(Ratio::type_name(), "ratio");
     }
 
     #[test]
@@ -356,7 +317,6 @@ mod tests {
         assert!(!bool::parse_config_value("0").unwrap());
         assert!(!bool::parse_config_value("off").unwrap());
         assert!(bool::parse_config_value("maybe").is_err());
-        assert_eq!(bool::type_name(), "bool");
     }
 
     #[test]
@@ -365,7 +325,6 @@ mod tests {
             String::parse_config_value("hello").unwrap(),
             "hello".to_string()
         );
-        assert_eq!(String::type_name(), "string");
     }
 
     #[test]
