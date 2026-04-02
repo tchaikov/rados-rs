@@ -330,6 +330,12 @@ impl Denc for Duration {
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         let sec = u32::decode(buf, 0)?;
         let nsec = u32::decode(buf, 0)?;
+        if nsec >= 1_000_000_000 {
+            return Err(RadosError::InvalidData(format!(
+                "nsec {} out of range (must be < 1_000_000_000)",
+                nsec
+            )));
+        }
         Ok(Duration::new(sec as u64, nsec))
     }
 
@@ -386,6 +392,12 @@ impl Denc for SystemTime {
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         let sec = u32::decode(buf, 0)?;
         let nsec = u32::decode(buf, 0)?;
+        if nsec >= 1_000_000_000 {
+            return Err(RadosError::InvalidData(format!(
+                "nsec {} out of range (must be < 1_000_000_000)",
+                nsec
+            )));
+        }
         Ok(UNIX_EPOCH + Duration::new(sec as u64, nsec))
     }
 
