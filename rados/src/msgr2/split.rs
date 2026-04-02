@@ -416,8 +416,8 @@ async fn io_task(
                                 }
                             }
                             Tag::Keepalive2Ack => {
+                                connection_state.record_keepalive_ack();
                                 tracing::trace!("I/O task: received Keepalive2Ack");
-                                // Don't send to message channel
                             }
                             _ => {
                                 let err = Error::protocol_error(&format!(

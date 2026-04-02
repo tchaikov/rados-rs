@@ -570,6 +570,11 @@ impl ConnectionState {
         self.frame_io.recv_frame(&mut self.state_machine).await
     }
 
+    /// Record that a Keepalive2Ack was received.
+    pub(crate) fn record_keepalive_ack(&mut self) {
+        self.state_machine.record_keepalive_ack();
+    }
+
     /// Drive a phase to completion, handling the enter / recv / send loop.
     pub(crate) async fn drive_phase<P: crate::msgr2::phase::Phase>(
         &mut self,
