@@ -960,11 +960,7 @@ impl MonClient {
             (active_con, msg)
         };
 
-        // Use unified CephMessage framework
-        let ceph_msg = CephMessage::from_payload(&msg, 0, CrcFlags::ALL)?;
-        let message = crate::msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        active_con.send_message(message).await?;
+        send_msg_with_tid(&active_con, &msg, 0).await?;
 
         debug!("Sent subscriptions");
         Ok(())
@@ -1183,10 +1179,7 @@ impl MonClient {
             crate::auth::protocol::CEPH_AUTH_CEPHX,
             auth_payload,
         );
-        let ceph_msg = CephMessage::from_payload(&mauth, 0, CrcFlags::ALL)?;
-        let msg = crate::msgr2::message::Message::from_ceph_message(ceph_msg);
-
-        if let Err(e) = active_con.send_message(msg).await {
+        if let Err(e) = send_msg_with_tid(active_con, &mauth, 0).await {
             warn!("Failed to send ticket renewal request: {:?}", e);
         } else {
             info!(
