@@ -1636,14 +1636,11 @@ impl Connection {
     /// The peer should respond with a Keepalive2Ack frame.
     pub async fn send_keepalive(&mut self) -> Result<()> {
         use crate::msgr2::frames::Keepalive2Frame;
-        use crate::msgr2::frames::create_frame_from_trait;
 
         let (timestamp_sec, timestamp_nsec) = crate::msgr2::current_keepalive_timestamp()?;
 
-        // Create Keepalive2 frame
         let keepalive_frame = Keepalive2Frame::new(timestamp_sec, timestamp_nsec);
-        let frame =
-            create_frame_from_trait(&keepalive_frame, crate::msgr2::frames::Tag::Keepalive2)?;
+        let frame = create_frame_from_trait(&keepalive_frame, Tag::Keepalive2)?;
 
         tracing::trace!(
             "Sending KEEPALIVE2 with timestamp {}.{:09}",

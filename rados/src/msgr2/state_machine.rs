@@ -219,25 +219,6 @@ impl StateMachine {
         self.last_keepalive_ack = Some(std::time::Instant::now());
     }
 
-    /// Reset transient per-connection state after a fault.
-    ///
-    /// Clears crypto/compression handlers and pre-authentication buffers so
-    /// the state machine is ready for a fresh connection attempt.  Session
-    /// identity fields (client/server cookies, global_id) are intentionally
-    /// preserved so that SESSION_RECONNECT can be attempted if the peer
-    /// supports it.
-    #[allow(dead_code)] // Reconnection primitive, not yet wired up
-    pub fn fault_reset(&mut self) {
-        self.frame_decryptor = None;
-        self.frame_encryptor = None;
-        self.compression_ctx = None;
-        self.session_key = None;
-        self.negotiated_features = 0;
-        self.pre_auth_rxbuf.clear();
-        self.pre_auth_txbuf.clear();
-        self.pre_auth_enabled = true; // re-enable for next connection attempt
-    }
-
     // ── Phase-coordinator helpers ─────────────────────────────────────────────
 
     /// Store the global ID assigned by the server during authentication.

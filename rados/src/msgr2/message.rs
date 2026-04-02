@@ -222,9 +222,6 @@ impl Message {
         middle_len: usize,
         data_len: usize,
     ) -> Result<Self> {
-        /*
-        Decode header
-        */
         let header = MsgHeader::decode(src)?;
 
         // Verify we have enough data

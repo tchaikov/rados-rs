@@ -138,9 +138,6 @@ pub struct RecvHalf {
     msg_rx: mpsc::Receiver<Result<Message>>,
     /// Shared state with SendHalf
     shared: Arc<Mutex<SharedState>>,
-    /// Optional message throttle (for ACK handling)
-    #[allow(dead_code)] // Kept for future use in reconnection logic
-    throttle: Option<MessageThrottle>,
 }
 
 impl SendHalf {
@@ -529,11 +526,7 @@ impl SplitBuilder {
             shutdown_token,
         };
 
-        let recv_half = RecvHalf {
-            msg_rx,
-            shared,
-            throttle: self.throttle,
-        };
+        let recv_half = RecvHalf { msg_rx, shared };
 
         (send_half, recv_half)
     }
