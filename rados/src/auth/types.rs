@@ -12,8 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub(crate) use crate::EntityName;
 pub use crate::EntityType;
 
-/// Global ID type for Ceph entities
-pub type GlobalId = u64;
+/// Global ID type for auth session tracking (raw u64).
+type GlobalId = u64;
 
 /// Cryptographic key for CephX authentication
 ///
