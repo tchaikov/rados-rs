@@ -28,22 +28,12 @@ pub struct CryptoKey {
     pub secret: Bytes,
 }
 
-/// Crypto type constants from ceph_fs.h
-pub const CEPH_CRYPTO_NONE: u16 = 0x0;
 pub const CEPH_CRYPTO_AES: u16 = 0x1;
 
 impl CryptoKey {
     pub fn new(secret: Bytes) -> Self {
         Self {
             crypto_type: CEPH_CRYPTO_AES,
-            created: SystemTime::now(),
-            secret,
-        }
-    }
-
-    pub fn new_with_type(crypto_type: u16, secret: Bytes) -> Self {
-        Self {
-            crypto_type,
             created: SystemTime::now(),
             secret,
         }
@@ -390,7 +380,6 @@ pub struct CephXSession {
     pub entity_name: EntityName,
     pub global_id: u64,
     pub session_key: CryptoKey,
-    pub ticket: Option<CephXTicketBlob>,
     /// Ticket handlers for service tickets (OSD, MDS, etc.)
     pub ticket_handlers: HashMap<EntityType, TicketHandler>,
 }
@@ -401,7 +390,6 @@ impl CephXSession {
             entity_name,
             global_id,
             session_key,
-            ticket: None,
             ticket_handlers: HashMap::new(),
         }
     }

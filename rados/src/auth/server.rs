@@ -8,8 +8,7 @@ use crate::auth::protocol::{
     CephXServerChallenge,
 };
 use crate::auth::types::{
-    AuthCapsInfo, AuthTicket, CEPH_CRYPTO_AES, CephXServiceTicketInfo, CephXTicketBlob, CryptoKey,
-    EntityName,
+    AuthCapsInfo, AuthTicket, CephXServiceTicketInfo, CephXTicketBlob, CryptoKey, EntityName,
 };
 use bytes::{Bytes, BytesMut};
 use rand::RngCore;
@@ -70,7 +69,7 @@ impl CephXServerHandler {
     fn random_aes_key() -> CryptoKey {
         let mut bytes = vec![0u8; AES_KEY_LEN];
         rand::thread_rng().fill_bytes(&mut bytes);
-        CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(bytes))
+        CryptoKey::new(Bytes::from(bytes))
     }
 
     /// Generate a new global_id for a client
@@ -358,7 +357,7 @@ mod tests {
     }
 
     fn test_secret(seed: u8) -> CryptoKey {
-        CryptoKey::new_with_type(CEPH_CRYPTO_AES, Bytes::from(vec![seed; AES_KEY_LEN]))
+        CryptoKey::new(Bytes::from(vec![seed; AES_KEY_LEN]))
     }
 
     fn decode_ticket_services(
