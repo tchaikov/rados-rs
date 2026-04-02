@@ -840,6 +840,7 @@ impl OSDClient {
                     }
                 );
                 Self::apply_redirect(&mut msg, &redirect);
+                msg.object.calculate_hash();
                 continue;
             }
 
