@@ -43,7 +43,14 @@ impl CephConfig {
                 // Normalize key: trim whitespace and replace spaces with underscores.
                 // Mirrors C++ ConfUtils::normalize_key_name().
                 let key = line[..eq_pos].trim().replace(' ', "_");
-                let value = line[eq_pos + 1..].trim().to_string();
+                // Strip inline comments (';' or '#') — mirrors C++ ConfUtils.
+                let raw_value = &line[eq_pos + 1..];
+                let value = raw_value
+                    .find(';')
+                    .or_else(|| raw_value.find('#'))
+                    .map_or(raw_value, |pos| &raw_value[..pos])
+                    .trim()
+                    .to_string();
 
                 sections
                     .entry(current_section.clone())
