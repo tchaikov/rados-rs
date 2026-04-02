@@ -700,8 +700,8 @@ pub struct MAuthReply {
     pub protocol: u32,
     pub result: i32,
     pub global_id: u64,
-    pub result_msg: String,
     pub auth_payload: Bytes,
+    pub result_msg: String,
 }
 
 impl_denc_ceph_message!(MAuthReply, crate::msgr2::message::CEPH_MSG_AUTH_REPLY, 1);
