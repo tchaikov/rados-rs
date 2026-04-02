@@ -6,8 +6,7 @@ use std::path::Path;
 
 use crate::cephconfig::ConfigError;
 
-use crate::auth::protocol::{CEPH_AUTH_CEPHX, CEPH_AUTH_NONE};
-const CEPH_AUTH_GSS: u32 = 0x4;
+use crate::auth::protocol::{CEPH_AUTH_CEPHX, CEPH_AUTH_GSS, CEPH_AUTH_NONE};
 
 /// Represents a parsed Ceph configuration.
 #[derive(Debug, Clone)]
