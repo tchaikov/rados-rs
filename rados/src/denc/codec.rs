@@ -503,6 +503,16 @@ pub trait VersionedEncode: Sized {
                 type_name: std::any::type_name::<Self>(),
             }));
         }
+        // Reject if the sender requires a compat version higher than what we support.
+        // This is the real forward-compatibility guard (C++ DECODE_START check).
+        if struct_compat > Self::MAX_DECODE_VERSION {
+            return Err(RadosError::Codec(CodecError::VersionTooNew {
+                got: struct_compat,
+                max: Self::MAX_DECODE_VERSION,
+                type_name: std::any::type_name::<Self>(),
+            }));
+        }
+        // Sanity: compat should never exceed version in a well-formed header.
         if struct_compat > struct_v {
             return Err(RadosError::Codec(CodecError::InvalidVersionHeader {
                 type_name: std::any::type_name::<Self>(),
