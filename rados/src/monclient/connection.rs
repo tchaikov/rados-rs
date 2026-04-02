@@ -70,29 +70,17 @@ impl KeepalivePolicy {
 
 /// Monitor connection
 pub struct MonConnection {
-    /// Monitor rank
     rank: usize,
-
-    /// Global ID assigned during authentication (immutable after connect)
+    /// Immutable after connect
     global_id: u64,
-
     /// Ceph session features negotiated during the ident exchange.
     peer_supported_features: u64,
-
-    /// Authentication provider (stored for creating service auth providers)
     /// Wrapped in Mutex to allow mutable access for ticket renewal
     auth_provider: Option<Arc<Mutex<crate::auth::MonitorAuthProvider>>>,
-
-    /// Channel for sending messages (to avoid deadlock with receive loop)
     send_tx: mpsc::Sender<crate::msgr2::message::Message>,
-
-    /// Background task handle for graceful shutdown and death detection
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
-
-    /// Token for signaling shutdown to background task
     shutdown_token: CancellationToken,
-
-    /// Our own entity address as sent in CLIENT_IDENT (used for blocklist detection).
+    /// Used for blocklist detection.
     client_addr: crate::EntityAddr,
 }
 

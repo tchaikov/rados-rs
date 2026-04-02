@@ -135,63 +135,38 @@ impl Default for MonClientConfig {
 /// Monitor client
 #[derive(Clone)]
 pub struct MonClient {
-    /// Configuration
     config: MonClientConfig,
-
-    /// Entity name
     entity_name: EntityName,
-
-    /// Connection state (active_con, pending_cons, hunting flags)
     connection_state: Arc<RwLock<ConnectionState>>,
-
-    /// Tracked monitor map state (current map and subscription flag)
     monmap_state: Arc<RwLock<MonMapHolder>>,
-
-    /// Subscription state
     subscription_state: Arc<RwLock<MonSub>>,
 
-    /// Command tracking (concurrent access)
     commands: Arc<DashMap<u64, CommandTracker>>,
     last_command_tid: Arc<AtomicU64>,
 
-    /// Pool operation tracking (concurrent access)
     pool_ops: Arc<DashMap<u64, PoolOpTracker>>,
     last_poolop_tid: Arc<AtomicU64>,
 
-    /// Version request tracking (concurrent access)
     version_requests: Arc<DashMap<u64, VersionTracker>>,
     last_version_req_id: Arc<AtomicU64>,
 
-    /// Auth state (authenticated, global_id, initialized)
     auth_state: Arc<RwLock<AuthState>>,
-
-    /// Runtime configuration
     runtime_config: Arc<RwLock<RuntimeMonClientConfig>>,
-
-    /// Latest OSDMap
     latest_osdmap: Arc<RwLock<Option<crate::monclient::MOSDMap>>>,
 
     /// Tracks background tasks (tick loop + drain loop) for graceful shutdown.
-    /// TaskTracker::spawn takes &self so no mutex is needed.
     tracker: TaskTracker,
 
-    /// Shutdown token — cancel to stop all background tasks
+    /// Cancel to stop all background tasks
     shutdown_token: CancellationToken,
 
-    /// Event broadcaster for map updates
     map_events: broadcast::Sender<MapEvent>,
 
-    /// Channel for routing MOSDMap messages to OSDClient
     /// None if no OSDClient is integrated (MonClient-only usage)
     osdmap_tx: Option<MapSender<MOSDMap>>,
 
-    /// Channel for routing monitor messages to drain task
     mon_msg_tx: mpsc::Sender<crate::msgr2::message::Message>,
-
-    /// Notification for authentication completion
     auth_notify: Arc<tokio::sync::Notify>,
-
-    /// Notification for MonMap arrival
     monmap_notify: Arc<tokio::sync::Notify>,
 }
 
@@ -228,16 +203,11 @@ impl RuntimeMonClientConfig {
 
 /// Connection state (active connection and hunting state)
 struct ConnectionState {
-    /// Active connection
     active_con: Option<Arc<MonConnection>>,
-
-    /// Hunting flag
     hunting: bool,
 
-    /// Hunting backoff state
     /// Current backoff multiplier for hunt interval
     reopen_interval_multiplier: f64,
-    /// Time of last hunting attempt
     last_hunt_attempt: Option<std::time::Instant>,
     /// Whether we've ever had a successful connection (for backoff logic)
     had_a_connection: bool,
@@ -245,23 +215,14 @@ struct ConnectionState {
 
 /// MonMap holder state
 struct MonMapHolder {
-    /// Monitor map
     monmap: MonMapState,
-
-    /// Want monmap flag
     want_monmap: bool,
 }
 
 /// Authentication state
 struct AuthState {
-    /// Authenticated flag
     authenticated: bool,
-
-    /// Global ID
-    #[allow(dead_code)]
     global_id: u64,
-
-    /// Initialized flag
     initialized: bool,
 }
 
