@@ -727,13 +727,14 @@ impl OSDClient {
         // Build initial message
         // OR in caller-supplied extra flags (e.g. BALANCE_READS, FULL_TRY, FULL_FORCE).
         let flags = MOSDOp::calculate_flags(&ops) | extra_flags.bits();
+        let pool = object.pool;
         let mut msg = MOSDOp::new(
             self.config.client_inc,
             osdmap.epoch.as_u32(),
             flags,
-            object.clone(),
-            StripedPgId::from_pg(object.pool, 0), // Will be set in loop
-            ops.clone(),
+            object,
+            StripedPgId::from_pg(pool, 0), // Will be set in loop
+            ops,
             crate::osdclient::types::RequestId::new(
                 &self.entity_name,
                 0,
