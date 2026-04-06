@@ -363,13 +363,16 @@ impl CephMessagePayload for MOSDOp {
     }
 
     fn encode_data(&self, _features: u64) -> std::result::Result<Bytes, crate::msgr2::Msgr2Error> {
-        // Collect all indata from operations into a single buffer for the message data section.
-        // This follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data()
+        // Fast path: single-op messages (read, write, write_full, stat, delete)
+        // return the indata directly — Bytes::clone() is a refcount bump, no copy.
+        if self.ops.len() == 1 {
+            return Ok(self.ops[0].indata.clone());
+        }
 
-        // Pre-calculate total size to avoid reallocations
+        // Multi-op: concatenate all indata into a single buffer.
+        // Follows the Ceph pattern of OSDOp::merge_osd_op_vector_in_data().
         let total_size: usize = self.ops.iter().map(|op| op.indata.len()).sum();
         let mut buf = BytesMut::with_capacity(total_size);
-
         for op in &self.ops {
             if !op.indata.is_empty() {
                 buf.put_slice(&op.indata);
