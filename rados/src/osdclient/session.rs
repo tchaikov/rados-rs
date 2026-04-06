@@ -560,7 +560,7 @@ impl OSDSession {
     /// Priority is set in the message header (not the MOSDOp payload)
     pub async fn submit_op(
         &self,
-        mut op: MOSDOp,
+        op: Arc<MOSDOp>,
         priority: i32,
     ) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
@@ -573,20 +573,10 @@ impl OSDSession {
             )));
         }
 
-        // Set retry_attempt for this operation
-        // retry_attempt is 0-based: 0 for first attempt, 1 for first retry, etc.
-        // Our attempts counter is 1-based, so retry_attempt = attempts - 1
-        // See: ~/dev/linux/net/ceph/osd_client.c (encodes req->r_attempts)
-        const FIRST_ATTEMPT: i32 = 1;
-        op.retry_attempt = FIRST_ATTEMPT - 1; // 0 for first send
-
         // Create channel for result
         let (tx, rx) = oneshot::channel();
 
-        // Track the operation
-        // Note: We store Arc<MOSDOp> to avoid cloning the entire operation on retries.
-        // Wrap op in Arc first to avoid partial move issues
-        let op_arc = Arc::new(op);
+        let op_arc = op;
 
         self.pending_ops.insert(
             tid,

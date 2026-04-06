@@ -758,13 +758,20 @@ impl OSDClient {
         if is_write {
             msg.mtime = crate::UTime::now();
         }
+        // retry_attempt 0 = first send; set here so submit_op receives it via Arc.
+        msg.retry_attempt = 0;
+
+        // Wrap in Arc so submit_op can take ownership without cloning the payload.
+        // Arc::make_mut in the loop is O(1) (refcount == 1 between iterations) and
+        // only copies on redirect, which is an EC-pool corner case.
+        let mut msg = Arc::new(msg);
 
         // Redirect/pause retry loop
         loop {
             // Refresh the epoch in the message to reflect the current OSDMap.
             // C++ _prepare_osd_op reads osdmap->get_epoch() at send time; after a
             // pause-wait that loads a newer map we must do the same.
-            msg.osdmap_epoch = osdmap.epoch.as_u32();
+            Arc::make_mut(&mut msg).osdmap_epoch = osdmap.epoch.as_u32();
 
             // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
             if osdmap.is_pool_eio(msg.object.pool) {
@@ -799,7 +806,7 @@ impl OSDClient {
                 osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
                 // Prune snap context: remove any snap IDs that were purged in
                 // the new OSDMap — mirrors Objecter::_prune_snapc().
-                osdmap.prune_snap_context(msg.object.pool, &mut msg.snaps);
+                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
                 continue;
             }
 
@@ -807,21 +814,27 @@ impl OSDClient {
             let (spg, osds) =
                 self.object_to_osds_in_map(&osdmap, msg.object.pool, &msg.object.oid)?;
             let primary_osd = osds[0];
-            msg.pgid = spg;
 
             // Get session
             let session = self.get_or_create_session(primary_osd).await?;
 
-            // Build request ID with fresh TID
+            // Build request ID with fresh TID and stamp pgid
             let tid = session.next_tid();
-            msg.reqid = crate::osdclient::types::RequestId::new(
-                &self.entity_name,
-                tid,
-                self.config.client_inc as i32,
-            );
+            {
+                let m = Arc::make_mut(&mut msg);
+                m.pgid = spg;
+                m.reqid = crate::osdclient::types::RequestId::new(
+                    &self.entity_name,
+                    tid,
+                    self.config.client_inc as i32,
+                );
+            }
 
-            // Submit operation (priority is set in message header)
-            let result_rx = session.submit_op(msg.clone(), priority).await?;
+            // Submit operation (priority is set in message header).
+            // Arc::clone is a cheap refcount bump; submit_op stores the Arc in
+            // pending_ops and drops it when the reply arrives, so by the time
+            // we reach the next iteration the refcount is back to 1.
+            let result_rx = session.submit_op(Arc::clone(&msg), priority).await?;
 
             // Wait for result using the remaining time towards the deadline.
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -841,8 +854,10 @@ impl OSDClient {
                         redirect.redirect_object.as_str()
                     }
                 );
-                Self::apply_redirect(&mut msg, &redirect);
-                msg.object.calculate_hash();
+                // pending_op was dropped when the reply arrived, so refcount is 1 here.
+                let m = Arc::make_mut(&mut msg);
+                Self::apply_redirect(m, &redirect);
+                m.object.calculate_hash();
                 continue;
             }
 
@@ -1172,7 +1187,10 @@ impl OSDClient {
 
         // Submit operation (use default priority for internal PGLS operations)
         let result_rx = session
-            .submit_op(msg, crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT)
+            .submit_op(
+                Arc::new(msg),
+                crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+            )
             .await?;
 
         // Wait for result with timeout
