@@ -172,7 +172,13 @@ async fn setup() -> (
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // Create OSDClient BEFORE subscribing to osdmap
-    let osd_config = rados::osdclient::OSDClientConfig::default();
+    let ms_crc_data = std::env::var("RADOS_MS_CRC_DATA")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
+    let osd_config = rados::osdclient::OSDClientConfig {
+        ms_crc_data,
+        ..Default::default()
+    };
 
     let fsid = mon_client.get_fsid().await;
     let osd_client = rados::osdclient::OSDClient::new(
