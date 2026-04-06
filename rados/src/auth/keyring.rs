@@ -66,12 +66,18 @@ impl Keyring {
                         keyring.keys.insert(entity.clone(), crypto_key);
                     }
                     key if key.starts_with("caps ") => {
-                        let service = &key[5..]; // Remove "caps " prefix
+                        let service = &key[5..];
+                        // Strip surrounding quotes — Ceph's KeyRing::decode_plaintext
+                        // strips them, and cap strings are compared unquoted.
+                        let cap_value = value
+                            .strip_prefix('"')
+                            .and_then(|s| s.strip_suffix('"'))
+                            .unwrap_or(value);
                         keyring
                             .caps
                             .entry(entity.clone())
                             .or_default()
-                            .insert(service.to_string(), value.to_string());
+                            .insert(service.to_string(), cap_value.to_string());
                     }
                     _ => {
                         warn!("Unknown keyring field: {} = {}", key, value);
@@ -140,12 +146,12 @@ mod tests {
         let admin_caps = keyring
             .get_caps("client.admin", "mon")
             .expect("admin mon caps");
-        assert_eq!(admin_caps, "\"allow *\""); // Quotes are preserved from keyring file
+        assert_eq!(admin_caps, "allow *");
 
         let test_caps = keyring
             .get_caps("client.test", "mon")
             .expect("test mon caps");
-        assert_eq!(test_caps, "\"allow r\""); // Quotes are preserved from keyring file
+        assert_eq!(test_caps, "allow r");
 
         let entities: Vec<_> = keyring.entities().collect();
         assert_eq!(entities.len(), 2);

@@ -8,6 +8,9 @@ use crate::denc::constants::crush::{FIXED_POINT_MASK, LN_LOOKUP_OFFSET};
 
 /// Select an item from a bucket using the appropriate algorithm
 pub fn bucket_choose(bucket: &CrushBucket, x: u32, r: u32) -> i32 {
+    if bucket.size == 0 {
+        return CRUSH_ITEM_NONE;
+    }
     match bucket.alg {
         BucketAlgorithm::Straw2 => bucket_straw2_choose(bucket, x, r),
         BucketAlgorithm::Uniform => bucket_uniform_choose(bucket, x, r),

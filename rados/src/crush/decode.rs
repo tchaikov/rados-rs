@@ -225,12 +225,6 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     let weight = u32::decode(data, 0)?;
     let size = u32::decode(data, 0)?;
 
-    if size == 0 {
-        return Err(CrushError::DecodeError(
-            "Bucket size must be non-zero".into(),
-        ));
-    }
-
     if alg_byte as u32 != alg {
         return Err(CrushError::DecodeError(format!(
             "Algorithm mismatch: header says {}, bucket says {}",

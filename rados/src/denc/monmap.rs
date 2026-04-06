@@ -6,7 +6,6 @@
 use crate::denc::codec::{Denc, VersionedEncode};
 use crate::denc::entity_addr::EntityAddrvec;
 use crate::denc::error::RadosError;
-use crate::denc::features::CephFeatures;
 use bytes::{Buf, BufMut};
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -160,12 +159,10 @@ pub struct MonInfo {
 impl VersionedEncode for MonInfo {
     const FEATURE_DEPENDENT: bool = true;
 
-    fn encoding_version(&self, features: u64) -> u8 {
-        if (features & CephFeatures::MASK_SERVER_NAUTILUS.bits()) == 0 {
-            2
-        } else {
-            6
-        }
+    fn encoding_version(&self, _features: u64) -> u8 {
+        // Quincy (v17) and later always have SERVER_NAUTILUS; v2 encode
+        // would produce wire data that our decode_content rejects (min v5).
+        6
     }
 
     fn compat_version(&self, _features: u64) -> u8 {
