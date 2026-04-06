@@ -55,7 +55,7 @@ fn bench_mosdop_encode_read(c: &mut Criterion) {
         let object = ObjectId::new(1, "test_object");
         let pgid = StripedPgId::from_pg(1, 0x12345678);
         let ops = vec![OSDOp::read(0, size)];
-        let reqid = RequestId::new("client.0", 1, 1);
+        let reqid = RequestId::from_str_name("client.0", 1, 1);
         let mosdop = MOSDOp::new(
             1,
             1,
@@ -87,7 +87,7 @@ fn bench_mosdop_encode_write(c: &mut Criterion) {
         let object = ObjectId::new(1, "test_object");
         let pgid = StripedPgId::from_pg(1, 0x12345678);
         let ops = vec![OSDOp::write(0, data)];
-        let reqid = RequestId::new("client.0", 1, 1);
+        let reqid = RequestId::from_str_name("client.0", 1, 1);
         let mosdop = MOSDOp::new(
             1,
             1,
@@ -117,7 +117,7 @@ fn bench_mosdop_encode_stat(c: &mut Criterion) {
     let object = ObjectId::new(1, "test_object");
     let pgid = StripedPgId::from_pg(1, 0x12345678);
     let ops = vec![OSDOp::stat()];
-    let reqid = RequestId::new("client.0", 1, 1);
+    let reqid = RequestId::from_str_name("client.0", 1, 1);
     let mosdop = MOSDOp::new(
         1,
         1,
@@ -147,7 +147,7 @@ fn bench_mosdop_full_message_encode(c: &mut Criterion) {
         let object = ObjectId::new(1, "test_object");
         let pgid = StripedPgId::from_pg(1, 0x12345678);
         let ops = vec![OSDOp::write(0, data)];
-        let reqid = RequestId::new("client.0", 1, 1);
+        let reqid = RequestId::from_str_name("client.0", 1, 1);
         let mosdop = MOSDOp::new(
             1,
             1,

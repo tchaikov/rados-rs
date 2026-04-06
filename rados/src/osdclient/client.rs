@@ -60,7 +60,7 @@ pub struct OSDClient {
     /// Request throttle to prevent resource exhaustion
     throttle: Arc<Throttle>,
     /// Entity name (e.g., "client.admin") from MonClient auth config
-    entity_name: String,
+    entity_name: Arc<str>,
     /// Global ID from monitor authentication (used in entity_name for request IDs)
     global_id: u64,
     /// Cluster FSID for OSDMap validation
@@ -106,7 +106,7 @@ impl OSDClient {
         mut osdmap_rx: MapReceiver<MOSDMap>,
     ) -> Result<Arc<Self>> {
         // Get entity_name and global_id from MonClient
-        let entity_name = mon_client.get_entity_name_string();
+        let entity_name: Arc<str> = mon_client.get_entity_name_string().into();
         let global_id = mon_client.get_global_id().await;
 
         info!("Creating OSDClient for entity_name={}", entity_name);

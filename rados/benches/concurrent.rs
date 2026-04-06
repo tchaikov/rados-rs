@@ -23,7 +23,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                                         let object = ObjectId::new(1, &format!("obj_{}", i));
                                         let pgid = StripedPgId::from_pg(1, 0x12345678);
                                         let ops = vec![OSDOp::read(0, 4096)];
-                                        let reqid = RequestId::new("client.0", 1, i);
+                                        let reqid = RequestId::from_str_name("client.0", 1, i);
                                         let mosdop =
                                             MOSDOp::new(1, 1, 0, object, pgid, ops, reqid, 0);
                                         black_box(Arc::new(mosdop));

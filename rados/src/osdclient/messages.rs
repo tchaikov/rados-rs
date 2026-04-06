@@ -583,7 +583,7 @@ mod tests {
         let object = ObjectId::new(3, "");
         let pgid = StripedPgId::from_pg(3, 0);
         let ops = vec![OSDOp::pgls(100, crate::HObject::empty_cursor(3), 20).unwrap()];
-        let reqid = RequestId::new("client.0", 1, 1);
+        let reqid = RequestId::from_str_name("client.0", 1, 1);
 
         let mosdop = MOSDOp::new(
             1,
@@ -649,7 +649,7 @@ mod tests {
         }];
 
         let reqid = RequestId {
-            entity_name: "client.admin".to_string(),
+            entity_name: "client.admin".into(),
             tid: 1,
             inc: 1,
         };
@@ -707,7 +707,7 @@ mod tests {
         }];
 
         let reqid = RequestId {
-            entity_name: "client.admin".to_string(),
+            entity_name: "client.admin".into(),
             tid: 1,
             inc: 1,
         };
@@ -731,7 +731,7 @@ mod tests {
         let object = ObjectId::new(3, "");
         let pgid = StripedPgId::from_pg(3, 0);
         let ops = vec![OSDOp::pgls(100, crate::HObject::empty_cursor(3), 20).unwrap()];
-        let reqid = RequestId::new("client.0", 1, 1);
+        let reqid = RequestId::from_str_name("client.0", 1, 1);
 
         let mosdop = MOSDOp::new(
             1,

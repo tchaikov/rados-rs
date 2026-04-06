@@ -375,8 +375,8 @@ impl std::str::FromStr for PackedEntityName {
 /// Request identifier for tracking operations (corresponds to osd_reqid_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestId {
-    /// Client entity name
-    pub entity_name: String,
+    /// Client entity name (shared — same string for the lifetime of a client)
+    pub entity_name: std::sync::Arc<str>,
     /// Transaction ID (unique per client)
     pub tid: u64,
     /// Client incarnation
@@ -384,9 +384,19 @@ pub struct RequestId {
 }
 
 impl RequestId {
-    pub fn new(entity_name: &str, tid: u64, inc: i32) -> Self {
+    pub fn new(entity_name: &std::sync::Arc<str>, tid: u64, inc: i32) -> Self {
         Self {
-            entity_name: entity_name.to_string(),
+            entity_name: std::sync::Arc::clone(entity_name),
+            tid,
+            inc,
+        }
+    }
+
+    /// Convenience constructor that allocates a new Arc from a string slice.
+    /// Use `new()` with a pre-allocated `Arc<str>` on the hot path.
+    pub fn from_str_name(entity_name: &str, tid: u64, inc: i32) -> Self {
+        Self {
+            entity_name: std::sync::Arc::from(entity_name),
             tid,
             inc,
         }
