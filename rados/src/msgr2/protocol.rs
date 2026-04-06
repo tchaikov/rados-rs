@@ -798,15 +798,15 @@ impl Connection {
         match addr {
             SocketAddr::V4(v4) => {
                 let mut data = Vec::with_capacity(16);
-                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET = 2
-                data.extend_from_slice(&v4.port().to_be_bytes()); // port in network byte order
-                data.extend_from_slice(&v4.ip().octets()); // IP address
-                data.extend_from_slice(&[0u8; 8]); // padding
+                data.extend_from_slice(&2u16.to_le_bytes()); // AF_INET
+                data.extend_from_slice(&v4.port().to_be_bytes());
+                data.extend_from_slice(&v4.ip().octets());
+                data.extend_from_slice(&[0u8; 8]); // padding to 16 bytes
                 entity_addr.sockaddr_data = data;
             }
             SocketAddr::V6(v6) => {
                 let mut data = Vec::with_capacity(28);
-                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6 = 10
+                data.extend_from_slice(&10u16.to_le_bytes()); // AF_INET6
                 data.extend_from_slice(&v6.port().to_be_bytes());
                 data.extend_from_slice(&0u32.to_be_bytes()); // flowinfo
                 data.extend_from_slice(&v6.ip().octets());

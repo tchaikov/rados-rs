@@ -114,10 +114,14 @@ pub struct StateMachine {
 }
 
 impl StateMachine {
-    /// Create a new state machine for client connection
-    pub fn new_client(config: crate::msgr2::ConnectionConfig) -> Self {
+    /// Shared initializer for both client and server state machines.
+    fn base(
+        state_kind: StateKind,
+        config: crate::msgr2::ConnectionConfig,
+        server_auth_handler: Option<crate::auth::CephXServerHandler>,
+    ) -> Self {
         Self {
-            state_kind: StateKind::BannerConnecting,
+            state_kind,
             frame_decryptor: None,
             frame_encryptor: None,
             compression_ctx: None,
@@ -131,16 +135,23 @@ impl StateMachine {
             client_addr: None,
             peer_supported_features: 0,
             config,
-            server_auth_handler: None,
+            server_auth_handler,
             global_id: 0,
             negotiated_features: 0,
-            client_cookie: rand::random(),
+            client_cookie: 0,
             server_cookie: 0,
             global_seq: 0,
             connect_seq: 0,
             in_seq: 0,
             last_keepalive_ack: None,
         }
+    }
+
+    /// Create a new state machine for client connection
+    pub fn new_client(config: crate::msgr2::ConnectionConfig) -> Self {
+        let mut sm = Self::base(StateKind::BannerConnecting, config, None);
+        sm.client_cookie = rand::random();
+        sm
     }
 
     /// Set the server address (called from protocol.rs after connection)
@@ -296,31 +307,13 @@ impl StateMachine {
 
     /// Create a new state machine for server connection with optional auth handler
     pub fn new_server_with_auth(auth_handler: Option<crate::auth::CephXServerHandler>) -> Self {
-        Self {
-            state_kind: StateKind::HelloAccepting,
-            frame_decryptor: None,
-            frame_encryptor: None,
-            compression_ctx: None,
-            pre_auth_rxbuf: BytesMut::new(),
-            pre_auth_txbuf: BytesMut::new(),
-            pre_auth_enabled: true,
-            session_key: None,
-            connection_mode: 0,
-            connection_secret: None,
-            server_addr: None,
-            client_addr: None,
-            peer_supported_features: 0,
-            config: crate::msgr2::ConnectionConfig::default(),
-            server_auth_handler: auth_handler,
-            global_id: 0,
-            negotiated_features: 0,
-            client_cookie: 0,
-            server_cookie: rand::random(),
-            global_seq: 0,
-            connect_seq: 0,
-            in_seq: 0,
-            last_keepalive_ack: None,
-        }
+        let mut sm = Self::base(
+            StateKind::HelloAccepting,
+            crate::msgr2::ConnectionConfig::default(),
+            auth_handler,
+        );
+        sm.server_cookie = rand::random();
+        sm
     }
 
     /// Get current state name

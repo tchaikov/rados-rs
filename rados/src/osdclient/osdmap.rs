@@ -2558,8 +2558,10 @@ impl OSDMap {
         self.pools.get(&pool_id).map(|p| p.crush_rule)
     }
 
-    /// Calculate object to PG mapping
-    /// Maps an object name to its placement group within a pool
+    /// Simplified object → PG mapping (no namespace, no locator key).
+    ///
+    /// **Not for production I/O.** Use `OSDClient::execute_op` which handles
+    /// namespace hashing, hashpspool, upmap, and pg_temp overrides.
     pub fn object_to_pg(&self, pool_id: u64, object_name: &str) -> Result<PgId, RadosError> {
         // Get the pool
         let pool = self
@@ -2579,10 +2581,10 @@ impl OSDMap {
         })
     }
 
-    /// Calculate object to OSD mapping
-    /// This is the complete object placement function that combines:
-    /// 1. Object name -> PG mapping (hashing)
-    /// 2. PG -> OSD set mapping (CRUSH)
+    /// Simplified object → OSD mapping (CRUSH only, no overrides).
+    ///
+    /// **Not for production I/O.** Skips upmap, pg_temp, and
+    /// pg_upmap_primaries overrides. Use `OSDClient::execute_op` instead.
     pub fn object_to_osds(&self, pool_id: u64, object_name: &str) -> Result<Vec<i32>, RadosError> {
         // First, map object to PG
         let pg = self.object_to_pg(pool_id, object_name)?;
@@ -2591,8 +2593,10 @@ impl OSDMap {
         self.pg_to_osds(&pg)
     }
 
-    /// Calculate PG to OSD mapping using CRUSH
-    /// Returns the ordered list of OSDs that should store replicas for this PG
+    /// Raw CRUSH PG → OSD mapping (no upmap / pg_temp overrides).
+    ///
+    /// **Not for production I/O.** Prefer `OSDClient::pg_to_osds_in_map`
+    /// which applies all OSDMap overrides.
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         // Check cache first
         let cache_key = (pg.pool, pg.seed);
