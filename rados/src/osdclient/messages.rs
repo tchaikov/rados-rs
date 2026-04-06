@@ -392,57 +392,23 @@ impl CephMessagePayload for MOSDOp {
     }
 }
 
-impl CephMessagePayload for MOSDOpReply {
-    fn msg_type() -> u16 {
-        CEPH_MSG_OSD_OPREPLY
-    }
-
-    fn msg_version(_features: u64) -> u16 {
-        Self::VERSION
-    }
-
-    fn msg_compat_version(_features: u64) -> u16 {
-        Self::COMPAT_VERSION
-    }
-
-    fn encode_payload(
-        &self,
-        _features: u64,
-    ) -> std::result::Result<Bytes, crate::msgr2::Msgr2Error> {
-        // MOSDOpReply encoding not implemented yet - this is typically only needed on the server side
-        Err(crate::msgr2::Msgr2Error::Serialization)
-    }
-
-    fn decode_payload(
-        _header: &CephMsgHeader,
+impl MOSDOpReply {
+    /// Decode a reply from the front (control) and data (payload) sections.
+    ///
+    /// Takes `Bytes` for the data section so op outdata can be extracted via
+    /// `Bytes::slice()` (zero-copy) instead of `Bytes::copy_from_slice()`.
+    pub fn decode_reply(
         front: &[u8],
-        _middle: &[u8],
-        data: &[u8],
+        data: Bytes,
     ) -> std::result::Result<Self, crate::msgr2::Msgr2Error> {
         use crate::Denc;
 
         let mut cursor = front;
-        // According to MOSDOpReply.h line 200, the encoding is:
-        // encode(oid, payload);
-        // encode(pgid, payload);
-        // encode(flags, payload);
-        // encode(result, payload);
-        // encode(bad_replay_version, payload);
-        // encode(osdmap_epoch, payload);
-        // encode(num_ops, payload);
-        // for each op: encode(ops[i].op, payload);
-        // encode(retry_attempt, payload);
-        // for each op: encode(ops[i].rval, payload);
-        // encode(replay_version, payload);
-        // encode(user_version, payload);
-        // encode(do_redirect, payload);
-        // if do_redirect: encode(redirect, payload);
-        // encode_trace(payload, features);
 
-        // 1. oid (object_t) - just the name as a string
+        // 1. oid (object_t)
         let oid = String::decode(&mut cursor, 0)?;
 
-        // 2. pgid (pg_t) - use Denc infrastructure
+        // 2. pgid (pg_t)
         let pgid_raw = PgId::decode(&mut cursor, 0)?;
 
         let pgid = StripedPgId {
@@ -458,9 +424,6 @@ impl CephMessagePayload for MOSDOpReply {
         let result = i32::decode(&mut cursor, 0)?;
 
         // 5. bad_replay_version (eversion_t = epoch + version)
-        // This is for backwards compatibility with old clients.
-        // Modern clients should use replay_version (our 'version' field) and user_version instead.
-        // See: ~/dev/ceph/src/messages/MOSDOpReply.h set_reply_versions()
         let _bad_replay_epoch = u32::decode(&mut cursor, 0)?;
         let _bad_replay_version = u64::decode(&mut cursor, 0)?;
 
@@ -470,20 +433,7 @@ impl CephMessagePayload for MOSDOpReply {
         // 7. num_ops (u32)
         let num_ops = u32::decode(&mut cursor, 0)? as usize;
 
-        // 8. For each op: osd_op structure
-        // osd_op is defined in rados.h and has a fixed size
-        // struct ceph_osd_op {
-        //   __le16 op;           /* CEPH_OSD_OP_* */
-        //   __le32 flags;        /* CEPH_OSD_OP_FLAG_* */
-        //   union {
-        //     ... various 28-byte unions ...
-        //   } __attribute__ ((packed));
-        //   __le32 payload_len;
-        // } __attribute__ ((packed));
-        // Total size: 2 + 4 + 28 + 4 = 38 bytes
-        // Verified by static_assert in rados.h: (2+4+(2*8+8+4)+4) = 38
-
-        // Parse osd_op structures to get payload lengths
+        // 8. For each op: osd_op structure (38 bytes each)
         let mut payload_lens = Vec::with_capacity(num_ops);
         for i in 0..num_ops {
             if cursor.remaining() < CEPH_OSD_OP_SIZE {
@@ -494,31 +444,25 @@ impl CephMessagePayload for MOSDOpReply {
                     cursor.remaining()
                 )));
             }
-            // Skip to payload_len field (at offset 34)
             cursor.advance(34);
             let payload_len = u32::decode(&mut cursor, 0)?;
-
             payload_lens.push(payload_len as usize);
         }
 
         // 9. retry_attempt (int32_t)
-        // Used to validate that the reply matches the request attempt
-        // See: ~/dev/linux/net/ceph/osd_client.c handle_reply()
         let retry_attempt = i32::decode(&mut cursor, 0)?;
 
         // 10. For each op: rval (int32_t)
         let mut ops = Vec::with_capacity(num_ops);
         for _i in 0..num_ops {
             let return_code = i32::decode(&mut cursor, 0)?;
-
             ops.push(OpReply {
                 return_code,
-                outdata: Bytes::new(), // Will be filled from data section below
+                outdata: Bytes::new(),
             });
         }
 
         // 11. replay_version (eversion_t = epoch + version)
-        // The epoch part is not currently used since we track OSDMap epoch separately
         let _replay_epoch = u32::decode(&mut cursor, 0)?;
         let version = u64::decode(&mut cursor, 0)?;
 
@@ -544,16 +488,12 @@ impl CephMessagePayload for MOSDOpReply {
         };
 
         // 15. trace (blkin_trace_info: 3 x u64)
-        // The trace is used for distributed tracing (Zipkin/Jaeger)
-        // These fields could be exposed in the future for observability/debugging
-        // See: ~/dev/ceph/src/include/encoding.h encode(blkin_trace_info)
         if cursor.remaining() >= BLKIN_TRACE_INFO_SIZE {
             let _trace = crate::osdclient::types::BlkinTraceInfo::decode(&mut cursor, 0)?;
         }
 
-        // 16. Distribute data section to operations
-        // The data section contains concatenated output data for all operations
-
+        // 16. Distribute data section to operations.
+        // Bytes::slice() shares the underlying allocation — zero copy.
         let mut data_offset = 0;
         for (i, op) in ops.iter_mut().enumerate() {
             let len = payload_lens[i];
@@ -567,7 +507,7 @@ impl CephMessagePayload for MOSDOpReply {
                         data.len()
                     )));
                 }
-                op.outdata = Bytes::copy_from_slice(&data[data_offset..data_offset + len]);
+                op.outdata = data.slice(data_offset..data_offset + len);
                 data_offset += len;
             }
         }
@@ -593,6 +533,38 @@ impl CephMessagePayload for MOSDOpReply {
             redirect,
             ops,
         })
+    }
+}
+
+impl CephMessagePayload for MOSDOpReply {
+    fn msg_type() -> u16 {
+        CEPH_MSG_OSD_OPREPLY
+    }
+
+    fn msg_version(_features: u64) -> u16 {
+        Self::VERSION
+    }
+
+    fn msg_compat_version(_features: u64) -> u16 {
+        Self::COMPAT_VERSION
+    }
+
+    fn encode_payload(
+        &self,
+        _features: u64,
+    ) -> std::result::Result<Bytes, crate::msgr2::Msgr2Error> {
+        Err(crate::msgr2::Msgr2Error::Serialization)
+    }
+
+    fn decode_payload(
+        _header: &CephMsgHeader,
+        front: &[u8],
+        _middle: &[u8],
+        data: &[u8],
+    ) -> std::result::Result<Self, crate::msgr2::Msgr2Error> {
+        // Fallback: copies data into Bytes since we only have a &[u8] slice.
+        // Prefer decode_reply() when the caller has the original Bytes.
+        Self::decode_reply(front, Bytes::copy_from_slice(data))
     }
 }
 

@@ -2162,10 +2162,9 @@ impl OSDClient {
 
         let tid = msg.tid();
 
-        // Decode the reply
-        use crate::msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
-        let header = CephMsgHeader::new(MOSDOpReply::msg_type(), MOSDOpReply::msg_version(0));
-        let reply = MOSDOpReply::decode_payload(&header, &msg.front, &[], &msg.data)?;
+        // Decode the reply. Pass msg.data as Bytes so op outdata can be
+        // extracted via Bytes::slice() (zero-copy) instead of memcpy.
+        let reply = MOSDOpReply::decode_reply(&msg.front, msg.data)?;
 
         debug!("OSD {} sent OSDOpReply for tid={}", osd_id, tid);
 
