@@ -335,15 +335,10 @@ impl OSDClient {
         };
 
         if let Some(session) = existing_session
-            && session.is_connected().await
+            && session.is_connected()
         {
             // Validate that session's address matches current OSDMap
-            // This prevents wasted reconnection attempts to stale addresses
-            // Reference: Ceph Objecter checks OSDMap during reconnect
-            let session_addr = session.get_peer_address().await;
-
-            // Compare addresses (ignoring nonce which can change)
-            if let Some(session_addr) = session_addr {
+            if let Some(session_addr) = session.get_peer_address() {
                 if session_addr.to_socket_addr() == current_addr.to_socket_addr() {
                     return Ok(session);
                 } else {
@@ -353,7 +348,6 @@ impl OSDClient {
                         session_addr.to_socket_addr(),
                         current_addr.to_socket_addr()
                     );
-                    // Address changed, fall through to create new session
                 }
             }
         }
@@ -392,12 +386,9 @@ impl OSDClient {
         };
 
         if let Some(existing) = existing_to_check
-            && existing.is_connected().await
+            && existing.is_connected()
         {
-            // Re-validate address outside lock
-            let session_addr = existing.get_peer_address().await;
-
-            if let Some(session_addr) = session_addr
+            if let Some(session_addr) = existing.get_peer_address()
                 && session_addr.to_socket_addr() == current_addr.to_socket_addr()
             {
                 // Another task created a session while we were connecting
@@ -1589,7 +1580,7 @@ impl OSDClient {
             return true;
         }
 
-        if session.is_connected().await {
+        if session.is_connected() {
             return self
                 .session_address_stale(session, osd_id, osdmap, new_epoch)
                 .await;
@@ -1702,7 +1693,7 @@ impl OSDClient {
         osdmap: &crate::osdclient::osdmap::OSDMap,
         new_epoch: u32,
     ) -> bool {
-        let Some(session_addr) = session.get_peer_address().await else {
+        let Some(session_addr) = session.get_peer_address() else {
             return false;
         };
         let Some(map_addrvec) = osdmap.get_osd_addr(osd_id) else {

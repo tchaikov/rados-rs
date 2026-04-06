@@ -11,7 +11,7 @@
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -57,20 +57,47 @@ const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ConnectionState {
     /// Initial state - not yet connected
-    Disconnected,
+    Disconnected = 0,
     /// Attempting to establish connection
-    Connecting,
+    Connecting = 1,
     /// Connection established and operational
-    Connected,
+    Connected = 2,
     /// Connection closed (terminal state)
-    Closed,
+    Closed = 3,
 }
 
-/// Session information combining connection state and peer address
-#[derive(Debug, Clone)]
-struct SessionInfo {
-    conn_state: ConnectionState,
-    peer_addr: Option<crate::EntityAddr>,
+impl ConnectionState {
+    fn from_u8(v: u8) -> Self {
+        match v {
+            0 => Self::Disconnected,
+            1 => Self::Connecting,
+            2 => Self::Connected,
+            3 => Self::Closed,
+            _ => Self::Disconnected,
+        }
+    }
+}
+
+/// Atomic wrapper around ConnectionState for lock-free reads on the hot path.
+///
+/// `is_connected()` and `get_peer_address()` are called on every single
+/// operation.  The previous `RwLock<SessionInfo>` added three async lock
+/// acquisitions per op; an AtomicU8 reduces that to a single Relaxed load.
+#[derive(Debug)]
+struct AtomicConnectionState(AtomicU8);
+
+impl AtomicConnectionState {
+    fn new(state: ConnectionState) -> Self {
+        Self(AtomicU8::new(state as u8))
+    }
+
+    fn load(&self) -> ConnectionState {
+        ConnectionState::from_u8(self.0.load(Ordering::Acquire))
+    }
+
+    fn store(&self, state: ConnectionState) {
+        self.0.store(state as u8, Ordering::Release);
+    }
 }
 
 /// Context passed to the I/O task
@@ -79,8 +106,8 @@ struct IoTaskContext {
     pending_ops: Arc<DashMap<u64, PendingOp>>,
     osdmap_tx: MapSender<MOSDMap>,
     client: std::sync::Weak<crate::osdclient::client::OSDClient>,
-    /// Session information (connection state and peer address)
-    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
+    /// Connection state — written by io_task on exit, read by is_connected()
+    conn_state: Arc<AtomicConnectionState>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
 }
@@ -108,9 +135,10 @@ pub struct OSDSession {
     /// Used to detect stale operations from previous connection incarnations.
     /// Reference: ~/dev/ceph/src/osdc/Objecter.h:2502, ~/dev/linux/net/ceph/osd_client.c:1413
     incarnation: Arc<AtomicU32>,
-    /// Session information (connection state and peer address combined)
-    /// Using a single lock reduces lock acquisitions and simplifies the code.
-    session_info: Arc<tokio::sync::RwLock<SessionInfo>>,
+    /// Connection state — AtomicU8 for lock-free reads on the hot path.
+    conn_state: Arc<AtomicConnectionState>,
+    /// Peer address — set once during connect(), immutable after.
+    peer_addr: Option<crate::EntityAddr>,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -180,11 +208,8 @@ impl OSDSession {
             // Start at incarnation 0, will increment to 1 on first connect()
             // Following Ceph pattern: incarnation 0 means "never connected"
             incarnation: Arc::new(AtomicU32::new(0)),
-            // Start with no peer address and disconnected state
-            session_info: Arc::new(tokio::sync::RwLock::new(SessionInfo {
-                conn_state: ConnectionState::Disconnected,
-                peer_addr: None,
-            })),
+            conn_state: Arc::new(AtomicConnectionState::new(ConnectionState::Disconnected)),
+            peer_addr: None,
             // Mutex to prevent concurrent connection attempts
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
             // No I/O task handle until connect() is called
@@ -220,13 +245,13 @@ impl OSDSession {
         let _lock = self.connecting_lock.lock().await;
 
         // Check if already connected (double-check after acquiring lock)
-        if self.session_info.read().await.conn_state == ConnectionState::Connected {
+        if self.conn_state.load() == ConnectionState::Connected {
             info!("OSD {} already connected, skipping", self.osd_id);
             return Ok(());
         }
 
         // Transition to Connecting state
-        self.session_info.write().await.conn_state = ConnectionState::Connecting;
+        self.conn_state.store(ConnectionState::Connecting);
 
         // Extract SocketAddr for TCP connection
         let addr = entity_addr
@@ -271,12 +296,10 @@ impl OSDSession {
 
         info!("Session established with OSD {}", self.osd_id);
 
-        // Store peer address and transition to Connected state
-        {
-            let mut info = self.session_info.write().await;
-            info.peer_addr = Some(entity_addr.clone());
-            info.conn_state = ConnectionState::Connected;
-        }
+        // Store peer address and transition to Connected state.
+        // connect() takes &mut self, so peer_addr can be set directly.
+        self.peer_addr = Some(entity_addr.clone());
+        self.conn_state.store(ConnectionState::Connected);
 
         // Increment connection incarnation following Ceph pattern
         // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
@@ -297,7 +320,7 @@ impl OSDSession {
             pending_ops: Arc::clone(&self.pending_ops),
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
-            session_info: Arc::clone(&self.session_info),
+            conn_state: Arc::clone(&self.conn_state),
             shutdown_token,
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
@@ -401,7 +424,7 @@ impl OSDSession {
         } else {
             ConnectionState::Disconnected
         };
-        ctx.session_info.write().await.conn_state = final_state;
+        ctx.conn_state.store(final_state);
 
         // Leave pending ops in the session.
         // They are migrated eagerly by get_or_create_session() the next time any operation
@@ -851,10 +874,9 @@ impl OSDSession {
         }
     }
 
-    /// Check if connected to OSD
-    pub async fn is_connected(&self) -> bool {
-        // Check explicit connection state
-        self.session_info.read().await.conn_state == ConnectionState::Connected
+    /// Check if connected to OSD (lock-free atomic load)
+    pub fn is_connected(&self) -> bool {
+        self.conn_state.load() == ConnectionState::Connected
     }
 
     /// Await the I/O task to ensure it has stopped
@@ -867,15 +889,15 @@ impl OSDSession {
         if let Some(handle) = handle {
             let _ = handle.await;
         }
-        self.session_info.write().await.conn_state = ConnectionState::Closed;
+        self.conn_state.store(ConnectionState::Closed);
     }
 
-    /// Get the peer address for this session
+    /// Get the peer address for this session.
     ///
-    /// Returns the EntityAddr that was used to establish the current connection.
-    /// Used to validate that the session's address matches the current OSDMap.
-    pub async fn get_peer_address(&self) -> Option<crate::EntityAddr> {
-        self.session_info.read().await.peer_addr.clone()
+    /// Returns the EntityAddr that was used to establish the connection.
+    /// The address is set once during connect() and never changes.
+    pub fn get_peer_address(&self) -> Option<&crate::EntityAddr> {
+        self.peer_addr.as_ref()
     }
 
     /// Check if an operation is blocked by an active backoff
