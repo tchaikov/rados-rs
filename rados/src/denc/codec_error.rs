@@ -27,10 +27,6 @@ pub enum CodecError {
     #[error("Invalid UTF-8: {0}")]
     Utf8(#[from] std::string::FromUtf8Error),
 
-    /// A fixed-size array could not be constructed because the element count was wrong.
-    #[error("Array size mismatch: expected {expected}, got {got}")]
-    ArraySizeMismatch { expected: usize, got: usize },
-
     /// The encoded struct version exceeds the maximum this decoder supports.
     #[error("{type_name} struct version {got} too new (max supported: {max})")]
     VersionTooNew {

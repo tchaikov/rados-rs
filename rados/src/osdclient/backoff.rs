@@ -16,7 +16,9 @@
 //! - ~/dev/ceph/src/osdc/Objecter.cc handle_osd_backoff(), _send_op()
 
 use crate::osdclient::types::StripedPgId;
-use std::collections::{BTreeMap, HashMap, HashSet};
+#[cfg(test)]
+use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap};
 use tracing::{debug, warn};
 
 /// Composite key for backoff entries: (pgid, begin_hobject)
@@ -68,12 +70,10 @@ pub struct BackoffTracker {
     /// Primary index: (pgid, begin_hobject) -> BackoffEntry
     /// BTreeMap enables efficient range queries for `is_blocked`.
     entries: BTreeMap<BackoffKey, BackoffEntry>,
-    /// Secondary index: backoff_id -> BackoffKey
-    /// Provides O(1) lookup for `remove_by_id` and `get_by_id`.
+    /// Secondary index: backoff_id -> BackoffKey for O(1) removal.
     by_id: HashMap<u64, BackoffKey>,
 }
 
-#[allow(dead_code)]
 impl BackoffTracker {
     /// Create a new empty backoff tracker
     pub fn new() -> Self {
@@ -168,23 +168,23 @@ impl BackoffTracker {
         None
     }
 
-    /// Get a backoff by ID
-    pub fn get_by_id(&self, id: u64) -> Option<&BackoffEntry> {
-        let key = self.by_id.get(&id)?;
-        self.entries.get(key)
-    }
-
     /// Check if there are any active backoffs
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
-    /// Get the total number of active backoffs
+    #[cfg(test)]
+    pub fn get_by_id(&self, id: u64) -> Option<&BackoffEntry> {
+        let key = self.by_id.get(&id)?;
+        self.entries.get(key)
+    }
+
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Get the number of PGs with active backoffs
+    #[cfg(test)]
     pub fn num_pgs(&self) -> usize {
         self.entries
             .keys()
@@ -193,7 +193,7 @@ impl BackoffTracker {
             .len()
     }
 
-    /// Clear all backoffs (used on session reset)
+    #[cfg(test)]
     pub fn clear(&mut self) {
         self.entries.clear();
         self.by_id.clear();

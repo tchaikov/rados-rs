@@ -2159,14 +2159,7 @@ impl OSDClient {
 
         debug!("OSD {} sent OSDOpReply for tid={}", osd_id, tid);
 
-        // Get the session for this OSD
-        // Clone Arc before releasing lock to avoid holding lock across await
-        let session = {
-            let sessions = self.sessions.read().await;
-            sessions.get(&osd_id).cloned().ok_or_else(|| {
-                OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
-            })?
-        };
+        let session = self.get_session_for_osd(osd_id).await?;
 
         // Check if retry is needed (returns Some if EAGAIN on replica read)
         if let Some((pending_op, new_flags)) = session.handle_osd_op_reply(tid, reply).await {

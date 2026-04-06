@@ -177,37 +177,32 @@ impl Frame {
         }
     }
 
+    fn make_assembler(&self, is_rev1: bool) -> (FrameAssembler, [u16; MAX_NUM_SEGMENTS], usize) {
+        let mut assembler = FrameAssembler::new(is_rev1);
+        if self.preamble.is_compressed() {
+            assembler.set_compression(true);
+        }
+        let n = self.preamble.num_segments as usize;
+        let mut alignments = [0u16; MAX_NUM_SEGMENTS];
+        for (a, seg) in alignments[..n].iter_mut().zip(&self.preamble.segments[..n]) {
+            *a = seg.align;
+        }
+        (assembler, alignments, n)
+    }
+
     /// Zero-copy variant of `to_wire` for unencrypted connections.
     ///
     /// Returns a list of Bytes chunks suitable for scatter-gather I/O.
     /// The large payload segments (front, data) are kept as Bytes references
     /// instead of being copied into a contiguous buffer.
     pub fn to_wire_vectored(&self, is_rev1: bool) -> Result<Vec<Bytes>, RadosError> {
-        let mut assembler = FrameAssembler::new(is_rev1);
-        if self.preamble.is_compressed() {
-            assembler.set_compression(true);
-        }
-        let n = self.preamble.num_segments as usize;
-        let mut alignments = [0u16; MAX_NUM_SEGMENTS];
-        for (a, seg) in alignments[..n].iter_mut().zip(&self.preamble.segments[..n]) {
-            *a = seg.align;
-        }
+        let (mut assembler, alignments, n) = self.make_assembler(is_rev1);
         assembler.assemble_frame_vectored(self.preamble.tag, &self.segments, &alignments[..n])
     }
 
-    /// Convert Frame to wire format with proper preamble, segments, and epilogue
-    /// This should be used when sending frames over the network
+    /// Convert Frame to a single contiguous wire-format buffer.
     pub fn to_wire(&self, is_rev1: bool) -> Result<Bytes, RadosError> {
-        let mut assembler = FrameAssembler::new(is_rev1);
-        // Copy compression flag from preamble if set
-        if self.preamble.is_compressed() {
-            assembler.set_compression(true);
-        }
-        let n = self.preamble.num_segments as usize;
-        let mut alignments = [0u16; MAX_NUM_SEGMENTS];
-        for (a, seg) in alignments[..n].iter_mut().zip(&self.preamble.segments[..n]) {
-            *a = seg.align;
-        }
+        let (mut assembler, alignments, n) = self.make_assembler(is_rev1);
         assembler.assemble_frame(self.preamble.tag, &self.segments, &alignments[..n])
     }
 
@@ -606,27 +601,23 @@ impl FrameAssembler {
         F::from_segments(segments)
     }
 
-    // Internal assembly logic
-    fn assemble_frame(
+    /// Validate segments and build descriptors + preamble for frame assembly.
+    fn prepare_frame(
         &mut self,
         tag: Tag,
         segments: &[Bytes],
         alignments: &[u16],
-    ) -> Result<Bytes, RadosError> {
+    ) -> Result<Preamble, RadosError> {
         if segments.is_empty() || segments.len() > MAX_NUM_SEGMENTS {
             return Err(RadosError::Protocol(format!(
                 "Invalid segment count: {}",
                 segments.len()
             )));
         }
-
-        // Calculate non-empty segments (drop trailing empty ones)
         let mut num_segments = segments.len();
         while num_segments > 1 && segments[num_segments - 1].is_empty() {
             num_segments -= 1;
         }
-
-        // Build descriptors
         self.descs.clear();
         for i in 0..num_segments {
             self.descs.push(SegmentDescriptor {
@@ -634,11 +625,16 @@ impl FrameAssembler {
                 align: alignments[i],
             });
         }
+        Ok(self.fill_preamble(tag, num_segments as u8))
+    }
 
-        // Build preamble
-        let preamble = self.fill_preamble(tag, num_segments as u8);
-
-        // Assembly depends on revision and encryption (we don't support encryption yet)
+    fn assemble_frame(
+        &mut self,
+        tag: Tag,
+        segments: &[Bytes],
+        alignments: &[u16],
+    ) -> Result<Bytes, RadosError> {
+        let preamble = self.prepare_frame(tag, segments, alignments)?;
         if self.is_rev1 {
             self.assemble_crc_rev1(preamble, segments)
         } else {
@@ -647,38 +643,16 @@ impl FrameAssembler {
     }
 
     /// Zero-copy variant of `assemble_frame` for scatter-gather I/O.
-    ///
-    /// Only supports rev1 framing. Segment payloads are returned as Bytes
-    /// references (no copy); only the small framing bytes are newly allocated.
     fn assemble_frame_vectored(
         &mut self,
         tag: Tag,
         segments: &[Bytes],
         alignments: &[u16],
     ) -> Result<Vec<Bytes>, RadosError> {
-        if segments.is_empty() || segments.len() > MAX_NUM_SEGMENTS {
-            return Err(RadosError::Protocol(format!(
-                "Invalid segment count: {}",
-                segments.len()
-            )));
-        }
-        let mut num_segments = segments.len();
-        while num_segments > 1 && segments[num_segments - 1].is_empty() {
-            num_segments -= 1;
-        }
-        self.descs.clear();
-        for i in 0..num_segments {
-            self.descs.push(SegmentDescriptor {
-                logical_len: segments[i].len() as u32,
-                align: alignments[i],
-            });
-        }
-        let preamble = self.fill_preamble(tag, num_segments as u8);
+        let preamble = self.prepare_frame(tag, segments, alignments)?;
         if self.is_rev1 {
             self.assemble_crc_rev1_vectored(preamble, segments)
         } else {
-            // rev0 doesn't benefit much from vectored I/O (simpler epilogue),
-            // fall back to a single-buffer assembly wrapped in a Vec.
             self.assemble_crc_rev0(preamble, segments).map(|b| vec![b])
         }
     }
@@ -740,7 +714,48 @@ impl FrameAssembler {
         Ok(frame.freeze())
     }
 
-    // msgr2.1 assembly: preamble + first_segment + first_crc + remaining_segments + epilogue (if multi-segment)
+    /// Build the rev1 head: preamble + first segment + inverted CRC.
+    fn build_rev1_head(
+        &self,
+        preamble: &Preamble,
+        segments: &[Bytes],
+        buf: &mut BytesMut,
+    ) -> Result<(), RadosError> {
+        buf.extend_from_slice(&preamble.encode()?);
+        if !segments.is_empty() && !segments[0].is_empty() {
+            buf.extend_from_slice(&segments[0]);
+            let crc = if self.with_data_crc {
+                !crc32c::crc32c(&segments[0])
+            } else {
+                0u32
+            };
+            buf.extend_from_slice(&crc.to_le_bytes());
+        }
+        Ok(())
+    }
+
+    /// Compute epilogue CRCs for remaining segments (rev1: inverted CRC).
+    fn build_rev1_epilogue(&self, segments: &[Bytes]) -> EpilogueCrcRev1 {
+        let mut epilogue = EpilogueCrcRev1 {
+            late_status: FRAME_LATE_STATUS_COMPLETE,
+            crc_values: [0; MAX_NUM_SEGMENTS - 1],
+        };
+        for (i, segment) in segments
+            .iter()
+            .enumerate()
+            .skip(1)
+            .take(self.descs.len() - 1)
+        {
+            epilogue.crc_values[i - 1] = if self.with_data_crc {
+                !crc32c::crc32c(segment)
+            } else {
+                0
+            };
+        }
+        epilogue
+    }
+
+    /// Contiguous rev1 assembly — copies all segments into one buffer.
     fn assemble_crc_rev1(
         &self,
         preamble: Preamble,
@@ -756,67 +771,35 @@ impl FrameAssembler {
         } else {
             0
         };
-        // epilogue_rev1: late_status(1) + crc_values((MAX_NUM_SEGMENTS-1) * 4)
         let epilogue_size = if self.descs.len() > 1 {
             1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE
         } else {
             0
         };
-        let total_size = PREAMBLE_SIZE + segments_size + first_crc_size + epilogue_size;
-        let mut frame = BytesMut::with_capacity(total_size);
+        let mut frame =
+            BytesMut::with_capacity(PREAMBLE_SIZE + segments_size + first_crc_size + epilogue_size);
 
-        frame.extend_from_slice(&preamble.encode()?);
-
-        if !segments.is_empty() && !segments[0].is_empty() {
-            frame.extend_from_slice(&segments[0]);
-            let first_crc = if self.with_data_crc {
-                !crc32c::crc32c(&segments[0])
-            } else {
-                0u32
-            };
-            frame.extend_from_slice(&first_crc.to_le_bytes());
-        }
+        self.build_rev1_head(&preamble, segments, &mut frame)?;
 
         if self.descs.len() == 1 {
             return Ok(frame.freeze());
         }
 
-        let mut epilogue = EpilogueCrcRev1 {
-            late_status: FRAME_LATE_STATUS_COMPLETE,
-            crc_values: [0; MAX_NUM_SEGMENTS - 1],
-        };
-
-        for (i, segment) in segments
-            .iter()
-            .enumerate()
-            .skip(1)
-            .take(self.descs.len() - 1)
-        {
+        let epilogue = self.build_rev1_epilogue(segments);
+        for segment in segments.iter().skip(1).take(self.descs.len() - 1) {
             frame.extend_from_slice(segment);
-            epilogue.crc_values[i - 1] = if self.with_data_crc {
-                !crc32c::crc32c(segment)
-            } else {
-                0
-            };
         }
-
         self.write_epilogue_crc_rev1(&epilogue, &mut frame);
 
         Ok(frame.freeze())
     }
 
-    /// Zero-copy variant of `assemble_crc_rev1`.
-    ///
-    /// Returns a list of `Bytes` chunks instead of a single contiguous buffer.
-    /// The segment payloads (front, middle, data) are kept as-is — only the
-    /// small framing bytes (preamble, CRCs, epilogue) are newly allocated.
-    /// The caller writes them to the network with scatter-gather I/O (`writev`).
+    /// Zero-copy rev1 assembly — keeps segment payloads as Bytes references.
     fn assemble_crc_rev1_vectored(
         &self,
         preamble: Preamble,
         segments: &[Bytes],
     ) -> Result<Vec<Bytes>, RadosError> {
-        // Head: preamble + first segment (small, ~80 bytes) + CRC
         let head_size = PREAMBLE_SIZE
             + segments.first().map_or(0, |s| s.len())
             + if !segments.is_empty() && !segments[0].is_empty() {
@@ -825,17 +808,7 @@ impl FrameAssembler {
                 0
             };
         let mut head = BytesMut::with_capacity(head_size);
-        head.extend_from_slice(&preamble.encode()?);
-
-        if !segments.is_empty() && !segments[0].is_empty() {
-            head.extend_from_slice(&segments[0]);
-            let first_crc = if self.with_data_crc {
-                !crc32c::crc32c(&segments[0])
-            } else {
-                0u32
-            };
-            head.extend_from_slice(&first_crc.to_le_bytes());
-        }
+        self.build_rev1_head(&preamble, segments, &mut head)?;
 
         let mut chunks = Vec::with_capacity(2 + self.descs.len());
         chunks.push(head.freeze());
@@ -844,27 +817,10 @@ impl FrameAssembler {
             return Ok(chunks);
         }
 
-        // Remaining segments: Bytes::clone is an atomic refcount bump — no copy.
-        let mut epilogue = EpilogueCrcRev1 {
-            late_status: FRAME_LATE_STATUS_COMPLETE,
-            crc_values: [0; MAX_NUM_SEGMENTS - 1],
-        };
-
-        for (i, segment) in segments
-            .iter()
-            .enumerate()
-            .skip(1)
-            .take(self.descs.len() - 1)
-        {
+        let epilogue = self.build_rev1_epilogue(segments);
+        for segment in segments.iter().skip(1).take(self.descs.len() - 1) {
             chunks.push(segment.clone());
-            epilogue.crc_values[i - 1] = if self.with_data_crc {
-                !crc32c::crc32c(segment)
-            } else {
-                0
-            };
         }
-
-        // Epilogue: late_status(1) + CRC values — tiny fixed size
         let epilogue_size = 1 + (MAX_NUM_SEGMENTS - 1) * FRAME_CRC_SIZE;
         let mut tail = BytesMut::with_capacity(epilogue_size);
         self.write_epilogue_crc_rev1(&epilogue, &mut tail);

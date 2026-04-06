@@ -222,8 +222,6 @@ impl MonMapState {
     /// Get monitors grouped by priority (lowest priority first)
     /// Returns monitors with the same priority grouped together
     pub fn get_monitors_by_priority(&self) -> Vec<Vec<usize>> {
-        use std::collections::BTreeMap;
-
         // Group monitors by priority
         let mut priority_groups: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
         for mon in &self.monitors {

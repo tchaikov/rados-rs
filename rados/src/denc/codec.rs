@@ -254,17 +254,23 @@ impl<T: Denc + FixedSize, const N: usize> Denc for [T; N] {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let items = (0..N)
-            .map(|_| T::decode(buf, features))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        match items.try_into() {
-            Ok(array) => Ok(array),
-            Err(items) => Err(RadosError::Codec(CodecError::ArraySizeMismatch {
-                expected: N,
-                got: items.len(),
-            })),
+        // Build array element-by-element on the stack, avoiding the Vec
+        // heap allocation that collect() + try_into() would require.
+        let mut arr = std::mem::MaybeUninit::<[T; N]>::uninit();
+        let ptr = arr.as_mut_ptr() as *mut T;
+        for i in 0..N {
+            match T::decode(buf, features) {
+                Ok(val) => unsafe { ptr.add(i).write(val) },
+                Err(e) => {
+                    // Drop already-initialized elements before returning.
+                    for j in 0..i {
+                        unsafe { ptr.add(j).drop_in_place() };
+                    }
+                    return Err(e);
+                }
+            }
         }
+        Ok(unsafe { arr.assume_init() })
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {

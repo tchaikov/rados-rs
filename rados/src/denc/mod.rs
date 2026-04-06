@@ -24,7 +24,6 @@ pub mod hobject;
 pub mod ids;
 pub mod macros;
 pub mod monmap;
-pub mod padding;
 pub mod types;
 pub mod zero_copy;
 
@@ -50,7 +49,6 @@ pub use features::{
 
 // Encoding metadata helpers
 pub use encoding_metadata::{EncodingMetadata, HasEncodingMetadata};
-pub use padding::Padding;
 pub use zero_copy::ZeroCopyDencode;
 
 // Re-export zerocopy crate for use in derived code
