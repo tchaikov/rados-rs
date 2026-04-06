@@ -115,6 +115,33 @@ impl FrameIO {
         payload_bytes
     }
 
+    /// Write all chunks using vectored I/O (scatter-gather).
+    ///
+    /// Uses `write_vectored` to send multiple non-contiguous buffers in a
+    /// single syscall where possible, avoiding memcpy of large segments.
+    async fn write_all_vectored(&mut self, chunks: &[Bytes]) -> std::io::Result<()> {
+        use std::io::IoSlice;
+
+        let mut slices: Vec<IoSlice<'_>> = chunks
+            .iter()
+            .filter(|c| !c.is_empty())
+            .map(|c| IoSlice::new(c))
+            .collect();
+
+        let mut remaining = slices.as_mut_slice();
+        while !remaining.is_empty() {
+            let n = self.stream.write_vectored(remaining).await?;
+            if n == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write_vectored wrote 0 bytes",
+                ));
+            }
+            IoSlice::advance_slices(&mut remaining, n);
+        }
+        Ok(())
+    }
+
     /// Send a frame with optional compression and encryption
     ///
     /// Processing order: compression → encryption
@@ -151,17 +178,29 @@ impl FrameIO {
         };
 
         let is_compressed = frame_to_send.preamble.is_compressed();
-        let final_bytes = if !state_machine.has_encryption() {
-            let wire_bytes = frame_to_send.to_wire(true)?;
+        if !state_machine.has_encryption() {
+            // Zero-copy path: scatter-gather I/O keeps large payload segments
+            // (e.g., write data) as Bytes references instead of memcpy-ing
+            // them into a contiguous buffer.
+            let chunks = frame_to_send.to_wire_vectored(true)?;
+            let total_len: usize = chunks.iter().map(|c| c.len()).sum();
             tracing::debug!(
-                "Sending frame: tag={:?}, {} segments, {} wire bytes, encrypted=false, compressed={}",
+                "Sending frame: tag={:?}, {} segments, {} wire bytes ({} chunks), encrypted=false, compressed={}",
                 frame_to_send.preamble.tag,
                 frame_to_send.preamble.num_segments,
-                wire_bytes.len(),
+                total_len,
+                chunks.len(),
                 is_compressed,
             );
-            wire_bytes
-        } else {
+            for chunk in &chunks {
+                state_machine.record_sent(chunk);
+            }
+            self.write_all_vectored(&chunks).await?;
+            self.stream.flush().await?;
+            return Ok(());
+        }
+
+        let final_bytes = {
             let num_segments = Self::normalized_num_segments(&frame_to_send);
             let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments)?;
             let payload_bytes = Self::build_secure_payload(&frame_to_send, num_segments);
