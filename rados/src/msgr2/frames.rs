@@ -12,6 +12,15 @@ use crate::msgr2::header::MsgHeader;
 use bytes::BufMut;
 use bytes::{Buf, Bytes, BytesMut};
 
+/// Ceph's preamble CRC: `!crc32c_append(0xFFFFFFFF, data)`.
+///
+/// Used for the 28-byte preamble CRC field.  Note: segment CRCs use
+/// `!crc32c::crc32c(data)` (initial value 0) instead — see the
+/// assemble/verify paths for details.
+pub(crate) fn ceph_crc32c(data: &[u8]) -> u32 {
+    !crc32c::crc32c_append(0xFFFFFFFF, data)
+}
+
 // Protocol constants
 pub const MAX_NUM_SEGMENTS: usize = 4;
 pub const DEFAULT_ALIGNMENT: u16 = 8;
@@ -410,8 +419,7 @@ impl Preamble {
         self.flags.encode(&mut buf, 0)?;
         self.reserved.encode(&mut buf, 0)?;
 
-        // Ceph's ceph_crc32c(): !crc32c_append(0xFFFFFFFF, data)
-        let crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        let crc = ceph_crc32c(&buf[..28]);
 
         crc.encode(&mut buf, 0)?;
 
@@ -425,7 +433,7 @@ impl Preamble {
         }
 
         // Verify CRC before decoding (first 28 bytes, excluding the CRC field itself)
-        let calculated_crc = !crc32c::crc32c_append(0xFFFFFFFF, &buf[..28]);
+        let calculated_crc = ceph_crc32c(&buf[..28]);
 
         let mut cursor = buf;
         let tag = Tag::try_from(u8::decode(&mut cursor, 0)?)?;

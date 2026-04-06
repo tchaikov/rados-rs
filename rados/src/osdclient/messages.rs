@@ -277,10 +277,9 @@ impl CephMessagePayload for MOSDOp {
         features: u64,
     ) -> std::result::Result<Bytes, crate::msgr2::Msgr2Error> {
         use crate::Denc;
+        use crate::EntityType;
         use crate::osdclient::denc_types::OsdReqId;
-        use crate::osdclient::types::{
-            BlkinTraceInfo, CEPH_ENTITY_TYPE_CLIENT, JaegerSpanContext, PackedEntityName,
-        };
+        use crate::osdclient::types::{BlkinTraceInfo, JaegerSpanContext, PackedEntityName};
 
         // Pre-allocate buffer with estimated size to avoid reallocations
         // Estimate: fixed fields + ops + variable data
@@ -302,7 +301,7 @@ impl CephMessagePayload for MOSDOp {
         self.flags.encode(&mut buf, 0)?;
 
         // 5. reqid (osd_reqid_t) - with version header (2,2)
-        let entity_name = PackedEntityName::new(CEPH_ENTITY_TYPE_CLIENT, self.global_id);
+        let entity_name = PackedEntityName::new(EntityType::CLIENT.bits() as u8, self.global_id);
         let reqid = OsdReqId {
             name: entity_name,
             tid: self.reqid.tid,

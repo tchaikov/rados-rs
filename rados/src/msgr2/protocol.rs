@@ -4,6 +4,7 @@
 //! handling frame I/O, encryption, and state machine coordination.
 
 use bytes::{Buf, Bytes, BytesMut};
+use std::collections::VecDeque;
 use std::io::IoSlice;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -14,7 +15,7 @@ use tokio::net::TcpStream;
 /// `write_all_buf` uses `chunks_vectored` to feed all chunks to
 /// `write_vectored` (writev) in a single syscall where possible,
 /// avoiding memcpy of large payload segments.
-struct BufList(Vec<Bytes>);
+struct BufList(VecDeque<Bytes>);
 
 impl Buf for BufList {
     fn remaining(&self) -> usize {
@@ -32,10 +33,10 @@ impl Buf for BufList {
 
     fn advance(&mut self, mut cnt: usize) {
         while cnt > 0 {
-            let front = &mut self.0[0];
+            let front = self.0.front_mut().expect("advance past end");
             if cnt >= front.len() {
                 cnt -= front.len();
-                self.0.remove(0);
+                self.0.pop_front();
             } else {
                 front.advance(cnt);
                 break;
@@ -46,11 +47,13 @@ impl Buf for BufList {
     fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
         let mut n = 0;
         for b in &self.0 {
-            if n >= dst.len() || b.is_empty() {
-                continue;
+            if n >= dst.len() {
+                break;
             }
-            dst[n] = IoSlice::new(b);
-            n += 1;
+            if !b.is_empty() {
+                dst[n] = IoSlice::new(b);
+                n += 1;
+            }
         }
         n
     }
@@ -220,7 +223,7 @@ impl FrameIO {
             for chunk in &chunks {
                 state_machine.record_sent(chunk);
             }
-            let mut buf = BufList(chunks);
+            let mut buf = BufList(VecDeque::from(chunks));
             self.stream.write_all_buf(&mut buf).await?;
             return Ok(());
         }
@@ -300,10 +303,12 @@ impl FrameIO {
             crate::msgr2::frames::PREAMBLE_SIZE // 32 bytes
         };
 
-        let mut preamble_block_buf = vec![0u8; preamble_block_size];
-        self.stream.read_exact(&mut preamble_block_buf).await?;
+        // Stack buffer avoids a heap allocation per frame receive.
+        let mut preamble_stack = [0u8; 96]; // max(32 plaintext, 96 encrypted)
+        let preamble_block_buf = &mut preamble_stack[..preamble_block_size];
+        self.stream.read_exact(preamble_block_buf).await?;
 
-        state_machine.record_received(&preamble_block_buf);
+        state_machine.record_received(preamble_block_buf);
 
         let preamble_and_inline = if has_encryption {
             let decrypted = state_machine.decrypt_frame_data(&preamble_block_buf)?;
@@ -314,7 +319,7 @@ impl FrameIO {
             );
             decrypted
         } else {
-            Bytes::from(preamble_block_buf)
+            Bytes::copy_from_slice(preamble_block_buf)
         };
 
         let preamble_bytes = preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE);

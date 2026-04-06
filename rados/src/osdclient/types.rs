@@ -328,13 +328,8 @@ pub struct PackedEntityName {
     pub num: crate::denc::zerocopy::little_endian::U64,
 }
 
-/// Entity type constants (from Ceph's msgr.h)
-pub const CEPH_ENTITY_TYPE_MON: u8 = 0x01;
-pub const CEPH_ENTITY_TYPE_MDS: u8 = 0x02;
-pub const CEPH_ENTITY_TYPE_OSD: u8 = 0x04;
-pub const CEPH_ENTITY_TYPE_CLIENT: u8 = 0x08;
-pub const CEPH_ENTITY_TYPE_MGR: u8 = 0x10;
-pub const CEPH_ENTITY_TYPE_AUTH: u8 = 0x20;
+// Use crate::EntityType for CEPH_ENTITY_TYPE_* constants.
+use crate::EntityType;
 
 impl PackedEntityName {
     pub fn new(entity_type: u8, num: u64) -> Self {
@@ -356,19 +351,19 @@ impl std::str::FromStr for PackedEntityName {
         }
 
         let entity_type = match parts[0] {
-            "mon" => CEPH_ENTITY_TYPE_MON,
-            "mds" => CEPH_ENTITY_TYPE_MDS,
-            "osd" => CEPH_ENTITY_TYPE_OSD,
-            "client" => CEPH_ENTITY_TYPE_CLIENT,
-            "mgr" => CEPH_ENTITY_TYPE_MGR,
-            "auth" => CEPH_ENTITY_TYPE_AUTH,
+            "mon" => EntityType::MON,
+            "mds" => EntityType::MDS,
+            "osd" => EntityType::OSD,
+            "client" => EntityType::CLIENT,
+            "mgr" => EntityType::MGR,
+            "auth" => EntityType::AUTH,
             _ => return Err(format!("Unknown entity type: {}", parts[0])),
         };
 
         let num: u64 = parts[1]
             .parse()
             .map_err(|e| format!("Invalid entity number: {}", e))?;
-        Ok(Self::new(entity_type, num))
+        Ok(Self::new(entity_type.bits() as u8, num))
     }
 }
 

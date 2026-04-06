@@ -236,7 +236,7 @@ impl OSDSession {
 
     /// Get the next transaction ID
     pub fn next_tid(&self) -> u64 {
-        self.next_tid.fetch_add(1, Ordering::SeqCst)
+        self.next_tid.fetch_add(1, Ordering::Relaxed)
     }
 
     /// Get current connection incarnation
@@ -513,19 +513,14 @@ impl OSDSession {
         mut pending_op: PendingOp,
         new_flags: u32,
     ) -> Result<()> {
-        // Create new MOSDOp with updated fields for retry
-        let mut new_mosdop = (*pending_op.op).clone();
-        new_mosdop.flags = new_flags;
+        // Update the wire message, cloning only if the Arc is shared (rare).
+        let op = Arc::make_mut(&mut pending_op.op);
+        op.flags = new_flags;
 
-        // Update attempts and retry_attempt
         pending_op.attempts += 1;
-        new_mosdop.retry_attempt = pending_op.attempts - 1;
+        op.retry_attempt = pending_op.attempts - 1;
 
-        // Update incarnation (operation is being resent in current session)
         pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
-
-        // Replace the Arc with updated operation
-        pending_op.op = Arc::new(new_mosdop);
 
         // Resubmit the operation
         Self::resubmit_operation(
