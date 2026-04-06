@@ -305,6 +305,7 @@ impl CephMessage {
 
 bitflags::bitflags! {
     /// CRC calculation flags
+    #[derive(Clone, Copy)]
     pub struct CrcFlags: u32 {
         const DATA = 1 << 0;
         const HEADER = 1 << 1;

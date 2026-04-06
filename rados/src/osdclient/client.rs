@@ -38,6 +38,14 @@ pub struct OSDClientConfig {
     pub max_inflight_ops: usize,
     /// Maximum in-flight bytes (default: 100MB, matches objecter_inflight_op_bytes)
     pub max_inflight_bytes: usize,
+    /// Compute CRC over the data section in the inner CephMessage footer.
+    /// Matches Ceph option `ms_crc_data` (default: true).
+    ///
+    /// The msgr2 frame layer already provides integrity (epilogue CRC for
+    /// plaintext, AES-GCM for encrypted), so the inner data CRC is
+    /// redundant.  Setting this to false avoids a full CRC32c pass over
+    /// every write payload.
+    pub ms_crc_data: bool,
 }
 
 impl Default for OSDClientConfig {
@@ -47,6 +55,7 @@ impl Default for OSDClientConfig {
             client_inc: 0,
             max_inflight_ops: crate::osdclient::throttle::DEFAULT_MAX_OPS,
             max_inflight_bytes: crate::osdclient::throttle::DEFAULT_MAX_BYTES,
+            ms_crc_data: true,
         }
     }
 }
@@ -366,6 +375,7 @@ impl OSDClient {
             self.global_id,
             self.map_tx.clone(),
             self.self_weak.clone(),
+            self.config.ms_crc_data,
         );
 
         // Connect to OSD BEFORE acquiring write lock - this is the expensive operation
