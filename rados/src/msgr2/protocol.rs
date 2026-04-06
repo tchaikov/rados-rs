@@ -3,10 +3,58 @@
 //! This module provides a high-level async API for the msgr2 protocol,
 //! handling frame I/O, encryption, and state machine coordination.
 
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
+use std::io::IoSlice;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+/// A list of `Bytes` chunks that implements `bytes::Buf`.
+///
+/// `write_all_buf` uses `chunks_vectored` to feed all chunks to
+/// `write_vectored` (writev) in a single syscall where possible,
+/// avoiding memcpy of large payload segments.
+struct BufList(Vec<Bytes>);
+
+impl Buf for BufList {
+    fn remaining(&self) -> usize {
+        self.0.iter().map(|b| b.len()).sum()
+    }
+
+    fn chunk(&self) -> &[u8] {
+        for b in &self.0 {
+            if !b.is_empty() {
+                return b;
+            }
+        }
+        &[]
+    }
+
+    fn advance(&mut self, mut cnt: usize) {
+        while cnt > 0 {
+            let front = &mut self.0[0];
+            if cnt >= front.len() {
+                cnt -= front.len();
+                self.0.remove(0);
+            } else {
+                front.advance(cnt);
+                break;
+            }
+        }
+    }
+
+    fn chunks_vectored<'a>(&'a self, dst: &mut [IoSlice<'a>]) -> usize {
+        let mut n = 0;
+        for b in &self.0 {
+            if n >= dst.len() || b.is_empty() {
+                continue;
+            }
+            dst[n] = IoSlice::new(b);
+            n += 1;
+        }
+        n
+    }
+}
 
 use crate::Denc;
 use crate::msgr2::FeatureSet;
@@ -119,29 +167,6 @@ impl FrameIO {
     ///
     /// Uses `write_vectored` to send multiple non-contiguous buffers in a
     /// single syscall where possible, avoiding memcpy of large segments.
-    async fn write_all_vectored(&mut self, chunks: &[Bytes]) -> std::io::Result<()> {
-        use std::io::IoSlice;
-
-        let mut slices: Vec<IoSlice<'_>> = chunks
-            .iter()
-            .filter(|c| !c.is_empty())
-            .map(|c| IoSlice::new(c))
-            .collect();
-
-        let mut remaining = slices.as_mut_slice();
-        while !remaining.is_empty() {
-            let n = self.stream.write_vectored(remaining).await?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WriteZero,
-                    "write_vectored wrote 0 bytes",
-                ));
-            }
-            IoSlice::advance_slices(&mut remaining, n);
-        }
-        Ok(())
-    }
-
     /// Send a frame with optional compression and encryption
     ///
     /// Processing order: compression → encryption
@@ -195,8 +220,8 @@ impl FrameIO {
             for chunk in &chunks {
                 state_machine.record_sent(chunk);
             }
-            self.write_all_vectored(&chunks).await?;
-            self.stream.flush().await?;
+            let mut buf = BufList(chunks);
+            self.stream.write_all_buf(&mut buf).await?;
             return Ok(());
         }
 
