@@ -132,8 +132,12 @@ async fn create_osd_client(
         .unwrap()
         .as_secs() as u32;
 
+    let ms_crc_data = std::env::var("RADOS_MS_CRC_DATA")
+        .map(|v| v != "0" && v != "false")
+        .unwrap_or(true);
     let osd_config = rados::osdclient::OSDClientConfig {
         client_inc,
+        ms_crc_data,
         ..Default::default()
     };
 
