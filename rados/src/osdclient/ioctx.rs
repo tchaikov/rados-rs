@@ -170,8 +170,8 @@ impl IoCtx {
         id
     }
 
-    /// Get the pool name (cached)
-    pub async fn pool_name(&self) -> Result<String> {
+    /// Get the pool name (cached after first lookup)
+    pub async fn pool_name(&self) -> Result<&str> {
         self.pool_name
             .get_or_try_init(|| async {
                 let osdmap = self.client.get_osdmap().await?;
@@ -181,7 +181,7 @@ impl IoCtx {
                     .ok_or(OSDClientError::PoolNotFound(self.pool_id))
             })
             .await
-            .cloned()
+            .map(String::as_str)
     }
 
     /// Create an object (optionally exclusive)

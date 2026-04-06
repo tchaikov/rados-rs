@@ -245,7 +245,7 @@ impl OSDSession {
     /// Following Ceph pattern where operations store incarnation when sent
     /// and are discarded if incarnation doesn't match current value.
     pub fn current_incarnation(&self) -> u32 {
-        self.incarnation.load(Ordering::SeqCst)
+        self.incarnation.load(Ordering::Acquire)
     }
 
     /// Connect to the OSD and start I/O task
@@ -321,7 +321,7 @@ impl OSDSession {
 
         // Increment connection incarnation following Ceph pattern
         // Reference: ~/dev/linux/net/ceph/osd_client.c:1413
-        let new_incarnation = self.incarnation.fetch_add(1, Ordering::SeqCst) + 1;
+        let new_incarnation = self.incarnation.fetch_add(1, Ordering::Release) + 1;
         info!(
             "OSD {} connection incarnation incremented to {}",
             self.osd_id, new_incarnation
@@ -490,7 +490,7 @@ impl OSDSession {
         reply: MOSDOpReply,
     ) -> Option<(PendingOp, u32)> {
         // Get current session incarnation for stale operation detection
-        let current_incarnation = self.incarnation.load(Ordering::SeqCst);
+        let current_incarnation = self.incarnation.load(Ordering::Acquire);
 
         let result = Self::handle_reply(tid, reply, &self.pending_ops, current_incarnation).await;
 
@@ -520,7 +520,7 @@ impl OSDSession {
         pending_op.attempts += 1;
         op.retry_attempt = pending_op.attempts - 1;
 
-        pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
+        pending_op.sent_incarnation = self.incarnation.load(Ordering::Acquire);
 
         // Resubmit the operation
         Self::resubmit_operation(
@@ -636,27 +636,25 @@ impl OSDSession {
         // Create channel for result
         let (tx, rx) = oneshot::channel();
 
-        let op_arc = op;
-
         self.pending_ops.insert(
             tid,
             PendingOp {
                 tid,
                 result_tx: tx,
                 attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                osdmap_epoch: op_arc.osdmap_epoch,
-                op: op_arc.clone(),
+                osdmap_epoch: op.osdmap_epoch,
+                op: op.clone(),
                 state: crate::osdclient::types::OpState::Queued,
                 target: crate::osdclient::types::OpTarget::new(
-                    op_arc.osdmap_epoch,
-                    op_arc.pgid,
+                    op.osdmap_epoch,
+                    op.pgid,
                     self.osd_id,
                     vec![self.osd_id],
                 ),
                 priority,
                 // Capture current session incarnation
                 // Following Ceph pattern: operation stores incarnation when sent
-                sent_incarnation: self.incarnation.load(Ordering::SeqCst),
+                sent_incarnation: self.incarnation.load(Ordering::Acquire),
                 redirect_count: 0,
             },
         );
@@ -669,13 +667,8 @@ impl OSDSession {
         }
 
         // Encode the operation using shared helper (priority goes in message header)
-        let msg = Self::encode_operation(
-            &op_arc,
-            tid,
-            priority,
-            self.negotiated_features,
-            self.crc_flags,
-        )?;
+        let msg =
+            Self::encode_operation(&op, tid, priority, self.negotiated_features, self.crc_flags)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         debug!("Submitting operation tid={} to OSD {}", tid, self.osd_id);
@@ -1017,7 +1010,7 @@ impl OSDSession {
 
         // Update incarnation to current session incarnation (operation is being resent)
         // This is critical: migrated operations get new incarnation from target session
-        pending_op.sent_incarnation = self.incarnation.load(Ordering::SeqCst);
+        pending_op.sent_incarnation = self.incarnation.load(Ordering::Acquire);
 
         // Check if operation is blocked by backoff
         if self.is_blocked_by_backoff(&pending_op.op).await {

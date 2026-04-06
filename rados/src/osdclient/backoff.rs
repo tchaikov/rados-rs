@@ -77,10 +77,7 @@ pub struct BackoffTracker {
 impl BackoffTracker {
     /// Create a new empty backoff tracker
     pub fn new() -> Self {
-        Self {
-            entries: BTreeMap::new(),
-            by_id: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a new backoff (called on BLOCK message)
