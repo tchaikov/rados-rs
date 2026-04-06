@@ -863,6 +863,10 @@ impl Connection {
 
         // Establish TCP connection
         let mut stream = TcpStream::connect(addr).await?;
+        // Ceph's msgr2 sets ms_tcp_nodelay=true by default.  Disabling
+        // Nagle's algorithm is critical for latency: without it the kernel
+        // may buffer small control messages for up to 40ms.
+        stream.set_nodelay(true)?;
         let local_addr = stream.local_addr()?;
         tracing::info!(
             "TCP connection established to {} (local: {})",
@@ -1305,6 +1309,7 @@ impl Connection {
 
         // Establish new TCP connection
         let mut stream = TcpStream::connect(self.server_addr).await?;
+        stream.set_nodelay(true)?;
         tracing::info!("TCP reconnection established to {}", self.server_addr);
 
         // Get local address for CLIENT_IDENT
