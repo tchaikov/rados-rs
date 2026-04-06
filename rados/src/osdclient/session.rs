@@ -11,7 +11,7 @@
 
 use dashmap::DashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
@@ -122,8 +122,12 @@ pub struct OSDSession {
     auth_provider: Option<Box<dyn crate::auth::AuthProvider>>,
     /// Global ID from monitor authentication (for AUTH_NONE authorizers)
     global_id: u64,
-    /// Per-PG backoff tracker using efficient data structures
+    /// Per-PG backoff tracker using efficient data structures.
     backoff_tracker: Arc<tokio::sync::RwLock<BackoffTracker>>,
+    /// Fast-path gate: true when the tracker has entries.  Checked with a
+    /// single Relaxed load on every submit_op — the RwLock is only acquired
+    /// when this is true (i.e., OSD has sent a BLOCK message, which is rare).
+    has_backoffs: Arc<AtomicBool>,
     /// Channel for routing MOSDMap messages to OSDClient
     osdmap_tx: MapSender<MOSDMap>,
     /// Weak reference to OSDClient for session-specific message dispatch
@@ -202,6 +206,7 @@ impl OSDSession {
             auth_provider,
             global_id,
             backoff_tracker: Arc::new(tokio::sync::RwLock::new(BackoffTracker::new())),
+            has_backoffs: Arc::new(AtomicBool::new(false)),
             osdmap_tx,
             client,
             tracker,
@@ -446,8 +451,15 @@ impl OSDSession {
     // ===========================================================================
 
     /// Get a clone of backoff tracker for management (used by OSDClient for backoff handling)
-    pub fn backoff_tracker(&self) -> Arc<tokio::sync::RwLock<BackoffTracker>> {
-        Arc::clone(&self.backoff_tracker)
+    pub fn backoff_tracker(&self) -> &tokio::sync::RwLock<BackoffTracker> {
+        &self.backoff_tracker
+    }
+
+    /// Update the has_backoffs atomic flag after a backoff mutation.
+    /// Called by OSDClient after register/remove to keep the fast-path
+    /// gate in sync with the actual tracker state.
+    pub fn set_has_backoffs(&self, has: bool) {
+        self.has_backoffs.store(has, Ordering::Release);
     }
 
     /// Get the send channel for sending messages (used by OSDClient for ACKs)
@@ -900,16 +912,16 @@ impl OSDSession {
         self.peer_addr.as_ref()
     }
 
-    /// Check if an operation is blocked by an active backoff
+    /// Check if an operation is blocked by an active backoff.
     ///
-    /// Fast path: skips hobj construction entirely when no backoffs are active
-    /// (the common case on a healthy cluster).
-    /// Reference: Ceph Objecter _send_op()
+    /// Lock-free fast path: a single Relaxed atomic load on has_backoffs.
+    /// On a healthy cluster (no BLOCK messages from any OSD), this returns
+    /// false without touching the RwLock or allocating HObject strings.
     async fn is_blocked_by_backoff(&self, op: &MOSDOp) -> bool {
-        let tracker = self.backoff_tracker.read().await;
-        if tracker.is_empty() {
+        if !self.has_backoffs.load(Ordering::Relaxed) {
             return false;
         }
+        let tracker = self.backoff_tracker.read().await;
         let hobj = hobj_from_op(op);
         tracker.is_blocked(&op.pgid, &hobj).is_some()
     }

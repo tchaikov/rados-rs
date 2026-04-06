@@ -2276,6 +2276,7 @@ impl OSDClient {
             end: backoff.end.clone(),
         };
         tracker.register(entry);
+        session.set_has_backoffs(true);
     }
 
     /// Send ACK_BLOCK message to OSD
@@ -2343,6 +2344,7 @@ impl OSDClient {
             let tracker = session.backoff_tracker();
             let mut tracker = tracker.write().await;
             tracker.remove_by_id(backoff.id, &backoff.begin, &backoff.end);
+            session.set_has_backoffs(!tracker.is_empty());
         }
 
         // Resend operations that were in the backoff range
