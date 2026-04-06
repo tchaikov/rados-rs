@@ -247,12 +247,12 @@ pub fn object_to_pg(
         object_name
     };
 
-    // Hash the key, prepending "namespace\n" when a namespace is set.
-    // Avoids allocation in the common (empty namespace) case.
+    // Hash the key, prepending "namespace\x1f" when a namespace is set.
+    // Matches pg_pool_t::hash_key(): ns + '\037' + key_or_oid.
     let hash = if locator.namespace.is_empty() {
         ceph_str_hash_rjenkins(hash_key.as_bytes())
     } else {
-        let hash_input = format!("{}\n{}", locator.namespace, hash_key);
+        let hash_input = format!("{}\x1f{}", locator.namespace, hash_key);
         ceph_str_hash_rjenkins(hash_input.as_bytes())
     };
 

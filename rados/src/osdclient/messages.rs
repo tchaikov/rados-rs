@@ -145,17 +145,11 @@ impl MOSDOp {
         flags.bits()
     }
 
-    /// Get the expected front section size for a PGLS operation
-    ///
-    /// This is useful for verifying the encoding is correct.
-    /// - v8: 209 bytes (without OpenTelemetry trace)
-    /// - v9: 216 bytes (with OpenTelemetry trace, 7 bytes for JaegerSpanContext)
-    ///
-    /// Returns `None` for unsupported versions.
+    #[cfg(test)]
     pub fn expected_front_size_pgls(version: u16) -> Option<usize> {
         match version {
-            8 => Some(209), // v8 format (Ceph v18)
-            9 => Some(216), // v9 format (Ceph v19+)
+            8 => Some(209),
+            9 => Some(216),
             _ => None,
         }
     }
@@ -163,14 +157,14 @@ impl MOSDOp {
 
 /// MOSDOpReply message - OSD to Client (message type 43)
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct MOSDOpReply {
-    pub object: ObjectId,
-    pub pgid: StripedPgId,
-    pub flags: u32,
+    // Decoded from wire but not consumed; kept for Debug output.
+    pub(crate) _object: ObjectId,
+    pub(crate) _pgid: StripedPgId,
+    pub(crate) _flags: u32,
     pub result: i32,
-    pub epoch: u32,
-    pub version: u64,
+    pub(crate) _epoch: u32,
+    pub(crate) _version: u64,
     pub user_version: u64,
     pub retry_attempt: i32,
     pub redirect: Option<RequestRedirect>,
@@ -285,8 +279,6 @@ impl CephMessagePayload for MOSDOp {
         // Estimate: fixed fields + ops + variable data
         let estimated_size = 256 + (self.ops.len() * 64);
         let mut buf = BytesMut::with_capacity(estimated_size);
-
-        // Debug logging for MOSDOp message
 
         // 1. spgid (spg_t) - with version header (1,1)
         self.pgid.encode(&mut buf, 0)?;
@@ -524,12 +516,12 @@ impl MOSDOpReply {
         };
 
         Ok(Self {
-            object,
-            pgid,
-            flags,
+            _object: object,
+            _pgid: pgid,
+            _flags: flags,
             result,
-            epoch,
-            version,
+            _epoch: epoch,
+            _version: version,
             user_version,
             retry_attempt,
             redirect,

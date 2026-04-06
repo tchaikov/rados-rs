@@ -198,7 +198,7 @@ impl OSDSession {
         client: std::sync::Weak<crate::osdclient::client::OSDClient>,
         ms_crc_data: bool,
     ) -> Self {
-        // Create channel for outgoing messages (like Linux kernel's out_queue)
+        // Placeholder channel; replaced by connect() with a real send_rx for the I/O task.
         let (send_tx, _) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
 
         // Get tracker from client if available

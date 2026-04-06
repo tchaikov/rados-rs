@@ -490,8 +490,7 @@ impl JaegerSpanContext {
 // OSD operation modes (from Ceph's rados.h)
 const CEPH_OSD_OP_MODE_RD: u16 = 0x1000; // Read mode
 const CEPH_OSD_OP_MODE_WR: u16 = 0x2000; // Write mode
-#[allow(dead_code)]
-const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode
+const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode (used via osd_op! macro)
 
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations

@@ -240,9 +240,6 @@ fn format_utime_as_timestamp(utime: &UTime) -> String {
     }
 }
 
-// String encoding implementation to match Ceph's string handling
-// Generic BTreeMap encoding - matches Ceph's map encoding
-
 /// Explicit Hash HitSet parameters - no additional parameters needed
 #[derive(Debug, Clone, Default, Serialize, crate::VersionedDenc)]
 #[denc(crate = "crate", version = 1, compat = 1)]

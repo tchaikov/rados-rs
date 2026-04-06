@@ -58,16 +58,6 @@ impl Throttle {
         }
     }
 
-    /// Create throttle with default limits
-    ///
-    /// Matches Ceph defaults:
-    /// - objecter_inflight_ops: 1024
-    /// - objecter_inflight_op_bytes: 100 MB
-    #[allow(dead_code)]
-    pub fn default_limits() -> Self {
-        Self::new(DEFAULT_MAX_OPS, DEFAULT_MAX_BYTES)
-    }
-
     /// Acquire budget for an operation
     ///
     /// This will block if the throttle limits are exceeded, providing backpressure.
@@ -175,9 +165,9 @@ impl Throttle {
 /// RAII guard that releases throttle budget when dropped
 pub struct ThrottlePermit<'a> {
     throttle: &'a Throttle,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // RAII: held until drop releases the semaphore permit
     op_permit: tokio::sync::SemaphorePermit<'a>,
-    #[allow(dead_code)]
+    #[allow(dead_code)] // RAII: held until drop releases the semaphore permit
     bytes_permit: Option<tokio::sync::SemaphorePermit<'a>>,
     bytes: usize,
 }
