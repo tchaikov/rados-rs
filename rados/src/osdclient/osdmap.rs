@@ -2382,10 +2382,7 @@ impl OSDMap {
     }
 
     pub fn new() -> Self {
-        Self {
-            crush_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
-            ..Default::default()
-        }
+        Self::default()
     }
 
     /// Check if an OSD is marked UP in the OSDMap.

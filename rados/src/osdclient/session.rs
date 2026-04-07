@@ -476,8 +476,8 @@ impl OSDSession {
     }
 
     /// Get the send channel for sending messages (used by OSDClient for ACKs)
-    pub fn send_tx(&self) -> mpsc::Sender<crate::msgr2::message::Message> {
-        self.send_tx.clone()
+    pub fn send_tx(&self) -> &mpsc::Sender<crate::msgr2::message::Message> {
+        &self.send_tx
     }
 
     /// Handle an operation reply and check if retry is needed
