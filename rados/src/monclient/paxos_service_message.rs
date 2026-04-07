@@ -86,10 +86,6 @@ pub trait PaxosServiceMessage: Sized {
     /// Get the paxos fields for this message
     fn paxos_fields(&self) -> &PaxosFields;
 
-    /// Get mutable paxos fields for this message
-    #[allow(dead_code)]
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields;
-
     /// Encode the message-specific fields (after paxos fields)
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()>;
 

@@ -295,10 +295,6 @@ impl PaxosServiceMessage for MMonCommand {
         &self.paxos
     }
 
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
-        &mut self.paxos
-    }
-
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         self.fsid.encode(buf, 0)?;
         self.cmd.encode(buf, 0)?;
@@ -370,10 +366,6 @@ pub struct MMonCommandAck {
 impl PaxosServiceMessage for MMonCommandAck {
     fn paxos_fields(&self) -> &PaxosFields {
         &self.paxos
-    }
-
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
-        &mut self.paxos
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
@@ -515,10 +507,6 @@ impl PaxosServiceMessage for MPoolOp {
         &self.paxos
     }
 
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
-        &mut self.paxos
-    }
-
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
         self.fsid.encode(buf, 0)?;
         self.pool.encode(buf, 0)?;
@@ -575,10 +563,6 @@ pub struct MPoolOpReply {
 impl PaxosServiceMessage for MPoolOpReply {
     fn paxos_fields(&self) -> &PaxosFields {
         &self.paxos
-    }
-
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
-        &mut self.paxos
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
@@ -653,10 +637,6 @@ impl MAuth {
 impl PaxosServiceMessage for MAuth {
     fn paxos_fields(&self) -> &PaxosFields {
         &self.paxos
-    }
-
-    fn paxos_fields_mut(&mut self) -> &mut PaxosFields {
-        &mut self.paxos
     }
 
     fn encode_message(&self, buf: &mut BytesMut) -> Result<()> {
