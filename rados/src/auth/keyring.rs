@@ -10,20 +10,15 @@ use std::path::Path;
 use tracing::{debug, warn};
 
 /// Represents a parsed Ceph keyring file
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Keyring {
-    /// Map of entity names to their authentication keys
     keys: HashMap<String, CryptoKey>,
-    /// Map of entity names to their capabilities
     caps: HashMap<String, HashMap<String, String>>,
 }
 
 impl Keyring {
     pub fn new() -> Self {
-        Self {
-            keys: HashMap::new(),
-            caps: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Load keyring from file path
@@ -104,12 +99,6 @@ impl Keyring {
 
     pub fn has_entity(&self, entity: &str) -> bool {
         self.keys.contains_key(entity)
-    }
-}
-
-impl Default for Keyring {
-    fn default() -> Self {
-        Self::new()
     }
 }
 

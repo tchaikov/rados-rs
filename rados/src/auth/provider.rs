@@ -310,24 +310,25 @@ impl AuthProvider for ServiceAuthProvider {
 
         let handler = self.lock_handler()?;
 
-        let session_key = handler
+        let session_key_ref = handler
             .get_session()
             .and_then(|session| session.ticket_handlers.get(&service_type))
-            .map(|th| th.session_key.clone());
+            .map(|th| &th.session_key);
 
         debug!(
             "Returning session_key: {} bytes",
-            session_key.as_ref().map(|k| k.secret.len()).unwrap_or(0)
+            session_key_ref.map(|k| k.secret.len()).unwrap_or(0)
         );
 
         let connection_secret =
-            Self::try_extract_connection_secret(con_mode, &payload, session_key.as_ref());
+            Self::try_extract_connection_secret(con_mode, &payload, session_key_ref);
 
         if let Some(ref secret) = connection_secret {
             debug!("Extracted connection_secret: {} bytes", secret.len());
         }
 
-        Ok((session_key.map(|k| k.secret.clone()), connection_secret))
+        let session_key_bytes = session_key_ref.map(|k| k.secret.clone());
+        Ok((session_key_bytes, connection_secret))
     }
 
     fn has_valid_ticket(&self, service_id: u32) -> bool {

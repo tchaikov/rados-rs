@@ -613,14 +613,12 @@ impl CephXClientHandler {
             })?
             .clone();
 
-        let session_key = handler.session_key.clone();
-
         debug!(
             "Building authorizer: global_id={}, service_type={:?}, secret_id={}, session_key_len={}",
             actual_global_id,
             service_type,
             ticket_blob.secret_id,
-            session_key.secret.len()
+            handler.session_key.secret.len()
         );
 
         let authorize_a = CephXAuthorizeA::new(actual_global_id, service_type.bits(), ticket_blob);
@@ -642,7 +640,7 @@ impl CephXClientHandler {
             authorizer_buf.len()
         );
 
-        let encrypted_b = Self::encrypt_authorize_b(&session_key, &authorize_b)?;
+        let encrypted_b = Self::encrypt_authorize_b(&handler.session_key, &authorize_b)?;
         trace!("encrypted_b length: {}", encrypted_b.len());
         authorizer_buf.extend_from_slice(&encrypted_b);
 
