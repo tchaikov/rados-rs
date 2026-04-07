@@ -441,7 +441,7 @@ pub struct EntityAddrvec {
 
 impl EntityAddrvec {
     pub fn new() -> Self {
-        Self { addrs: Vec::new() }
+        Self::default()
     }
 
     pub fn with_addr(addr: EntityAddr) -> Self {
