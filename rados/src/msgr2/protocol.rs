@@ -311,7 +311,7 @@ impl FrameIO {
         state_machine.record_received(preamble_block_buf);
 
         let preamble_and_inline = if has_encryption {
-            let decrypted = state_machine.decrypt_frame_data(&preamble_block_buf)?;
+            let decrypted = state_machine.decrypt_frame_data(preamble_block_buf)?;
             tracing::debug!(
                 "Decrypted preamble block: {} bytes → {} bytes",
                 preamble_block_buf.len(),

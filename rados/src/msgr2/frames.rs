@@ -43,9 +43,8 @@ pub(crate) fn align_to_crypto_block(size: usize) -> usize {
 pub struct FrameFlags(u8);
 
 impl FrameFlags {
-    /// Create new flags with all bits cleared
     pub fn new() -> Self {
-        Self(0)
+        Self::default()
     }
 
     /// Create from raw u8 value
