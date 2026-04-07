@@ -1231,20 +1231,10 @@ define_control_frame!(
 );
 
 // WaitFrame has no payload
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct WaitFrame;
 
-impl Default for WaitFrame {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl WaitFrame {
-    pub fn new() -> Self {
-        Self
-    }
-
     pub fn to_wire(
         &self,
         assembler: &mut FrameAssembler,
