@@ -2553,8 +2553,7 @@ impl OSDMap {
     }
 
     /// Returns the parsed `PoolFlags` for the given pool, or empty if unknown.
-    fn pool_flags(&self, pool_id: u64) -> crate::osdclient::types::PoolFlags {
-        use crate::osdclient::types::PoolFlags;
+    fn pool_flags(&self, pool_id: u64) -> PoolFlags {
         self.pools
             .get(&pool_id)
             .map(|p| PoolFlags::from_bits_truncate(p.flags))
@@ -2566,7 +2565,6 @@ impl OSDMap {
     /// Checks both the `FULL` and `FULL_QUOTA` pool flags, matching
     /// `Objecter::_osdmap_pool_full()` in C++.
     pub fn is_pool_full(&self, pool_id: u64) -> bool {
-        use crate::osdclient::types::PoolFlags;
         self.pool_flags(pool_id)
             .intersects(PoolFlags::FULL | PoolFlags::FULL_QUOTA)
     }
@@ -2577,7 +2575,6 @@ impl OSDMap {
     /// `Objecter::_calc_target()` → `RECALC_OP_TARGET_POOL_EIO`.
     /// All client ops targeting this pool must fail immediately with -EIO.
     pub fn is_pool_eio(&self, pool_id: u64) -> bool {
-        use crate::osdclient::types::PoolFlags;
         self.pool_flags(pool_id).contains(PoolFlags::EIO)
     }
 
