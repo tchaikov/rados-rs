@@ -2458,8 +2458,9 @@ impl OSDMap {
     /// 2. pg_upmap_items — fine-grained OSD swaps
     /// 3. pg_upmap_primaries — primary override within the up set
     /// 4. pg_temp — if present, overrides the entire acting set
-    /// 5. primary_temp — directly sets acting[0]; applied after pg_temp so
-    ///    it can override the primary even when pg_temp is active
+    /// 5. primary_temp — overrides the primary (acting[0] in our flat-vec
+    ///    model); in C++ this is a separate `acting_primary` int that does
+    ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
         if let Some(upmap_osds) = self.pg_upmap.get(pg) {
             *osds = upmap_osds.clone();
@@ -2485,10 +2486,11 @@ impl OSDMap {
             *osds = temp_osds.clone();
         }
 
-        // primary_temp overrides acting[0] (mirrors C++ OSDMap::_pg_to_up_acting_osds).
-        // Applied after pg_temp so it takes effect even when a temp acting set is active.
-        // Swap rather than overwrite: if primary is already a replica, overwriting would
-        // produce a duplicate OSD that retain() would not remove (it only strips sentinels).
+        // primary_temp: in C++ this sets a separate `acting_primary` output without
+        // touching the acting vector.  We use a flat Vec where [0] is the primary,
+        // so we swap-to-front when the OSD is already present (avoiding a duplicate)
+        // or overwrite [0] when it is not (losing the displaced OSD — acceptable
+        // because the client only uses [0] for routing).
         if let Some(&primary) = self.primary_temp.get(pg)
             && primary >= 0
             && !osds.is_empty()
