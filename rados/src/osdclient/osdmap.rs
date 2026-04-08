@@ -2485,13 +2485,19 @@ impl OSDMap {
             *osds = temp_osds.clone();
         }
 
-        // primary_temp overrides acting[0] directly (mirrors C++ OSDMap::_pg_to_up_acting_osds).
+        // primary_temp overrides acting[0] (mirrors C++ OSDMap::_pg_to_up_acting_osds).
         // Applied after pg_temp so it takes effect even when a temp acting set is active.
+        // Swap rather than overwrite: if primary is already a replica, overwriting would
+        // produce a duplicate OSD that retain() would not remove (it only strips sentinels).
         if let Some(&primary) = self.primary_temp.get(pg)
             && primary >= 0
             && !osds.is_empty()
         {
-            osds[0] = primary;
+            if let Some(pos) = osds.iter().position(|&osd| osd == primary) {
+                osds.swap(0, pos);
+            } else {
+                osds[0] = primary;
+            }
         }
 
         // Filter out CRUSH_ITEM_NONE (-1) sentinels.

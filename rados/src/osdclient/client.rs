@@ -479,7 +479,6 @@ impl OSDClient {
         let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
             .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {}", e)))?;
 
-        // CRUSH placement + overrides (cached per PG within the same OSDMap epoch)
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
 
         let spg = StripedPgId::from_pg(pg.pool, pg.seed);
@@ -506,10 +505,7 @@ impl OSDClient {
     }
 
     /// Map a PG to its acting OSD set, applying CRUSH placement and all overrides.
-    ///
-    /// Delegates to `OSDMap::pg_to_acting_osds`, which caches results per
-    /// `(pool_id, pg_seed)` so repeated lookups for the same PG within the
-    /// same OSDMap epoch skip the CRUSH tree walk.
+    /// Returns `NoOSDs` if the acting set is empty.
     ///
     /// Shared helper used by both `object_to_osds_in_map` and `query_pg_objects`.
     fn pg_to_osds_in_map(
@@ -1071,7 +1067,6 @@ impl OSDClient {
             seed: current_pg,
         };
 
-        // CRUSH placement + overrides (cached per PG within the same OSDMap epoch)
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
         let primary_osd = osds[0];
 
