@@ -518,7 +518,7 @@ impl OSDClient {
     ) -> Result<Vec<i32>> {
         let osds = osdmap
             .pg_to_acting_osds(&pg)
-            .map_err(|e| OSDClientError::Crush(format!("{e}")))?;
+            .map_err(|e| OSDClientError::Crush(format!("PG->OSD mapping failed: {e}")))?;
 
         if osds.is_empty() {
             return Err(OSDClientError::NoOSDs);

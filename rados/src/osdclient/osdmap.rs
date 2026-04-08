@@ -6,6 +6,7 @@
 //! onto OSD sets, plus serialization helpers that keep `dencoder` JSON output
 //! aligned with ceph-dencoder where practical.
 
+use super::types::PoolFlags;
 use crate::crush::CrushMap;
 use crate::denc::{
     Denc, EntityAddr, EntityAddrvec, FixedSize, RadosError, VersionedEncode,
@@ -2054,14 +2055,15 @@ impl OSDMapIncremental {
     /// Apply this incremental update to an OSDMap
     pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
         // Invalidate placement caches on any OSDMap update.
-        // acting_cache stores CRUSH + override results, so it must be cleared
-        // whenever upmap, pg_temp, or any CRUSH-affecting field changes.
+        // Clear acting_cache first: a thread that misses it and falls through
+        // to CRUSH must also miss crush_cache, forcing a full recompute from
+        // the new OSDMap state rather than using stale crush results.
         {
-            let mut cache = base.lock_crush_cache()?;
+            let mut cache = base.lock_acting_cache()?;
             cache.clear();
         }
         {
-            let mut cache = base.lock_acting_cache()?;
+            let mut cache = base.lock_crush_cache()?;
             cache.clear();
         }
 
@@ -2427,7 +2429,6 @@ impl OSDMap {
             .as_ref()
             .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
 
-        use super::types::PoolFlags;
         let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
 
         let mut osds = crate::crush::placement::pg_to_osds(
@@ -2700,7 +2701,6 @@ impl OSDMap {
     /// **Not for production I/O.** Prefer `OSDMap::pg_to_acting_osds`
     /// which applies all OSDMap overrides.
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
-        // Check cache first
         let cache_key = (pg.pool, pg.seed);
         {
             let mut cache = self.lock_crush_cache()?;
@@ -2709,41 +2709,31 @@ impl OSDMap {
             }
         }
 
-        // Cache miss - calculate using CRUSH
-        // Get the pool
         let pool = self
             .get_pool(pg.pool)
             .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
 
-        // Get the CRUSH map
         let crush_map = self
             .get_crush_map()
             .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
 
-        // Verify the CRUSH rule exists
         let _rule = crush_map
             .get_rule(pool.crush_rule as u32)
             .map_err(|e| RadosError::Protocol(format!("Failed to get CRUSH rule: {e}")))?;
 
-        // Use CRUSH to calculate the OSD set
         let result_max = pool.size as usize;
         let mut result = Vec::with_capacity(result_max);
 
-        // Use PG seed as the input to CRUSH
-        let x = pg.seed;
-
-        // Call CRUSH mapper
         crate::crush::mapper::crush_do_rule(
             crush_map,
             pool.crush_rule as u32,
-            x,
+            pg.seed,
             &mut result,
             result_max,
             &self.osd_weight,
         )
         .map_err(|e| RadosError::Protocol(format!("CRUSH mapping failed: {e}")))?;
 
-        // Store in cache
         {
             let mut cache = self.lock_crush_cache()?;
             cache.put(cache_key, result.clone());
