@@ -319,15 +319,15 @@ fn generate_zerocopy_denc(name: &syn::Ident, krate: &TokenStream2) -> TokenStrea
             where
                 Self: Sized,
             {
-                let size = ::std::mem::size_of::<Self>();
-                if buf.remaining() < size {
+                const SIZE: usize = ::std::mem::size_of::<#name>();
+                if buf.remaining() < SIZE {
                     return ::std::result::Result::Err(#krate::RadosError::Protocol(format!(
                         "Insufficient bytes: need {}, have {}",
-                        size,
+                        SIZE,
                         buf.remaining()
                     )));
                 }
-                let mut bytes = ::std::vec![0u8; size];
+                let mut bytes = [0u8; SIZE];
                 buf.copy_to_slice(&mut bytes);
                 <Self as #krate::zerocopy::FromBytes>::read_from_bytes(&bytes)
                     .map_err(|e| #krate::RadosError::Protocol(
