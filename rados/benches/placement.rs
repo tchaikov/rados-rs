@@ -125,10 +125,51 @@ fn bench_object_to_osds_warm_batch(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_pg_to_acting_osds_cache_hit(c: &mut Criterion) {
+    let mut group = c.benchmark_group("acting_cache");
+    let osdmap = create_test_osdmap(100, 3);
+    let pg = PgId { pool: 1, seed: 42 };
+
+    // Warm the acting cache
+    osdmap.pg_to_acting_osds(&pg).unwrap();
+
+    group.bench_function("pg_to_acting_osds_hit", |b| {
+        b.iter(|| {
+            let osds = osdmap.pg_to_acting_osds(black_box(&pg)).unwrap();
+            black_box(osds);
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_pg_to_acting_osds_cold_batch(c: &mut Criterion) {
+    let mut group = c.benchmark_group("acting_cache");
+    let base = create_test_osdmap(100, 3);
+
+    group.bench_function("pg_to_acting_osds_cold_batch_128", |b| {
+        b.iter_batched(
+            || base.clone(),
+            |osdmap| {
+                for seed in 0..128 {
+                    let pg = PgId { pool: 1, seed };
+                    let osds = osdmap.pg_to_acting_osds(black_box(&pg)).unwrap();
+                    black_box(osds);
+                }
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_pg_to_osds_cache_hit,
     bench_pg_to_osds_cold_batch,
     bench_object_to_osds_warm_batch,
+    bench_pg_to_acting_osds_cache_hit,
+    bench_pg_to_acting_osds_cold_batch,
 );
 criterion_main!(benches);

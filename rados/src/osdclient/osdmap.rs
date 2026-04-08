@@ -2186,6 +2186,13 @@ pub struct OSDMap {
     #[serde(skip)]
     crush_cache: std::sync::Mutex<lru::LruCache<(u64, u32), Vec<i32>>>,
 
+    // Acting set cache: (pool_id, pg_seed) -> Vec<i32> (final OSD list after
+    // CRUSH + upmap + pg_temp overrides).  Keyed identically to crush_cache but
+    // the value includes all placement overrides, so callers on the I/O hot path
+    // can skip the full CRUSH walk + override application on repeated lookups.
+    #[serde(skip)]
+    acting_cache: std::sync::Mutex<lru::LruCache<(u64, u32), Vec<i32>>>,
+
     // Version 4+ fields
     pub pg_upmap: BTreeMap<PgId, Vec<i32>>,
     pub pg_upmap_items: BTreeMap<PgId, Vec<(i32, i32)>>,
@@ -2278,6 +2285,7 @@ impl Default for OSDMap {
             crush: None,
             erasure_code_profiles: BTreeMap::default(),
             crush_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
+            acting_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
             pg_upmap: BTreeMap::default(),
             pg_upmap_items: BTreeMap::default(),
             crush_version: 0,
@@ -2334,8 +2342,9 @@ impl Clone for OSDMap {
             osd_primary_affinity: self.osd_primary_affinity.clone(),
             crush: self.crush.clone(),
             erasure_code_profiles: self.erasure_code_profiles.clone(),
-            // Create a new empty cache for the clone
+            // Create new empty caches for the clone
             crush_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
+            acting_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
             pg_upmap: self.pg_upmap.clone(),
             pg_upmap_items: self.pg_upmap_items.clone(),
             crush_version: self.crush_version,
@@ -2372,13 +2381,103 @@ impl Clone for OSDMap {
     }
 }
 
-type CrushCache = lru::LruCache<(u64, u32), Vec<i32>>;
+type PlacementCache = lru::LruCache<(u64, u32), Vec<i32>>;
 
 impl OSDMap {
-    fn lock_crush_cache(&self) -> Result<std::sync::MutexGuard<'_, CrushCache>, RadosError> {
+    fn lock_crush_cache(&self) -> Result<std::sync::MutexGuard<'_, PlacementCache>, RadosError> {
         self.crush_cache
             .lock()
             .map_err(|_| RadosError::Protocol("crush_cache lock poisoned".into()))
+    }
+
+    fn lock_acting_cache(&self) -> Result<std::sync::MutexGuard<'_, PlacementCache>, RadosError> {
+        self.acting_cache
+            .lock()
+            .map_err(|_| RadosError::Protocol("acting_cache lock poisoned".into()))
+    }
+
+    /// Map a PG to its final acting OSD set via CRUSH + all overrides.
+    ///
+    /// Results are cached per `(pool_id, pg_seed)` so repeated lookups for
+    /// the same PG within the same OSDMap epoch skip the CRUSH tree walk.
+    ///
+    /// This is the method the I/O hot path should use.
+    pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+        let cache_key = (pg.pool, pg.seed);
+        {
+            let mut cache = self.lock_acting_cache()?;
+            if let Some(cached) = cache.get(&cache_key) {
+                return Ok(cached.clone());
+            }
+        }
+
+        let pool = self
+            .pools
+            .get(&pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+
+        let crush_map = self
+            .crush
+            .as_ref()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+
+        use super::types::PoolFlags;
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+
+        let mut osds = crate::crush::placement::pg_to_osds(
+            crush_map,
+            *pg,
+            pool.crush_rule as u32,
+            &self.osd_weight,
+            pool.size as usize,
+            hashpspool,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
+
+        Self::apply_pg_overrides(self, pg, &mut osds);
+
+        {
+            let mut cache = self.lock_acting_cache()?;
+            cache.put(cache_key, osds.clone());
+        }
+
+        Ok(osds)
+    }
+
+    /// Apply PG placement overrides from the OSDMap.
+    ///
+    /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
+    /// 1. pg_upmap — complete acting set replacement
+    /// 2. pg_upmap_items — fine-grained OSD swaps
+    /// 3. pg_upmap_primaries — primary override
+    /// 4. pg_temp — if present, overrides the entire acting set (highest priority)
+    fn apply_pg_overrides(osdmap: &OSDMap, pg: &PgId, osds: &mut Vec<i32>) {
+        if let Some(upmap_osds) = osdmap.pg_upmap.get(pg) {
+            *osds = upmap_osds.clone();
+        }
+
+        if let Some(upmap_items) = osdmap.pg_upmap_items.get(pg) {
+            for &(from_osd, to_osd) in upmap_items {
+                if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
+                    osds[pos] = to_osd;
+                }
+            }
+        }
+
+        if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(pg)
+            && let Some(pos) = osds.iter().position(|&osd| osd == primary_osd)
+        {
+            osds.swap(0, pos);
+        }
+
+        if let Some(temp_osds) = osdmap.pg_temp.get(pg)
+            && !temp_osds.is_empty()
+        {
+            *osds = temp_osds.clone();
+        }
+
+        // Filter out CRUSH_ITEM_NONE (-1) sentinels.
+        osds.retain(|&osd| osd >= 0);
     }
 
     pub fn new() -> Self {
@@ -2700,6 +2799,7 @@ impl VersionedEncode for OSDMap {
             crush: client.crush,
             erasure_code_profiles: client.erasure_code_profiles,
             crush_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
+            acting_cache: std::sync::Mutex::new(lru::LruCache::new(CRUSH_CACHE_SIZE)),
             pg_upmap: client.pg_upmap,
             pg_upmap_items: client.pg_upmap_items,
             crush_version: client.crush_version,

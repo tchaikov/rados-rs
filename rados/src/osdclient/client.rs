@@ -20,7 +20,7 @@ use crate::osdclient::session::OSDSession;
 use crate::osdclient::throttle::Throttle;
 use crate::osdclient::tracker::{Tracker, TrackerConfig};
 use crate::osdclient::types::{
-    ListObjectEntry, ListResult, OSDOp, ObjectId, ObjectLocator, OsdOpFlags, PoolFlags, ReadResult,
+    ListObjectEntry, ListResult, OSDOp, ObjectId, ObjectLocator, OsdOpFlags, ReadResult,
     RequestRedirect, StatResult, StripedPgId, WriteResult, calc_op_budget,
 };
 
@@ -480,8 +480,8 @@ impl OSDClient {
         let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
             .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {}", e)))?;
 
-        // CRUSH placement + overrides
-        let osds = Self::pg_to_osds_in_map(osdmap, pool_info, pg)?;
+        // CRUSH placement + overrides (cached per PG within the same OSDMap epoch)
+        let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
 
         let spg = StripedPgId::from_pg(pg.pool, pg.seed);
         debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
@@ -506,90 +506,20 @@ impl OSDClient {
         Ok(osds)
     }
 
-    /// Apply PG placement overrides from the OSDMap.
-    ///
-    /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
-    /// 1. pg_upmap — complete acting set replacement
-    /// 2. pg_upmap_items — fine-grained OSD swaps
-    /// 3. pg_upmap_primaries — primary override
-    /// 4. pg_temp — if present, overrides the entire acting set (highest priority)
-    fn apply_pg_overrides(
-        osdmap: &crate::osdclient::osdmap::OSDMap,
-        pg: &crate::crush::placement::PgId,
-        osds: &mut Vec<i32>,
-    ) {
-        // 1. pg_upmap (complete "up" set override)
-        if let Some(upmap_osds) = osdmap.pg_upmap.get(pg) {
-            debug!("Using pg_upmap override for PG {:?}: {:?}", pg, upmap_osds);
-            *osds = upmap_osds.clone();
-        }
-
-        // 2. pg_upmap_items (fine-grained OSD replacements within the "up" set)
-        if let Some(upmap_items) = osdmap.pg_upmap_items.get(pg) {
-            debug!("Applying pg_upmap_items to PG {:?}: {:?}", pg, upmap_items);
-            for &(from_osd, to_osd) in upmap_items {
-                if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
-                    osds[pos] = to_osd;
-                }
-            }
-        }
-
-        // 3. pg_upmap_primaries (primary OSD override)
-        if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(pg) {
-            debug!(
-                "Using pg_upmap_primaries override for PG {:?}: primary={}",
-                pg, primary_osd
-            );
-            if let Some(pos) = osds.iter().position(|&osd| osd == primary_osd) {
-                osds.swap(0, pos);
-            }
-        }
-
-        // 4. pg_temp takes full priority over the "up" set (mirrors C++ _get_temp_osds).
-        // In C++, if pg_temp is non-empty, it becomes the acting set regardless of upmap.
-        if let Some(temp_osds) = osdmap.pg_temp.get(pg)
-            && !temp_osds.is_empty()
-        {
-            debug!("Using pg_temp override for PG {:?}: {:?}", pg, temp_osds);
-            *osds = temp_osds.clone();
-        }
-
-        // Filter out CRUSH_ITEM_NONE (-1) sentinels — these represent incomplete
-        // acting set slots (e.g., during degraded state).
-        osds.retain(|&osd| osd >= 0);
-    }
-
     /// Map a PG to its acting OSD set, applying CRUSH placement and all overrides.
+    ///
+    /// Delegates to `OSDMap::pg_to_acting_osds`, which caches results per
+    /// `(pool_id, pg_seed)` so repeated lookups for the same PG within the
+    /// same OSDMap epoch skip the CRUSH tree walk.
     ///
     /// Shared helper used by both `object_to_osds_in_map` and `query_pg_objects`.
     fn pg_to_osds_in_map(
         osdmap: &crate::osdclient::osdmap::OSDMap,
-        pool_info: &crate::osdclient::PgPool,
         pg: crate::crush::placement::PgId,
     ) -> Result<Vec<i32>> {
-        let crush_map = osdmap
-            .crush
-            .as_ref()
-            .ok_or_else(|| OSDClientError::Crush("No CRUSH map in OSDMap".into()))?;
-
-        let hashpspool =
-            PoolFlags::from_bits_truncate(pool_info.flags).contains(PoolFlags::HASHPSPOOL);
-
-        let mut osds = crate::crush::placement::pg_to_osds(
-            crush_map,
-            pg,
-            pool_info.crush_rule as u32,
-            &osdmap.osd_weight,
-            pool_info.size as usize,
-            hashpspool,
-        )
-        .map_err(|e| OSDClientError::Crush(format!("CRUSH placement failed: {}", e)))?;
-
-        if osds.is_empty() {
-            return Err(OSDClientError::NoOSDs);
-        }
-
-        Self::apply_pg_overrides(osdmap, &pg, &mut osds);
+        let osds = osdmap
+            .pg_to_acting_osds(&pg)
+            .map_err(|e| OSDClientError::Crush(format!("{e}")))?;
 
         if osds.is_empty() {
             return Err(OSDClientError::NoOSDs);
@@ -1142,8 +1072,8 @@ impl OSDClient {
             seed: current_pg,
         };
 
-        // CRUSH placement + overrides
-        let osds = Self::pg_to_osds_in_map(osdmap, pool_info, pg)?;
+        // CRUSH placement + overrides (cached per PG within the same OSDMap epoch)
+        let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
         let primary_osd = osds[0];
 
         // Get session
