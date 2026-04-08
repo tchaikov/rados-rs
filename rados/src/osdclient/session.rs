@@ -286,6 +286,9 @@ impl OSDSession {
         };
         config.service_id = EntityType::OSD.bits();
         config.global_id = self.global_id;
+        // OSD connections are lossy (mirrors librados Policy::lossy_client):
+        // no reconnect, no replay queue, CEPH_MSG_CONNECT_LOSSY set in CLIENT_IDENT.
+        config.is_lossy = true;
 
         // Connect using msgr2
         let mut connection = crate::msgr2::protocol::Connection::connect_with_target(

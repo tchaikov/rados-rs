@@ -546,6 +546,11 @@ pub(crate) struct ConnectionState {
     in_seq: u64,
     /// Session cookies for reconnection
     session: SessionState,
+    /// Connection policy — true means lossy (no replay queue, no reconnect).
+    /// Mirrors `Policy::lossy` in the C++ messenger.  Set once from
+    /// `ConnectionConfig::is_lossy` and never changes for the life of the
+    /// connection object.
+    is_lossy: bool,
 }
 
 /// Session state preserved across reconnections
@@ -563,17 +568,18 @@ struct SessionState {
     sent_messages: std::collections::VecDeque<Message>,
     /// Optional cap on the replay queue size
     max_sent_messages: Option<usize>,
-    /// Connection policy - if true, connection is lossy (no reconnection support)
-    is_lossy: bool,
 }
 
 impl ConnectionState {
-    /// Create a new connection state with the given stream and state machine
-    fn new(stream: TcpStream, state_machine: StateMachine) -> Self {
+    /// Create a new connection state with the given stream and state machine.
+    ///
+    /// When `is_lossy` is true, client_cookie is set to 0 so the server
+    /// knows not to keep session state (mirrors C++ `lossy_client` policy).
+    fn new(stream: TcpStream, state_machine: StateMachine, is_lossy: bool) -> Self {
         let frame_io = FrameIO::new(stream);
 
-        // Generate a random client cookie for this connection instance
-        let client_cookie = rand::random::<u64>();
+        // Lossy connections send client_cookie = 0; lossless get a random one.
+        let client_cookie = if is_lossy { 0 } else { rand::random::<u64>() };
 
         Self {
             state_machine,
@@ -587,8 +593,8 @@ impl ConnectionState {
                 connect_seq: 0,
                 sent_messages: std::collections::VecDeque::new(),
                 max_sent_messages: None,
-                is_lossy: false, // Default to lossless (reconnectable)
             },
+            is_lossy,
         }
     }
 
@@ -641,7 +647,7 @@ impl ConnectionState {
 
     /// Check if this connection has a valid session that can be reconnected
     pub(crate) fn can_reconnect(&self) -> bool {
-        !self.session.is_lossy && self.session.server_cookie != 0
+        !self.is_lossy && self.session.server_cookie != 0
     }
 
     /// Set the incoming message sequence number
@@ -651,7 +657,7 @@ impl ConnectionState {
 
     /// Record a sent message for potential replay
     pub(crate) fn record_sent_message(&mut self, message: Message) -> Result<()> {
-        if self.session.is_lossy {
+        if self.is_lossy {
             return Ok(());
         }
         if let Some(limit) = self.session.max_sent_messages
@@ -919,7 +925,7 @@ impl Connection {
         // Perform msgr2 banner exchange and record bytes in pre-auth buffers
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
 
-        let mut state = ConnectionState::new(stream, state_machine);
+        let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
         state.session.max_sent_messages = config.max_replay_queue_len;
 
         // Initialize throttle from config if present
@@ -1088,7 +1094,7 @@ impl Connection {
         // Perform msgr2 banner exchange (server-side: receive first, then send)
         Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
 
-        let mut state = ConnectionState::new(stream, state_machine);
+        let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
         state.session.max_sent_messages = config.max_replay_queue_len;
 
         // Initialize throttle from config if present
@@ -1268,6 +1274,7 @@ impl Connection {
                 global_seq,
                 connect_seq,
                 in_seq,
+                self.state.is_lossy,
             ))
             .await?;
 
@@ -1368,8 +1375,8 @@ impl Connection {
         // Perform banner exchange
         Self::exchange_banner(&mut stream, &mut state_machine, &self.config).await?;
 
-        // Create new ConnectionState
-        let mut state = ConnectionState::new(stream, state_machine);
+        // Create new ConnectionState (reconnect is only reachable for lossless)
+        let mut state = ConnectionState::new(stream, state_machine, false);
 
         // Restore session state
         state.out_seq = out_seq;
@@ -1506,6 +1513,10 @@ impl Connection {
     /// This method automatically handles connection failures by attempting
     /// reconnection and message replay according to the msgr2 protocol.
     pub async fn send_message(&mut self, msg: Message) -> Result<()> {
+        if self.state.is_lossy {
+            // Lossy connections never reconnect: move msg directly, no clone needed.
+            return self.send_message_inner(msg).await;
+        }
         self.retry_with_reconnect(
             |conn| Box::pin(conn.send_message_inner(msg.clone())),
             "send",
@@ -1545,8 +1556,12 @@ impl Connection {
             msg.data.len(),
         );
 
-        // Record message in sent queue for potential replay (before sending)
-        self.state.record_sent_message(msg.clone())?;
+        // Clone into the replay queue before sending.  Guard avoids the clone
+        // for lossy connections (record_sent_message is also safe to call, but
+        // the clone itself is the expensive part we want to skip).
+        if !self.state.is_lossy {
+            self.state.record_sent_message(msg.clone())?;
+        }
 
         // Convert Message to MessageFrame and send (move fields from owned msg)
         let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
@@ -1760,7 +1775,7 @@ impl Connection {
             connect_seq: self.state.session.connect_seq,
             sent_messages: self.state.session.sent_messages.clone(),
             max_sent_messages: self.state.session.max_sent_messages,
-            is_lossy: self.state.session.is_lossy,
+            is_lossy: self.state.is_lossy,
             global_id: self.state.state_machine.global_id(),
         };
 
@@ -1816,7 +1831,7 @@ impl Connection {
             connect_seq: self.state.session.connect_seq,
             global_id: self.state.state_machine.global_id(),
             last_keepalive_ack: self.state.state_machine.last_keepalive_ack(),
-            is_lossy: self.state.session.is_lossy,
+            is_lossy: self.state.is_lossy,
             can_reconnect: self.state.can_reconnect(),
         }
     }
@@ -1863,7 +1878,7 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
         let sm = StateMachine::new_client(crate::msgr2::ConnectionConfig::with_no_auth());
-        let state = ConnectionState::new(stream, sm);
+        let state = ConnectionState::new(stream, sm, false);
         Connection {
             state,
             server_addr: addr,

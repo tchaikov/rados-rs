@@ -23,6 +23,10 @@ use crate::msgr2::{
     phase::{Phase, Step},
 };
 
+/// Wire flag set in `ClientIdentFrame.flags` for lossy connections.
+/// Mirrors `CEPH_MSG_CONNECT_LOSSY` in `src/include/msgr.h`.
+const CEPH_MSG_CONNECT_LOSSY: u64 = 1;
+
 const ALL_LEGACY_CEPH_FEATURE_BITS: u64 = (1u64 << 62) - 1;
 
 fn session_supported_features() -> u64 {
@@ -68,6 +72,7 @@ pub struct SessionClient {
     global_seq: u64,
     connect_seq: u64,
     in_seq: u64,
+    is_lossy: bool,
 }
 
 impl SessionClient {
@@ -81,6 +86,7 @@ impl SessionClient {
         global_seq: u64,
         connect_seq: u64,
         in_seq: u64,
+        is_lossy: bool,
     ) -> Self {
         Self {
             global_id,
@@ -91,11 +97,17 @@ impl SessionClient {
             global_seq,
             connect_seq,
             in_seq,
+            is_lossy,
         }
     }
 
     fn build_client_ident(&self) -> Result<Frame> {
         let addrs = crate::EntityAddrvec::with_addr(self.client_addr.clone());
+        let flags = if self.is_lossy {
+            CEPH_MSG_CONNECT_LOSSY
+        } else {
+            0
+        };
         let ident = ClientIdentFrame::new(
             addrs,
             self.server_addr.clone(),
@@ -103,7 +115,7 @@ impl SessionClient {
             self.global_seq,
             session_supported_features(),
             session_required_features(),
-            0, // flags (non-lossy)
+            flags,
             self.client_cookie,
         );
         tracing::debug!(
@@ -377,6 +389,7 @@ mod tests {
             0,
             0,
             0,
+            false,
         );
         let addrs = crate::EntityAddrvec::with_addr(crate::EntityAddr::default());
         let server_ident =
@@ -404,6 +417,7 @@ mod tests {
             0,
             0,
             0,
+            false,
         );
         let ident_missing = IdentMissingFeaturesFrame::new(0x55);
         let frame = create_frame_from_trait(&ident_missing, Tag::IdentMissingFeatures).unwrap();

@@ -314,6 +314,15 @@ pub struct ConnectionConfig {
     /// Maximum number of unacknowledged messages to retain for replay on reconnect.
     /// If `None`, the replay queue is unbounded.
     pub max_replay_queue_len: Option<usize>,
+
+    /// If true, the connection is lossy: messages are not queued for replay and
+    /// the session cannot be reconnected after a failure.  Sets the
+    /// `CEPH_MSG_CONNECT_LOSSY` flag in `CLIENT_IDENT`.
+    ///
+    /// The official librados sets this for all connections
+    /// (`Messenger::Policy::lossy_client`).  OSD sessions must use `true`;
+    /// monitor sessions use `false` (they need reconnect + message replay).
+    pub is_lossy: bool,
 }
 
 impl Default for ConnectionConfig {
@@ -334,6 +343,7 @@ impl Default for ConnectionConfig {
             global_id: 0,          // Will be set after monitor authentication
             throttle_config: None, // No throttle by default (matches Ceph client)
             max_replay_queue_len: None,
+            is_lossy: false,
         }
     }
 }
