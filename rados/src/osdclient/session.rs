@@ -39,6 +39,7 @@ fn hobj_from_op(op: &MOSDOp) -> crate::HObject {
 }
 use crate::monclient::MOSDMap;
 use crate::msgr2::MapSender;
+use crate::msgr2::ceph_message::CephMessagePayload;
 use crate::msgr2::io_loop::{KeepaliveConfig, run_io_loop};
 use crate::msgr2::message::MessagePriority;
 
@@ -553,7 +554,7 @@ impl OSDSession {
                 Ok(())
             }
             Err(mpsc::error::TrySendError::Full(_)) => {
-                // Channel is full - this shouldn't happen with our 100-message buffer
+                // Channel is full - this shouldn't happen with our 1024-message buffer
                 // but if it does, notify the client rather than deadlocking
                 error!("Send channel full when retrying operation tid {}", tid);
                 let _ = pending_op
@@ -587,8 +588,6 @@ impl OSDSession {
         priority: i32,
         features: u64,
     ) -> Result<crate::msgr2::message::Message> {
-        use crate::msgr2::ceph_message::CephMessagePayload;
-
         let front = op.encode_payload(features)?;
         let data = op.encode_data(features)?;
 
