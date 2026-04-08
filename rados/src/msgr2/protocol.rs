@@ -645,6 +645,11 @@ impl ConnectionState {
         self.session.server_cookie
     }
 
+    /// Whether this connection uses lossy policy (no replay, no reconnect).
+    pub(crate) fn is_lossy(&self) -> bool {
+        self.is_lossy
+    }
+
     /// Check if this connection has a valid session that can be reconnected
     pub(crate) fn can_reconnect(&self) -> bool {
         !self.is_lossy && self.session.server_cookie != 0
@@ -1775,7 +1780,6 @@ impl Connection {
             connect_seq: self.state.session.connect_seq,
             sent_messages: self.state.session.sent_messages.clone(),
             max_sent_messages: self.state.session.max_sent_messages,
-            is_lossy: self.state.is_lossy,
             global_id: self.state.state_machine.global_id(),
         };
 

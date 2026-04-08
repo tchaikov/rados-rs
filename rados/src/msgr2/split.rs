@@ -66,18 +66,13 @@ pub struct SharedState {
     pub sent_messages: VecDeque<Message>,
     /// Optional cap on the replay queue size
     pub max_sent_messages: Option<usize>,
-    /// Whether the connection is lossy
-    pub is_lossy: bool,
     /// Global ID from authentication
     pub global_id: u64,
 }
 
 impl SharedState {
-    /// Record a sent message for potential replay
+    /// Check whether the replay queue has room for another message.
     pub fn can_record_sent_message(&self) -> Result<()> {
-        if self.is_lossy {
-            return Ok(());
-        }
         if let Some(limit) = self.max_sent_messages
             && self.sent_messages.len() >= limit
         {
@@ -88,11 +83,10 @@ impl SharedState {
         Ok(())
     }
 
+    /// Push a message into the replay queue (caller must check `can_record_sent_message` first).
     pub fn record_sent_message(&mut self, message: Message) -> Result<()> {
         self.can_record_sent_message()?;
-        if !self.is_lossy {
-            self.sent_messages.push_back(message);
-        }
+        self.sent_messages.push_back(message);
         Ok(())
     }
 
@@ -252,20 +246,23 @@ async fn send_outbound_entry(
     shared: &Arc<Mutex<SharedState>>,
 ) -> SendOutcome {
     let OutboundEntry { mut msg, reply } = entry;
+    let is_lossy = connection_state.is_lossy();
 
     // Assign sequence numbers under lock
-    let (seq, ack_seq, should_record) = {
+    let (seq, ack_seq) = {
         let mut state = shared.lock().await;
-        if let Err(err) = state.can_record_sent_message() {
-            let _ = reply.send(Err(err));
-            return SendOutcome::Continue;
+        if !is_lossy {
+            if let Err(err) = state.can_record_sent_message() {
+                let _ = reply.send(Err(err));
+                return SendOutcome::Continue;
+            }
         }
         state.out_seq += 1;
         msg.header.set_seq(state.out_seq);
         msg.header.set_ack_seq(state.in_seq);
-        (state.out_seq, state.in_seq, !state.is_lossy)
+        (state.out_seq, state.in_seq)
     };
-    let recorded_msg = should_record.then(|| msg.clone());
+    let recorded_msg = (!is_lossy).then(|| msg.clone());
 
     tracing::debug!(
         "I/O task: sending message type=0x{:04x}, seq={}, ack_seq={}",
@@ -546,7 +543,6 @@ mod tests {
             connect_seq: 0,
             sent_messages: VecDeque::new(),
             max_sent_messages: None,
-            is_lossy: false,
             global_id: 100,
         };
 
