@@ -2456,8 +2456,10 @@ impl OSDMap {
     /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
     /// 1. pg_upmap — complete acting set replacement
     /// 2. pg_upmap_items — fine-grained OSD swaps
-    /// 3. pg_upmap_primaries — primary override
-    /// 4. pg_temp — if present, overrides the entire acting set (highest priority)
+    /// 3. pg_upmap_primaries — primary override within the up set
+    /// 4. pg_temp — if present, overrides the entire acting set
+    /// 5. primary_temp — directly sets acting[0]; applied after pg_temp so
+    ///    it can override the primary even when pg_temp is active
     fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
         if let Some(upmap_osds) = self.pg_upmap.get(pg) {
             *osds = upmap_osds.clone();
@@ -2481,6 +2483,15 @@ impl OSDMap {
             && !temp_osds.is_empty()
         {
             *osds = temp_osds.clone();
+        }
+
+        // primary_temp overrides acting[0] directly (mirrors C++ OSDMap::_pg_to_up_acting_osds).
+        // Applied after pg_temp so it takes effect even when a temp acting set is active.
+        if let Some(&primary) = self.primary_temp.get(pg)
+            && primary >= 0
+            && !osds.is_empty()
+        {
+            osds[0] = primary;
         }
 
         // Filter out CRUSH_ITEM_NONE (-1) sentinels.
