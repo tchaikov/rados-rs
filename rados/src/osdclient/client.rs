@@ -375,7 +375,6 @@ impl OSDClient {
             self.global_id,
             self.map_tx.clone(),
             self.self_weak.clone(),
-            self.config.ms_crc_data,
         );
 
         // Connect to OSD BEFORE acquiring write lock - this is the expensive operation

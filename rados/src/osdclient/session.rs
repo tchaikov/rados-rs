@@ -39,7 +39,6 @@ fn hobj_from_op(op: &MOSDOp) -> crate::HObject {
 }
 use crate::monclient::MOSDMap;
 use crate::msgr2::MapSender;
-use crate::msgr2::ceph_message::{CephMessage, CrcFlags};
 use crate::msgr2::io_loop::{KeepaliveConfig, run_io_loop};
 use crate::msgr2::message::MessagePriority;
 
@@ -146,8 +145,6 @@ pub struct OSDSession {
     /// Ceph session features negotiated during the ident exchange.
     /// Set during connect(), used to select the correct MOSDOp encoding version.
     negotiated_features: u64,
-    /// CRC flags for inner CephMessage encoding (from OSDClientConfig::ms_crc_data).
-    crc_flags: CrcFlags,
     /// Mutex to prevent concurrent connect() attempts
     /// Following Ceph pattern: prevents race conditions when multiple
     /// paths might trigger reconnection simultaneously.
@@ -196,19 +193,12 @@ impl OSDSession {
         global_id: u64,
         osdmap_tx: MapSender<MOSDMap>,
         client: std::sync::Weak<crate::osdclient::client::OSDClient>,
-        ms_crc_data: bool,
     ) -> Self {
         // Placeholder channel; replaced by connect() with a real send_rx for the I/O task.
         let (send_tx, _) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
 
         // Get tracker from client if available
         let tracker = client.upgrade().map(|c| Arc::clone(&c.tracker));
-
-        let crc_flags = if ms_crc_data {
-            CrcFlags::ALL
-        } else {
-            CrcFlags::HEADER
-        };
 
         Self {
             osd_id,
@@ -226,7 +216,6 @@ impl OSDSession {
             conn_state: Arc::new(AtomicConnectionState::new(ConnectionState::Disconnected)),
             peer_addr: None,
             negotiated_features: 0,
-            crc_flags,
             // Mutex to prevent concurrent connection attempts
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
             // No I/O task handle until connect() is called
@@ -529,7 +518,6 @@ impl OSDSession {
             &self.send_tx,
             &self.pending_ops,
             self.negotiated_features,
-            self.crc_flags,
         )
         .await
     }
@@ -543,15 +531,8 @@ impl OSDSession {
         send_tx: &mpsc::Sender<crate::msgr2::message::Message>,
         pending_ops: &Arc<DashMap<u64, PendingOp>>,
         features: u64,
-        crc_flags: CrcFlags,
     ) -> Result<()> {
-        let msg = Self::encode_operation(
-            &pending_op.op,
-            tid,
-            pending_op.priority,
-            features,
-            crc_flags,
-        )?;
+        let msg = Self::encode_operation(&pending_op.op, tid, pending_op.priority, features)?;
 
         // Update tid in pending_op
         pending_op.tid = tid;
@@ -587,29 +568,34 @@ impl OSDSession {
 
     /// Encode an operation into a msgr2 message
     ///
-    /// Helper to eliminate duplication between submit_op and retry logic
-    /// Priority is set in the message header (not the MOSDOp payload)
+    /// Helper to eliminate duplication between submit_op and retry logic.
+    /// Priority is set in the message header (not the MOSDOp payload).
+    ///
+    /// Encodes the MOSDOp payload directly into a Message without going
+    /// through CephMessage::from_payload, which would wastefully compute
+    /// CephMsg-level CRCs (those are only needed by the legacy msgr1
+    /// format; msgr2 computes its own per-segment CRCs in the frame
+    /// epilogue).
     fn encode_operation(
         op: &MOSDOp,
         tid: u64,
         priority: i32,
         features: u64,
-        crc_flags: CrcFlags,
     ) -> Result<crate::msgr2::message::Message> {
-        let ceph_msg = CephMessage::from_payload(op, features, crc_flags)?;
+        use crate::msgr2::ceph_message::CephMessagePayload;
 
-        // Convert i32 priority to u16 for message header (clamped to valid range)
+        let front = op.encode_payload(features)?;
+        let data = op.encode_data(features)?;
+
         let priority_u16 = priority.clamp(0, u16::MAX as i32) as u16;
 
-        let mut msg = crate::msgr2::message::Message::new(
-            crate::osdclient::messages::CEPH_MSG_OSD_OP,
-            ceph_msg.front,
-        )
-        .with_version(ceph_msg.header.version.get())
-        .with_tid(tid)
-        .with_priority(MessagePriority::from(priority_u16));
-        msg.header.compat_version = ceph_msg.header.compat_version;
-        msg.data = ceph_msg.data;
+        let mut msg =
+            crate::msgr2::message::Message::new(crate::osdclient::messages::CEPH_MSG_OSD_OP, front)
+                .with_version(MOSDOp::msg_version(features))
+                .with_tid(tid)
+                .with_priority(MessagePriority::from(priority_u16));
+        msg.header.compat_version = MOSDOp::msg_compat_version(features).into();
+        msg.data = data;
 
         Ok(msg)
     }
@@ -667,8 +653,7 @@ impl OSDSession {
         }
 
         // Encode the operation using shared helper (priority goes in message header)
-        let msg =
-            Self::encode_operation(&op, tid, priority, self.negotiated_features, self.crc_flags)?;
+        let msg = Self::encode_operation(&op, tid, priority, self.negotiated_features)?;
 
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         debug!("Submitting operation tid={} to OSD {}", tid, self.osd_id);
@@ -878,13 +863,7 @@ impl OSDSession {
         // Resend the operations
         // IMPORTANT: Use try_send() to avoid deadlock (we're in the io_task)
         for (tid, op_arc, priority) in ops_to_resend {
-            match Self::encode_operation(
-                &op_arc,
-                tid,
-                priority,
-                self.negotiated_features,
-                self.crc_flags,
-            ) {
+            match Self::encode_operation(&op_arc, tid, priority, self.negotiated_features) {
                 Ok(msg) => match send_tx.try_send(msg) {
                     Ok(()) => {
                         info!(
@@ -1035,8 +1014,7 @@ impl OSDSession {
         self.pending_ops.insert(tid, pending_op);
 
         // Encode and send the operation using shared helper (priority preserved from original)
-        let msg =
-            Self::encode_operation(&op, tid, priority, self.negotiated_features, self.crc_flags)?;
+        let msg = Self::encode_operation(&op, tid, priority, self.negotiated_features)?;
 
         // Send to channel
         self.send_tx
@@ -1069,7 +1047,6 @@ mod tests {
             0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
-            true,
         );
 
         assert_eq!(session.current_incarnation(), 0);
@@ -1084,7 +1061,6 @@ mod tests {
             0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
-            true,
         );
 
         // Initial incarnation should be 0
