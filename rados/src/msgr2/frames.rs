@@ -991,7 +991,7 @@ impl MessageFrame {
     }
 
     fn segments_to_bytes(&self, _features: u64) -> Result<Vec<Bytes>, RadosError> {
-        let mut buf = BytesMut::new();
+        let mut buf = BytesMut::with_capacity(MsgHeader::LENGTH);
         <MsgHeader as Denc>::encode(&self.header, &mut buf, 0)?;
         Ok(vec![
             buf.freeze(),

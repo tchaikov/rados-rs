@@ -42,8 +42,13 @@ use crate::msgr2::MapSender;
 use crate::msgr2::io_loop::{KeepaliveConfig, run_io_loop};
 use crate::msgr2::message::MessagePriority;
 
-/// Send channel buffer size (messages)
-const SEND_CHANNEL_BUFFER_SIZE: usize = 100;
+/// Send channel buffer size (messages).
+///
+/// Sized to match the default throttle cap (1024 ops) so the throttle
+/// remains the sole source of backpressure.  A smaller buffer causes
+/// callers to block at `send_tx.send().await` even after the throttle
+/// admitted them.
+const SEND_CHANNEL_BUFFER_SIZE: usize = 1024;
 /// Maximum redirect loop count before failing an operation
 const MAX_REDIRECTS: u32 = 10;
 /// Default keepalive interval for OSD connections (seconds)
