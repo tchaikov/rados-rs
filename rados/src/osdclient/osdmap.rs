@@ -2053,9 +2053,15 @@ impl OSDMapIncremental {
 
     /// Apply this incremental update to an OSDMap
     pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
-        // Invalidate CRUSH cache on any OSDMap update
+        // Invalidate placement caches on any OSDMap update.
+        // acting_cache stores CRUSH + override results, so it must be cleared
+        // whenever upmap, pg_temp, or any CRUSH-affecting field changes.
         {
             let mut cache = base.lock_crush_cache()?;
+            cache.clear();
+        }
+        {
+            let mut cache = base.lock_acting_cache()?;
             cache.clear();
         }
 
@@ -2434,7 +2440,7 @@ impl OSDMap {
         )
         .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
 
-        Self::apply_pg_overrides(self, pg, &mut osds);
+        self.apply_pg_overrides(pg, &mut osds);
 
         {
             let mut cache = self.lock_acting_cache()?;
@@ -2451,12 +2457,12 @@ impl OSDMap {
     /// 2. pg_upmap_items — fine-grained OSD swaps
     /// 3. pg_upmap_primaries — primary override
     /// 4. pg_temp — if present, overrides the entire acting set (highest priority)
-    fn apply_pg_overrides(osdmap: &OSDMap, pg: &PgId, osds: &mut Vec<i32>) {
-        if let Some(upmap_osds) = osdmap.pg_upmap.get(pg) {
+    fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
+        if let Some(upmap_osds) = self.pg_upmap.get(pg) {
             *osds = upmap_osds.clone();
         }
 
-        if let Some(upmap_items) = osdmap.pg_upmap_items.get(pg) {
+        if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
             for &(from_osd, to_osd) in upmap_items {
                 if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
                     osds[pos] = to_osd;
@@ -2464,13 +2470,13 @@ impl OSDMap {
             }
         }
 
-        if let Some(&primary_osd) = osdmap.pg_upmap_primaries.get(pg)
+        if let Some(&primary_osd) = self.pg_upmap_primaries.get(pg)
             && let Some(pos) = osds.iter().position(|&osd| osd == primary_osd)
         {
             osds.swap(0, pos);
         }
 
-        if let Some(temp_osds) = osdmap.pg_temp.get(pg)
+        if let Some(temp_osds) = self.pg_temp.get(pg)
             && !temp_osds.is_empty()
         {
             *osds = temp_osds.clone();
@@ -2691,7 +2697,7 @@ impl OSDMap {
 
     /// Raw CRUSH PG → OSD mapping (no upmap / pg_temp overrides).
     ///
-    /// **Not for production I/O.** Prefer `OSDClient::pg_to_osds_in_map`
+    /// **Not for production I/O.** Prefer `OSDMap::pg_to_acting_osds`
     /// which applies all OSDMap overrides.
     pub fn pg_to_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         // Check cache first
