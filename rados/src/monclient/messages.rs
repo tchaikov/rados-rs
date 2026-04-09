@@ -668,24 +668,6 @@ impl PaxosServiceMessage for MAuth {
 
 impl_paxos_ceph_message!(MAuth, crate::msgr2::message::CEPH_MSG_AUTH, 1);
 
-/// MAuthReply - Authentication reply message
-///
-/// This message is sent by the monitor in response to MAuth.
-/// Note: This is NOT a PaxosServiceMessage (it inherits from Message in C++).
-/// Field order matches wire encoding: auth_payload is encoded before result_msg
-/// (see C++ MAuthReply.h:50-57).
-#[derive(Debug, Clone, crate::Denc)]
-#[denc(crate = "crate")]
-pub struct MAuthReply {
-    pub protocol: u32,
-    pub result: i32,
-    pub global_id: u64,
-    pub auth_payload: Bytes,
-    pub result_msg: String,
-}
-
-impl_denc_ceph_message!(MAuthReply, crate::msgr2::message::CEPH_MSG_AUTH_REPLY, 1);
-
 #[cfg(test)]
 mod tests {
     use super::*;

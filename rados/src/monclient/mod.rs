@@ -56,8 +56,8 @@ pub use client::{MonClient, MonClientConfig, PoolOpResult};
 pub use dns_srv::{DEFAULT_MON_DNS_SRV_NAME, resolve_mon_addrs_via_dns_srv};
 pub use error::{MonClientError, Result};
 pub use messages::{
-    MAuth, MAuthReply, MConfig, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply,
-    MMonMap, MMonSubscribe, MMonSubscribeAck, MOSDMap, MPoolOp, MPoolOpReply,
+    MAuth, MConfig, MMonCommand, MMonCommandAck, MMonGetVersion, MMonGetVersionReply, MMonMap,
+    MMonSubscribe, MMonSubscribeAck, MOSDMap, MPoolOp, MPoolOpReply,
 };
 pub use monmap::{MonInfo, MonMapState};
 pub use subscription::{CEPH_SUBSCRIBE_ONETIME, MonService, MonSub, SubscribeItem};
