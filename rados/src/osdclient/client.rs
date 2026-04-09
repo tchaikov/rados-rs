@@ -1501,13 +1501,16 @@ impl OSDClient {
 
             if should_close {
                 sessions_to_close.push(osd_id);
-                self.drain_session_ops(&session, &osdmap, new_epoch, &mut need_resend)
+                // Drain all ops; CRUSH errors are silently dropped (session is closing).
+                let _ = self
+                    .collect_resend_ops(&session, &osdmap, new_epoch, None, &mut need_resend)
                     .await;
                 continue;
             }
 
-            // Check per-operation targets
-            self.scan_session_operations(osd_id, &session, &osdmap, new_epoch, &mut need_resend)
+            // Scan ops: only re-target those whose primary OSD changed or whose pool
+            // bumped last_force_op_resend since this op was sent.
+            self.collect_resend_ops(&session, &osdmap, new_epoch, Some(osd_id), &mut need_resend)
                 .await?;
         }
 
@@ -1555,13 +1558,20 @@ impl OSDClient {
         false
     }
 
-    /// Scan operations in a session and collect those needing resend
-    async fn scan_session_operations(
+    /// Collect pending ops from a session that need resubmission after an OSDMap change.
+    ///
+    /// `current_osd`:
+    ///   - `Some(id)` — scan path: only collect ops whose primary OSD changed or
+    ///     whose pool's `last_force_op_resend` epoch was bumped since the op was sent.
+    ///   - `None`     — drain path: collect every op unconditionally (session is closing).
+    ///
+    /// CRUSH placement errors are propagated; drain callers should discard with `let _ =`.
+    async fn collect_resend_ops(
         &self,
-        osd_id: i32,
-        session: &Arc<OSDSession>,
-        osdmap: &Arc<crate::osdclient::osdmap::OSDMap>,
+        session: &OSDSession,
+        osdmap: &crate::osdclient::osdmap::OSDMap,
         new_epoch: u32,
+        current_osd: Option<i32>,
         need_resend: &mut Vec<(i32, crate::osdclient::session::PendingOp)>,
     ) -> Result<()> {
         let metadata = session.get_pending_ops_metadata().await;
@@ -1572,23 +1582,27 @@ impl OSDClient {
                 continue;
             }
 
-            // Check if the pool's admin-forced resend epoch falls after this op
-            // was sent.  Mirrors Objecter::_calc_target step 4: if
-            // last_force_op_resend is in (op_epoch, new_epoch] the op must be
-            // resubmitted even if its primary OSD has not changed.
-            let force_resend = osdmap.pools.get(&pool_id).is_some_and(|p| {
-                let lf = p.canonical_last_force_op_resend().as_u32();
-                lf > op_osdmap_epoch && lf <= new_epoch
-            });
-
-            // Check if target changed
             let new_osds =
                 self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
             let new_primary = new_osds.first().copied().unwrap_or(-1);
 
-            if (new_primary != osd_id || force_resend)
-                && let Some(mut op) = session.remove_pending_op(tid).await
-            {
+            // Scan path: only resend if primary changed or pool forced a resend.
+            // Drain path (current_osd == None): always resend.
+            let should_resend = match current_osd {
+                None => true,
+                Some(osd_id) => {
+                    // Mirrors Objecter::_calc_target step 4: if last_force_op_resend is in
+                    // (op_epoch, new_epoch] the op must be resubmitted even if its primary
+                    // OSD has not changed.
+                    let force_resend = osdmap.pools.get(&pool_id).is_some_and(|p| {
+                        let lf = p.canonical_last_force_op_resend().as_u32();
+                        lf > op_osdmap_epoch && lf <= new_epoch
+                    });
+                    new_primary != osd_id || force_resend
+                }
+            };
+
+            if should_resend && let Some(mut op) = session.remove_pending_op(tid).await {
                 op.target.update(new_epoch, new_primary, new_osds.clone());
                 op.state = crate::osdclient::types::OpState::Queued;
                 need_resend.push((new_primary, op));
@@ -1695,36 +1709,6 @@ impl OSDClient {
                 .send(Err(OSDClientError::PoolNotFound(pool_id)));
         }
         true
-    }
-
-    /// Drain all pending operations from a session that is about to be closed.
-    ///
-    /// Each operation is either failed (if its pool was deleted) or re-targeted
-    /// via CRUSH and appended to `need_resend` for resubmission.
-    async fn drain_session_ops(
-        &self,
-        session: &OSDSession,
-        osdmap: &crate::osdclient::osdmap::OSDMap,
-        new_epoch: u32,
-        need_resend: &mut Vec<(i32, crate::osdclient::session::PendingOp)>,
-    ) {
-        let metadata = session.get_pending_ops_metadata().await;
-        let mut placement_cache = HashMap::new();
-        for (tid, pool_id, object_id, _osdmap_epoch) in metadata {
-            if Self::fail_if_pool_deleted(session, tid, pool_id, osdmap).await {
-                continue;
-            }
-            if let Ok(new_osds) =
-                self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)
-            {
-                let new_primary = new_osds.first().copied().unwrap_or(-1);
-                if let Some(mut op) = session.remove_pending_op(tid).await {
-                    op.target.update(new_epoch, new_primary, new_osds.clone());
-                    op.state = crate::osdclient::types::OpState::Queued;
-                    need_resend.push((new_primary, op));
-                }
-            }
-        }
     }
 
     /// Resend pending ops from a disconnected session into a freshly created one.
