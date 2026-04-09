@@ -70,8 +70,6 @@ pub struct OpTarget {
     pub osd: i32,
     /// Acting set
     pub acting: Vec<i32>,
-    /// Whether replica was used
-    pub used_replica: bool,
 }
 
 impl OpTarget {
@@ -82,7 +80,6 @@ impl OpTarget {
             pgid,
             osd,
             acting,
-            used_replica: false,
         }
     }
 
@@ -106,7 +103,6 @@ impl Default for OpTarget {
             pgid: StripedPgId::new(0, 0, -1),
             osd: -1,
             acting: Vec::new(),
-            used_replica: false,
         }
     }
 }
@@ -1518,7 +1514,6 @@ mod tests {
         assert_eq!(target.pgid.seed, 42);
         assert_eq!(target.osd, 5);
         assert_eq!(target.acting, vec![5, 6, 7]);
-        assert!(!target.used_replica);
     }
 
     #[test]
@@ -1528,7 +1523,6 @@ mod tests {
         assert_eq!(target.epoch, 0);
         assert_eq!(target.osd, -1);
         assert!(target.acting.is_empty());
-        assert!(!target.used_replica);
     }
 
     #[test]
