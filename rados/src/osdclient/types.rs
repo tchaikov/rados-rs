@@ -169,35 +169,6 @@ bitflags::bitflags! {
     }
 }
 
-bitflags::bitflags! {
-    /// OSD Read-Modify-Write operation flags (from ~/dev/ceph/src/osd/osd_types.h)
-    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct OsdRmwFlags: u32 {
-        /// Read operation
-        const READ = 1 << 1;
-        /// Write operation
-        const WRITE = 1 << 2;
-        /// Class read operation
-        const CLASS_READ = 1 << 3;
-        /// Class write operation
-        const CLASS_WRITE = 1 << 4;
-        /// PG operation
-        const PGOP = 1 << 5;
-        /// Cache operation
-        const CACHE = 1 << 6;
-        /// Force promote
-        const FORCE_PROMOTE = 1 << 7;
-        /// Skip handle cache
-        const SKIP_HANDLE_CACHE = 1 << 8;
-        /// Skip promote
-        const SKIP_PROMOTE = 1 << 9;
-        /// RW ordered
-        const RWORDERED = 1 << 10;
-        /// Return vector
-        const RETURNVEC = 1 << 11;
-    }
-}
-
 /// Object identification (corresponds to hobject_t in Ceph)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ObjectId {
