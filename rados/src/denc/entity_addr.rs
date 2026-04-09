@@ -245,9 +245,37 @@ impl EntityAddr {
             ));
         }
 
-        let _struct_v = buf.get_u8();
-        let _struct_compat = buf.get_u8();
+        let struct_v = buf.get_u8();
+        let struct_compat = buf.get_u8();
         let struct_len = buf.get_u32_le() as usize;
+
+        // Version / compat validation (mirrors VersionedEncode::decode_versioned)
+        const MAX_VERSION: u8 = 1;
+        if struct_compat > MAX_VERSION {
+            return Err(RadosError::Codec(crate::denc::CodecError::VersionTooNew {
+                got: struct_compat,
+                max: MAX_VERSION,
+                type_name: "EntityAddr (MSG_ADDR2)",
+            }));
+        }
+        if struct_compat > struct_v {
+            return Err(RadosError::Codec(
+                crate::denc::CodecError::InvalidVersionHeader {
+                    type_name: "EntityAddr (MSG_ADDR2)",
+                    compat: struct_compat,
+                    version: struct_v,
+                },
+            ));
+        }
+
+        // DoS protection: entity_addr is small; reject anything over 64 KiB
+        const MAX_STRUCT_LEN: usize = 64 << 10;
+        if struct_len > MAX_STRUCT_LEN {
+            return Err(RadosError::InvalidData(format!(
+                "EntityAddr MSG_ADDR2 struct_len {} exceeds maximum {}",
+                struct_len, MAX_STRUCT_LEN,
+            )));
+        }
 
         if buf.remaining() < struct_len {
             return Err(RadosError::Protocol(format!(
