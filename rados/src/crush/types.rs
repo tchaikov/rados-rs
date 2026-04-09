@@ -135,6 +135,8 @@ pub struct CrushMap {
     pub class_map: HashMap<i32, i32>,
     /// Class ID -> class name (e.g., "ssd", "hdd", "nvme")
     pub class_name: HashMap<i32, String>,
+    /// Class name -> class ID (reverse of `class_name`; mirrors C++ `class_rname`)
+    pub class_rname: HashMap<String, i32>,
     /// `bucket[id][class_id] = shadow_bucket_id` for device-class tree shadows
     pub class_bucket: HashMap<i32, HashMap<i32, i32>>,
 }
@@ -162,6 +164,7 @@ impl CrushMap {
             msr_collision_tries: 100,
             class_map: HashMap::new(),
             class_name: HashMap::new(),
+            class_rname: HashMap::new(),
             class_bucket: HashMap::new(),
         }
     }
@@ -200,10 +203,7 @@ impl CrushMap {
     ///
     /// Returns None if the class name doesn't exist
     pub fn get_class_id(&self, class_name: &str) -> Option<i32> {
-        self.class_name
-            .iter()
-            .find(|(_, name)| name.as_str() == class_name)
-            .map(|(id, _)| *id)
+        self.class_rname.get(class_name).copied()
     }
 
     /// Check if a device belongs to a specific class

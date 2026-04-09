@@ -113,6 +113,11 @@ impl CrushMap {
         if data.remaining() > 0 {
             map.class_map = HashMap::decode(data, 0)?;
             map.class_name = HashMap::decode(data, 0)?;
+            map.class_rname = map
+                .class_name
+                .iter()
+                .map(|(&id, name)| (name.clone(), id))
+                .collect();
             map.class_bucket = HashMap::decode(data, 0)?;
         }
 
@@ -401,6 +406,9 @@ mod tests {
         map.class_name.insert(1, "ssd".to_string());
         map.class_name.insert(2, "hdd".to_string());
         map.class_name.insert(3, "nvme".to_string());
+        map.class_rname.insert("ssd".to_string(), 1);
+        map.class_rname.insert("hdd".to_string(), 2);
+        map.class_rname.insert("nvme".to_string(), 3);
 
         map.class_map.insert(0, 1);
         map.class_map.insert(1, 2);
