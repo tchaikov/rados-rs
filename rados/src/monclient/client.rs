@@ -1050,6 +1050,10 @@ impl MonClient {
                 conn_state.active_con = None;
                 conn_state.hunting = true;
             }
+            {
+                let mut auth_state = self.auth_state.write().await;
+                auth_state.authenticated = false;
+            }
 
             self.start_hunting().await?;
             return Ok(());
