@@ -874,9 +874,10 @@ impl VersionedEncode for PoolSnapInfo {
     fn decode_content<B: Buf>(
         buf: &mut B,
         features: u64,
-        _version: u8,
+        version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        crate::denc::check_min_version!(version, 2, "PoolSnapInfo", "Quincy v17+");
         let snapid = u64::decode(buf, features)?;
         let stamp = UTime::decode(buf, features)?;
         let name = String::decode(buf, features)?;
