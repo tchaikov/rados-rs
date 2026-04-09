@@ -1691,30 +1691,46 @@ impl MonClient {
         self.subscribe(what, version, 0).await?;
 
         let mut events = self.subscribe_events();
-        let timeout_duration = self.command_timeout().await;
+        let deadline = tokio::time::Instant::now() + self.command_timeout().await;
 
-        tokio::time::timeout(timeout_duration, async move {
-            loop {
-                match events.recv().await {
-                    Ok(MapEvent::MonMapUpdated { epoch }) if what == MonService::MonMap => {
-                        if u64::from(epoch) >= version {
-                            return Ok(());
-                        }
-                    }
-                    Ok(MapEvent::OsdMapUpdated { epoch }) if what == MonService::OsdMap => {
-                        if epoch >= version {
-                            return Ok(());
-                        }
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        return Err(MonClientError::Other(format!("Event channel error: {}", e)));
-                    }
-                }
+        match what {
+            MonService::OsdMap => {
+                self.wait_for_osdmap_epoch(&mut events, version, deadline)
+                    .await
             }
-        })
-        .await
-        .map_err(|_| MonClientError::Timeout)?
+            MonService::MonMap => loop {
+                tokio::select! {
+                    event = events.recv() => match event {
+                        Ok(MapEvent::MonMapUpdated { epoch }) if u64::from(epoch) >= version => {
+                            return Ok(());
+                        }
+                        Ok(_) => {}
+                        Err(e) => return Err(MonClientError::Other(format!("Event channel error: {e}"))),
+                    },
+                    _ = tokio::time::sleep_until(deadline) => return Err(MonClientError::Timeout),
+                }
+            },
+            _ => unreachable!(), // guarded above
+        }
+    }
+
+    /// Wait until the cached OSDMap has epoch >= `min_epoch` or the deadline passes.
+    async fn wait_for_osdmap_epoch(
+        &self,
+        events: &mut broadcast::Receiver<MapEvent>,
+        min_epoch: u64,
+        deadline: tokio::time::Instant,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                event = events.recv() => match event {
+                    Ok(MapEvent::OsdMapUpdated { epoch }) if epoch >= min_epoch => return Ok(()),
+                    Ok(_) => {}
+                    Err(e) => return Err(MonClientError::Other(format!("Event channel error: {e}"))),
+                },
+                _ = tokio::time::sleep_until(deadline) => return Err(MonClientError::Timeout),
+            }
+        }
     }
 
     /// Subscribe to map events
@@ -1754,31 +1770,12 @@ impl MonClient {
             }
         }
 
-        loop {
-            tokio::select! {
-                event = events.recv() => {
-                    match event {
-                        Ok(MapEvent::OsdMapUpdated { epoch: recv_epoch }) => {
-                            if recv_epoch >= epoch {
-                                let guard = self.latest_osdmap.read().await;
-                                return guard.clone().ok_or_else(|| {
-                                    MonClientError::Other(
-                                        "OSDMap event received but map not cached".into()
-                                    )
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            return Err(MonClientError::Other(format!("Event channel error: {}", e)));
-                        }
-                        _ => {}
-                    }
-                }
-                _ = tokio::time::sleep_until(deadline) => {
-                    return Err(MonClientError::Timeout);
-                }
-            }
-        }
+        self.wait_for_osdmap_epoch(&mut events, epoch, deadline)
+            .await?;
+        let guard = self.latest_osdmap.read().await;
+        guard
+            .clone()
+            .ok_or_else(|| MonClientError::Other("OSDMap event received but map not cached".into()))
     }
 
     /// Get the current MonMapState
