@@ -6,7 +6,7 @@
 
 use bytes::Bytes;
 use rados::msgr2::compression::{CompressionAlgorithm, CompressionContext};
-use rados::msgr2::frames::{FRAME_EARLY_DATA_COMPRESSED, Frame, Tag};
+use rados::msgr2::frames::{Frame, Tag};
 
 #[test]
 fn test_frame_compression_roundtrip_snappy() {
@@ -22,9 +22,8 @@ fn test_frame_compression_roundtrip_snappy() {
     let compressed_frame = frame.compress(&ctx);
 
     // Verify compression flag is set
-    assert_ne!(
-        compressed_frame.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        compressed_frame.preamble.flags.is_compressed(),
         "Compression flag should be set"
     );
 
@@ -44,9 +43,8 @@ fn test_frame_compression_roundtrip_snappy() {
         .expect("Decompression should succeed");
 
     // Verify compression flag is cleared
-    assert_eq!(
-        decompressed_frame.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        !decompressed_frame.preamble.flags.is_compressed(),
         "Compression flag should be cleared"
     );
 
@@ -119,9 +117,8 @@ fn test_frame_compression_threshold() {
     let compressed_small = small_frame.compress(&ctx);
 
     // Verify small frame is NOT compressed (below threshold)
-    assert_eq!(
-        compressed_small.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        !compressed_small.preamble.flags.is_compressed(),
         "Small frame should not be compressed"
     );
     assert_eq!(
@@ -138,9 +135,8 @@ fn test_frame_compression_threshold() {
     let compressed_large = large_frame.compress(&ctx);
 
     // Verify large frame IS compressed
-    assert_ne!(
-        compressed_large.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        compressed_large.preamble.flags.is_compressed(),
         "Large frame should be compressed"
     );
 }
@@ -159,9 +155,8 @@ fn test_frame_compression_with_custom_threshold() {
     let compressed_frame = frame.compress(&ctx);
 
     // Verify frame is compressed (above custom threshold)
-    assert_ne!(
-        compressed_frame.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        compressed_frame.preamble.flags.is_compressed(),
         "Frame should be compressed with custom threshold"
     );
 }
@@ -182,9 +177,8 @@ fn test_frame_decompression_of_uncompressed_frame() {
         .expect("Decompression should succeed");
 
     // Verify frame is unchanged
-    assert_eq!(
-        result.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        !result.preamble.flags.is_compressed(),
         "Compression flag should not be set"
     );
     assert_eq!(result.segments[0], payload, "Data should be unchanged");
@@ -274,9 +268,8 @@ fn test_frame_to_wire_preserves_compression_flag() {
 
     // The compression flag should be preserved in the preamble
     // (We can't easily parse it back without full frame parsing, but we verify it's set)
-    assert_ne!(
-        compressed_frame.preamble.flags & FRAME_EARLY_DATA_COMPRESSED,
-        0,
+    assert!(
+        compressed_frame.preamble.flags.is_compressed(),
         "Compression flag should be preserved"
     );
 }

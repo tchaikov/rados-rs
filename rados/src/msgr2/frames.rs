@@ -177,7 +177,7 @@ impl Frame {
                     logical_len: payload.len() as u32,
                     align: DEFAULT_ALIGNMENT,
                 }; MAX_NUM_SEGMENTS],
-                flags: 0,
+                flags: FrameFlags::default(),
                 reserved: 0,
                 crc: 0,
             },
@@ -381,7 +381,7 @@ pub struct Preamble {
     pub tag: Tag,
     pub num_segments: u8,
     pub segments: [SegmentDescriptor; MAX_NUM_SEGMENTS],
-    pub flags: u8,
+    pub flags: FrameFlags,
     pub reserved: u8,
     pub crc: u32,
 }
@@ -389,21 +389,17 @@ pub struct Preamble {
 impl Preamble {
     /// Check if the compression flag is set
     pub fn is_compressed(&self) -> bool {
-        FrameFlags::from(self.flags).is_compressed()
+        self.flags.is_compressed()
     }
 
     /// Set the compression flag
     pub fn set_compressed(&mut self) {
-        let mut flags = FrameFlags::from(self.flags);
-        flags.set_compressed();
-        self.flags = flags.raw();
+        self.flags.set_compressed();
     }
 
     /// Clear the compression flag
     pub fn clear_compressed(&mut self) {
-        let mut flags = FrameFlags::from(self.flags);
-        flags.clear_compressed();
-        self.flags = flags.raw();
+        self.flags.clear_compressed();
     }
 
     pub fn encode(&self) -> Result<Bytes, RadosError> {
@@ -418,7 +414,7 @@ impl Preamble {
             segment.align.encode(&mut buf, 0)?;
         }
 
-        self.flags.encode(&mut buf, 0)?;
+        u8::from(self.flags).encode(&mut buf, 0)?;
         self.reserved.encode(&mut buf, 0)?;
 
         let crc = ceph_crc32c(&buf[..28]);
@@ -450,7 +446,7 @@ impl Preamble {
             segment.align = u16::decode(&mut cursor, 0)?;
         }
 
-        let flags = u8::decode(&mut cursor, 0)?;
+        let flags = FrameFlags::from(u8::decode(&mut cursor, 0)?);
         let reserved = u8::decode(&mut cursor, 0)?;
         let received_crc = u32::decode(&mut cursor, 0)?;
 
@@ -489,7 +485,7 @@ pub struct EpilogueCrcRev1 {
 // FrameAssembler now owns all wire serialization logic
 pub struct FrameAssembler {
     descs: Vec<SegmentDescriptor>,
-    flags: u8,
+    flags: FrameFlags,
     is_rev1: bool,
     with_data_crc: bool,
 }
@@ -498,7 +494,7 @@ impl FrameAssembler {
     pub fn new(is_rev1: bool) -> Self {
         Self {
             descs: Vec::new(),
-            flags: 0,
+            flags: FrameFlags::default(),
             is_rev1,
             with_data_crc: true,
         }
@@ -506,9 +502,9 @@ impl FrameAssembler {
 
     pub fn set_compression(&mut self, enabled: bool) {
         if enabled {
-            self.flags |= FRAME_EARLY_DATA_COMPRESSED;
+            self.flags.set_compressed();
         } else {
-            self.flags &= !FRAME_EARLY_DATA_COMPRESSED;
+            self.flags.clear_compressed();
         }
     }
 
@@ -1292,7 +1288,7 @@ pub fn create_frame_from_trait<F: FrameTrait>(
                 }
                 descs
             },
-            flags: 0,
+            flags: FrameFlags::default(),
             reserved: 0,
             crc: 0,
         },
@@ -1488,7 +1484,7 @@ mod tests {
                     },
                     SegmentDescriptor::default(),
                 ],
-                flags: 0,
+                flags: FrameFlags::default(),
                 reserved: 0,
                 crc: 0,
             },
