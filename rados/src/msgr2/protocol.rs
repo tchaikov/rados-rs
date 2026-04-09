@@ -893,117 +893,82 @@ impl Connection {
         })
     }
 
-    /// Perform msgr2 banner exchange (client-side)
+    /// Send our msgr2 banner with the configured feature sets.
+    async fn send_banner(
+        stream: &mut TcpStream,
+        state_machine: &mut StateMachine,
+        config: &crate::msgr2::ConnectionConfig,
+    ) -> Result<()> {
+        let banner = Banner::new_with_features(
+            FeatureSet::from(config.supported_features),
+            FeatureSet::from(config.required_features),
+        );
+        let mut buf = BytesMut::with_capacity(64);
+        banner.encode(&mut buf)?;
+        state_machine.record_sent(&buf);
+        stream.write_all(&buf).await?;
+        stream.flush().await?;
+        tracing::info!(
+            "Sent msgr2 banner: supported={:x}, required={:x}",
+            u64::from(banner.supported_features),
+            u64::from(banner.required_features)
+        );
+        Ok(())
+    }
+
+    /// Receive a peer msgr2 banner, check feature compatibility, and record peer features.
     ///
-    /// Client sends banner first, then receives server banner.
+    /// `peer_role` is used only in log messages ("client" or "server").
+    async fn recv_banner(
+        stream: &mut TcpStream,
+        state_machine: &mut StateMachine,
+        config: &crate::msgr2::ConnectionConfig,
+        peer_role: &str,
+    ) -> Result<()> {
+        // Banner is always 26 bytes: 8 prefix + 2 length + 16 payload
+        let mut buf = vec![0u8; 26];
+        stream.read_exact(&mut buf).await?;
+        state_machine.record_received(&buf);
+
+        let mut bytes = BytesMut::from(&buf[..]);
+        let peer_banner = Banner::decode(&mut bytes)?;
+        tracing::info!(
+            "Received {} banner: supported={:x}, required={:x}",
+            peer_role,
+            u64::from(peer_banner.supported_features),
+            u64::from(peer_banner.required_features)
+        );
+
+        let our_features = FeatureSet::from(config.supported_features);
+        let missing = peer_banner.required_features & !our_features;
+        if !missing.is_empty() {
+            return Err(Error::Protocol(format!(
+                "Missing required features: {:x}",
+                u64::from(missing)
+            )));
+        }
+        state_machine.set_peer_supported_features(u64::from(peer_banner.supported_features));
+        Ok(())
+    }
+
+    /// Perform msgr2 banner exchange (client-side): send first, then receive.
     async fn exchange_banner(
         stream: &mut TcpStream,
         state_machine: &mut StateMachine,
         config: &crate::msgr2::ConnectionConfig,
     ) -> Result<()> {
-        // Send our banner with configured features
-        let banner = Banner::new_with_features(
-            FeatureSet::from(config.supported_features),
-            FeatureSet::from(config.required_features),
-        );
-
-        let mut buf = BytesMut::with_capacity(64);
-        banner.encode(&mut buf)?;
-
-        // Record and send banner bytes (pre-auth signature tracking)
-        state_machine.record_sent(&buf);
-        stream.write_all(&buf).await?;
-        stream.flush().await?;
-        tracing::info!(
-            "Sent msgr2 banner: supported={:x}, required={:x}",
-            u64::from(banner.supported_features),
-            u64::from(banner.required_features)
-        );
-
-        // Read server banner response (26 bytes: 8 prefix + 2 length + 16 payload)
-        let mut buf = vec![0u8; 26];
-        stream.read_exact(&mut buf).await?;
-        state_machine.record_received(&buf);
-
-        let mut bytes = BytesMut::from(&buf[..]);
-        let server_banner = Banner::decode(&mut bytes)?;
-
-        tracing::info!(
-            "Received server banner: supported={:x}, required={:x}",
-            u64::from(server_banner.supported_features),
-            u64::from(server_banner.required_features)
-        );
-
-        // Check if we can meet server requirements
-        let our_features = FeatureSet::from(config.supported_features);
-        let missing = server_banner.required_features & !our_features;
-        if !missing.is_empty() {
-            return Err(Error::Protocol(format!(
-                "Missing required features: {:x}",
-                u64::from(missing)
-            )));
-        }
-
-        // Store peer's supported features for later use (e.g., compression negotiation)
-        state_machine.set_peer_supported_features(u64::from(server_banner.supported_features));
-
-        Ok(())
+        Self::send_banner(stream, state_machine, config).await?;
+        Self::recv_banner(stream, state_machine, config, "server").await
     }
 
-    /// Perform msgr2 banner exchange (server-side)
-    ///
-    /// Server receives client banner first, then sends server banner.
+    /// Perform msgr2 banner exchange (server-side): receive first, then send.
     async fn exchange_banner_server(
         stream: &mut TcpStream,
         state_machine: &mut StateMachine,
         config: &crate::msgr2::ConnectionConfig,
     ) -> Result<()> {
-        // Read client banner (26 bytes: 8 prefix + 2 length + 16 payload)
-        let mut buf = vec![0u8; 26];
-        stream.read_exact(&mut buf).await?;
-        state_machine.record_received(&buf);
-
-        let mut bytes = BytesMut::from(&buf[..]);
-        let client_banner = Banner::decode(&mut bytes)?;
-
-        tracing::info!(
-            "Received client banner: supported={:x}, required={:x}",
-            u64::from(client_banner.supported_features),
-            u64::from(client_banner.required_features)
-        );
-
-        // Check if we can meet client requirements
-        let our_features = FeatureSet::from(config.supported_features);
-        let missing = client_banner.required_features & !our_features;
-        if !missing.is_empty() {
-            return Err(Error::Protocol(format!(
-                "Missing required features: {:x}",
-                u64::from(missing)
-            )));
-        }
-
-        // Store peer's supported features for later use (e.g., compression negotiation)
-        state_machine.set_peer_supported_features(u64::from(client_banner.supported_features));
-
-        // Send our banner response
-        let banner = Banner::new_with_features(
-            FeatureSet::from(config.supported_features),
-            FeatureSet::from(config.required_features),
-        );
-
-        let mut buf = BytesMut::with_capacity(64);
-        banner.encode(&mut buf)?;
-
-        state_machine.record_sent(&buf);
-        stream.write_all(&buf).await?;
-        stream.flush().await?;
-        tracing::info!(
-            "Sent msgr2 banner: supported={:x}, required={:x}",
-            u64::from(banner.supported_features),
-            u64::from(banner.required_features)
-        );
-
-        Ok(())
+        Self::recv_banner(stream, state_machine, config, "client").await?;
+        Self::send_banner(stream, state_machine, config).await
     }
 
     /// Accept an incoming msgr2 connection (server-side)
