@@ -52,23 +52,32 @@ impl Denc for EntityAddrType {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct EntityAddr {
     pub addr_type: EntityAddrType,
     pub nonce: u32,
-    pub sockaddr_data: Vec<u8>,
+    /// Raw `sockaddr_storage` bytes (128 bytes, same size as C++ `sockaddr_storage`).
+    /// Bytes beyond the actual address family size are always zeroed.
+    pub sockaddr_data: [u8; STORAGE_SIZE],
+}
+
+impl Default for EntityAddr {
+    fn default() -> Self {
+        Self {
+            addr_type: EntityAddrType::default(),
+            nonce: 0,
+            sockaddr_data: [0u8; STORAGE_SIZE],
+        }
+    }
 }
 
 impl EntityAddr {
     /// Parse address family and port from sockaddr_data.
-    ///
-    /// Returns `(address_family, port)` if the data is at least 4 bytes,
-    /// or `None` if too short.
     fn parse_af_port(&self) -> Option<(u16, u16)> {
-        if self.sockaddr_data.len() < 8 {
+        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        if af == 0 {
             return None;
         }
-        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
         let port = u16::from_be_bytes([self.sockaddr_data[2], self.sockaddr_data[3]]);
         Some((af, port))
     }
@@ -92,7 +101,7 @@ impl EntityAddr {
                     port
                 )
             }
-            AF_INET6 if self.sockaddr_data.len() >= 24 => {
+            AF_INET6 => {
                 let b = &self.sockaddr_data[8..24];
                 format!(
                     "[{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}:{:02x}{:02x}]:{}",
@@ -135,7 +144,7 @@ impl EntityAddr {
                 );
                 Some(SocketAddr::new(IpAddr::V4(ip), port))
             }
-            AF_INET6 if self.sockaddr_data.len() >= 24 => {
+            AF_INET6 => {
                 let addr_bytes: [u8; 16] = self.sockaddr_data[8..24].try_into().ok()?;
                 let ip = Ipv6Addr::from(addr_bytes);
                 Some(SocketAddr::new(IpAddr::V6(ip), port))
@@ -166,12 +175,10 @@ impl EntityAddr {
     /// Return a copy with port and nonce zeroed out — used for whole-IP
     /// blocklist checks (`ceph osd blocklist add <ip>:0/0`).
     pub fn as_ip_only(&self) -> Self {
-        let mut data = self.sockaddr_data.clone();
+        let mut data = self.sockaddr_data;
         // bytes 2-3 are the port in network byte order; zero them out
-        if data.len() >= 4 {
-            data[2] = 0;
-            data[3] = 0;
-        }
+        data[2] = 0;
+        data[3] = 0;
         Self {
             addr_type: EntityAddrType::Any,
             nonce: 0,
@@ -179,11 +186,22 @@ impl EntityAddr {
         }
     }
 
+    /// Number of meaningful bytes in `sockaddr_data` for wire encoding.
+    fn sockaddr_len(&self) -> usize {
+        let af = u16::from_le_bytes([self.sockaddr_data[0], self.sockaddr_data[1]]);
+        match af {
+            AF_INET => 16,
+            AF_INET6 => 28,
+            0 => 0,
+            _ => STORAGE_SIZE,
+        }
+    }
+
     /// Create from SocketAddr
     pub fn from_socket_addr(addr_type: EntityAddrType, addr: std::net::SocketAddr) -> Self {
         use std::net::IpAddr;
 
-        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
+        let mut sockaddr_data = [0u8; STORAGE_SIZE];
 
         // Write address family and port (common to both V4 and V6)
         let af = match addr.ip() {
@@ -226,7 +244,7 @@ impl EntityAddr {
             ));
         }
 
-        let mut sockaddr_data = vec![0u8; STORAGE_SIZE];
+        let mut sockaddr_data = [0u8; STORAGE_SIZE];
         buf.copy_to_slice(&mut sockaddr_data);
 
         Ok(Self {
@@ -298,8 +316,13 @@ impl EntityAddr {
                 "Insufficient sockaddr data".to_string(),
             ));
         }
-        let mut sockaddr_data = vec![0u8; elen];
-        content.copy_to_slice(&mut sockaddr_data);
+        if elen > STORAGE_SIZE {
+            return Err(RadosError::InvalidData(format!(
+                "EntityAddr sockaddr elen {elen} exceeds storage size {STORAGE_SIZE}",
+            )));
+        }
+        let mut sockaddr_data = [0u8; STORAGE_SIZE];
+        content.copy_to_slice(&mut sockaddr_data[..elen]);
 
         // DECODE_FINISH: skip any trailing bytes for forward compatibility
         // (take() shares the buffer; unconsumed bytes must be advanced past)
@@ -314,7 +337,8 @@ impl EntityAddr {
 
     /// Encode in MSG_ADDR2 format
     fn encode_msgr2<B: BufMut>(&self, buf: &mut B) -> Result<(), RadosError> {
-        let content_size = 4 + 4 + 4 + self.sockaddr_data.len(); // addr_type + nonce + len + data
+        let elen = self.sockaddr_len();
+        let content_size = 4 + 4 + 4 + elen; // addr_type + nonce + len + data
 
         buf.put_u8(1); // marker
 
@@ -326,8 +350,8 @@ impl EntityAddr {
         // Encode content
         Denc::encode(&self.addr_type, buf, 0)?;
         Denc::encode(&self.nonce, buf, 0)?;
-        Denc::encode(&(self.sockaddr_data.len() as u32), buf, 0)?;
-        buf.put_slice(&self.sockaddr_data);
+        Denc::encode(&(elen as u32), buf, 0)?;
+        buf.put_slice(&self.sockaddr_data[..elen]);
 
         Ok(())
     }
@@ -419,7 +443,7 @@ impl<'de> serde::Deserialize<'de> for EntityAddr {
                     if let Ok(socket_addr) = addr_str.parse::<std::net::SocketAddr>() {
                         EntityAddr::from_socket_addr(addr_type, socket_addr).sockaddr_data
                     } else {
-                        Vec::new()
+                        [0u8; STORAGE_SIZE]
                     };
 
                 Ok(EntityAddr {
@@ -456,8 +480,8 @@ impl Denc for EntityAddr {
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
         // MSG_ADDR2: marker (1) + version (1) + compat (1) + len (4) + content
-        // Content: addr_type (4) + nonce (4) + len (4) + sockaddr_data
-        Some(1 + 1 + 1 + 4 + 4 + 4 + 4 + self.sockaddr_data.len())
+        // Content: addr_type (4) + nonce (4) + len (4) + sockaddr bytes (family-specific)
+        Some(1 + 1 + 1 + 4 + 4 + 4 + 4 + self.sockaddr_len())
     }
 }
 
@@ -566,30 +590,24 @@ mod tests {
 
     #[test]
     fn test_entity_addr_msgr2_roundtrip() {
-        let mut buf = BytesMut::new();
-
+        let addr =
+            EntityAddr::from_socket_addr(EntityAddrType::Msgr2, "10.20.30.40:50".parse().unwrap());
         let addr = EntityAddr {
-            addr_type: EntityAddrType::Msgr2,
             nonce: 0xABCDEF01,
-            sockaddr_data: vec![10, 20, 30, 40, 50],
+            ..addr
         };
 
+        let mut buf = BytesMut::new();
         Denc::encode(&addr, &mut buf, 0).unwrap();
 
-        // Decode
         let decoded = <EntityAddr as Denc>::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.addr_type, EntityAddrType::Msgr2);
-        assert_eq!(decoded.nonce, 0xABCDEF01);
-        assert_eq!(decoded.sockaddr_data, vec![10, 20, 30, 40, 50]);
+        assert_eq!(decoded, addr);
     }
 
     #[test]
     fn test_entity_addr_encode_ignores_features() {
-        let addr = EntityAddr {
-            addr_type: EntityAddrType::Msgr2,
-            nonce: 0xABCDEF01,
-            sockaddr_data: vec![10, 20, 30, 40, 50],
-        };
+        let addr =
+            EntityAddr::from_socket_addr(EntityAddrType::Msgr2, "10.20.30.40:50".parse().unwrap());
 
         let mut modern = BytesMut::new();
         let mut with_msg_addr2 = BytesMut::new();
@@ -602,18 +620,13 @@ mod tests {
 
     #[test]
     fn test_entity_addr_encoded_size() {
-        let addr = EntityAddr {
-            addr_type: EntityAddrType::None,
-            nonce: 0,
-            sockaddr_data: vec![1, 2, 3],
-        };
+        // IPv4 addr: elen=16 → MSG_ADDR2 size: 1+1+1+4+4+4+4+16 = 35
+        let ipv4 = EntityAddr::from_socket_addr(EntityAddrType::None, "1.2.3.4:0".parse().unwrap());
+        assert_eq!(<EntityAddr as Denc>::encoded_size(&ipv4, 0), Some(35));
 
-        // MSG_ADDR2 size: 1 + 1 + 1 + 4 + 4 + 4 + 4 + 3 = 22
-        assert_eq!(<EntityAddr as Denc>::encoded_size(&addr, 0), Some(22));
-        assert_eq!(
-            <EntityAddr as Denc>::encoded_size(&addr, u64::MAX),
-            Some(22)
-        );
+        // Unset addr (zeros): elen=0 → size = 1+1+1+4+4+4+4+0 = 19
+        let unset = EntityAddr::default();
+        assert_eq!(<EntityAddr as Denc>::encoded_size(&unset, 0), Some(19));
     }
 
     #[test]
@@ -637,9 +650,8 @@ mod tests {
     #[test]
     fn test_entity_addrvec_encode_ignores_features() {
         let addr = EntityAddr {
-            addr_type: EntityAddrType::Msgr2,
             nonce: 1,
-            sockaddr_data: vec![10, 20, 30, 40],
+            ..EntityAddr::from_socket_addr(EntityAddrType::Msgr2, "10.20.30.40:0".parse().unwrap())
         };
         let addrvec = EntityAddrvec::with_addr(addr);
 
