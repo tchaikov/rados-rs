@@ -1192,6 +1192,11 @@ impl OSDClient {
             pool, cursor, max_entries
         );
 
+        // Fail immediately if the client has been fenced by the cluster.
+        if self.blocklisted.load(Ordering::Relaxed) {
+            return Err(OSDClientError::Blocklisted);
+        }
+
         // Parse cursor → starting hobject position
         let mut hobject_cursor = Self::parse_list_cursor(pool, cursor)?;
 
@@ -1201,6 +1206,33 @@ impl OSDClient {
             .pools
             .get(&pool)
             .ok_or(OSDClientError::PoolNotFound(pool))?;
+
+        // Mirrors execute_op pre-flight checks: hard-fail on EIO, pause, and epoch barrier.
+        // PGLS is a read, so only pauserd applies (not pausewr/pool_full).
+        if osdmap.is_pool_eio(pool) {
+            return Err(OSDClientError::OSDError {
+                code: -libc::EIO,
+                message: format!("pool {} has EIO flag set", pool),
+            });
+        }
+        let barrier = self.epoch_barrier.load(Ordering::Relaxed);
+        if barrier != 0 && osdmap.epoch.as_u32() < barrier {
+            return Err(OSDClientError::OSDError {
+                code: -libc::EAGAIN,
+                message: format!(
+                    "pool {} epoch {} is behind barrier {}",
+                    pool,
+                    osdmap.epoch.as_u32(),
+                    barrier
+                ),
+            });
+        }
+        if osdmap.is_pauserd() {
+            return Err(OSDClientError::OSDError {
+                code: -libc::EAGAIN,
+                message: "cluster reads are paused".into(),
+            });
+        }
 
         let mut all_entries: Vec<ListObjectEntry> = Vec::new();
 
