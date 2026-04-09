@@ -373,7 +373,7 @@ pub struct SegmentDescriptor {
 }
 
 // Preamble structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Preamble {
     pub tag: Tag,
     pub num_segments: u8,
