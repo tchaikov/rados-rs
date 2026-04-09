@@ -1163,7 +1163,7 @@ impl Connection {
         }
 
         // Phase 5: Session establishment
-        let server_cookie = self.state.state_machine.server_cookie();
+        let server_cookie: u64 = rand::random();
         self.state
             .drive_phase(SessionServer::new(server_cookie))
             .await?;
@@ -1352,17 +1352,8 @@ impl Connection {
         // Get local address for CLIENT_IDENT
         let local_addr = stream.local_addr()?;
 
-        // Create new state machine with preserved session cookies
+        // Create new state machine for the new TCP connection
         let mut state_machine = StateMachine::new_client(self.config.clone());
-
-        // Restore session cookies so reconnection handshake uses SESSION_RECONNECT
-        state_machine.set_session_cookies(
-            client_cookie,
-            server_cookie,
-            global_seq,
-            connect_seq,
-            in_seq,
-        );
 
         // Set server and client addresses
         Self::configure_state_machine_addresses(
@@ -1378,7 +1369,11 @@ impl Connection {
         // Create new ConnectionState (reconnect is only reachable for lossless)
         let mut state = ConnectionState::new(stream, state_machine, false);
 
-        // Restore session state
+        // Restore session state (cookies and seqs must survive across the new TCP connection)
+        state.session.client_cookie = client_cookie;
+        state.session.server_cookie = server_cookie;
+        state.session.global_seq = global_seq;
+        state.session.connect_seq = connect_seq;
         state.out_seq = out_seq;
         state.in_seq = in_seq;
         state.session.sent_messages = sent_messages;

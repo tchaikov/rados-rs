@@ -98,17 +98,6 @@ pub struct StateMachine {
     global_id: u64,
     /// Ceph session features negotiated during the ident exchange.
     negotiated_features: u64,
-    // Session state for reconnection
-    /// Client cookie - generated on first connection
-    client_cookie: u64,
-    /// Server cookie - assigned by server in SERVER_IDENT
-    server_cookie: u64,
-    /// Global sequence number
-    global_seq: u64,
-    /// Connection sequence number
-    connect_seq: u64,
-    /// Last received message sequence number
-    in_seq: u64,
     /// Last time we received a Keepalive2Ack (for timeout detection)
     last_keepalive_ack: Option<std::time::Instant>,
 }
@@ -138,20 +127,13 @@ impl StateMachine {
             server_auth_handler,
             global_id: 0,
             negotiated_features: 0,
-            client_cookie: 0,
-            server_cookie: 0,
-            global_seq: 0,
-            connect_seq: 0,
-            in_seq: 0,
             last_keepalive_ack: None,
         }
     }
 
     /// Create a new state machine for client connection
     pub fn new_client(config: crate::msgr2::ConnectionConfig) -> Self {
-        let mut sm = Self::base(StateKind::BannerConnecting, config, None);
-        sm.client_cookie = rand::random();
-        sm
+        Self::base(StateKind::BannerConnecting, config, None)
     }
 
     /// Set the server address (called from protocol.rs after connection)
@@ -162,22 +144,6 @@ impl StateMachine {
     /// Set the client address (called from protocol.rs after connection)
     pub fn set_client_addr(&mut self, addr: crate::EntityAddr) {
         self.client_addr = Some(addr);
-    }
-
-    /// Set session cookies for reconnection (called when resuming a session)
-    pub fn set_session_cookies(
-        &mut self,
-        client_cookie: u64,
-        server_cookie: u64,
-        global_seq: u64,
-        connect_seq: u64,
-        in_seq: u64,
-    ) {
-        self.client_cookie = client_cookie;
-        self.server_cookie = server_cookie;
-        self.global_seq = global_seq;
-        self.connect_seq = connect_seq;
-        self.in_seq = in_seq;
     }
 
     /// Set peer's supported msgr2 features (from banner exchange)
@@ -275,11 +241,6 @@ impl StateMachine {
         self.client_addr.clone().unwrap_or_default()
     }
 
-    /// Server cookie (0 if not yet assigned by the peer).
-    pub fn server_cookie(&self) -> u64 {
-        self.server_cookie
-    }
-
     /// Preferred connection modes from config.
     pub fn config_preferred_modes(&self) -> &[crate::msgr2::ConnectionMode] {
         &self.config.preferred_modes
@@ -307,13 +268,11 @@ impl StateMachine {
 
     /// Create a new state machine for server connection with optional auth handler
     pub fn new_server_with_auth(auth_handler: Option<crate::auth::CephXServerHandler>) -> Self {
-        let mut sm = Self::base(
+        Self::base(
             StateKind::HelloAccepting,
             crate::msgr2::ConnectionConfig::default(),
             auth_handler,
-        );
-        sm.server_cookie = rand::random();
-        sm
+        )
     }
 
     /// Get current state name
