@@ -1654,34 +1654,32 @@ impl MonClient {
     /// Wait for a specific map version (async)
     pub async fn wait_for_map(&self, what: MonService, version: u64) -> Result<()> {
         // Check if we already have this version
-        {
-            let monmap_state = self.monmap_state.read().await;
-            match what {
-                MonService::MonMap => {
-                    if monmap_state.monmap.epoch as u64 >= version {
-                        return Ok(());
-                    }
+        match what {
+            MonService::MonMap => {
+                let monmap_state = self.monmap_state.read().await;
+                if monmap_state.monmap.epoch as u64 >= version {
+                    return Ok(());
                 }
-                MonService::OsdMap => {
-                    let latest_osdmap = self.latest_osdmap.read().await;
-                    if latest_osdmap
-                        .as_ref()
-                        .is_some_and(|osdmap| u64::from(osdmap.get_last()) >= version)
-                    {
-                        return Ok(());
-                    }
+            }
+            MonService::OsdMap => {
+                let latest_osdmap = self.latest_osdmap.read().await;
+                if latest_osdmap
+                    .as_ref()
+                    .is_some_and(|osdmap| u64::from(osdmap.get_last()) >= version)
+                {
+                    return Ok(());
                 }
-                MonService::Config => {
-                    return Err(MonClientError::Other(
-                        "wait_for_map does not support config updates".into(),
-                    ));
-                }
-                MonService::MgrMap | MonService::MdsMap => {
-                    return Err(MonClientError::Other(format!(
-                        "wait_for_map does not yet support {}",
-                        what
-                    )));
-                }
+            }
+            MonService::Config => {
+                return Err(MonClientError::Other(
+                    "wait_for_map does not support config updates".into(),
+                ));
+            }
+            MonService::MgrMap | MonService::MdsMap => {
+                return Err(MonClientError::Other(format!(
+                    "wait_for_map does not yet support {}",
+                    what
+                )));
             }
         }
 
