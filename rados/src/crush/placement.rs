@@ -252,8 +252,13 @@ pub fn object_to_pg(
     let hash = if locator.namespace.is_empty() {
         ceph_str_hash_rjenkins(hash_key.as_bytes())
     } else {
-        let hash_input = format!("{}\x1f{}", locator.namespace, hash_key);
-        ceph_str_hash_rjenkins(hash_input.as_bytes())
+        let ns = locator.namespace.as_bytes();
+        let key = hash_key.as_bytes();
+        let mut hash_input = Vec::with_capacity(ns.len() + 1 + key.len());
+        hash_input.extend_from_slice(ns);
+        hash_input.push(b'\x1f');
+        hash_input.extend_from_slice(key);
+        ceph_str_hash_rjenkins(&hash_input)
     };
 
     let pg_seed = hash % pg_num;
