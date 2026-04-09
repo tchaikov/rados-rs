@@ -47,6 +47,72 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
+/// Bounded queue of sent messages kept for potential replay on reconnect.
+///
+/// Shared by `SessionState` (unsplit connection) and `SharedState` (split halves).
+#[derive(Debug, Clone, Default)]
+pub struct ReplayQueue {
+    messages: VecDeque<Message>,
+    max: Option<usize>,
+}
+
+impl ReplayQueue {
+    pub fn new(max: Option<usize>) -> Self {
+        Self {
+            messages: VecDeque::new(),
+            max,
+        }
+    }
+
+    /// Return an error if the queue is already at its configured limit.
+    pub fn check_limit(&self) -> Result<()> {
+        if let Some(limit) = self.max
+            && self.messages.len() >= limit
+        {
+            return Err(Error::Protocol(format!(
+                "replay queue limit ({limit}) reached; acknowledge or raise ConnectionConfig::max_replay_queue_len before sending more messages"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Push a message into the queue.  Caller must have called `check_limit` first
+    /// when the seq has already been assigned (split send path).
+    pub fn push(&mut self, message: Message) {
+        self.messages.push_back(message);
+    }
+
+    /// Check limit and push — convenience for the non-split send path.
+    pub fn record(&mut self, message: Message) -> Result<()> {
+        self.check_limit()?;
+        self.messages.push_back(message);
+        Ok(())
+    }
+
+    /// Drop all messages whose sequence number is ≤ `ack_seq`.
+    pub fn discard_acked(&mut self, ack_seq: u64) {
+        while self
+            .messages
+            .front()
+            .is_some_and(|m| m.header.get_seq() <= ack_seq)
+        {
+            self.messages.pop_front();
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.messages.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &Message> {
+        self.messages.iter()
+    }
+}
+
 /// Shared state between SendHalf and RecvHalf
 ///
 /// This contains state that needs to be accessed by both halves,
@@ -62,43 +128,21 @@ pub struct SharedState {
     pub server_cookie: u64,
     pub global_seq: u64,
     pub connect_seq: u64,
-    /// Queue of sent messages awaiting acknowledgment
-    pub sent_messages: VecDeque<Message>,
-    /// Optional cap on the replay queue size
-    pub max_sent_messages: Option<usize>,
+    /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
+    pub replay: ReplayQueue,
     /// Global ID from authentication
     pub global_id: u64,
 }
 
 impl SharedState {
-    /// Check whether the replay queue has room for another message.
-    pub fn can_record_sent_message(&self) -> Result<()> {
-        if let Some(limit) = self.max_sent_messages
-            && self.sent_messages.len() >= limit
-        {
-            return Err(Error::Protocol(format!(
-                "replay queue limit ({limit}) reached; acknowledge or raise ConnectionConfig::max_replay_queue_len before sending more messages"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Push a message into the replay queue (caller must check `can_record_sent_message` first).
+    /// Push a message into the replay queue.
     pub fn record_sent_message(&mut self, message: Message) -> Result<()> {
-        self.can_record_sent_message()?;
-        self.sent_messages.push_back(message);
-        Ok(())
+        self.replay.record(message)
     }
 
-    /// Discard acknowledged messages up to the given sequence number
+    /// Discard acknowledged messages up to the given sequence number.
     pub fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
-        while let Some(msg) = self.sent_messages.front() {
-            if msg.header.get_seq() <= ack_seq {
-                self.sent_messages.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.replay.discard_acked(ack_seq);
     }
 }
 
@@ -252,7 +296,7 @@ async fn send_outbound_entry(
     let (seq, ack_seq) = {
         let mut state = shared.lock().await;
         if !is_lossy {
-            if let Err(err) = state.can_record_sent_message() {
+            if let Err(err) = state.replay.check_limit() {
                 let _ = reply.send(Err(err));
                 return SendOutcome::Continue;
             }
@@ -541,8 +585,7 @@ mod tests {
             server_cookie: 456,
             global_seq: 1,
             connect_seq: 0,
-            sent_messages: VecDeque::new(),
-            max_sent_messages: None,
+            replay: ReplayQueue::new(None),
             global_id: 100,
         };
 
@@ -552,12 +595,12 @@ mod tests {
             shared.record_sent_message(msg).unwrap();
         }
 
-        assert_eq!(shared.sent_messages.len(), 5);
+        assert_eq!(shared.replay.len(), 5);
 
         // ACK up to seq 3
         shared.discard_acknowledged_messages(3);
-        assert_eq!(shared.sent_messages.len(), 2);
+        assert_eq!(shared.replay.len(), 2);
         // Use get_seq() to avoid unaligned reference to packed field
-        assert_eq!(shared.sent_messages.front().unwrap().header.get_seq(), 4);
+        assert_eq!(shared.replay.iter().next().unwrap().header.get_seq(), 4);
     }
 }

@@ -565,9 +565,7 @@ struct SessionState {
     /// Connection sequence number - incremented on each reconnection attempt
     connect_seq: u64,
     /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
-    sent_messages: std::collections::VecDeque<Message>,
-    /// Optional cap on the replay queue size
-    max_sent_messages: Option<usize>,
+    replay: crate::msgr2::split::ReplayQueue,
 }
 
 impl ConnectionState {
@@ -591,8 +589,7 @@ impl ConnectionState {
                 server_cookie: 0, // Will be assigned by server
                 global_seq: 0,
                 connect_seq: 0,
-                sent_messages: std::collections::VecDeque::new(),
-                max_sent_messages: None,
+                replay: crate::msgr2::split::ReplayQueue::new(None),
             },
             is_lossy,
         }
@@ -665,31 +662,17 @@ impl ConnectionState {
         if self.is_lossy {
             return Ok(());
         }
-        if let Some(limit) = self.session.max_sent_messages
-            && self.session.sent_messages.len() >= limit
-        {
-            return Err(Error::Protocol(format!(
-                "replay queue limit ({limit}) reached; acknowledge or raise ConnectionConfig::max_replay_queue_len before sending more messages"
-            )));
-        }
-        self.session.sent_messages.push_back(message);
-        Ok(())
+        self.session.replay.record(message)
     }
 
     /// Discard acknowledged messages up to the given sequence number
     pub(crate) fn discard_acknowledged_messages(&mut self, ack_seq: u64) {
-        while let Some(msg) = self.session.sent_messages.front() {
-            if msg.header.get_seq() <= ack_seq {
-                self.session.sent_messages.pop_front();
-            } else {
-                break;
-            }
-        }
+        self.session.replay.discard_acked(ack_seq);
     }
 
     /// Clear the sent message queue
     pub(crate) fn clear_sent_messages(&mut self) {
-        self.session.sent_messages.clear();
+        self.session.replay.clear();
     }
 
     /// Reset session state for a new connection
@@ -697,7 +680,7 @@ impl ConnectionState {
         self.session.server_cookie = 0;
         self.session.global_seq = 0;
         self.session.connect_seq = 0;
-        self.session.sent_messages.clear();
+        self.session.replay.clear();
         self.in_seq = 0;
         self.out_seq = 0;
         // Note: client_cookie is preserved across resets
@@ -926,7 +909,7 @@ impl Connection {
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
 
         let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
-        state.session.max_sent_messages = config.max_replay_queue_len;
+        state.session.replay = crate::msgr2::split::ReplayQueue::new(config.max_replay_queue_len);
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1095,7 +1078,7 @@ impl Connection {
         Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
 
         let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
-        state.session.max_sent_messages = config.max_replay_queue_len;
+        state.session.replay = crate::msgr2::split::ReplayQueue::new(config.max_replay_queue_len);
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1287,8 +1270,7 @@ impl Connection {
         if let Some(msg_seq) = sess_out.reconnect_msg_seq {
             tracing::info!("Session reconnected, server acked up to msg_seq={msg_seq}");
             self.state.discard_acknowledged_messages(msg_seq);
-            let messages_to_replay: Vec<_> =
-                self.state.session.sent_messages.iter().cloned().collect();
+            let messages_to_replay: Vec<_> = self.state.session.replay.iter().cloned().collect();
             if !messages_to_replay.is_empty() {
                 tracing::info!(
                     "Replaying {} unacknowledged messages",
@@ -1330,8 +1312,7 @@ impl Connection {
         let connect_seq = self.state.session.connect_seq + 1; // Increment for new attempt
         let in_seq = self.state.in_seq;
         let out_seq = self.state.out_seq;
-        let sent_messages = std::mem::take(&mut self.state.session.sent_messages);
-        let max_sent_messages = self.state.session.max_sent_messages;
+        let replay = std::mem::take(&mut self.state.session.replay);
 
         tracing::debug!(
             "Reconnecting with: client_cookie={}, server_cookie={}, global_seq={}, connect_seq={}, in_seq={}, out_seq={}, queued_messages={}",
@@ -1341,7 +1322,7 @@ impl Connection {
             connect_seq,
             in_seq,
             out_seq,
-            sent_messages.len()
+            replay.len()
         );
 
         // Establish new TCP connection
@@ -1376,8 +1357,7 @@ impl Connection {
         state.session.connect_seq = connect_seq;
         state.out_seq = out_seq;
         state.in_seq = in_seq;
-        state.session.sent_messages = sent_messages;
-        state.session.max_sent_messages = max_sent_messages;
+        state.session.replay = replay;
 
         // Replace current state with new reconnected state
         self.state = state;
@@ -1768,8 +1748,7 @@ impl Connection {
             server_cookie: self.state.session.server_cookie,
             global_seq: self.state.session.global_seq,
             connect_seq: self.state.session.connect_seq,
-            sent_messages: self.state.session.sent_messages.clone(),
-            max_sent_messages: self.state.session.max_sent_messages,
+            replay: self.state.session.replay.clone(),
             global_id: self.state.state_machine.global_id(),
         };
 
@@ -1818,7 +1797,7 @@ impl Connection {
                 .map(|c| c.algorithm()),
             out_seq: self.state.out_seq,
             in_seq: self.state.in_seq,
-            sent_messages_pending: self.state.session.sent_messages.len(),
+            sent_messages_pending: self.state.session.replay.len(),
             client_cookie: self.state.session.client_cookie,
             server_cookie: self.state.session.server_cookie,
             global_seq: self.state.session.global_seq,
