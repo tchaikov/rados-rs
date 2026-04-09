@@ -16,7 +16,6 @@ pub mod message;
 pub(crate) mod phase;
 pub(crate) mod priority_queue;
 pub(crate) mod protocol;
-pub mod revocation;
 pub(crate) mod split;
 pub(crate) mod state_machine;
 pub mod throttle;
@@ -33,9 +32,6 @@ pub use map_channel::{MapMessage, MapReceiver, MapSender, map_channel};
 pub use message::{Message, MessagePriority, MessageType, MsgFooter};
 pub use priority_queue::PriorityQueue;
 pub use protocol::Connection;
-pub use revocation::{
-    MessageHandle, MessageId, MessageStatus, RevocationManager, RevocationResult, RevocationStats,
-};
 pub use state_machine::StateKind;
 use std::time::{SystemTime, UNIX_EPOCH};
 pub use throttle::{MessageThrottle, ThrottleConfig, ThrottleStats};

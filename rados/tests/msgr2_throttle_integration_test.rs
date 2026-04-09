@@ -1,6 +1,6 @@
-//! Integration tests for throttle and revocation in Connection layer
+//! Integration tests for throttle in Connection layer
 //!
-//! These tests verify that throttle and revocation features work correctly
+//! These tests verify that throttle features work correctly
 //! when integrated into the Connection layer.
 
 use rados::msgr2::{ConnectionConfig, Message, ThrottleConfig};
@@ -193,117 +193,6 @@ async fn test_throttle_queue_depth_limiting() {
     // Now the send should complete
     let elapsed = send_task.await.unwrap();
     assert!(elapsed.as_millis() >= 50, "Should have blocked until ACK");
-}
-
-/// Test that revocation manager is initialized
-#[tokio::test]
-async fn test_revocation_manager_initialization() {
-    use rados::msgr2::revocation::RevocationManager;
-
-    let manager = RevocationManager::new();
-
-    // Register a message
-    let (handle, _rx) = manager.register_message().await;
-
-    // Verify handle is valid (just check it exists)
-    let _id = handle.id();
-
-    // Mark as sent
-    manager.mark_sent(handle.id()).await;
-
-    // Verify stats
-    let stats = manager.stats().await;
-    assert_eq!(stats.total, 1);
-    assert_eq!(stats.sent, 1);
-}
-
-/// Test that revocation works before sending
-#[tokio::test]
-async fn test_revocation_before_send() {
-    use rados::msgr2::revocation::RevocationManager;
-
-    let manager = RevocationManager::new();
-
-    // Register a message
-    let (handle, mut rx) = manager.register_message().await;
-
-    // Revoke it
-    handle.revoke().await;
-
-    // Check that revocation signal was received
-    assert!(rx.try_recv().is_ok(), "Should receive revocation signal");
-
-    // Verify stats
-    let stats = manager.stats().await;
-    assert_eq!(stats.total, 1);
-    assert_eq!(stats.revoked, 1);
-}
-
-/// Test that revocation fails after sending
-#[tokio::test]
-async fn test_revocation_after_send() {
-    use rados::msgr2::revocation::RevocationManager;
-
-    let manager = RevocationManager::new();
-
-    // Register a message
-    let (handle, mut rx) = manager.register_message().await;
-
-    // Mark as sent
-    manager.mark_sent(handle.id()).await;
-
-    // Try to revoke - should fail
-    handle.revoke().await;
-
-    // Check that no revocation signal was received
-    assert!(
-        rx.try_recv().is_err(),
-        "Should not receive revocation signal after sent"
-    );
-
-    // Verify stats
-    let stats = manager.stats().await;
-    assert_eq!(stats.total, 1);
-    assert_eq!(stats.sent, 1);
-    assert_eq!(stats.revoked, 0);
-}
-
-/// Test combined throttle and revocation
-#[tokio::test]
-async fn test_combined_throttle_and_revocation() {
-    use rados::msgr2::revocation::RevocationManager;
-    use rados::msgr2::throttle::MessageThrottle;
-
-    // Create throttle with limits
-    let throttle_config = ThrottleConfig::with_limits(10, 1024, 5);
-    let throttle = MessageThrottle::new(throttle_config);
-
-    // Create revocation manager
-    let manager = RevocationManager::new();
-
-    // Register message for revocation
-    let (handle, _rx) = manager.register_message().await;
-
-    // Wait for throttle
-    throttle.wait_for_send(100).await;
-
-    // Send message
-    throttle.record_send(100).await;
-
-    // Mark as sent
-    manager.mark_sent(handle.id()).await;
-
-    // Record ACK
-    throttle.record_ack().await;
-
-    // Verify both systems worked
-    let throttle_stats = throttle.stats().await;
-    assert_eq!(throttle_stats.total_messages, 1);
-    assert_eq!(throttle_stats.total_bytes, 100);
-
-    let revocation_stats = manager.stats().await;
-    assert_eq!(revocation_stats.total, 1);
-    assert_eq!(revocation_stats.sent, 1);
 }
 
 /// Test that close() discards all sent messages
