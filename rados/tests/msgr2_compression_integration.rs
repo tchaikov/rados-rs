@@ -19,7 +19,7 @@ fn test_frame_compression_roundtrip_snappy() {
     let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
 
     // Compress the frame
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     // Verify compression flag is set
     assert_ne!(
@@ -64,7 +64,7 @@ fn test_frame_compression_roundtrip_zstd() {
     let frame = Frame::new(Tag::Message, payload.clone());
 
     let ctx = CompressionContext::new(CompressionAlgorithm::Zstd);
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     let decompressed_frame = compressed_frame
         .decompress(&ctx)
@@ -80,7 +80,7 @@ fn test_frame_compression_roundtrip_lz4() {
     let frame = Frame::new(Tag::Message, payload.clone());
 
     let ctx = CompressionContext::new(CompressionAlgorithm::Lz4);
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     let decompressed_frame = compressed_frame
         .decompress(&ctx)
@@ -96,7 +96,7 @@ fn test_frame_compression_roundtrip_zlib() {
     let frame = Frame::new(Tag::Message, payload.clone());
 
     let ctx = CompressionContext::new(CompressionAlgorithm::Zlib);
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     let decompressed_frame = compressed_frame
         .decompress(&ctx)
@@ -116,9 +116,7 @@ fn test_frame_compression_threshold() {
     let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
 
     // Compress the small frame
-    let compressed_small = small_frame
-        .compress(&ctx)
-        .expect("Compression should succeed");
+    let compressed_small = small_frame.compress(&ctx);
 
     // Verify small frame is NOT compressed (below threshold)
     assert_eq!(
@@ -137,9 +135,7 @@ fn test_frame_compression_threshold() {
     let large_frame = Frame::new(Tag::Message, large_payload);
 
     // Compress the large frame
-    let compressed_large = large_frame
-        .compress(&ctx)
-        .expect("Compression should succeed");
+    let compressed_large = large_frame.compress(&ctx);
 
     // Verify large frame IS compressed
     assert_ne!(
@@ -160,7 +156,7 @@ fn test_frame_compression_with_custom_threshold() {
     let frame = Frame::new(Tag::Message, payload);
 
     // Compress the frame
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     // Verify frame is compressed (above custom threshold)
     assert_ne!(
@@ -202,7 +198,7 @@ fn test_compression_ratio_logging() {
     let frame = Frame::new(Tag::Message, payload);
 
     let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     let original_size: usize = frame.segments.iter().map(|s| s.len()).sum();
     let compressed_size: usize = compressed_frame.segments.iter().map(|s| s.len()).sum();
@@ -232,9 +228,7 @@ fn test_all_algorithms_roundtrip() {
         let frame = Frame::new(Tag::Message, payload.clone());
         let ctx = CompressionContext::new(algo);
 
-        let compressed = frame
-            .compress(&ctx)
-            .unwrap_or_else(|_| panic!("Compression should succeed for {:?}", algo));
+        let compressed = frame.compress(&ctx);
 
         let decompressed = compressed
             .decompress(&ctx)
@@ -268,7 +262,7 @@ fn test_frame_to_wire_preserves_compression_flag() {
     let frame = Frame::new(Tag::Message, payload);
 
     let ctx = CompressionContext::new(CompressionAlgorithm::Snappy);
-    let compressed_frame = frame.compress(&ctx).expect("Compression should succeed");
+    let compressed_frame = frame.compress(&ctx);
 
     // Convert to wire format
     let wire_bytes = compressed_frame

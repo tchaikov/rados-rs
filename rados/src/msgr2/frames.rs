@@ -220,30 +220,33 @@ impl Frame {
     /// is compressed independently. The preamble `FRAME_EARLY_DATA_COMPRESSED`
     /// flag is set and each segment descriptor's `logical_len` is updated to the
     /// compressed length. The `reserved` field is left as zero.
-    pub fn compress(
-        &self,
-        ctx: &crate::msgr2::compression::CompressionContext,
-    ) -> Result<Self, RadosError> {
+    pub fn compress(&self, ctx: &crate::msgr2::compression::CompressionContext) -> Self {
         let total_size: usize = self.segments.iter().map(|s| s.len()).sum();
 
-        // Check if we should compress based on threshold
         if !ctx.should_compress(total_size) {
-            return Ok(self.clone());
+            return self.clone();
         }
 
-        let mut new_preamble = self.preamble.clone();
+        let mut new_preamble = self.preamble;
         let mut new_segments = Vec::with_capacity(self.segments.len());
 
         for (i, segment) in self.segments.iter().enumerate() {
             if segment.is_empty() {
                 new_segments.push(Bytes::new());
             } else {
-                let compressed = ctx
-                    .compress(segment)
-                    .map_err(|e| RadosError::Compression(e.to_string()))?;
-
-                new_preamble.segments[i].logical_len = compressed.len() as u32;
-                new_segments.push(compressed);
+                // Mirror C++ asm_compress: if compression fails for any segment,
+                // degrade gracefully and send the frame uncompressed rather than
+                // aborting the operation.
+                match ctx.compress(segment) {
+                    Ok(compressed) => {
+                        new_preamble.segments[i].logical_len = compressed.len() as u32;
+                        new_segments.push(compressed);
+                    }
+                    Err(e) => {
+                        tracing::warn!("Compression failed, sending uncompressed: {e}");
+                        return self.clone();
+                    }
+                }
             }
         }
 
@@ -255,10 +258,10 @@ impl Frame {
             new_segments.iter().map(|s| s.len()).sum::<usize>()
         );
 
-        Ok(Frame {
+        Frame {
             preamble: new_preamble,
             segments: new_segments,
-        })
+        }
     }
 
     /// Decompress this frame if it's compressed.

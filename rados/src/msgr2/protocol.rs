@@ -186,20 +186,16 @@ impl FrameIO {
     ) -> Result<()> {
         // Cow avoids cloning when compression is disabled or doesn't help
         let frame_to_send: Cow<Frame> = if let Some(ctx) = state_machine.compression_ctx() {
-            match frame.compress(ctx) {
-                Ok(compressed_frame) if compressed_frame.preamble.is_compressed() => {
-                    tracing::debug!(
-                        "Frame compressed: tag={:?}, algorithm={:?}",
-                        frame.preamble.tag,
-                        ctx.algorithm()
-                    );
-                    Cow::Owned(compressed_frame)
-                }
-                Ok(_) => Cow::Borrowed(frame),
-                Err(e) => {
-                    tracing::warn!("Compression failed, sending uncompressed: {:?}", e);
-                    Cow::Borrowed(frame)
-                }
+            let compressed = frame.compress(ctx);
+            if compressed.preamble.is_compressed() {
+                tracing::debug!(
+                    "Frame compressed: tag={:?}, algorithm={:?}",
+                    frame.preamble.tag,
+                    ctx.algorithm()
+                );
+                Cow::Owned(compressed)
+            } else {
+                Cow::Borrowed(frame)
             }
         } else {
             Cow::Borrowed(frame)
