@@ -687,11 +687,6 @@ impl ConnectionState {
         }
     }
 
-    /// Get all unacknowledged messages for replay
-    pub(crate) fn get_unacknowledged_messages(&self) -> &std::collections::VecDeque<Message> {
-        &self.session.sent_messages
-    }
-
     /// Clear the sent message queue
     pub(crate) fn clear_sent_messages(&mut self) {
         self.session.sent_messages.clear();
@@ -1844,29 +1839,6 @@ impl Connection {
     pub async fn throttle_stats(&self) -> Option<crate::msgr2::throttle::ThrottleStats> {
         let t = self.throttle.as_ref()?;
         Some(t.stats().await)
-    }
-
-    /// Mark connection as down (for reconnection)
-    ///
-    /// This matches Ceph's `mark_down()` behavior:
-    /// - Keeps sent messages for potential replay on reconnection
-    /// - Closes the TCP connection
-    /// - Does NOT reset session state (preserves cookies, sequences)
-    ///
-    /// Use this when the connection failed but you plan to reconnect.
-    /// The sent messages will be available for retransmission after reconnection.
-    pub async fn mark_down(&mut self) {
-        tracing::info!(
-            "Marking connection down to {} (keeping {} sent messages for replay)",
-            self.server_addr,
-            self.state.get_unacknowledged_messages().len()
-        );
-
-        // Keep sent messages for potential replay
-        // Do NOT call clear_sent_messages() or reset_session()
-
-        // TCP stream will be dropped when ConnectionState is dropped
-        tracing::debug!("Connection marked down, sent messages preserved for reconnection");
     }
 }
 
