@@ -20,6 +20,9 @@ pub enum CephXError {
     #[error("Encoding error: {0}")]
     EncodingError(String),
 
+    #[error("Codec error: {0}")]
+    Codec(#[from] crate::denc::CodecError),
+
     #[error("Time error: {0}")]
     TimeError(String),
 }
@@ -29,6 +32,9 @@ pub type Result<T> = std::result::Result<T, CephXError>;
 
 impl From<crate::RadosError> for CephXError {
     fn from(err: crate::RadosError) -> Self {
-        CephXError::EncodingError(err.to_string())
+        match err {
+            crate::RadosError::Codec(e) => CephXError::Codec(e),
+            other => CephXError::EncodingError(other.to_string()),
+        }
     }
 }

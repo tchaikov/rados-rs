@@ -8,7 +8,7 @@
 use thiserror::Error;
 
 /// Errors produced by [`crate::Denc`] encode and decode implementations.
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone)]
 pub enum CodecError {
     /// The input buffer contained fewer bytes than needed to decode the value.
     #[error("Insufficient data: need {needed} bytes, have {available}")]
