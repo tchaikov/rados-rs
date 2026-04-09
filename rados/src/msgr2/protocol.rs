@@ -1330,7 +1330,7 @@ impl Connection {
         let connect_seq = self.state.session.connect_seq + 1; // Increment for new attempt
         let in_seq = self.state.in_seq;
         let out_seq = self.state.out_seq;
-        let sent_messages = self.state.session.sent_messages.clone();
+        let sent_messages = std::mem::take(&mut self.state.session.sent_messages);
         let max_sent_messages = self.state.session.max_sent_messages;
 
         tracing::debug!(
