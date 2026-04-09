@@ -1070,14 +1070,8 @@ impl MonClient {
 
     /// Check if auth tickets need renewal and send renewal requests if so.
     async fn check_auth_tickets(&self, active_con: &MonConnection) -> Result<()> {
-        let Some(auth_provider_arc) = active_con.get_auth_provider() else {
+        let Some(handler_arc) = active_con.get_auth_handler() else {
             return Ok(());
-        };
-
-        // Get the handler reference, releasing the tokio mutex early
-        let handler_arc = {
-            let auth_provider = auth_provider_arc.lock().await;
-            std::sync::Arc::clone(auth_provider.handler())
         };
 
         let lock_err = |e| MonClientError::Other(format!("Failed to lock auth handler: {}", e));
@@ -1627,7 +1621,7 @@ impl MonClient {
     pub async fn get_service_auth_provider(&self) -> Option<crate::auth::ServiceAuthProvider> {
         let conn_state = self.connection_state.read().await;
         if let Some(conn) = conn_state.active_con.as_ref() {
-            conn.create_service_auth_provider().await
+            conn.create_service_auth_provider()
         } else {
             None
         }

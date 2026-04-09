@@ -75,8 +75,7 @@ pub struct MonConnection {
     global_id: u64,
     /// Ceph session features negotiated during the ident exchange.
     peer_supported_features: u64,
-    /// Wrapped in Mutex to allow mutable access for ticket renewal
-    auth_provider: Option<Arc<Mutex<crate::auth::MonitorAuthProvider>>>,
+    auth_provider: Option<crate::auth::MonitorAuthProvider>,
     send_tx: mpsc::Sender<crate::msgr2::message::Message>,
     task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
     shutdown_token: CancellationToken,
@@ -195,7 +194,7 @@ impl MonConnection {
             rank,
             global_id,
             peer_supported_features,
-            auth_provider: auth_provider.map(|p| Arc::new(Mutex::new(p))),
+            auth_provider,
             send_tx,
             task_handle: Arc::new(Mutex::new(Some(handle))),
             shutdown_token,
@@ -273,30 +272,27 @@ impl MonConnection {
         Ok(())
     }
 
-    /// Get a reference to the authentication provider
+    /// Returns a clone of the inner handler Arc, shared with ServiceAuthProviders.
     ///
-    /// Returns None if no authentication was used (no-auth cluster).
-    pub fn get_auth_provider(&self) -> Option<Arc<Mutex<crate::auth::MonitorAuthProvider>>> {
-        self.auth_provider.as_ref().map(Arc::clone)
+    /// Ticket renewals written through this Arc are visible to all
+    /// ServiceAuthProviders because they hold the same Arc.
+    pub fn get_auth_handler(
+        &self,
+    ) -> Option<std::sync::Arc<std::sync::Mutex<crate::auth::client::CephXClientHandler>>> {
+        self.auth_provider
+            .as_ref()
+            .map(|p| std::sync::Arc::clone(p.handler()))
     }
 
     /// Create a ServiceAuthProvider for OSD/MDS/MGR connections
     ///
-    /// This creates an authorizer-based auth provider using the service tickets
-    /// obtained during monitor authentication. The handler is shared via Arc<Mutex<>>
-    /// so that when MonClient renews tickets, all ServiceAuthProviders automatically
-    /// see the updated tickets. Returns None if no authentication was used (no-auth cluster).
-    pub async fn create_service_auth_provider(&self) -> Option<crate::auth::ServiceAuthProvider> {
-        if let Some(mon_auth_arc) = &self.auth_provider {
-            let mon_auth = mon_auth_arc.lock().await;
-            // Share the handler with ServiceAuthProvider via Arc<Mutex<>>
-            // This ensures ticket renewals are automatically visible
-            Some(crate::auth::ServiceAuthProvider::from_shared_handler(
-                std::sync::Arc::clone(mon_auth.handler()),
+    /// Returns None if no authentication was used (no-auth cluster).
+    pub fn create_service_auth_provider(&self) -> Option<crate::auth::ServiceAuthProvider> {
+        self.auth_provider.as_ref().map(|p| {
+            crate::auth::ServiceAuthProvider::from_shared_handler(std::sync::Arc::clone(
+                p.handler(),
             ))
-        } else {
-            None
-        }
+        })
     }
 }
 
