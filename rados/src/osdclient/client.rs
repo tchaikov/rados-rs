@@ -381,7 +381,7 @@ impl OSDClient {
         // that can take seconds and should not block other session lookups
         info!("Creating new session for OSD {}", osd_id);
         session
-            .connect(current_addr.clone(), self.shutdown_token.child_token())
+            .connect(current_addr, self.shutdown_token.child_token())
             .await?;
 
         let session = Arc::new(session);

@@ -767,7 +767,7 @@ pub struct ConnectionDiagnostics {
 
 impl Connection {
     fn socket_to_entity_addr(addr: SocketAddr) -> crate::EntityAddr {
-        crate::EntityAddr::from_socket_addr(crate::EntityAddrType::Msgr2, addr.into())
+        crate::EntityAddr::from_socket_addr(crate::EntityAddrType::Msgr2, addr)
     }
 
     /// Configure a state machine with server and client addresses
@@ -788,7 +788,7 @@ impl Connection {
     ) {
         // Set server address
         if let Some(target_addr) = target_entity_addr {
-            state_machine.set_server_addr(target_addr.clone());
+            state_machine.set_server_addr(*target_addr);
         } else {
             state_machine.set_server_addr(Self::socket_to_entity_addr(server_addr));
         }

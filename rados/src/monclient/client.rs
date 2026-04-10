@@ -1593,10 +1593,7 @@ impl MonClient {
     /// connection is currently active.
     pub async fn get_client_addr(&self) -> Option<crate::EntityAddr> {
         let conn_state = self.connection_state.read().await;
-        conn_state
-            .active_con
-            .as_ref()
-            .map(|c| c.client_addr().clone())
+        conn_state.active_con.as_ref().map(|c| *c.client_addr())
     }
 
     /// Get a ServiceAuthProvider for connecting to OSDs/MDSs/MGRs

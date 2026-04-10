@@ -136,7 +136,7 @@ fn bench_client_ident_frame_encode(c: &mut Criterion) {
     let target_addr =
         rados::denc::EntityAddr::from_socket_addr(rados::denc::EntityAddrType::Msgr2, addr);
     let frame = ClientIdentFrame::new(
-        rados::denc::EntityAddrvec::with_addr(entity_addr.clone()),
+        rados::denc::EntityAddrvec::with_addr(entity_addr),
         target_addr,
         12345,              // gid
         100,                // global_seq

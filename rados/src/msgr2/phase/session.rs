@@ -102,7 +102,7 @@ impl SessionClient {
     }
 
     fn build_client_ident(&self) -> Result<Frame> {
-        let addrs = crate::EntityAddrvec::with_addr(self.client_addr.clone());
+        let addrs = crate::EntityAddrvec::with_addr(self.client_addr);
         let flags = if self.is_lossy {
             CEPH_MSG_CONNECT_LOSSY
         } else {
@@ -110,7 +110,7 @@ impl SessionClient {
         };
         let ident = ClientIdentFrame::new(
             addrs,
-            self.server_addr.clone(),
+            self.server_addr,
             self.global_id as i64,
             self.global_seq,
             session_supported_features(),
@@ -128,7 +128,7 @@ impl SessionClient {
     }
 
     fn build_session_reconnect(&self) -> Result<Frame> {
-        let addrs = crate::EntityAddrvec::with_addr(self.client_addr.clone());
+        let addrs = crate::EntityAddrvec::with_addr(self.client_addr);
         let reconnect = SessionReconnectFrame::new(
             addrs,
             self.client_cookie,

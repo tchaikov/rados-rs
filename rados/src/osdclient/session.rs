@@ -291,13 +291,10 @@ impl OSDSession {
         config.is_lossy = true;
 
         // Connect using msgr2
-        let mut connection = crate::msgr2::protocol::Connection::connect_with_target(
-            addr,
-            entity_addr.clone(),
-            config,
-        )
-        .await
-        .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
+        let mut connection =
+            crate::msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
+                .await
+                .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
 
         info!(
             "Banner exchange complete, establishing session with OSD {}",
@@ -313,7 +310,7 @@ impl OSDSession {
 
         // Store peer address, features, and transition to Connected state.
         // connect() takes &mut self, so these fields can be set directly.
-        self.peer_addr = Some(entity_addr.clone());
+        self.peer_addr = Some(entity_addr);
         self.negotiated_features = connection.negotiated_features();
         self.conn_state.store(ConnectionState::Connected);
 

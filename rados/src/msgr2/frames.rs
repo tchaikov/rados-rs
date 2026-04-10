@@ -277,7 +277,7 @@ impl Frame {
             return Ok(self.clone());
         }
 
-        let mut new_preamble = self.preamble.clone();
+        let mut new_preamble = self.preamble;
         let mut new_segments = Vec::with_capacity(self.segments.len());
 
         for (i, segment) in self.segments.iter().enumerate() {

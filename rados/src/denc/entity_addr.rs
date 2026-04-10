@@ -168,7 +168,7 @@ impl EntityAddr {
     pub fn as_type_any(&self) -> Self {
         Self {
             addr_type: EntityAddrType::Any,
-            ..self.clone()
+            ..*self
         }
     }
 

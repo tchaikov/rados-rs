@@ -233,12 +233,12 @@ impl StateMachine {
 
     /// Clone the server entity address, falling back to default if not set.
     pub fn server_addr_clone(&self) -> crate::EntityAddr {
-        self.server_addr.clone().unwrap_or_default()
+        self.server_addr.unwrap_or_default()
     }
 
     /// Clone the client entity address, falling back to default if not set.
     pub fn client_addr_clone(&self) -> crate::EntityAddr {
-        self.client_addr.clone().unwrap_or_default()
+        self.client_addr.unwrap_or_default()
     }
 
     /// Preferred connection modes from config.

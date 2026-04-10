@@ -295,11 +295,9 @@ async fn send_outbound_entry(
     // Assign sequence numbers under lock
     let (seq, ack_seq) = {
         let mut state = shared.lock().await;
-        if !is_lossy {
-            if let Err(err) = state.replay.check_limit() {
-                let _ = reply.send(Err(err));
-                return SendOutcome::Continue;
-            }
+        if !is_lossy && let Err(err) = state.replay.check_limit() {
+            let _ = reply.send(Err(err));
+            return SendOutcome::Continue;
         }
         state.out_seq += 1;
         msg.header.set_seq(state.out_seq);
