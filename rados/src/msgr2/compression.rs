@@ -7,7 +7,7 @@
 
 use crate::msgr2::error::{Msgr2Error as Error, Result};
 use bytes::Bytes;
-use std::cell::Cell;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Compression algorithm identifiers (from Ceph's Compressor.h)
 #[derive(
@@ -246,27 +246,32 @@ impl CompressionStats {
     }
 }
 
-/// Internal per-field Cell storage — lets `compress()`/`decompress()` update counters
-/// through a shared `&self` reference without requiring `&mut self`.
+/// Internal per-field atomic storage — lets `compress()`/`decompress()` update
+/// counters through a shared `&self` reference without requiring `&mut self`,
+/// and (unlike the prior `Cell<u64>` version) is `Sync`, which matters because
+/// `CompressionContext` is shared via `Arc` across the separate rx/tx tasks
+/// that drive `FramedRead` / `FramedWrite` in the post-handshake data plane.
+/// `Relaxed` ordering is sufficient: the counters are observational — no
+/// other state is gated on them.
 #[derive(Default)]
 struct StatsCell {
-    bytes_before_compression: Cell<u64>,
-    bytes_after_compression: Cell<u64>,
-    compression_ops: Cell<u64>,
-    bytes_before_decompression: Cell<u64>,
-    bytes_after_decompression: Cell<u64>,
-    decompression_ops: Cell<u64>,
+    bytes_before_compression: AtomicU64,
+    bytes_after_compression: AtomicU64,
+    compression_ops: AtomicU64,
+    bytes_before_decompression: AtomicU64,
+    bytes_after_decompression: AtomicU64,
+    decompression_ops: AtomicU64,
 }
 
 impl StatsCell {
     fn snapshot(&self) -> CompressionStats {
         CompressionStats {
-            bytes_before_compression: self.bytes_before_compression.get(),
-            bytes_after_compression: self.bytes_after_compression.get(),
-            compression_ops: self.compression_ops.get(),
-            bytes_before_decompression: self.bytes_before_decompression.get(),
-            bytes_after_decompression: self.bytes_after_decompression.get(),
-            decompression_ops: self.decompression_ops.get(),
+            bytes_before_compression: self.bytes_before_compression.load(Ordering::Relaxed),
+            bytes_after_compression: self.bytes_after_compression.load(Ordering::Relaxed),
+            compression_ops: self.compression_ops.load(Ordering::Relaxed),
+            bytes_before_decompression: self.bytes_before_decompression.load(Ordering::Relaxed),
+            bytes_after_decompression: self.bytes_after_decompression.load(Ordering::Relaxed),
+            decompression_ops: self.decompression_ops.load(Ordering::Relaxed),
         }
     }
 }
@@ -329,13 +334,11 @@ impl CompressionContext {
         let compressed = self.compressor.compress(data)?;
         self.stats
             .bytes_before_compression
-            .set(self.stats.bytes_before_compression.get() + data.len() as u64);
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         self.stats
             .bytes_after_compression
-            .set(self.stats.bytes_after_compression.get() + compressed.len() as u64);
-        self.stats
-            .compression_ops
-            .set(self.stats.compression_ops.get() + 1);
+            .fetch_add(compressed.len() as u64, Ordering::Relaxed);
+        self.stats.compression_ops.fetch_add(1, Ordering::Relaxed);
         Ok(Bytes::from(compressed))
     }
 
@@ -344,13 +347,11 @@ impl CompressionContext {
         let decompressed = self.compressor.decompress(data)?;
         self.stats
             .bytes_before_decompression
-            .set(self.stats.bytes_before_decompression.get() + data.len() as u64);
+            .fetch_add(data.len() as u64, Ordering::Relaxed);
         self.stats
             .bytes_after_decompression
-            .set(self.stats.bytes_after_decompression.get() + decompressed.len() as u64);
-        self.stats
-            .decompression_ops
-            .set(self.stats.decompression_ops.get() + 1);
+            .fetch_add(decompressed.len() as u64, Ordering::Relaxed);
+        self.stats.decompression_ops.fetch_add(1, Ordering::Relaxed);
         Ok(Bytes::from(decompressed))
     }
 
