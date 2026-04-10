@@ -169,10 +169,13 @@ pub struct ClientBuilder {
     operation_timeout: Duration,
     monmap_wait_timeout: Duration,
     osdmap_wait_timeout: Duration,
+    max_inflight_ops: usize,
+    max_inflight_bytes: usize,
 }
 
 impl Default for ClientBuilder {
     fn default() -> Self {
+        use crate::osdclient::throttle::{DEFAULT_MAX_BYTES, DEFAULT_MAX_OPS};
         Self {
             entity_name: "client.admin".to_owned(),
             config_file: None,
@@ -182,6 +185,8 @@ impl Default for ClientBuilder {
             operation_timeout: Duration::from_secs(30),
             monmap_wait_timeout: Duration::from_secs(10),
             osdmap_wait_timeout: Duration::from_secs(10),
+            max_inflight_ops: DEFAULT_MAX_OPS,
+            max_inflight_bytes: DEFAULT_MAX_BYTES,
         }
     }
 }
@@ -241,6 +246,31 @@ impl ClientBuilder {
     /// before giving up (default: 10s).
     pub fn osdmap_timeout(mut self, dur: Duration) -> Self {
         self.osdmap_wait_timeout = dur;
+        self
+    }
+
+    /// Cap on concurrent in-flight operations across the whole client.
+    /// Mirrors Ceph's `objecter_inflight_ops` (default: 1024).
+    ///
+    /// Lowering this throttles aggressive workloads; raising it can
+    /// improve throughput on clusters with many OSDs at the cost of more
+    /// queued state per client.
+    pub fn max_inflight_ops(mut self, max: usize) -> Self {
+        self.max_inflight_ops = max;
+        self
+    }
+
+    /// Cap on total bytes represented by in-flight operations across the
+    /// whole client. Mirrors Ceph's `objecter_inflight_op_bytes`
+    /// (default: 100 MiB).
+    ///
+    /// The byte throttle and the op-count throttle ([`max_inflight_ops`])
+    /// both gate every submission; an op that would exceed either cap
+    /// waits until capacity is available.
+    ///
+    /// [`max_inflight_ops`]: Self::max_inflight_ops
+    pub fn max_inflight_bytes(mut self, max: usize) -> Self {
+        self.max_inflight_bytes = max;
         self
     }
 
@@ -375,6 +405,8 @@ impl ClientBuilder {
             tracker_config: TrackerConfig {
                 operation_timeout: self.operation_timeout,
             },
+            max_inflight_ops: self.max_inflight_ops,
+            max_inflight_bytes: self.max_inflight_bytes,
             ..Default::default()
         };
         let osd_client =
@@ -443,6 +475,7 @@ mod tests {
 
     #[test]
     fn builder_defaults_are_sensible() {
+        use crate::osdclient::throttle::{DEFAULT_MAX_BYTES, DEFAULT_MAX_OPS};
         let b = ClientBuilder::default();
         assert_eq!(b.entity_name, "client.admin");
         assert!(b.config_file.is_none());
@@ -450,6 +483,8 @@ mod tests {
         assert_eq!(b.operation_timeout, Duration::from_secs(30));
         assert_eq!(b.monmap_wait_timeout, Duration::from_secs(10));
         assert_eq!(b.osdmap_wait_timeout, Duration::from_secs(10));
+        assert_eq!(b.max_inflight_ops, DEFAULT_MAX_OPS);
+        assert_eq!(b.max_inflight_bytes, DEFAULT_MAX_BYTES);
     }
 
     #[test]
@@ -462,7 +497,9 @@ mod tests {
             .dns_srv_name("ceph-test")
             .operation_timeout(Duration::from_secs(5))
             .monmap_timeout(Duration::from_secs(2))
-            .osdmap_timeout(Duration::from_secs(3));
+            .osdmap_timeout(Duration::from_secs(3))
+            .max_inflight_ops(256)
+            .max_inflight_bytes(8 * 1024 * 1024);
         assert_eq!(b.entity_name, "client.test");
         assert_eq!(
             b.config_file.as_deref(),
@@ -477,6 +514,8 @@ mod tests {
         assert_eq!(b.operation_timeout, Duration::from_secs(5));
         assert_eq!(b.monmap_wait_timeout, Duration::from_secs(2));
         assert_eq!(b.osdmap_wait_timeout, Duration::from_secs(3));
+        assert_eq!(b.max_inflight_ops, 256);
+        assert_eq!(b.max_inflight_bytes, 8 * 1024 * 1024);
     }
 
     #[test]
