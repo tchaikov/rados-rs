@@ -12,122 +12,21 @@
 use bytes::Bytes;
 use futures::StreamExt;
 use std::io::SeekFrom;
-use std::path::Path;
-use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tracing::info;
 
-/// Helper to get test configuration from environment and ceph.conf
-struct TestConfig {
-    mon_addrs: Vec<String>,
-    keyring_path: Option<String>,
-    entity_name: String,
-    pool: String,
-}
-
-impl TestConfig {
-    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        let ceph_conf_path =
-            std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
-        if !Path::new(&ceph_conf_path).exists() {
-            return Err(format!("ceph.conf not found at: {ceph_conf_path}").into());
-        }
-        let ceph_config = rados::cephconfig::CephConfig::from_file(&ceph_conf_path)?;
-        let mon_addrs = ceph_config.mon_addrs()?;
-        let auth_methods = ceph_config.get_auth_client_required();
-        let keyring_path = if auth_methods.contains(&rados::auth::protocol::CEPH_AUTH_CEPHX) {
-            Some(
-                std::env::var("CEPH_KEYRING")
-                    .or_else(|_| ceph_config.keyring())
-                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string()),
-            )
-        } else {
-            None
-        };
-        let entity_name = ceph_config.entity_name();
-        let pool = std::env::var("CEPH_TEST_POOL").unwrap_or_else(|_| "test-pool".to_string());
-        Ok(Self {
-            mon_addrs,
-            keyring_path,
-            entity_name,
-            pool,
-        })
-    }
-}
-
-async fn create_ioctx(
-    config: &TestConfig,
-) -> Result<rados::osdclient::IoCtx, Box<dyn std::error::Error>> {
-    let (osdmap_tx, osdmap_rx) = rados::msgr2::map_channel::<rados::monclient::MOSDMap>(64);
-    let auth = if let Some(keyring_path) = &config.keyring_path {
-        rados::monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring_path)?
-    } else {
-        rados::monclient::AuthConfig::no_auth(config.entity_name.clone())
-    };
-    let mon_config = rados::monclient::MonClientConfig {
-        mon_addrs: config.mon_addrs.clone(),
-        auth: Some(auth),
-        ..Default::default()
-    };
-    let mon_client = rados::monclient::MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
-    mon_client.init().await?;
-    if config.keyring_path.is_some() {
-        mon_client
-            .wait_for_auth(std::time::Duration::from_secs(5))
-            .await?;
-    }
-    mon_client
-        .wait_for_monmap(std::time::Duration::from_secs(2))
-        .await?;
-
-    let client_inc = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
-    let ms_crc_data = std::env::var("RADOS_MS_CRC_DATA")
-        .map(|v| v != "0" && v != "false")
-        .unwrap_or(true);
-    let osd_config = rados::osdclient::OSDClientConfig {
-        client_inc,
-        ms_crc_data,
-        ..Default::default()
-    };
-    let fsid = mon_client.get_fsid().await;
-    let osd_client = rados::osdclient::OSDClient::new(
-        osd_config,
-        fsid,
-        Arc::clone(&mon_client),
-        osdmap_tx,
-        osdmap_rx,
-    )
-    .await?;
-    osd_client
-        .wait_for_latest_osdmap(std::time::Duration::from_secs(2))
-        .await?;
-
-    // Resolve pool name → id
-    let osdmap = osd_client.get_osdmap().await?;
-    let pool_id = osdmap
-        .pool_name
-        .iter()
-        .find(|(_, name)| name.as_str() == config.pool)
-        .map(|(id, _)| *id)
-        .ok_or_else(|| format!("Pool '{}' not found", config.pool))?;
-
-    let ioctx = rados::osdclient::IoCtx::new(osd_client, pool_id).await?;
-    Ok(ioctx)
-}
+mod common;
+use common::create_ioctx;
 
 // ─── RadosObject tests ────────────────────────────────────────────────────────
 
 #[tokio::test]
 #[ignore]
 async fn test_rados_object_write_and_read_back() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
     info!("test_rados_object_write_and_read_back");
 
-    let config = TestConfig::from_env().expect("TestConfig");
-    let ioctx = create_ioctx(&config).await.expect("create_ioctx");
+    let ioctx = create_ioctx().await.expect("create_ioctx");
 
     let name = format!("tokio-rw-{}", rand::random::<u32>());
     let mut obj = rados::osdclient::RadosObject::new(ioctx.clone(), name.clone());
@@ -152,11 +51,10 @@ async fn test_rados_object_write_and_read_back() {
 #[tokio::test]
 #[ignore]
 async fn test_rados_object_partial_write_and_seek() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
     info!("test_rados_object_partial_write_and_seek");
 
-    let config = TestConfig::from_env().expect("TestConfig");
-    let ioctx = create_ioctx(&config).await.expect("create_ioctx");
+    let ioctx = create_ioctx().await.expect("create_ioctx");
 
     let name = format!("tokio-seek-{}", rand::random::<u32>());
     let mut obj = rados::osdclient::RadosObject::new(ioctx.clone(), name.clone());
@@ -187,11 +85,10 @@ async fn test_rados_object_partial_write_and_seek() {
 #[tokio::test]
 #[ignore]
 async fn test_rados_object_seek_end() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
     info!("test_rados_object_seek_end");
 
-    let config = TestConfig::from_env().expect("TestConfig");
-    let ioctx = create_ioctx(&config).await.expect("create_ioctx");
+    let ioctx = create_ioctx().await.expect("create_ioctx");
 
     let name = format!("tokio-seekend-{}", rand::random::<u32>());
     let mut obj = rados::osdclient::RadosObject::new(ioctx.clone(), name.clone());
@@ -214,11 +111,10 @@ async fn test_rados_object_seek_end() {
 #[tokio::test]
 #[ignore]
 async fn test_rados_object_nonexistent_reads_as_empty() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
     info!("test_rados_object_nonexistent_reads_as_empty");
 
-    let config = TestConfig::from_env().expect("TestConfig");
-    let ioctx = create_ioctx(&config).await.expect("create_ioctx");
+    let ioctx = create_ioctx().await.expect("create_ioctx");
 
     // Use a name that very likely doesn't exist
     let name = format!("tokio-noexist-{}", rand::random::<u64>());
@@ -236,11 +132,10 @@ async fn test_rados_object_nonexistent_reads_as_empty() {
 #[tokio::test]
 #[ignore]
 async fn test_list_objects_stream_basic() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
     info!("test_list_objects_stream_basic");
 
-    let config = TestConfig::from_env().expect("TestConfig");
-    let ioctx = create_ioctx(&config).await.expect("create_ioctx");
+    let ioctx = create_ioctx().await.expect("create_ioctx");
 
     // Create a set of objects with a unique prefix
     let prefix = format!("list-stream-{}", rand::random::<u32>());

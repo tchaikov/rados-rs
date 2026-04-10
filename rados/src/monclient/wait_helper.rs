@@ -6,46 +6,29 @@
 use std::future::Future;
 use std::time::Duration;
 
-/// Wait for a condition to be met with notification and timeout
+/// Wait for a condition to be met with notification and timeout.
 ///
-/// This is a generic helper that consolidates the common pattern used in
-/// wait_for_auth(), wait_for_monmap(), and wait_for_osdmap().
+/// Consolidates the pattern used by `wait_for_auth`, `wait_for_monmap`, and
+/// `wait_for_osdmap`.
 ///
 /// # Pattern
 ///
-/// 1. Check if condition is already met (fast path)
-/// 2. Wait for notification with timeout
-/// 3. Double-check condition after notification
-/// 4. Return result or timeout error
+/// 1. Arm a `Notified` future via `enable()` so any `notify_waiters()` call that
+///    fires before the first poll will still wake it.
+/// 2. Check if the condition is already met (fast path).
+/// 3. Race the armed waiter against the deadline.
+/// 4. On wakeup, loop and re-check.
 ///
-/// # Arguments
+/// The `enable()` step is load-bearing. `Notify::notify_waiters()` does not
+/// persist a permit, so without arming first there is a TOCTOU window between
+/// the check and the await in which a fired notification can be lost — causing
+/// the caller to hang for the full timeout even though the condition became
+/// true immediately.
 ///
-/// * `check_fn` - Async function that checks if the condition is met and returns Some(T) if true
-/// * `notify` - The Notify instance to wait on
-/// * `timeout` - Maximum time to wait
-/// * `timeout_error` - Error to return on timeout
-///
-/// # Returns
-///
-/// Returns Ok(T) if condition is met, or Err(E) on timeout or spurious wakeup
-///
-/// # Example
-///
-/// ```rust,ignore
-/// wait_for_condition(
-///     || async {
-///         let state = self.state.read().await;
-///         if state.authenticated {
-///             Some(())
-///         } else {
-///             None
-///         }
-///     },
-///     &self.auth_notify,
-///     timeout,
-///     MonClientError::AuthenticationTimeout,
-/// ).await
-/// ```
+/// Tokio's own MPMC channel example in the `Notify` docs uses the exact same
+/// pinned-`enable()`-then-check idiom; see `tokio/src/sync/notify.rs` around
+/// line 169 ("enable the future before checking try_recv") for the canonical
+/// formulation.
 pub async fn wait_for_condition<T, E, CheckFn, CheckFut>(
     check_fn: CheckFn,
     notify: &tokio::sync::Notify,
@@ -58,12 +41,19 @@ where
 {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
+        // Arm the waiter BEFORE checking state. If a notification fires in the
+        // gap between the check returning None and us calling .await below,
+        // `enable()` guarantees we still pick it up on the next poll.
+        let notified = notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
+
         if let Some(value) = check_fn().await {
             return Ok(value);
         }
 
         tokio::select! {
-            _ = notify.notified() => continue,
+            _ = notified.as_mut() => continue,
             _ = tokio::time::sleep_until(deadline) => return Err(timeout_error),
         }
     }

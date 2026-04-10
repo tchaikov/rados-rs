@@ -1,300 +1,145 @@
-//! Integration tests for mon command operations using the invoke() API
+//! Integration tests for MonClient::invoke() — the low-level mon command path.
 //!
-//! These tests demonstrate using the low-level invoke() method to send
-//! arbitrary monitor commands.
+//! Environment:
+//! - `CEPH_CONF` (required) — path to `ceph.conf`
+//! - `CEPH_KEYRING` (optional) — overrides the keyring path from `ceph.conf`
 //!
-//! ## Running the tests
-//!
+//! Run with:
 //! ```bash
-//! export CEPH_CONF=/path/to/ceph.conf
-//! cargo test --package monclient --test command_operations -- --ignored --nocapture
+//! CEPH_CONF=/path/to/ceph.conf \
+//!   cargo test --package rados --test monclient_command_operations -- --ignored --nocapture
 //! ```
 
 use bytes::Bytes;
-use std::path::Path;
-use std::sync::Arc;
 use tracing::info;
 
-/// Helper to get test configuration from environment and ceph.conf
-struct TestConfig {
-    mon_addrs: Vec<String>,
-    keyring_path: Option<String>,
-    entity_name: String,
-}
-
-impl TestConfig {
-    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        // Get ceph.conf path
-        let ceph_conf_path =
-            std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
-
-        if !Path::new(&ceph_conf_path).exists() {
-            return Err(format!("ceph.conf not found at: {}", ceph_conf_path).into());
-        }
-
-        // Parse ceph.conf
-        let ceph_config = rados::cephconfig::CephConfig::from_file(&ceph_conf_path)?;
-
-        // Get monitor addresses
-        let mon_addrs = ceph_config.mon_addrs()?;
-
-        // Get required auth methods for client connections
-        let auth_methods = ceph_config.get_auth_client_required();
-
-        // Get keyring path only if CephX is in the supported methods
-        let keyring_path = if auth_methods.contains(&rados::auth::protocol::CEPH_AUTH_CEPHX) {
-            Some(
-                std::env::var("CEPH_KEYRING")
-                    .or_else(|_| ceph_config.keyring())
-                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string()),
-            )
-        } else {
-            None
-        };
-
-        // Get entity name
-        let entity_name = ceph_config.entity_name();
-
-        Ok(Self {
-            mon_addrs,
-            keyring_path,
-            entity_name,
-        })
-    }
-}
-
-/// Helper to create and initialize a MonClient
-async fn create_mon_client(
-    config: &TestConfig,
-) -> Result<Arc<rados::monclient::MonClient>, Box<dyn std::error::Error>> {
-    // Create auth config
-    let auth = if let Some(ref keyring) = config.keyring_path {
-        rados::monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring)?
-    } else {
-        rados::monclient::AuthConfig::no_auth(config.entity_name.clone())
-    };
-
-    // Create MonClient
-    let mon_config = rados::monclient::MonClientConfig {
-        mon_addrs: config.mon_addrs.clone(),
-        auth: Some(auth),
-        ..Default::default()
-    };
-
-    let mon_client = rados::monclient::MonClient::new(mon_config, None).await?;
-
-    // Initialize connection
-    mon_client.init().await?;
-
-    info!("✓ Connected to monitor");
-
-    // Wait for authentication to complete if auth is required
-    if config.keyring_path.is_some() {
-        mon_client
-            .wait_for_auth(std::time::Duration::from_secs(5))
-            .await?;
-    }
-
-    // Wait for MonMap to arrive - use event-driven wait
-    mon_client
-        .wait_for_monmap(std::time::Duration::from_secs(2))
-        .await?;
-
-    Ok(mon_client)
-}
+mod common;
+use common::build_test_client;
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_invoke_status_command() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing invoke() with status command");
 
-    info!("Testing invoke() with status command");
-    info!("====================================");
+    let client = build_test_client().await.expect("build_test_client");
+    let mon_client = client.mon_client();
 
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let mon_client = create_mon_client(&config)
-        .await
-        .expect("Failed to create MonClient");
-
-    // Use invoke() to get cluster status
-    info!("Getting cluster status");
     let cmd = vec![r#"{"prefix": "status"}"#.to_string()];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to get status");
-
-    info!("✓ Status command succeeded");
-    info!("Return value: {}", result.retval);
-    info!("Output (outs): {}", result.outs);
-
-    // Output buffer (outbl) may contain JSON data
-    if !result.outbl.is_empty() {
-        info!("Output buffer size: {} bytes", result.outbl.len());
-        if let Ok(json_str) = String::from_utf8(result.outbl.to_vec()) {
-            info!("Output buffer (JSON): {}", json_str);
-        }
-    }
-
-    assert_eq!(result.retval, 0, "Status command should succeed");
-    info!("✓ Test completed successfully");
+        .expect("invoke status");
+    info!(
+        "status ok, retval={} outs={} outbl_len={}",
+        result.retval,
+        result.outs,
+        result.outbl.len()
+    );
+    assert_eq!(result.retval, 0, "status command should succeed");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_invoke_list_pools() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing invoke() with pool ls command");
 
-    info!("Testing invoke() with pool ls command");
-    info!("=====================================");
+    let client = build_test_client().await.expect("build_test_client");
+    let mon_client = client.mon_client();
 
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let mon_client = create_mon_client(&config)
-        .await
-        .expect("Failed to create MonClient");
-
-    // Use invoke() to list pools
-    info!("Listing pools");
     let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to list pools");
-
-    info!("✓ Pool list command succeeded");
-    info!("Return value: {}", result.retval);
-
-    // The pool list is typically in the output buffer
+        .expect("invoke osd pool ls");
+    assert_eq!(result.retval, 0, "pool ls should succeed");
     if !result.outbl.is_empty()
         && let Ok(pool_list) = String::from_utf8(result.outbl.to_vec())
     {
-        info!("Pools: {}", pool_list);
-        assert!(!pool_list.is_empty(), "Should have at least some pools");
+        info!("pools: {pool_list}");
+        assert!(!pool_list.is_empty(), "should have at least one pool");
     }
-
-    assert_eq!(result.retval, 0, "Pool list command should succeed");
-    info!("✓ Test completed successfully");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_invoke_create_and_delete_pool() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing invoke() create + delete pool");
 
-    info!("Testing invoke() for pool creation and deletion");
-    info!("==============================================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let mon_client = create_mon_client(&config)
-        .await
-        .expect("Failed to create MonClient");
+    let client = build_test_client().await.expect("build_test_client");
+    let mon_client = client.mon_client();
 
     let pool_name = format!("test-invoke-{}", rand::random::<u32>());
 
-    // Create pool using invoke()
-    info!("Creating pool: {}", pool_name);
     let cmd = vec![format!(
-        r#"{{"prefix": "osd pool create", "pool": "{}"}}"#,
-        pool_name
+        r#"{{"prefix": "osd pool create", "pool": "{pool_name}"}}"#
     )];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to create pool");
+        .expect("invoke create pool");
+    assert_eq!(result.retval, 0, "pool creation should succeed");
 
-    info!("✓ Pool created");
-    info!("Return value: {}", result.retval);
-    assert_eq!(result.retval, 0, "Pool creation should succeed");
+    // Give the monitor a moment to commit.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-    // Wait for pool to be fully created
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-
-    // Verify pool exists
     let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to list pools");
+        .expect("invoke osd pool ls");
+    let pool_list = String::from_utf8(result.outbl.to_vec()).expect("outbl is valid utf8");
+    assert!(pool_list.contains(&pool_name), "pool should appear in list");
 
-    let pool_list = String::from_utf8(result.outbl.to_vec()).unwrap();
-    assert!(pool_list.contains(&pool_name), "Pool should exist in list");
-    info!("✓ Pool verified");
-
-    // Delete pool using invoke()
-    info!("Deleting pool: {}", pool_name);
     let cmd = vec![format!(
-        r#"{{"prefix": "osd pool rm", "pool": "{}", "pool2": "{}", "yes_i_really_really_mean_it": true}}"#,
-        pool_name, pool_name
+        r#"{{"prefix": "osd pool rm", "pool": "{pool_name}", "pool2": "{pool_name}", "yes_i_really_really_mean_it": true}}"#
     )];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to delete pool");
+        .expect("invoke delete pool");
+    assert_eq!(result.retval, 0, "pool deletion should succeed");
 
-    info!("✓ Pool deleted");
-    info!("Return value: {}", result.retval);
-    assert_eq!(result.retval, 0, "Pool deletion should succeed");
-
-    // Verify pool is gone
     let cmd = vec![r#"{"prefix": "osd pool ls"}"#.to_string()];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to list pools");
-
-    let pool_list = String::from_utf8(result.outbl.to_vec()).unwrap();
+        .expect("invoke osd pool ls after delete");
+    let pool_list = String::from_utf8(result.outbl.to_vec()).expect("outbl is valid utf8");
     assert!(
         !pool_list.contains(&pool_name),
-        "Pool should not exist after deletion"
+        "pool should not exist after deletion"
     );
-    info!("✓ Pool deletion verified");
-
-    info!("✓ Test completed successfully");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_invoke_with_input_buffer() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing invoke() with input buffer (config-key put/get/del)");
 
-    info!("Testing invoke() with input buffer");
-    info!("=================================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let mon_client = create_mon_client(&config)
-        .await
-        .expect("Failed to create MonClient");
-
-    // Example: Send a command with an input buffer
-    // This demonstrates the full invoke() API capability
-    info!("Sending command with input buffer");
+    let client = build_test_client().await.expect("build_test_client");
+    let mon_client = client.mon_client();
 
     let cmd = vec![r#"{"prefix": "config-key put", "key": "test-invoke-key"}"#.to_string()];
     let input_data = Bytes::from("test-value-from-invoke");
-
     let result = mon_client
         .invoke(cmd, input_data)
         .await
-        .expect("Failed to put config key");
+        .expect("invoke config-key put");
+    assert_eq!(result.retval, 0, "config-key put should succeed");
 
-    info!("✓ Command with input buffer succeeded");
-    info!("Return value: {}", result.retval);
-    assert_eq!(result.retval, 0, "Config key put should succeed");
-
-    // Verify by reading the key back
     let cmd = vec![r#"{"prefix": "config-key get", "key": "test-invoke-key"}"#.to_string()];
     let result = mon_client
         .invoke(cmd, Bytes::new())
         .await
-        .expect("Failed to get config key");
+        .expect("invoke config-key get");
+    let value = String::from_utf8(result.outbl.to_vec()).expect("outbl is valid utf8");
+    assert_eq!(value, "test-value-from-invoke", "value should match");
 
-    let value = String::from_utf8(result.outbl.to_vec()).unwrap();
-    info!("✓ Retrieved value: {}", value);
-    assert_eq!(value, "test-value-from-invoke", "Value should match");
-
-    // Cleanup
+    // Best-effort cleanup; ignore errors so a failed del doesn't mask the real assertion.
     let cmd = vec![r#"{"prefix": "config-key del", "key": "test-invoke-key"}"#.to_string()];
     let _ = mon_client.invoke(cmd, Bytes::new()).await;
-
-    info!("✓ Test completed successfully");
 }

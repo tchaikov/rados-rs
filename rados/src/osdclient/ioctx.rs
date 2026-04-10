@@ -48,6 +48,7 @@ const MAX_ENTRIES_PER_REQUEST: usize = 100;
 /// # Ok(())
 /// # }
 /// ```
+#[must_use = "IoCtx holds an Arc<OSDClient> — dropping it without issuing operations is almost certainly a bug"]
 pub struct IoCtx {
     /// OSD client for performing operations
     client: Arc<OSDClient>,

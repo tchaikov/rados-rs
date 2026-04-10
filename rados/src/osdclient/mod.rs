@@ -30,7 +30,7 @@ pub(crate) mod tracker;
 pub mod types;
 
 // Re-export commonly used types
-pub use client::{OSDClient, OSDClientConfig};
+pub use client::{OSDClient, OSDClientConfig, default_client_inc};
 pub use error::OSDClientError;
 pub use ioctx::IoCtx;
 pub use list_stream::list_objects_stream;

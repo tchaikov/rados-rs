@@ -10,11 +10,14 @@
 
 pub mod auth;
 pub mod cephconfig;
+mod client;
 pub mod crush;
 pub mod denc;
 pub mod monclient;
 pub mod msgr2;
 pub mod osdclient;
+
+pub use client::{Client, ClientBuilder, ClientError, connect};
 
 pub use auth::{AuthResult, CephXClientHandler, CephXError, CephXServerHandler, Keyring};
 pub use cephconfig::{

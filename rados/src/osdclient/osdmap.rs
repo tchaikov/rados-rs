@@ -2673,6 +2673,13 @@ impl OSDMap {
         self.pool_name.get(&pool_id)
     }
 
+    /// Look up a pool ID by name. Linear scan — fine for realistic pool counts.
+    pub fn pool_id_by_name(&self, name: &str) -> Option<u64> {
+        self.pool_name
+            .iter()
+            .find_map(|(&id, n)| (n == name).then_some(id))
+    }
+
     /// Get the CRUSH rule ID for a pool
     pub fn get_pool_crush_rule(&self, pool_id: u64) -> Option<u8> {
         self.pools.get(&pool_id).map(|p| p.crush_rule)

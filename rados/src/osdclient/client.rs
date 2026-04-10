@@ -48,6 +48,20 @@ pub struct OSDClientConfig {
     pub ms_crc_data: bool,
 }
 
+/// Derive a `client_inc` value suitable for `OSDClientConfig::client_inc`.
+///
+/// Uses the current seconds-since-epoch so that two clients started a second
+/// apart get distinct values, which is enough for the OSD-side duplicate
+/// request detector to treat them as separate incarnations. Falls back to `1`
+/// on the theoretical path where `SystemTime::now()` precedes `UNIX_EPOCH`
+/// (treating `0` as reserved for "not yet set").
+pub fn default_client_inc() -> u32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(1)
+}
+
 impl Default for OSDClientConfig {
     fn default() -> Self {
         Self {

@@ -1,5 +1,8 @@
-//! Test listing objects after creating some
-use std::sync::Arc;
+//! Create a handful of objects, then list them.
+//!
+//! Environment:
+//! - `CEPH_CONF` - path to `ceph.conf` (default: `/etc/ceph/ceph.conf`)
+//! - `RADOS_POOL` - pool name to open (default: `test`)
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -7,65 +10,33 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::INFO)
         .init();
 
-    println!("\n🧪 List Test with Objects\n");
+    println!("\nList Test with Objects\n");
 
-    let (osdmap_tx, osdmap_rx) = rados::msgr2::map_channel::<rados::monclient::MOSDMap>(64);
+    let ceph_conf = std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".into());
+    let pool_name = std::env::var("RADOS_POOL").unwrap_or_else(|_| "test".into());
 
-    let auth = rados::monclient::AuthConfig::from_keyring(
-        "client.admin".to_string(),
-        "/home/kefu/dev/ceph/build/keyring",
-    )?;
-
-    let mon_config = rados::monclient::MonClientConfig {
-        mon_addrs: vec!["v2:192.168.1.43:40490".to_string()],
-        auth: Some(auth),
-        ..Default::default()
-    };
-
-    let mon_client = rados::monclient::MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
-    mon_client.init().await?;
-    println!("✓ Mon connected");
-
-    mon_client
-        .subscribe(rados::monclient::MonService::OsdMap, 0, 0)
+    let client = rados::Client::builder()
+        .config_file(&ceph_conf)
+        .build()
         .await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    println!("✓ OSDMap received");
+    let ioctx = client.open_pool(&pool_name).await?;
+    println!("Opened pool '{pool_name}'");
 
-    let osd_config = rados::osdclient::OSDClientConfig::default();
-
-    // Get FSID
-    let fsid = mon_client.get_fsid().await;
-
-    let osd_client = rados::osdclient::OSDClient::new(
-        osd_config,
-        fsid,
-        Arc::clone(&mon_client),
-        osdmap_tx,
-        osdmap_rx,
-    )
-    .await?;
-    println!("✓ OSD client created");
-
-    // Create test objects
-    println!("\n📝 Creating test objects...");
+    println!("\nCreating test objects...");
     for i in 0..5 {
-        let oid = format!("test_object_{}", i);
-        let data = format!("Test data {}", i);
-        osd_client
-            .write_full(2, &oid, bytes::Bytes::from(data))
-            .await?;
-        println!("  ✓ Created {}", oid);
+        let oid = format!("test_object_{i}");
+        let data = format!("Test data {i}");
+        ioctx.write_full(&oid, bytes::Bytes::from(data)).await?;
+        println!("  created {oid}");
     }
 
-    // List objects
-    println!("\n📋 Listing objects in pool 2...");
-    let result = osd_client.list(2, None, 100).await?;
-    println!("✓ List succeeded!");
-    println!("  Found {} objects", result.entries.len());
-    for entry in &result.entries {
-        println!("    - {}", entry.oid);
+    println!("\nListing objects in pool '{pool_name}'...");
+    let (objects, cursor) = ioctx.list_objects(None, 100).await?;
+    println!("  found {} objects", objects.len());
+    for oid in &objects {
+        println!("    - {oid}");
     }
+    println!("  next cursor: {cursor:?}");
 
     Ok(())
 }

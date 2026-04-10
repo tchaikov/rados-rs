@@ -1,489 +1,217 @@
-//! Integration tests for pool management operations
+//! Integration tests for pool management operations (create/list/delete).
 //!
-//! These tests require a running Ceph cluster and proper configuration.
-//! Tests are marked with `#[ignore]` to skip them during regular `cargo test` runs.
+//! **Must be run with `--test-threads=1`** to avoid races when multiple tests
+//! create/delete pools simultaneously.
 //!
-//! ## Running the tests
+//! Environment:
+//! - `CEPH_CONF` (required) — path to `ceph.conf`
+//! - `CEPH_KEYRING` (optional) — overrides the keyring path from `ceph.conf`
 //!
-//! **IMPORTANT**: These tests must be run sequentially with `--test-threads=1` to avoid
-//! race conditions when multiple tests create/delete pools simultaneously.
-//!
+//! Run with:
 //! ```bash
-//! export CEPH_CONF=/path/to/ceph.conf
-//! cargo test --package rados --test osdclient_pool_operations -- --ignored --test-threads=1 --nocapture
+//! CEPH_CONF=/path/to/ceph.conf \
+//!   cargo test --package rados --test osdclient_pool_operations \
+//!     -- --ignored --test-threads=1 --nocapture
 //! ```
-//!
-//! ## Configuration
-//!
-//! The tests use the rados-cephconfig crate to parse ceph.conf and automatically
-//! discover monitor addresses and keyring paths.
-//!
-//! Required environment variables:
-//! - `CEPH_CONF`: Path to ceph.conf file (default: /etc/ceph/ceph.conf)
-//!
 
-use std::path::Path;
-use std::sync::Arc;
+use std::time::Duration;
 use tracing::info;
 
-/// Helper to get test configuration from environment and ceph.conf
-struct TestConfig {
-    mon_addrs: Vec<String>,
-    keyring_path: Option<String>,
-    entity_name: String,
-}
+mod common;
+use common::build_test_client;
 
-impl TestConfig {
-    fn from_env() -> Result<Self, Box<dyn std::error::Error>> {
-        // Get ceph.conf path
-        let ceph_conf_path =
-            std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_string());
-
-        if !Path::new(&ceph_conf_path).exists() {
-            return Err(format!("ceph.conf not found at: {}", ceph_conf_path).into());
+/// Poll [`OSDClient::list_pools`] until `predicate` is satisfied or the budget
+/// is exhausted. Centralises the "wait for OSDMap to catch up" loop that every
+/// pool test needs after create/delete.
+async fn poll_until<F>(
+    client: &std::sync::Arc<rados::osdclient::OSDClient>,
+    label: &str,
+    mut predicate: F,
+) -> bool
+where
+    F: FnMut(&[rados::osdclient::PoolInfo]) -> bool,
+{
+    // 100 attempts * 50ms = 5s budget. Same budget as the old hand-rolled loops.
+    for i in 0..100 {
+        let pool_infos = client.list_pools().await.expect("list_pools");
+        if predicate(&pool_infos) {
+            info!("{label} satisfied after {}ms", i * 50);
+            return true;
         }
-
-        // Parse ceph.conf
-        let ceph_config = rados::cephconfig::CephConfig::from_file(&ceph_conf_path)?;
-
-        // Get monitor addresses
-        let mon_addrs = ceph_config.mon_addrs()?;
-
-        // Check auth methods from ceph.conf
-        let auth_methods = ceph_config.get_auth_client_required();
-
-        // Get keyring path only if CephX is in the supported methods
-        let keyring_path = if auth_methods.contains(&rados::auth::protocol::CEPH_AUTH_CEPHX) {
-            Some(
-                std::env::var("CEPH_KEYRING")
-                    .or_else(|_| ceph_config.keyring())
-                    .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string()),
-            )
-        } else {
-            None
-        };
-
-        // Get entity name
-        let entity_name = ceph_config.entity_name();
-
-        Ok(Self {
-            mon_addrs,
-            keyring_path,
-            entity_name,
-        })
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
-}
-
-/// Helper to create and initialize OSD client
-async fn create_osd_client(
-    config: &TestConfig,
-) -> Result<
-    (
-        Arc<rados::osdclient::OSDClient>,
-        Arc<rados::monclient::MonClient>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let (osdmap_tx, osdmap_rx) = rados::msgr2::map_channel::<rados::monclient::MOSDMap>(64);
-
-    // Create auth config based on whether keyring is available
-    let auth = if let Some(keyring_path) = &config.keyring_path {
-        rados::monclient::AuthConfig::from_keyring(config.entity_name.clone(), keyring_path)?
-    } else {
-        rados::monclient::AuthConfig::no_auth(config.entity_name.clone())
-    };
-
-    let mon_config = rados::monclient::MonClientConfig {
-        mon_addrs: config.mon_addrs.clone(),
-        auth: Some(auth),
-        ..Default::default()
-    };
-
-    let mon_client = rados::monclient::MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
-
-    // Initialize connection
-    mon_client.init().await?;
-
-    info!("✓ Connected to monitor");
-
-    // Wait for authentication to fully complete with all service tickets
-    // Skip this for AUTH_NONE since there are no service tickets
-    if config.keyring_path.is_some() {
-        mon_client
-            .wait_for_auth(std::time::Duration::from_secs(5))
-            .await?;
-    }
-
-    // Wait for MonMap to arrive - use event-driven wait
-    mon_client
-        .wait_for_monmap(std::time::Duration::from_secs(2))
-        .await?;
-
-    // Create OSD client with unique client_inc
-    let client_inc = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as u32;
-
-    let osd_config = rados::osdclient::OSDClientConfig {
-        client_inc,
-        ..Default::default()
-    };
-
-    // Get FSID from MonClient
-    let fsid = mon_client.get_fsid().await;
-
-    let osd_client = rados::osdclient::OSDClient::new(
-        osd_config,
-        fsid,
-        Arc::clone(&mon_client),
-        osdmap_tx,
-        osdmap_rx,
-    )
-    .await?;
-    info!("✓ OSD client created");
-
-    osd_client
-        .wait_for_latest_osdmap(std::time::Duration::from_secs(2))
-        .await?;
-    info!("✓ Latest OSDMap received");
-
-    Ok((osd_client, mon_client))
+    false
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_create_pool() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing pool creation");
 
-    info!("Testing pool creation");
-    info!("====================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, _mon_client) = create_osd_client(&config)
-        .await
-        .expect("Failed to create OSD client");
+    let client = build_test_client().await.expect("build_test_client");
+    let osd = client.osd_client();
 
     let pool_name = format!("test-create-{}", rand::random::<u32>());
-
-    info!("Creating pool: {}", pool_name);
-    osd_client
-        .create_pool(&pool_name, None)
+    info!("creating pool {pool_name}");
+    osd.create_pool(&pool_name, None)
         .await
-        .expect("Failed to create pool");
+        .expect("create_pool");
 
-    info!("✓ Pool created successfully");
+    let found = poll_until(osd, "pool visible in OSDMap", |pools| {
+        pools.iter().any(|p| p.pool_name == pool_name)
+    })
+    .await;
+    assert!(found, "pool {pool_name} not found in pool list");
 
-    // Wait for pool to appear in OSDMap (poll efficiently)
-    info!("Waiting for pool to appear in OSDMap...");
-    let mut found = false;
-    for i in 0..20 {
-        // 20 * 50ms = 1s max
-        let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-        let pool_names: Vec<String> = pool_infos.iter().map(|p| p.pool_name.clone()).collect();
-        if pool_names.contains(&pool_name) {
-            info!("✓ Pool found in OSDMap after {}ms", i * 50);
-            found = true;
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-
-    assert!(found, "Pool {} not found in pool list", pool_name);
-    info!("✓ Pool verified in pool list");
-
-    // Cleanup
-    info!("Cleaning up pool: {}", pool_name);
-    osd_client
-        .delete_pool(&pool_name, true)
+    osd.delete_pool(&pool_name, true)
         .await
-        .expect("Failed to delete pool");
-
-    info!("✓ Test completed successfully");
+        .expect("cleanup delete_pool");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_delete_pool() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing pool deletion");
 
-    info!("Testing pool deletion");
-    info!("====================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, _mon_client) = create_osd_client(&config)
-        .await
-        .expect("Failed to create OSD client");
+    let client = build_test_client().await.expect("build_test_client");
+    let osd = client.osd_client();
 
     let pool_name = format!("test-delete-{}", rand::random::<u32>());
-
-    // First create a pool
-    info!("Creating pool: {}", pool_name);
-    osd_client
-        .create_pool(&pool_name, None)
+    info!("creating pool {pool_name}");
+    osd.create_pool(&pool_name, None)
         .await
-        .expect("Failed to create pool");
+        .expect("create_pool");
 
-    info!("✓ Pool created");
+    // Wait for the pool to appear in a received incremental OSDMap before
+    // deleting, so the create/delete don't get batched into the same epoch.
+    let found = poll_until(osd, "pool visible after create", |pools| {
+        pools.iter().any(|p| p.pool_name == pool_name)
+    })
+    .await;
+    assert!(found, "pool {pool_name} not found in OSDMap after create");
 
-    // IMPORTANT: Wait for the pool to actually appear in a received incremental OSDMap
-    // This prevents the create and delete from being batched into the same epoch by the monitor
-    info!("Waiting for pool to appear in OSDMap...");
-    let mut found = false;
-    for i in 0..100 {
-        // 100 * 50ms = 5s max
-        let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-        let pool_names: Vec<String> = pool_infos.iter().map(|p| p.pool_name.clone()).collect();
-        if pool_names.contains(&pool_name) {
-            info!("✓ Pool found in OSDMap after {}ms", i * 50);
-            found = true;
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
+    // Small extra wait so the create has fully committed before we delete.
+    tokio::time::sleep(Duration::from_millis(100)).await;
 
-    assert!(
-        found,
-        "Pool {} not found in OSDMap after creation",
-        pool_name
-    );
-
-    // Wait an additional short period to ensure the pool creation is fully committed
-    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-    // Verify it exists
-    let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-    let pool_names: Vec<String> = pool_infos.iter().map(|p| p.pool_name.clone()).collect();
-    assert!(pool_names.contains(&pool_name), "Pool should exist");
-    info!("✓ Pool verified");
-
-    // Now delete it
-    info!("Deleting pool: {}", pool_name);
-    osd_client
-        .delete_pool(&pool_name, true)
+    info!("deleting pool {pool_name}");
+    osd.delete_pool(&pool_name, true)
         .await
-        .expect("Failed to delete pool");
+        .expect("delete_pool");
 
-    info!("✓ Pool deleted successfully");
-
-    // Wait for pool to be removed from OSDMap (poll efficiently)
-    info!("Waiting for pool to be removed from OSDMap...");
-    let mut removed = false;
-    for i in 0..100 {
-        // 100 * 50ms = 5s max
-        let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-        let pool_names: Vec<String> = pool_infos.iter().map(|p| p.pool_name.clone()).collect();
-        if !pool_names.contains(&pool_name) {
-            info!("✓ Pool removed after {}ms", i * 50);
-            removed = true;
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-
+    let removed = poll_until(osd, "pool removed from OSDMap", |pools| {
+        !pools.iter().any(|p| p.pool_name == pool_name)
+    })
+    .await;
     assert!(
         removed,
-        "Pool {} still exists after deletion and 5s of waiting",
-        pool_name
+        "pool {pool_name} still exists after deletion + 5s wait"
     );
-
-    // Verify it's gone
-    let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-    assert!(
-        !pool_infos.iter().any(|p| p.pool_name == pool_name),
-        "Pool should not exist after deletion"
-    );
-    info!("✓ Pool deletion verified");
-
-    info!("✓ Test completed successfully");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_delete_pool_requires_confirmation() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing pool deletion confirmation requirement");
 
-    info!("Testing pool deletion confirmation requirement");
-    info!("==============================================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, _mon_client) = create_osd_client(&config)
-        .await
-        .expect("Failed to create OSD client");
+    let client = build_test_client().await.expect("build_test_client");
+    let osd = client.osd_client();
+    let mon = client.mon_client();
 
     let pool_name = format!("test-confirm-{}", rand::random::<u32>());
-
-    // First create a pool
-    info!("Creating pool: {}", pool_name);
-    osd_client
-        .create_pool(&pool_name, None)
+    osd.create_pool(&pool_name, None)
         .await
-        .expect("Failed to create pool");
+        .expect("create_pool");
 
-    info!("✓ Pool created");
-
-    // Wait for osdmap to be updated with the new pool
-    info!("Waiting for osdmap update...");
-    _mon_client
-        .get_version(rados::monclient::MonService::OsdMap)
+    mon.get_version(rados::monclient::MonService::OsdMap)
         .await
-        .expect("Failed to get osdmap version");
+        .expect("get osdmap version");
 
-    // Try to delete without confirmation (should fail)
-    info!("Attempting to delete without confirmation");
-    let result = osd_client.delete_pool(&pool_name, false).await;
-    assert!(result.is_err(), "Delete should fail without confirmation");
-    info!("✓ Delete correctly rejected without confirmation");
+    // Delete without confirmation must fail.
+    let result = osd.delete_pool(&pool_name, false).await;
+    assert!(result.is_err(), "delete should fail without confirmation");
 
-    // Verify pool still exists
-    let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
+    // Pool must still exist.
+    let pool_infos = osd.list_pools().await.expect("list_pools");
     assert!(
         pool_infos.iter().any(|p| p.pool_name == pool_name),
-        "Pool should still exist after failed delete"
+        "pool should still exist after failed delete"
     );
-    info!("✓ Pool still exists");
 
-    // Cleanup with proper confirmation
-    info!("Cleaning up pool: {}", pool_name);
-    osd_client
-        .delete_pool(&pool_name, true)
+    osd.delete_pool(&pool_name, true)
         .await
-        .expect("Failed to delete pool");
-
-    info!("✓ Test completed successfully");
+        .expect("cleanup delete_pool");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_list_pools() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing pool listing");
 
-    info!("Testing pool listing");
-    info!("===================");
+    let client = build_test_client().await.expect("build_test_client");
+    let osd = client.osd_client();
+    let mon = client.mon_client();
 
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, _mon_client) = create_osd_client(&config)
-        .await
-        .expect("Failed to create OSD client");
+    let pool_infos = osd.list_pools().await.expect("list_pools");
+    info!("found {} pools initially", pool_infos.len());
 
-    // List pools
-    info!("Listing pools");
-    let pool_infos = osd_client.list_pools().await.expect("Failed to list pools");
-
-    info!("✓ Found {} pools", pool_infos.len());
-    for pool_info in &pool_infos {
-        info!("  - {} (id: {})", pool_info.pool_name, pool_info.pool_id);
-    }
-
-    // Create a test pool
     let pool_name = format!("test-list-{}", rand::random::<u32>());
-    info!("Creating test pool: {}", pool_name);
-    osd_client
-        .create_pool(&pool_name, None)
+    osd.create_pool(&pool_name, None)
         .await
-        .expect("Failed to create pool");
+        .expect("create_pool");
 
-    // Wait for osdmap to be updated with the new pool
-    info!("Waiting for osdmap update...");
-    _mon_client
-        .get_version(rados::monclient::MonService::OsdMap)
+    mon.get_version(rados::monclient::MonService::OsdMap)
         .await
-        .expect("Failed to get osdmap version");
+        .expect("get osdmap version");
 
-    // List again and verify
-    let pools_after = osd_client.list_pools().await.expect("Failed to list pools");
-
-    // Don't check exact count (other tests may be creating pools in parallel)
-    // Just verify our specific pool exists
+    let pools_after = osd.list_pools().await.expect("list_pools");
     assert!(
         pools_after.iter().any(|p| p.pool_name == pool_name),
-        "New pool should be in list"
+        "new pool should be in list"
     );
-    info!("✓ Pool list updated correctly (our pool found)");
 
-    // Cleanup
-    info!("Cleaning up pool: {}", pool_name);
-    osd_client
-        .delete_pool(&pool_name, true)
+    osd.delete_pool(&pool_name, true)
         .await
-        .expect("Failed to delete pool");
-
-    info!("✓ Test completed successfully");
+        .expect("cleanup delete_pool");
 }
 
 #[tokio::test]
-#[ignore] // Requires a running Ceph cluster
+#[ignore]
 async fn test_pool_workflow() {
-    tracing_subscriber::fmt().with_test_writer().try_init().ok();
+    common::init_tracing();
+    info!("testing complete pool workflow");
 
-    info!("Testing complete pool workflow");
-    info!("==============================");
-
-    let config = TestConfig::from_env().expect("Failed to load test configuration");
-    let (osd_client, _mon_client) = create_osd_client(&config)
-        .await
-        .expect("Failed to create OSD client");
+    let client = build_test_client().await.expect("build_test_client");
+    let osd = client.osd_client();
+    let mon = client.mon_client();
 
     let pool_name = format!("test-workflow-{}", rand::random::<u32>());
-
-    // 1. List pools before
-    info!("1. Listing pools before creation");
-    let pools_before = osd_client.list_pools().await.expect("Failed to list pools");
-    info!("   ✓ Found {} pools", pools_before.len());
-
-    // 2. Create pool
-    info!("2. Creating pool: {}", pool_name);
-    osd_client
-        .create_pool(&pool_name, None)
+    info!("creating pool {pool_name}");
+    osd.create_pool(&pool_name, None)
         .await
-        .expect("Failed to create pool");
-    info!("   ✓ Pool created");
+        .expect("create_pool");
 
-    // Wait for osdmap to be updated with the new pool
-    info!("   Waiting for osdmap update...");
-    _mon_client
-        .get_version(rados::monclient::MonService::OsdMap)
+    mon.get_version(rados::monclient::MonService::OsdMap)
         .await
-        .expect("Failed to get osdmap version");
+        .expect("get osdmap version");
 
-    // 3. List pools after creation
-    info!("3. Listing pools after creation");
-    let pools_after = osd_client.list_pools().await.expect("Failed to list pools");
-    // Don't check exact count (other tests may be running in parallel)
-    // Just verify our specific pool exists
+    let pools_after = osd.list_pools().await.expect("list_pools");
     assert!(pools_after.iter().any(|p| p.pool_name == pool_name));
-    info!("   ✓ Pool verified in list");
 
-    // 4. Delete pool
-    info!("4. Deleting pool: {}", pool_name);
-    osd_client
-        .delete_pool(&pool_name, true)
+    info!("deleting pool {pool_name}");
+    osd.delete_pool(&pool_name, true)
         .await
-        .expect("Failed to delete pool");
-    info!("   ✓ Pool deleted");
+        .expect("delete_pool");
 
-    // 5. Verify deletion (with retry for eventual consistency)
-    info!("5. Verifying deletion");
-    let mut deletion_verified = false;
-    for i in 0..100 {
-        // 100 * 50ms = 5s max
-        let pools_final = osd_client.list_pools().await.expect("Failed to list pools");
-        if !pools_final.iter().any(|p| p.pool_name == pool_name) {
-            info!("   ✓ Pool removed after {}ms", i * 50);
-            deletion_verified = true;
-            break;
-        }
-        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-    }
-
-    if !deletion_verified {
-        panic!(
-            "Pool {} still exists after deletion and 5s of waiting",
-            pool_name
-        );
-    }
-
-    info!("   ✓ Pool deletion verified");
-
-    info!("✓ Complete workflow test passed!");
+    let deleted = poll_until(osd, "pool removed in workflow", |pools| {
+        !pools.iter().any(|p| p.pool_name == pool_name)
+    })
+    .await;
+    assert!(
+        deleted,
+        "pool {pool_name} still exists after deletion + 5s wait"
+    );
 }

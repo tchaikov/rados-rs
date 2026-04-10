@@ -1,5 +1,8 @@
-//! Minimal test for listing objects
-use std::sync::Arc;
+//! Minimal list test: open a pool and print the first 10 object names.
+//!
+//! Environment:
+//! - `CEPH_CONF` - path to `ceph.conf` (default: `/etc/ceph/ceph.conf`)
+//! - `RADOS_POOL` - pool name to open (default: `test`)
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -7,69 +10,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_max_level(tracing::Level::DEBUG)
         .init();
 
-    println!("\n🧪 Minimal List Test\n");
+    println!("\nMinimal List Test\n");
 
-    // Create map channel for routing MOSDMap messages
-    let (osdmap_tx, osdmap_rx) = rados::msgr2::map_channel::<rados::monclient::MOSDMap>(64);
+    let ceph_conf = std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".into());
+    let pool_name = std::env::var("RADOS_POOL").unwrap_or_else(|_| "test".into());
 
-    let auth = rados::monclient::AuthConfig::from_keyring(
-        "client.admin".to_string(),
-        "/home/kefu/dev/ceph/build/keyring",
-    )?;
-
-    let mon_config = rados::monclient::MonClientConfig {
-        mon_addrs: vec!["v2:192.168.1.43:40490".to_string()],
-        auth: Some(auth),
-        ..Default::default()
-    };
-
-    let mon_client = rados::monclient::MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
-    mon_client.init().await?;
-    println!("✓ Mon connected");
-
-    mon_client
-        .subscribe(rados::monclient::MonService::OsdMap, 0, 0)
+    let client = rados::Client::builder()
+        .config_file(&ceph_conf)
+        .build()
         .await?;
-    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-    println!("✓ OSDMap received");
+    println!("  client ready");
 
-    let osd_config = rados::osdclient::OSDClientConfig::default();
+    let ioctx = client.open_pool(&pool_name).await?;
+    println!("  pool '{pool_name}' opened");
 
-    // Get FSID
-    let fsid = mon_client.get_fsid().await;
-
-    let osd_client = rados::osdclient::OSDClient::new(
-        osd_config,
-        fsid,
-        Arc::clone(&mon_client),
-        osdmap_tx,
-        osdmap_rx,
-    )
-    .await?;
-    println!("✓ OSD client created");
-
-    println!("\n📋 Calling list() on pool 2...");
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        osd_client.list(2, None, 10),
+        ioctx.list_objects(None, 10),
     )
     .await;
 
     match result {
-        Ok(Ok(list_result)) => {
-            println!("✓ List succeeded!");
-            println!("  Found {} objects", list_result.entries.len());
-            for entry in &list_result.entries {
-                println!("    - {}", entry.oid);
+        Ok(Ok((objects, next_cursor))) => {
+            println!("  list succeeded, {} objects", objects.len());
+            for oid in &objects {
+                println!("    - {oid}");
             }
-            println!("  Next cursor: {:?}", list_result.cursor);
+            println!("  next cursor: {next_cursor:?}");
         }
         Ok(Err(e)) => {
-            println!("✗ List failed: {}", e);
+            println!("  list failed: {e}");
             return Err(e.into());
         }
         Err(_) => {
-            println!("✗ List timed out after 10s");
+            println!("  list timed out after 10s");
             return Err("Timeout".into());
         }
     }
