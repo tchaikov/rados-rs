@@ -8,7 +8,6 @@ use crate::msgr2::io_loop::{KeepaliveConfig, run_io_loop};
 use crate::msgr2::protocol::Connection as Msgr2Connection;
 use crate::msgr2::{ConnectionConfig, MapSender};
 use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
@@ -77,7 +76,13 @@ pub struct MonConnection {
     peer_supported_features: u64,
     auth_provider: Option<crate::auth::MonitorAuthProvider>,
     send_tx: mpsc::Sender<crate::msgr2::message::Message>,
-    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// I/O task handle for graceful shutdown.
+    ///
+    /// `MonConnection` is always stored behind an outer `Arc<MonConnection>`,
+    /// so the field itself does not need a second refcount — a bare `Mutex`
+    /// suffices to coordinate the set-at-spawn / take-in-shutdown handoff.
+    /// The `Option` marks "already taken" so double-shutdowns are no-ops.
+    task_handle: Mutex<Option<JoinHandle<()>>>,
     shutdown_token: CancellationToken,
     /// Used for blocklist detection.
     client_addr: crate::EntityAddr,
@@ -196,7 +201,7 @@ impl MonConnection {
             peer_supported_features,
             auth_provider,
             send_tx,
-            task_handle: Arc::new(Mutex::new(Some(handle))),
+            task_handle: Mutex::new(Some(handle)),
             shutdown_token,
             client_addr,
         };

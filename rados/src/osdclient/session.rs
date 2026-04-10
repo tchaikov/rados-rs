@@ -156,8 +156,15 @@ pub struct OSDSession {
     /// paths might trigger reconnection simultaneously.
     /// Reference: Ceph Objecter uses locks during reconnection
     connecting_lock: Arc<tokio::sync::Mutex<()>>,
-    /// I/O task handle for graceful shutdown
-    io_task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// I/O task handle for graceful shutdown.
+    ///
+    /// `Session` is always stored behind an outer `Arc<Session>`, so the
+    /// field itself does not need a second refcount — a bare `Mutex` is
+    /// enough to coordinate the set-in-connect / take-in-close handoff
+    /// between concurrent tasks. The `Option` is load-bearing: `close()`
+    /// `.take()`s the handle to `.await` it, and subsequent calls need to
+    /// observe "already taken".
+    io_task_handle: Mutex<Option<JoinHandle<()>>>,
 }
 
 /// Tracking information for a pending operation
@@ -225,7 +232,7 @@ impl OSDSession {
             // Mutex to prevent concurrent connection attempts
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
             // No I/O task handle until connect() is called
-            io_task_handle: Arc::new(Mutex::new(None)),
+            io_task_handle: Mutex::new(None),
         }
     }
 
