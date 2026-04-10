@@ -98,6 +98,19 @@ impl FrameIO {
         Self { stream }
     }
 
+    /// Consume this `FrameIO` and return its underlying [`TcpStream`].
+    ///
+    /// Used by `ConnectionState::transition_to_framed` to unwrap the stream
+    /// so it can be split into owned halves and handed to the post-handshake
+    /// [`FramedRead`] / [`FramedWrite`] pair.
+    ///
+    /// [`FramedRead`]: tokio_util::codec::FramedRead
+    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
+    #[allow(dead_code)]
+    pub(crate) fn into_stream(self) -> TcpStream {
+        self.stream
+    }
+
     fn normalized_num_segments(frame: &Frame) -> usize {
         let mut num_segments = frame.segments.len();
         while num_segments > 1 && frame.segments[num_segments - 1].is_empty() {
@@ -532,10 +545,88 @@ impl FrameIO {
     }
 }
 
+/// Post-handshake I/O surface: a [`FramedRead`]/[`FramedWrite`] pair bound
+/// to opposite halves of the same `TcpStream`.
+///
+/// Extracted into its own struct (and boxed inside [`Io::Established`])
+/// purely so the [`Io`] enum stays small — `FramedRead`/`FramedWrite` own
+/// substantial internal read/write buffers, so without the indirection the
+/// enum would balloon to match its largest variant on every `Io` allocation.
+///
+/// [`FramedRead`]: tokio_util::codec::FramedRead
+/// [`FramedWrite`]: tokio_util::codec::FramedWrite
+#[allow(dead_code)] // consumed in step 3
+pub(crate) struct EstablishedIo {
+    pub(crate) framed_rx: tokio_util::codec::FramedRead<
+        tokio::net::tcp::OwnedReadHalf,
+        crate::msgr2::codec::Msgr2Decoder,
+    >,
+    pub(crate) framed_tx: tokio_util::codec::FramedWrite<
+        tokio::net::tcp::OwnedWriteHalf,
+        crate::msgr2::codec::Msgr2Encoder,
+    >,
+}
+
+/// Current I/O surface of a msgr2 [`Connection`].
+///
+/// During the handshake (banner, auth, session ident) and the legacy
+/// data-plane path the connection owns a [`FrameIO`] directly wrapped in
+/// [`Io::Raw`]. After `ConnectionState::transition_to_framed` runs —
+/// which step 2 makes possible but does not yet call — the stream is
+/// unwrapped, split into owned halves, and handed to a
+/// [`FramedRead`] + [`FramedWrite`] pair driven by [`Msgr2Decoder`] and
+/// [`Msgr2Encoder`] respectively. That is the [`Io::Established`] state,
+/// stored in a `Box<EstablishedIo>` to keep the enum size uniform across
+/// variants (clippy's `large_enum_variant` lint).
+///
+/// [`Io::Transitioning`] is a transient sentinel used only inside
+/// `transition_to_framed` while the swap is in progress — any accessor
+/// observing it externally indicates a programmer bug, not a runtime
+/// condition, and therefore panics rather than returning an error.
+///
+/// [`FramedRead`]: tokio_util::codec::FramedRead
+/// [`FramedWrite`]: tokio_util::codec::FramedWrite
+/// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
+/// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
+#[allow(dead_code)] // Established / Transitioning consumed in step 3
+pub(crate) enum Io {
+    /// Handshake + legacy data plane: the TcpStream lives inside a FrameIO.
+    Raw(FrameIO),
+    /// Post-handshake Framed wrapper pair, boxed to keep enum size uniform.
+    Established(Box<EstablishedIo>),
+    /// Transient state during `transition_to_framed`. Never observed by
+    /// external callers under normal operation.
+    Transitioning,
+}
+
+impl Io {
+    /// Borrow the inner [`FrameIO`] out of the [`Io::Raw`] variant.
+    ///
+    /// Called by the handshake and legacy data-plane methods of
+    /// [`ConnectionState`]. Returning `&mut FrameIO` here rather than
+    /// destructuring inside each caller lets the borrow checker see
+    /// `self.io` and `self.state_machine` as disjoint fields, so a caller
+    /// can hold a mutable borrow of both at once through split borrows.
+    fn as_raw_mut(&mut self) -> Result<&mut FrameIO> {
+        match self {
+            Io::Raw(f) => Ok(f),
+            Io::Established { .. } => Err(Error::protocol_error(
+                "raw I/O operation attempted on an established (Framed) connection",
+            )),
+            Io::Transitioning => {
+                // A panic here means some code path observed the sentinel
+                // outside of `transition_to_framed`, which is a programmer
+                // bug, not a runtime condition.
+                panic!("ConnectionState::Io is in the Transitioning sentinel state")
+            }
+        }
+    }
+}
+
 /// Connection state coordination layer
 pub(crate) struct ConnectionState {
     state_machine: StateMachine,
-    frame_io: FrameIO,
+    io: Io,
     /// Outgoing message sequence number (incremented for each message sent)
     out_seq: u64,
     /// Incoming message sequence number (last received from peer)
@@ -577,7 +668,7 @@ impl ConnectionState {
 
         Self {
             state_machine,
-            frame_io,
+            io: Io::Raw(frame_io),
             out_seq: 0, // Starts at 0, first message will get seq=1
             in_seq: 0,
             session: SessionState {
@@ -593,14 +684,17 @@ impl ConnectionState {
 
     /// Send a frame through the state machine and frame I/O
     pub(crate) async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        self.frame_io
-            .send_frame(frame, &mut self.state_machine)
-            .await
+        // Split borrows: `self.io.as_raw_mut()` and `&mut self.state_machine`
+        // touch disjoint fields of `self`, so the borrow checker is happy
+        // to hand out both at once.
+        let frame_io = self.io.as_raw_mut()?;
+        frame_io.send_frame(frame, &mut self.state_machine).await
     }
 
     /// Receive a frame through the frame I/O and state machine
     pub(crate) async fn recv_frame(&mut self) -> Result<Frame> {
-        self.frame_io.recv_frame(&mut self.state_machine).await
+        let frame_io = self.io.as_raw_mut()?;
+        frame_io.recv_frame(&mut self.state_machine).await
     }
 
     /// Record that a Keepalive2Ack was received.
@@ -613,7 +707,85 @@ impl ConnectionState {
         &mut self,
         phase: P,
     ) -> Result<P::Output> {
-        crate::msgr2::phase::drive(&mut self.frame_io, &mut self.state_machine, phase).await
+        let frame_io = self.io.as_raw_mut()?;
+        crate::msgr2::phase::drive(frame_io, &mut self.state_machine, phase).await
+    }
+
+    /// Transition the connection from the raw `TcpStream` data plane to the
+    /// post-handshake [`Io::Established`] Framed codec pair.
+    ///
+    /// Call this exactly once, after the handshake reaches SESSION_READY. The
+    /// sequence of operations is:
+    ///
+    /// 1. Atomically replace `self.io` with the [`Io::Transitioning`]
+    ///    sentinel using [`std::mem::replace`], so the old variant can be
+    ///    moved out by value.
+    /// 2. If the prior state was [`Io::Raw`], consume the [`FrameIO`] and
+    ///    split the underlying stream into owned read and write halves via
+    ///    [`TcpStream::into_split`].
+    /// 3. Harvest the encryptor, decryptor, and compression context from
+    ///    the state machine (the state machine no longer needs them once
+    ///    the codec owns them).
+    /// 4. Wrap each half in [`FramedRead`] / [`FramedWrite`] with a freshly
+    ///    constructed [`Msgr2Decoder`] / [`Msgr2Encoder`] pair, and install
+    ///    them as [`Io::Established`].
+    ///
+    /// If the prior state was already `Established` or `Transitioning`, it
+    /// is put back unchanged and an error is returned — calling this method
+    /// twice is a programmer bug but doesn't corrupt state.
+    ///
+    /// Step 2 adds this method but does not call it from anywhere;
+    /// step 3 wires it into the post-handshake state machine transition
+    /// and introduces the first real caller.
+    ///
+    /// [`FramedRead`]: tokio_util::codec::FramedRead
+    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
+    /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
+    /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
+    /// [`TcpStream::into_split`]: tokio::net::TcpStream::into_split
+    #[allow(dead_code)] // first real caller lands in step 3
+    pub(crate) fn transition_to_framed(&mut self) -> Result<()> {
+        use tokio_util::codec::{FramedRead, FramedWrite};
+
+        // Step 1: atomically move the current Io out so we can pattern-match
+        // it by value. The sentinel remains in place throughout the rest of
+        // this function; if we bail early, the `already` arm restores the
+        // prior variant.
+        let prev = std::mem::replace(&mut self.io, Io::Transitioning);
+        let frame_io = match prev {
+            Io::Raw(f) => f,
+            already @ (Io::Established { .. } | Io::Transitioning) => {
+                self.io = already;
+                return Err(Error::protocol_error(
+                    "transition_to_framed: connection is not in Io::Raw",
+                ));
+            }
+        };
+
+        // Step 2: unwrap the TcpStream and split it into owned halves.
+        let stream = frame_io.into_stream();
+        let (read_half, write_half) = stream.into_split();
+
+        // Step 3: harvest codec state from the state machine. The
+        // compression context is wrapped in Arc at take time so both codec
+        // halves can hold a clone without racing on interior-mutable stats.
+        let compression_arc = self.state_machine.take_compression_ctx_arc();
+        let is_rev1 = self.state_machine.is_rev1();
+        let decryptor = self.state_machine.take_frame_decryptor();
+        let encryptor = self.state_machine.take_frame_encryptor();
+
+        // Step 4: construct the Framed pair and install as Established.
+        let decoder =
+            crate::msgr2::codec::Msgr2Decoder::new(decryptor, is_rev1, compression_arc.clone());
+        let encoder = crate::msgr2::codec::Msgr2Encoder::new(encryptor, is_rev1, compression_arc);
+
+        self.io = Io::Established(Box::new(EstablishedIo {
+            framed_rx: FramedRead::new(read_half, decoder),
+            framed_tx: FramedWrite::new(write_half, encoder),
+        }));
+
+        tracing::info!("ConnectionState transitioned to Io::Established (Framed codec)");
+        Ok(())
     }
 
     /// Get the current state name
