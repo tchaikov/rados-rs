@@ -214,17 +214,36 @@ impl OSDClient {
             }
         });
 
-        // Spawn drain task for OSDMap messages
+        // Spawn drain task for OSDMap messages. Two independent exit
+        // conditions: the shutdown_token being cancelled (explicit
+        // OSDClient::shutdown call) or the upstream msgr2 channel closing
+        // + weak-ref upgrade failing (natural Arc teardown). Previously
+        // only the weak-ref path existed, which meant calling shutdown()
+        // while an IoCtx still held a strong Arc would leave this task
+        // running until the IoCtx dropped.
         let client_weak = Arc::downgrade(&client);
+        let drain_token = client.shutdown_token.clone();
         tokio::spawn(async move {
-            while let Some(msg) = osdmap_rx.recv().await {
-                if let Some(client_arc) = client_weak.upgrade() {
-                    if let Err(e) = client_arc.handle_osdmap(msg).await {
-                        error!("Failed to handle OSDMap: {}", e);
+            loop {
+                tokio::select! {
+                    _ = drain_token.cancelled() => {
+                        info!("OSDClient shutdown_token cancelled, terminating OSDMap drain task");
+                        break;
                     }
-                } else {
-                    info!("OSDClient dropped, terminating OSDMap drain task");
-                    break;
+                    msg = osdmap_rx.recv() => {
+                        let Some(msg) = msg else {
+                            info!("OSDMap channel closed, terminating OSDMap drain task");
+                            break;
+                        };
+                        if let Some(client_arc) = client_weak.upgrade() {
+                            if let Err(e) = client_arc.handle_osdmap(msg).await {
+                                error!("Failed to handle OSDMap: {}", e);
+                            }
+                        } else {
+                            info!("OSDClient dropped, terminating OSDMap drain task");
+                            break;
+                        }
+                    }
                 }
             }
             info!("OSDClient OSDMap drain task terminated");

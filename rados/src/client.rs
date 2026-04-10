@@ -126,6 +126,30 @@ impl Client {
     pub fn osd_client(&self) -> &Arc<OSDClient> {
         &self.osd_client
     }
+
+    /// Gracefully shut down both the OSDClient and the MonClient.
+    ///
+    /// Cancels every background task spawned by the two sub-clients (per-OSD
+    /// session I/O loops, the OSDMap drain task, the timeout tracker, the
+    /// MonClient hunter / drain / tick loops, every MonConnection I/O task),
+    /// waits for them to finish, and returns once the connection is torn
+    /// down. Idempotent — calling twice is a no-op on the second call.
+    ///
+    /// After `shutdown().await` returns, any in-flight [`IoCtx`] operation
+    /// will fail with a connection error. It is safe to drop the `Client`
+    /// without calling `shutdown()` — the `Drop` impls of the sub-clients
+    /// cancel the same tokens — but the explicit call is the only way to
+    /// *await* completion of the background tasks, so tests and any code
+    /// that cares about ordered teardown should prefer it.
+    pub async fn shutdown(&self) -> Result<(), ClientError> {
+        // Order matters: stop the OSD side first so its sessions don't try
+        // to send keepalives or commands to a MonClient that's already
+        // mid-teardown. The OSDClient shutdown is infallible; only the
+        // MonClient shutdown can surface an error.
+        self.osd_client.shutdown().await;
+        self.mon_client.shutdown().await?;
+        Ok(())
+    }
 }
 
 /// Builder for [`Client`].

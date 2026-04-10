@@ -163,3 +163,47 @@ async fn test_write_read_stat_remove_workflow() {
         "object should not exist after removal"
     );
 }
+
+#[tokio::test]
+#[ignore]
+async fn test_client_shutdown_is_clean_and_idempotent() {
+    common::init_tracing();
+    info!("testing Client::shutdown end-to-end");
+
+    // Build a client, issue a successful op to confirm everything is wired
+    // up, then call shutdown() and assert a follow-up op fails cleanly.
+    let client = common::build_test_client()
+        .await
+        .expect("build_test_client");
+    let pool = common::test_pool_name();
+    let ioctx = client.open_pool(&pool).await.expect("open_pool");
+
+    let object_name = format!("test-shutdown-{}", rand::random::<u32>());
+    let test_data = Bytes::from("hello from shutdown test");
+    ioctx
+        .write_full(&object_name, test_data.clone())
+        .await
+        .expect("pre-shutdown write_full");
+    ioctx
+        .remove(&object_name)
+        .await
+        .expect("pre-shutdown remove");
+
+    // First shutdown: must succeed and terminate background tasks.
+    client.shutdown().await.expect("first shutdown");
+
+    // Second shutdown: must be idempotent — both MonClient and OSDClient
+    // short-circuit when already cancelled, so this should still be Ok.
+    client.shutdown().await.expect("second shutdown idempotent");
+
+    // Post-shutdown op must fail rather than hang forever. We assert on
+    // "failed" rather than a specific kind because OSDClient returns one of
+    // several errors depending on which background task noticed the
+    // cancellation first.
+    let post_shutdown = ioctx.stat(&object_name).await;
+    assert!(
+        post_shutdown.is_err(),
+        "stat after shutdown should fail, got {:?}",
+        post_shutdown
+    );
+}
