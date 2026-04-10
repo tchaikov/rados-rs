@@ -5,6 +5,7 @@
 
 pub mod banner;
 pub mod ceph_message;
+pub(crate) mod codec;
 pub mod compression;
 pub(crate) mod crypto;
 pub mod error;
