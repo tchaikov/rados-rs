@@ -191,6 +191,7 @@ impl OSDClient {
 
             let tracker = Arc::new(Tracker::new(
                 config.tracker_config.clone(),
+                config.max_inflight_ops,
                 timeout_callback,
             ));
 
@@ -1794,7 +1795,7 @@ impl OSDClient {
         info!("Shutting down OSDClient");
 
         // Shutdown tracker first to stop timeout callbacks
-        self.tracker.shutdown();
+        self.tracker.shutdown().await;
 
         // Cancel all I/O tasks (child tokens are cancelled automatically)
         self.shutdown_token.cancel();

@@ -44,24 +44,48 @@ enum TimeoutCommand {
 /// Timeout callback for notifying sessions of timed-out operations
 pub type TimeoutCallback = Arc<dyn Fn(i32, u64) + Send + Sync>;
 
-/// Request tracker for handling per-operation timeouts
+/// Request tracker for handling per-operation timeouts.
 ///
 /// Uses a background task with `tokio::time::sleep_until` to efficiently
 /// track operation deadlines. Operations are stored in a BTreeMap ordered
 /// by deadline, allowing O(log n) insertion and O(1) next-deadline lookup.
+///
+/// The command channel is **bounded**, sized to the client's
+/// `max_inflight_ops`. Each in-flight op produces at most one Track + one
+/// Untrack, so the throttle already caps the channel depth; bounding it
+/// makes that relationship explicit and gives proper backpressure instead
+/// of the unbounded-growth risk the previous `mpsc::unbounded_channel()`
+/// carried when the tracker task fell behind.
 pub struct Tracker {
     config: TrackerConfig,
-    /// Channel for sending commands to the timeout manager task
-    cmd_tx: mpsc::UnboundedSender<TimeoutCommand>,
+    /// Channel for sending commands to the timeout manager task.
+    cmd_tx: mpsc::Sender<TimeoutCommand>,
 }
 
 impl Tracker {
-    /// Create a new tracker with a timeout callback
+    /// Create a new tracker with a timeout callback.
     ///
-    /// The callback is invoked when an operation times out, passing (osd_id, tid).
-    /// This allows the OSDClient to cancel the operation in the appropriate session.
-    pub fn new(config: TrackerConfig, timeout_callback: TimeoutCallback) -> Self {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    /// `max_inflight_ops` comes from the enclosing `OSDClientConfig`; the
+    /// command channel buffer is sized to `2 * max_inflight_ops` so a burst
+    /// of simultaneous Track + Untrack commands (one per op going in flight
+    /// and one per op completing at the same time) never blocks — under
+    /// normal operation the throttle caps the concurrent op count at
+    /// `max_inflight_ops`, so the buffer cannot overflow unless the
+    /// timeout manager task is itself blocked.
+    ///
+    /// The callback is invoked when an operation times out, passing
+    /// `(osd_id, tid)`. This allows the OSDClient to cancel the operation
+    /// in the appropriate session.
+    pub fn new(
+        config: TrackerConfig,
+        max_inflight_ops: usize,
+        timeout_callback: TimeoutCallback,
+    ) -> Self {
+        // 2x headroom over the throttle cap, with a floor so a
+        // mis-configured max_inflight_ops = 0 still yields a usable channel
+        // for the single Shutdown command.
+        let buffer = max_inflight_ops.saturating_mul(2).max(8);
+        let (cmd_tx, cmd_rx) = mpsc::channel(buffer);
 
         // Spawn background timeout manager task
         tokio::spawn(Self::timeout_manager_task(cmd_rx, timeout_callback));
@@ -74,26 +98,34 @@ impl Tracker {
         self.config.operation_timeout
     }
 
-    /// Track a new operation with a deadline
+    /// Track a new operation with a deadline.
     ///
-    /// The operation will be cancelled via the timeout callback if it doesn't
-    /// complete before the deadline.
-    pub fn track(&self, tid: u64, osd_id: i32, deadline: Instant) {
-        let _ = self.cmd_tx.send(TimeoutCommand::Track {
-            tid,
-            osd_id,
-            deadline,
-        });
+    /// The operation will be cancelled via the timeout callback if it
+    /// doesn't complete before the deadline. If the tracker task has
+    /// already exited (shutdown in progress), the send is silently
+    /// dropped — callers at that point don't need timeout tracking.
+    pub async fn track(&self, tid: u64, osd_id: i32, deadline: Instant) {
+        let _ = self
+            .cmd_tx
+            .send(TimeoutCommand::Track {
+                tid,
+                osd_id,
+                deadline,
+            })
+            .await;
     }
 
-    /// Stop tracking an operation (called when operation completes)
-    pub fn untrack(&self, tid: u64, osd_id: i32) {
-        let _ = self.cmd_tx.send(TimeoutCommand::Untrack { tid, osd_id });
+    /// Stop tracking an operation (called when the operation completes).
+    pub async fn untrack(&self, tid: u64, osd_id: i32) {
+        let _ = self
+            .cmd_tx
+            .send(TimeoutCommand::Untrack { tid, osd_id })
+            .await;
     }
 
-    /// Shutdown the tracker (called when OSDClient is dropped)
-    pub fn shutdown(&self) {
-        let _ = self.cmd_tx.send(TimeoutCommand::Shutdown);
+    /// Shutdown the tracker (called from `OSDClient::shutdown`).
+    pub async fn shutdown(&self) {
+        let _ = self.cmd_tx.send(TimeoutCommand::Shutdown).await;
     }
 
     /// Background task that manages operation timeouts
@@ -106,7 +138,7 @@ impl Tracker {
     /// because `tokio::select!` branches are mutually exclusive within this
     /// single task -- there is no concurrent access.
     async fn timeout_manager_task(
-        mut cmd_rx: mpsc::UnboundedReceiver<TimeoutCommand>,
+        mut cmd_rx: mpsc::Receiver<TimeoutCommand>,
         timeout_callback: TimeoutCallback,
     ) {
         // Primary index: Map (deadline, osd_id, tid) -> ()

@@ -493,7 +493,7 @@ impl OSDSession {
         if result.is_none()
             && let Some(tracker) = &self.tracker
         {
-            tracker.untrack(tid, self.osd_id);
+            tracker.untrack(tid, self.osd_id).await;
         }
 
         result
@@ -653,7 +653,7 @@ impl OSDSession {
         if let Some(tracker) = &self.tracker {
             let timeout = tracker.operation_timeout();
             let deadline = tokio::time::Instant::now() + timeout;
-            tracker.track(tid, self.osd_id, deadline);
+            tracker.track(tid, self.osd_id, deadline).await;
         }
 
         // Encode the operation using shared helper (priority goes in message header)
