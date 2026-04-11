@@ -55,7 +55,11 @@ impl Phase for CompressionClient {
                 let method: u32 = u32::decode(&mut p, 0)?;
 
                 let algorithm = if is_compress {
-                    CompressionAlgorithm::try_from(method).unwrap_or(CompressionAlgorithm::None)
+                    CompressionAlgorithm::try_from(method).map_err(|_| {
+                        Error::protocol_error(&format!(
+                            "COMPRESSION_DONE: server selected unknown algorithm id {method}"
+                        ))
+                    })?
                 } else {
                     CompressionAlgorithm::None
                 };
