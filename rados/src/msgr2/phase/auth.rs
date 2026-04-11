@@ -307,6 +307,13 @@ impl Phase for AuthClient {
 
 // ── Server ────────────────────────────────────────────────────────────────────
 
+/// Global ID handed out to an unauthenticated client when the server has no
+/// auth handler configured. Only reached by the test-scaffolding
+/// `ConnectionConfig::with_no_auth()` path, never by real daemons — the
+/// specific value is not meaningful, just has to be non-zero so downstream
+/// code that distinguishes "no gid yet" from "gid assigned" works.
+const NO_AUTH_SERVER_GLOBAL_ID: u64 = 1001;
+
 /// Server-side authentication phase.
 ///
 /// Waits for `AUTH_REQUEST` from the client.  For AUTH_NONE it replies
@@ -381,7 +388,7 @@ impl Phase for AuthServer {
 
             // No auth handler — accept without authentication
             tracing::warn!("Server: no auth handler, skipping authentication");
-            let global_id = 1001u64;
+            let global_id = NO_AUTH_SERVER_GLOBAL_ID;
             let done = AuthDoneFrame::new(global_id, connection_mode, Bytes::new());
             let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;
             return Ok(Step::Done(
