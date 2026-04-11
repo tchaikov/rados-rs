@@ -361,85 +361,88 @@ impl SessionServer {
     }
 }
 
+impl SessionServer {
+    fn handle_client_ident(self, frame: Frame) -> Result<Step<Self, ()>> {
+        let mut p = frame
+            .segments
+            .first()
+            .ok_or_else(|| Error::protocol_error("CLIENT_IDENT missing payload"))?
+            .clone();
+        let _addrs = crate::EntityAddrvec::decode(&mut p, 0)?;
+        let client_target_addr = crate::EntityAddr::decode(&mut p, 0)?;
+        let _gid = i64::decode(&mut p, 0)?;
+        let _global_seq = u64::decode(&mut p, 0)?;
+        let client_supported_features = u64::decode(&mut p, 0)?;
+        let _client_required_features = u64::decode(&mut p, 0)?;
+        let client_flags = u64::decode(&mut p, 0)?;
+        let _cookie = u64::decode(&mut p, 0)?;
+
+        // Fault misrouted clients (Ceph `ProtocolV2::handle_client_ident`).
+        if client_target_addr != self.server_addr {
+            return Err(Error::Protocol(format!(
+                "CLIENT_IDENT target addr mismatch: we are {:?}, client is \
+                 trying to reach {:?}",
+                self.server_addr, client_target_addr
+            )));
+        }
+
+        let missing_features = session_required_features() & !client_supported_features;
+        if missing_features != 0 {
+            let ident_missing = IdentMissingFeaturesFrame::new(missing_features);
+            let response = create_frame_from_trait(&ident_missing, Tag::IdentMissingFeatures)?;
+            return Ok(Step::Abort {
+                error: Error::Protocol(format!(
+                    "Client missing required features: 0x{missing_features:x}"
+                )),
+                send: Some(response),
+            });
+        }
+
+        // Mirror the client's lossy flag so `lossy <=> cookie == 0`
+        // holds on the wire (Ceph `ProtocolV2::handle_client_ident`).
+        let client_is_lossy = (client_flags & CEPH_MSG_CONNECT_LOSSY) != 0;
+        let (response_flags, response_cookie) = if client_is_lossy {
+            (CEPH_MSG_CONNECT_LOSSY, 0)
+        } else {
+            (0, self.server_cookie)
+        };
+
+        let addrs = crate::EntityAddrvec::with_addr(self.server_addr);
+        let server_ident = ServerIdentFrame::new(
+            addrs,
+            0,
+            0,
+            session_supported_features(),
+            session_required_features(),
+            response_flags,
+            response_cookie,
+        );
+        let response = create_frame_from_trait(&server_ident, Tag::ServerIdent)?;
+        tracing::debug!(
+            "Server: sending SERVER_IDENT (lossy={}, cookie={:#x})",
+            client_is_lossy,
+            response_cookie
+        );
+        Ok(Step::Done((), Some(response)))
+    }
+
+    fn handle_session_reconnect(self, _frame: Frame) -> Result<Step<Self, ()>> {
+        let reconnect_ok = SessionReconnectOkFrame::new(0);
+        let response = create_frame_from_trait(&reconnect_ok, Tag::SessionReconnectOk)?;
+        tracing::debug!("Server: sending SESSION_RECONNECT_OK");
+        Ok(Step::Done((), Some(response)))
+    }
+}
+
 impl Phase for SessionServer {
     type Output = ();
 
     fn step(self, frame: Frame) -> Result<Step<Self, ()>> {
         match frame.preamble.tag {
-            Tag::ClientIdent | Tag::SessionReconnect => {
-                if frame.preamble.tag == Tag::ClientIdent {
-                    let segment = frame
-                        .segments
-                        .first()
-                        .ok_or_else(|| Error::protocol_error("CLIENT_IDENT missing payload"))?;
-                    let mut p = segment.clone();
-                    let _addrs = crate::EntityAddrvec::decode(&mut p, 0)?;
-                    let client_target_addr = crate::EntityAddr::decode(&mut p, 0)?;
-                    let _gid = i64::decode(&mut p, 0)?;
-                    let _global_seq = u64::decode(&mut p, 0)?;
-                    let client_supported_features = u64::decode(&mut p, 0)?;
-                    let _client_required_features = u64::decode(&mut p, 0)?;
-                    let client_flags = u64::decode(&mut p, 0)?;
-                    let _cookie = u64::decode(&mut p, 0)?;
-
-                    // Fault misrouted clients (Ceph `ProtocolV2::handle_client_ident`).
-                    if client_target_addr != self.server_addr {
-                        return Err(Error::Protocol(format!(
-                            "CLIENT_IDENT target addr mismatch: we are {:?}, client is \
-                             trying to reach {:?}",
-                            self.server_addr, client_target_addr
-                        )));
-                    }
-
-                    let missing_features = session_required_features() & !client_supported_features;
-                    if missing_features != 0 {
-                        let ident_missing = IdentMissingFeaturesFrame::new(missing_features);
-                        let response =
-                            create_frame_from_trait(&ident_missing, Tag::IdentMissingFeatures)?;
-                        return Ok(Step::Abort {
-                            error: Error::Protocol(format!(
-                                "Client missing required features: 0x{missing_features:x}"
-                            )),
-                            send: Some(response),
-                        });
-                    }
-
-                    // Mirror the client's lossy flag so `lossy <=> cookie == 0`
-                    // holds on the wire (Ceph `ProtocolV2::handle_client_ident`).
-                    let client_is_lossy = (client_flags & CEPH_MSG_CONNECT_LOSSY) != 0;
-                    let (response_flags, response_cookie) = if client_is_lossy {
-                        (CEPH_MSG_CONNECT_LOSSY, 0)
-                    } else {
-                        (0, self.server_cookie)
-                    };
-
-                    let addrs = crate::EntityAddrvec::with_addr(self.server_addr);
-                    let server_ident = ServerIdentFrame::new(
-                        addrs,
-                        0,
-                        0,
-                        session_supported_features(),
-                        session_required_features(),
-                        response_flags,
-                        response_cookie,
-                    );
-                    let response = create_frame_from_trait(&server_ident, Tag::ServerIdent)?;
-                    tracing::debug!(
-                        "Server: sending SERVER_IDENT (lossy={}, cookie={:#x})",
-                        client_is_lossy,
-                        response_cookie
-                    );
-                    return Ok(Step::Done((), Some(response)));
-                }
-
-                let reconnect_ok = SessionReconnectOkFrame::new(0);
-                let response = create_frame_from_trait(&reconnect_ok, Tag::SessionReconnectOk)?;
-                tracing::debug!("Server: sending SESSION_RECONNECT_OK");
-                Ok(Step::Done((), Some(response)))
-            }
-            _ => Err(Error::protocol_error(&format!(
-                "Unexpected frame {:?} in session phase (server)",
-                frame.preamble.tag
+            Tag::ClientIdent => self.handle_client_ident(frame),
+            Tag::SessionReconnect => self.handle_session_reconnect(frame),
+            other => Err(Error::protocol_error(&format!(
+                "Unexpected frame {other:?} in session phase (server)"
             ))),
         }
     }
@@ -476,9 +479,8 @@ mod tests {
     #[test]
     fn client_rejects_server_ident_with_mismatched_peer_addr() {
         // Session was opened against 127.0.0.1:6800 but the server
-        // identifies as 127.0.0.1:7000. This is the scenario Ceph C++
-        // (ProtocolV2.cc:2157) and the Linux kernel
-        // (messenger_v2.c:2507) both reject.
+        // identifies as 127.0.0.1:7000. Ceph `ProtocolV2::handle_server_ident`
+        // and Linux `process_server_ident` both reject this case.
         let dialed = msgr2_addr(6800);
         let session = client_with_server_addr(dialed, false);
 
@@ -506,9 +508,8 @@ mod tests {
 
     #[test]
     fn client_accepts_server_ident_when_addrvec_contains_dialed_addr() {
-        // Multi-address server: we dialed one of them. C++ `contains`
-        // (msg_types.h:710) and our new `EntityAddrvec::contains`
-        // both accept this case.
+        // Multi-address server: we dialed one of them. Ceph
+        // `entity_addrvec_t::contains` accepts this case.
         let dialed = msgr2_addr(6800);
         let session = client_with_server_addr(dialed, false);
 
@@ -532,9 +533,9 @@ mod tests {
 
     #[test]
     fn client_rejects_lossy_invariant_violation_with_nonzero_cookie() {
-        // Kernel invariant: lossy mode MUST have server_cookie == 0.
-        // See net/ceph/messenger_v2.c:2535-2537 — WARN_ON is triggered
-        // if lossy flag is set and cookie is non-zero.
+        // Protocol invariant: lossy mode MUST have server_cookie == 0.
+        // Linux `process_server_ident` WARN_ONs on lossy flag set with
+        // non-zero cookie.
         let dialed = msgr2_addr(6800);
         let session = client_with_server_addr(dialed, true);
 
@@ -562,9 +563,8 @@ mod tests {
 
     #[test]
     fn client_rejects_lossless_invariant_violation_with_zero_cookie() {
-        // Kernel invariant: lossless mode MUST have server_cookie != 0.
-        // See net/ceph/messenger_v2.c:2538-2540 — WARN_ON triggered if
-        // lossy flag is clear and cookie is zero.
+        // Protocol invariant: lossless mode MUST have server_cookie != 0.
+        // Linux `process_server_ident` WARN_ONs on lossless + zero cookie.
         let dialed = msgr2_addr(6800);
         let session = client_with_server_addr(dialed, false);
 
@@ -593,7 +593,7 @@ mod tests {
     #[test]
     fn client_adopts_server_declared_lossy_flag_when_client_said_otherwise() {
         // Client declared is_lossy=false but the server unilaterally
-        // decided this connection is lossy. Ceph C++ (ProtocolV2.cc:2171)
+        // decided this connection is lossy. Ceph `ProtocolV2::handle_server_ident`
         // adopts the server's policy by overwriting connection.policy.lossy;
         // we emit a warning log but still return Success with the
         // server-declared flag plumbed into output.server_is_lossy.
@@ -715,7 +715,7 @@ mod tests {
     #[test]
     fn server_rejects_client_ident_with_wrong_target_addr() {
         // The client says it's trying to reach 6800, but we are 6900.
-        // Ceph C++ rejects at ProtocolV2.cc:2425-2431 with
+        // Ceph `ProtocolV2::handle_client_ident` rejects with
         // "peer is trying to reach X which is not us".
         let server_addr = msgr2_addr(6900);
         let server = SessionServer::new(123, server_addr);
