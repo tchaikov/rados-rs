@@ -2,11 +2,9 @@
 //!
 //! **Client** sends `AUTH_REQUEST`, handles server replies:
 //! - `AUTH_BAD_METHOD` → retry with a different auth method, using the
-//!   ordered-search semantics from Ceph C++ `MonConnection::handle_auth_bad_method`
-//!   (`src/mon/MonClient.cc:1870-1894`): anchor at the position of the
-//!   rejected method in our preference-ordered supported list and search
-//!   forward. The search terminates naturally when no more methods are
-//!   viable, so there is no explicit retry counter.
+//!   ordered-search semantics from Ceph `MonConnection::handle_auth_bad_method`
+//!   (anchor at the rejected method's position in our preference-ordered list,
+//!   search forward). Terminates naturally when no method is viable.
 //! - `AUTH_REPLY_MORE` → CephX challenge-response round-trip
 //! - `AUTH_DONE`       → authentication complete, phase finishes
 //!
@@ -164,6 +162,143 @@ impl AuthClient {
                 .unwrap_or_else(|| vec![ConnectionMode::Crc])
         }
     }
+
+    fn handle_auth_bad_method(self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+        if frame.segments.is_empty() {
+            return Err(Error::protocol_error("AUTH_BAD_METHOD missing payload"));
+        }
+        let mut p = frame.segments[0].as_ref();
+        let server_rejected: u32 = u32::decode(&mut p, 0)?;
+        let server_result: i32 = i32::decode(&mut p, 0)?;
+        let allowed_methods: Vec<u32> = Vec::decode(&mut p, 0)?;
+        let allowed_modes: Vec<u32> = Vec::decode(&mut p, 0)?;
+
+        // `self.method` is what we sent; decode the server's echoed
+        // rejection independently so the ordered search anchors at the
+        // server's position even if the two ever differ. Unknown values
+        // (future auth methods) fall back to a full-list search.
+        let rejected_method = AuthMethod::try_from(server_rejected).ok();
+
+        tracing::info!(
+            "AUTH_BAD_METHOD: server rejected method={} ({:?}) with \
+             result={} ({}), allowed_methods={:?}, allowed_modes={:?}",
+            server_rejected,
+            rejected_method,
+            server_result,
+            strerror(server_result),
+            allowed_methods,
+            allowed_modes,
+        );
+
+        let mut tried = self.tried_methods.clone();
+        if !tried.contains(&self.method) {
+            tried.push(self.method);
+        }
+        if let Some(rm) = rejected_method
+            && !tried.contains(&rm)
+        {
+            tried.push(rm);
+        }
+
+        let server_allowed: Vec<AuthMethod> = allowed_methods
+            .iter()
+            .filter_map(|&m| AuthMethod::try_from(m).ok())
+            .collect();
+
+        // Ordered search (Ceph `MonConnection::handle_auth_bad_method`):
+        // anchor at the rejected method's position in our preference-
+        // ordered supported list and walk forward for the first method
+        // that is (a) in the server's allowed list and (b) not in
+        // `tried`. Unknown `rejected_method` → anchor at 0. The search
+        // is bounded by `supported_methods.len()`, so no retry counter.
+        let anchor_pos =
+            rejected_method.and_then(|rm| self.supported_methods.iter().position(|&m| m == rm));
+        let search_start = anchor_pos.map(|pos| pos + 1).unwrap_or(0);
+
+        let new_method = self.supported_methods[search_start..]
+            .iter()
+            .find(|m| server_allowed.contains(m) && !tried.contains(m))
+            .copied()
+            .ok_or_else(|| {
+                Error::Protocol(format!(
+                    "No viable auth method remaining: client supported={:?}, \
+                     server allowed={:?}, already tried={:?}; server last \
+                     rejected method={} with result={} ({})",
+                    self.supported_methods,
+                    server_allowed,
+                    tried,
+                    server_rejected,
+                    server_result,
+                    strerror(server_result),
+                ))
+            })?;
+
+        let new_modes = self.negotiate_modes(&allowed_modes);
+        tracing::info!("Retrying auth with method={new_method:?}, modes={new_modes:?}");
+        let mut next = Self {
+            method: new_method,
+            preferred_modes: new_modes,
+            tried_methods: tried,
+            ..self
+        };
+        let req = next.build_auth_request()?;
+        Ok(Step::Next {
+            state: next,
+            send: Some(req),
+        })
+    }
+
+    fn handle_auth_reply_more(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+        let provider = self
+            .auth_provider
+            .as_mut()
+            .ok_or_else(|| Error::protocol_error("AUTH_REPLY_MORE but no CephX auth provider"))?;
+        let payload = frame
+            .segments
+            .first()
+            .ok_or_else(|| Error::protocol_error("AUTH_REPLY_MORE missing payload"))?;
+        provider.handle_auth_response(payload.clone(), 0, 0)?;
+        let response_payload = provider.build_auth_payload(0, self.service_id)?;
+        let more = AuthRequestMoreFrame::new(response_payload);
+        let resp = create_frame_from_trait(&more, Tag::AuthRequestMore)?;
+        Ok(Step::Next {
+            state: self,
+            send: Some(resp),
+        })
+    }
+
+    fn handle_auth_done(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+        let segment = frame
+            .segments
+            .first()
+            .ok_or_else(|| Error::protocol_error("AUTH_DONE missing payload"))?;
+        let mut p = segment.clone();
+        let global_id = u64::decode(&mut p, 0)?;
+        let con_mode = u32::decode(&mut p, 0)?;
+        let auth_payload = Bytes::decode(&mut p, 0)?;
+
+        tracing::info!("AUTH_DONE: global_id={global_id}, connection_mode={con_mode}");
+
+        let (session_key, connection_secret) = if self.method == AuthMethod::None {
+            (None, None)
+        } else {
+            let provider = self
+                .auth_provider
+                .as_mut()
+                .ok_or_else(|| Error::protocol_error("No auth provider"))?;
+            provider.handle_auth_response(auth_payload, global_id, con_mode)?
+        };
+
+        Ok(Step::Done(
+            AuthOutput {
+                global_id,
+                connection_mode: con_mode,
+                session_key,
+                connection_secret,
+            },
+            None,
+        ))
+    }
 }
 
 impl Phase for AuthClient {
@@ -173,180 +308,13 @@ impl Phase for AuthClient {
         Ok(Some(self.build_auth_request()?))
     }
 
-    fn step(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+    fn step(self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
         match frame.preamble.tag {
-            Tag::AuthBadMethod => {
-                if frame.segments.is_empty() {
-                    return Err(Error::protocol_error("AUTH_BAD_METHOD missing payload"));
-                }
-                let mut p = frame.segments[0].as_ref();
-                let server_rejected: u32 = u32::decode(&mut p, 0)?;
-                let server_result: i32 = i32::decode(&mut p, 0)?;
-                let allowed_methods: Vec<u32> = Vec::decode(&mut p, 0)?;
-                let allowed_modes: Vec<u32> = Vec::decode(&mut p, 0)?;
-
-                // The server tells us which method it rejected; in the
-                // normal case it's the same method we just sent
-                // (`self.method`), but decoding it separately lets the
-                // ordered search below anchor at the server's position
-                // even if the two ever differ. If the server reports a
-                // method we don't know about (e.g. a future auth method)
-                // we fall back to searching from the start of our
-                // supported list.
-                let rejected_method = AuthMethod::try_from(server_rejected).ok();
-
-                // Log the rejected method and result errno at info level
-                // so operators can correlate a failure with the Ceph
-                // monitor's own logs. Previously these fields were
-                // decoded and dropped, leaving operators to guess why
-                // authentication failed.
-                tracing::info!(
-                    "AUTH_BAD_METHOD: server rejected method={} ({:?}) with \
-                     result={} ({}), allowed_methods={:?}, allowed_modes={:?}",
-                    server_rejected,
-                    rejected_method,
-                    server_result,
-                    strerror(server_result),
-                    allowed_methods,
-                    allowed_modes,
-                );
-
-                // Mark the method we sent (and the one the server
-                // reports rejecting, if different) as tried so the
-                // ordered search below won't pick either.
-                let mut tried = self.tried_methods.clone();
-                if !tried.contains(&self.method) {
-                    tried.push(self.method);
-                }
-                if let Some(rm) = rejected_method
-                    && !tried.contains(&rm)
-                {
-                    tried.push(rm);
-                }
-
-                // Decode the server's allowed-methods list, dropping
-                // any values we don't recognise.
-                let server_allowed: Vec<AuthMethod> = allowed_methods
-                    .iter()
-                    .filter_map(|&m| AuthMethod::try_from(m).ok())
-                    .collect();
-
-                // Ordered search, mirroring Ceph C++
-                // `MonConnection::handle_auth_bad_method`
-                // (`src/mon/MonClient.cc:1880-1890`): anchor at the
-                // position of the rejected method in our
-                // preference-ordered supported list, then search forward
-                // for the first method that is (a) also in the server's
-                // allowed list and (b) not already in `tried`. Moving
-                // forward only prevents falling back to a less-preferred
-                // method that we've already moved past.
-                //
-                // If the server reports a rejected method we don't know,
-                // `anchor_pos` is `None` and we search from the start of
-                // the supported list. The `tried` set still prevents
-                // re-sending any method we've already attempted.
-                //
-                // The search terminates naturally when no more methods
-                // are viable; that's why there's no explicit retry
-                // counter here. The `3`-attempt cap that previously
-                // lived in this arm was a magic number with no basis in
-                // the msgr2 protocol — neither Ceph C++ nor the Linux
-                // kernel imposes such a limit. The ordered search
-                // bounds the iteration by `supported_methods.len()`
-                // naturally.
-                let anchor_pos = rejected_method
-                    .and_then(|rm| self.supported_methods.iter().position(|&m| m == rm));
-                let search_start = anchor_pos.map(|pos| pos + 1).unwrap_or(0);
-
-                let new_method = self.supported_methods[search_start..]
-                    .iter()
-                    .find(|m| server_allowed.contains(m) && !tried.contains(m))
-                    .copied()
-                    .ok_or_else(|| {
-                        Error::Protocol(format!(
-                            "No viable auth method remaining: client supported={:?}, \
-                             server allowed={:?}, already tried={:?}; server last \
-                             rejected method={} with result={} ({})",
-                            self.supported_methods,
-                            server_allowed,
-                            tried,
-                            server_rejected,
-                            server_result,
-                            strerror(server_result),
-                        ))
-                    })?;
-
-                let new_modes = self.negotiate_modes(&allowed_modes);
-                tracing::info!("Retrying auth with method={new_method:?}, modes={new_modes:?}");
-                let mut next = Self {
-                    method: new_method,
-                    preferred_modes: new_modes,
-                    tried_methods: tried,
-                    ..self
-                };
-                let req = next.build_auth_request()?;
-                Ok(Step::Next {
-                    state: next,
-                    send: Some(req),
-                })
-            }
-
-            Tag::AuthReplyMore => {
-                let provider = self.auth_provider.as_mut().ok_or_else(|| {
-                    Error::protocol_error("AUTH_REPLY_MORE but no CephX auth provider")
-                })?;
-                let payload = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("AUTH_REPLY_MORE missing payload"))?;
-                provider.handle_auth_response(payload.clone(), 0, 0)?;
-                let response_payload = provider.build_auth_payload(0, self.service_id)?;
-                let more = AuthRequestMoreFrame::new(response_payload);
-                let resp = create_frame_from_trait(&more, Tag::AuthRequestMore)?;
-                Ok(Step::Next {
-                    state: self,
-                    send: Some(resp),
-                })
-            }
-
-            Tag::AuthDone => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("AUTH_DONE missing payload"))?;
-                let mut p = segment.clone();
-                let global_id = u64::decode(&mut p, 0)?;
-                let con_mode = u32::decode(&mut p, 0)?;
-                let auth_payload = Bytes::decode(&mut p, 0)?;
-
-                tracing::info!("AUTH_DONE: global_id={global_id}, connection_mode={con_mode}");
-
-                let (session_key, connection_secret) = if self.method == AuthMethod::None {
-                    (None, None)
-                } else {
-                    let provider = self
-                        .auth_provider
-                        .as_mut()
-                        .ok_or_else(|| Error::protocol_error("No auth provider"))?;
-                    let (sk, cs) =
-                        provider.handle_auth_response(auth_payload, global_id, con_mode)?;
-                    (sk, cs)
-                };
-
-                Ok(Step::Done(
-                    AuthOutput {
-                        global_id,
-                        connection_mode: con_mode,
-                        session_key,
-                        connection_secret,
-                    },
-                    None,
-                ))
-            }
-
-            _ => Err(Error::protocol_error(&format!(
-                "Unexpected frame {:?} in auth phase (client)",
-                frame.preamble.tag
+            Tag::AuthBadMethod => self.handle_auth_bad_method(frame),
+            Tag::AuthReplyMore => self.handle_auth_reply_more(frame),
+            Tag::AuthDone => self.handle_auth_done(frame),
+            other => Err(Error::protocol_error(&format!(
+                "Unexpected frame {other:?} in auth phase (client)"
             ))),
         }
     }
