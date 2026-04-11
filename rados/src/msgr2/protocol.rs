@@ -1300,6 +1300,14 @@ impl Connection {
             .await?;
 
         self.state.state_machine.transition_to_ready(0);
+
+        // Symmetric with establish_session on the client side: hand the raw
+        // TcpStream over to the Framed codec pair now that the handshake is
+        // finished. Any future server-driven data-plane code — or a client
+        // roundtripping messages back to us — flows through
+        // Msgr2Decoder/Msgr2Encoder from this point on.
+        self.state.transition_to_framed()?;
+
         tracing::info!("Session established (server-side)");
         Ok(())
     }
