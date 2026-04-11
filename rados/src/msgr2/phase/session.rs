@@ -244,6 +244,20 @@ impl SessionClient {
     }
 
     fn handle_session_retry(mut self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        // SESSION_RETRY is only legal as a reply to SESSION_RECONNECT, which
+        // itself requires a prior session (`server_cookie != 0`). A server
+        // that sends it in response to an initial CLIENT_IDENT is violating
+        // the protocol, and blindly retrying with `server_cookie == 0` would
+        // produce a SESSION_RECONNECT that itself breaks the lossy/cookie
+        // invariant enforced in handle_server_ident.
+        if self.server_cookie == 0 {
+            return Err(Error::Protocol(
+                "SESSION_RETRY received without an established session \
+                 (server_cookie == 0); initial CLIENT_IDENT must be answered \
+                 with SERVER_IDENT or SESSION_RESET"
+                    .into(),
+            ));
+        }
         let mut p = Self::first_segment(&frame, "SESSION_RETRY")?.clone();
         let server_connect_seq = u64::decode(&mut p, 0)?;
         tracing::warn!("SESSION_RETRY: server_connect_seq={server_connect_seq}, incrementing ours");
@@ -259,6 +273,15 @@ impl SessionClient {
         mut self,
         frame: Frame,
     ) -> Result<Step<Self, SessionClientOutput>> {
+        // Same reasoning as handle_session_retry: SESSION_RETRY_GLOBAL only
+        // makes sense when resuming an existing session.
+        if self.server_cookie == 0 {
+            return Err(Error::Protocol(
+                "SESSION_RETRY_GLOBAL received without an established session \
+                 (server_cookie == 0)"
+                    .into(),
+            ));
+        }
         let mut p = Self::first_segment(&frame, "SESSION_RETRY_GLOBAL")?.clone();
         let server_global_seq = u64::decode(&mut p, 0)?;
         tracing::warn!("SESSION_RETRY_GLOBAL: updating global_seq to {server_global_seq}");
@@ -451,6 +474,7 @@ impl Phase for SessionServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::msgr2::frames::{SessionRetryFrame, SessionRetryGlobalFrame};
 
     /// Build a `SessionClient` with a non-default server addr so the
     /// peer-addr validation has something to compare against. Cookies,
@@ -822,6 +846,47 @@ mod tests {
             }
             _ => panic!("expected Done with SERVER_IDENT"),
         }
+    }
+
+    #[test]
+    fn client_rejects_session_retry_before_session_established() {
+        // SESSION_RETRY is only legal as a reply to SESSION_RECONNECT, which
+        // requires a prior session (server_cookie != 0). If a misbehaving
+        // server sends it in response to CLIENT_IDENT (server_cookie == 0),
+        // SessionClient must refuse rather than emit a bogus reconnect with
+        // zero cookie.
+        let session = client_with_server_addr(msgr2_addr(6800), false);
+        assert_eq!(session.server_cookie, 0, "precondition: no session yet");
+
+        let retry = SessionRetryFrame::new(42);
+        let frame = create_frame_from_trait(&retry, Tag::SessionRetry).unwrap();
+
+        let err = match session.step(frame) {
+            Ok(_) => panic!("expected SESSION_RETRY pre-session to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("without an established session"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn client_rejects_session_retry_global_before_session_established() {
+        let session = client_with_server_addr(msgr2_addr(6800), false);
+        assert_eq!(session.server_cookie, 0);
+
+        let retry = SessionRetryGlobalFrame::new(99);
+        let frame = create_frame_from_trait(&retry, Tag::SessionRetryGlobal).unwrap();
+
+        let err = match session.step(frame) {
+            Ok(_) => panic!("expected SESSION_RETRY_GLOBAL pre-session to fail"),
+            Err(err) => err.to_string(),
+        };
+        assert!(
+            err.contains("without an established session"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
