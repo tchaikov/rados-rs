@@ -92,15 +92,22 @@ impl CompressionServer {
         if request.preferred_methods.is_empty() {
             return CompressionAlgorithm::Snappy;
         }
-        request
-            .preferred_methods
-            .iter()
-            .find_map(|&m| {
-                CompressionAlgorithm::try_from(m)
-                    .ok()
-                    .filter(|a| *a != CompressionAlgorithm::None)
-            })
-            .unwrap_or(CompressionAlgorithm::None)
+        let mut selected = None;
+        for &m in &request.preferred_methods {
+            match CompressionAlgorithm::try_from(m) {
+                Ok(alg) if alg != CompressionAlgorithm::None => {
+                    selected = Some(alg);
+                    break;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        "COMPRESSION_REQUEST: client advertised unknown algorithm id {m}, ignoring"
+                    );
+                }
+            }
+        }
+        selected.unwrap_or(CompressionAlgorithm::None)
     }
 }
 
