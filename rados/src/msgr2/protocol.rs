@@ -1316,10 +1316,16 @@ impl Connection {
             }
         }
 
-        // Phase 5: Session establishment
+        // Phase 5: Session establishment. Pass our own advertised
+        // address so SessionServer can validate the client's target_addr
+        // and echo a correctly-populated SERVER_IDENT addrs field —
+        // without this the client's peer-address validation would reject
+        // the connection because the server would previously have sent
+        // EntityAddr::default() as its addrs.
         let server_cookie: u64 = rand::random();
+        let server_addr = self.state.state_machine.server_addr_clone();
         self.state
-            .drive_phase(SessionServer::new(server_cookie))
+            .drive_phase(SessionServer::new(server_cookie, server_addr))
             .await?;
 
         self.state.state_machine.transition_to_ready(0);
@@ -1442,6 +1448,25 @@ impl Connection {
 
         // Apply session results.
         self.state.session.server_cookie = sess_out.server_cookie;
+
+        // Adopt the server-declared lossy policy. SERVER_IDENT's flags
+        // are authoritative per Ceph C++ (ProtocolV2.cc:2171) and the
+        // Linux kernel (messenger_v2.c:2535-2540); whatever the server
+        // echoes back in response to our CLIENT_IDENT is the policy the
+        // connection actually runs with. `SessionReconnectOk` carries no
+        // ident, so on reconnection we leave `is_lossy` unchanged and
+        // trust the policy established during the original handshake.
+        if let Some(server_is_lossy) = sess_out.server_is_lossy
+            && server_is_lossy != self.state.is_lossy
+        {
+            tracing::info!(
+                "Adopting server's lossy policy: was {}, now {}",
+                self.state.is_lossy,
+                server_is_lossy
+            );
+            self.state.is_lossy = server_is_lossy;
+        }
+
         self.state
             .state_machine
             .transition_to_ready(sess_out.negotiated_features);

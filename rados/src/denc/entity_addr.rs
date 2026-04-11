@@ -509,6 +509,20 @@ impl EntityAddrvec {
     pub fn get_msgr2(&self) -> Option<&EntityAddr> {
         self.addrs.iter().find(|a| a.is_msgr2())
     }
+
+    /// Returns true if this addrvec contains `addr` (exact match including
+    /// type, nonce, and sockaddr bytes).
+    ///
+    /// Mirrors `entity_addrvec_t::contains` in Ceph's `src/msg/msg_types.h`.
+    /// Used during msgr2 session establishment to validate that the peer's
+    /// advertised addresses include the one we actually dialed — a
+    /// defense-in-depth check against misrouting during DNS / topology
+    /// changes. Both Ceph's C++ `handle_server_ident` and the Linux kernel
+    /// `process_server_ident` perform this check and fault the connection
+    /// on mismatch.
+    pub fn contains(&self, addr: &EntityAddr) -> bool {
+        self.addrs.iter().any(|a| a == addr)
+    }
 }
 
 impl crate::denc::codec::Denc for EntityAddrvec {
