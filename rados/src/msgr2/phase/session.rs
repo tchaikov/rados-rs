@@ -53,19 +53,11 @@ pub struct SessionClientOutput {
     /// Server cookie assigned in `SERVER_IDENT` (needed for reconnection).
     pub server_cookie: u64,
     /// Server-declared lossy flag from `SERVER_IDENT.flags & CEPH_MSG_CONNECT_LOSSY`.
-    ///
-    /// Both Ceph C++ (`ProtocolV2::handle_server_ident` in `ProtocolV2.cc:2171`)
-    /// and the Linux kernel (`process_server_ident` in
-    /// `net/ceph/messenger_v2.c:2535-2540`) treat the server's flags as
-    /// **authoritative**: the client declares its intent in CLIENT_IDENT,
-    /// but whatever the server echoes back in SERVER_IDENT is the policy
-    /// the connection actually runs with. The caller (`Connection::establish_session`)
-    /// writes this back into `ConnectionState.is_lossy` so subsequent
-    /// calls to `can_reconnect` / `record_sent_message` use the correct
-    /// policy.
-    ///
-    /// `None` when the session was resumed via `SESSION_RECONNECT_OK`
-    /// (no SERVER_IDENT arrived, so the existing policy is preserved).
+    /// The server's flag is authoritative (Ceph `ProtocolV2::handle_server_ident`,
+    /// Linux `process_server_ident`) — the client declares intent in CLIENT_IDENT,
+    /// but the server's echo is the policy the connection actually runs with.
+    /// `None` when the session was resumed via `SESSION_RECONNECT_OK` (no
+    /// SERVER_IDENT arrived, so the existing policy is preserved).
     pub server_is_lossy: Option<bool>,
     /// Set when the session was resumed: the last message sequence the server
     /// acknowledged.  The caller must replay unacknowledged messages.
@@ -160,6 +152,148 @@ impl SessionClient {
         );
         Ok(create_frame_from_trait(&reconnect, Tag::SessionReconnect)?)
     }
+
+    fn first_segment<'a>(frame: &'a Frame, what: &'static str) -> Result<&'a bytes::Bytes> {
+        frame
+            .segments
+            .first()
+            .ok_or_else(|| Error::protocol_error(&format!("{what} missing payload")))
+    }
+
+    fn handle_server_ident(self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "SERVER_IDENT")?.clone();
+        let server_addrs = crate::EntityAddrvec::decode(&mut p, 0)?;
+        let _gid = u64::decode(&mut p, 0)?;
+        let _global_seq = u64::decode(&mut p, 0)?;
+        let features_supported = u64::decode(&mut p, 0)?;
+        let features_required = u64::decode(&mut p, 0)?;
+        let flags = u64::decode(&mut p, 0)?;
+        let server_cookie = u64::decode(&mut p, 0)?;
+
+        // Fault on misrouted daemons (Ceph `ProtocolV2::handle_server_ident`,
+        // Linux `process_server_ident`).
+        if !server_addrs.contains(&self.server_addr) {
+            return Err(Error::Protocol(format!(
+                "SERVER_IDENT peer addr mismatch: dialed {:?}, server advertised {:?}",
+                self.server_addr, server_addrs
+            )));
+        }
+
+        // Server's lossy flag is authoritative. Enforce the protocol
+        // invariant `lossy <=> cookie == 0` and warn on a mismatch with
+        // our declared policy.
+        let server_is_lossy = (flags & CEPH_MSG_CONNECT_LOSSY) != 0;
+        if server_is_lossy != self.is_lossy {
+            tracing::warn!(
+                "SERVER_IDENT lossy flag mismatch: client declared is_lossy={}, \
+                 server responded is_lossy={}; adopting server's policy",
+                self.is_lossy,
+                server_is_lossy,
+            );
+        }
+        if server_is_lossy && server_cookie != 0 {
+            return Err(Error::Protocol(format!(
+                "SERVER_IDENT protocol violation: lossy mode with non-zero \
+                 server_cookie {server_cookie:#x}"
+            )));
+        }
+        if !server_is_lossy && server_cookie == 0 {
+            return Err(Error::Protocol(
+                "SERVER_IDENT protocol violation: lossless mode with zero server_cookie".into(),
+            ));
+        }
+
+        let our_features = session_supported_features();
+        let missing = features_required & !our_features;
+        if missing != 0 {
+            return Err(Error::Protocol(format!(
+                "Server requires unsupported features: 0x{missing:x}"
+            )));
+        }
+
+        let negotiated_features = our_features & features_supported;
+        tracing::info!(
+            "Session established: negotiated_features=0x{negotiated_features:x}, \
+             server_cookie={server_cookie}, server_is_lossy={server_is_lossy}"
+        );
+        Ok(Step::Done(
+            SessionClientOutput {
+                negotiated_features,
+                server_cookie,
+                server_is_lossy: Some(server_is_lossy),
+                reconnect_msg_seq: None,
+            },
+            None,
+        ))
+    }
+
+    fn handle_session_reconnect_ok(self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "SESSION_RECONNECT_OK")?.clone();
+        let msg_seq = u64::decode(&mut p, 0)?;
+        tracing::info!("Reconnection successful, server acked up to msg_seq={msg_seq}");
+        Ok(Step::Done(
+            SessionClientOutput {
+                negotiated_features: 0,
+                server_cookie: self.server_cookie,
+                // Resumption skips SERVER_IDENT; preserve existing policy.
+                server_is_lossy: None,
+                reconnect_msg_seq: Some(msg_seq),
+            },
+            None,
+        ))
+    }
+
+    fn handle_session_retry(mut self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "SESSION_RETRY")?.clone();
+        let server_connect_seq = u64::decode(&mut p, 0)?;
+        tracing::warn!("SESSION_RETRY: server_connect_seq={server_connect_seq}, incrementing ours");
+        self.connect_seq += 1;
+        let retry_frame = self.build_session_reconnect()?;
+        Ok(Step::Next {
+            state: self,
+            send: Some(retry_frame),
+        })
+    }
+
+    fn handle_session_retry_global(
+        mut self,
+        frame: Frame,
+    ) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "SESSION_RETRY_GLOBAL")?.clone();
+        let server_global_seq = u64::decode(&mut p, 0)?;
+        tracing::warn!("SESSION_RETRY_GLOBAL: updating global_seq to {server_global_seq}");
+        self.global_seq = server_global_seq.max(self.global_seq + 1);
+        let retry_frame = self.build_session_reconnect()?;
+        Ok(Step::Next {
+            state: self,
+            send: Some(retry_frame),
+        })
+    }
+
+    fn handle_session_reset(mut self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "SESSION_RESET")?.clone();
+        let full = bool::decode(&mut p, 0)?;
+        tracing::warn!("SESSION_RESET (full={full}): sending CLIENT_IDENT");
+        self.server_cookie = 0;
+        if full {
+            self.global_seq = 0;
+            self.connect_seq = 0;
+            self.in_seq = 0;
+        }
+        let ident_frame = self.build_client_ident()?;
+        Ok(Step::Next {
+            state: self,
+            send: Some(ident_frame),
+        })
+    }
+
+    fn handle_ident_missing_features(frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+        let mut p = Self::first_segment(&frame, "IDENT_MISSING_FEATURES")?.clone();
+        let missing_features = u64::decode(&mut p, 0)?;
+        Err(Error::Protocol(format!(
+            "Server reported missing required features: 0x{missing_features:x}"
+        )))
+    }
 }
 
 impl Phase for SessionClient {
@@ -174,179 +308,13 @@ impl Phase for SessionClient {
         Ok(Some(frame))
     }
 
-    fn step(mut self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
+    fn step(self, frame: Frame) -> Result<Step<Self, SessionClientOutput>> {
         match frame.preamble.tag {
-            Tag::ServerIdent => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("SERVER_IDENT missing payload"))?;
-                let mut p = segment.clone();
-                let server_addrs = crate::EntityAddrvec::decode(&mut p, 0)?;
-                let _gid = u64::decode(&mut p, 0)?;
-                let _global_seq = u64::decode(&mut p, 0)?;
-                let features_supported = u64::decode(&mut p, 0)?;
-                let features_required = u64::decode(&mut p, 0)?;
-                let flags = u64::decode(&mut p, 0)?;
-                let server_cookie = u64::decode(&mut p, 0)?;
-
-                // Peer-address validation. Mirrors Ceph C++
-                // `handle_server_ident` at
-                // src/msg/async/ProtocolV2.cc:2157-2161 and the Linux kernel
-                // `process_server_ident` at net/ceph/messenger_v2.c:2507-2514.
-                // Both fault the connection when the server's advertised
-                // addresses don't include the one we dialed — defense-in-
-                // depth against DNS changes, load balancer quirks, and
-                // topology updates that could silently misroute us to the
-                // wrong daemon.
-                if !server_addrs.contains(&self.server_addr) {
-                    return Err(Error::Protocol(format!(
-                        "SERVER_IDENT peer addr mismatch: dialed {:?}, server advertised {:?}",
-                        self.server_addr, server_addrs
-                    )));
-                }
-
-                // Lossy-flag cross-validation. The server's flags in
-                // SERVER_IDENT are authoritative — both Ceph C++
-                // (ProtocolV2.cc:2171: `connection->policy.lossy =
-                // server_ident.flags() & CEPH_MSG_CONNECT_LOSSY`) and the
-                // Linux kernel (messenger_v2.c:2535-2540) treat the
-                // returned flag as the connection's actual policy, not
-                // just a courtesy echo. Warn loudly if the server's
-                // decision differs from what we declared, and enforce
-                // the kernel's asserted invariant:
-                //
-                //     lossy  <=> server_cookie == 0
-                //
-                // violation of which indicates a protocol-level bug on
-                // one side of the connection.
-                let server_is_lossy = (flags & CEPH_MSG_CONNECT_LOSSY) != 0;
-                if server_is_lossy != self.is_lossy {
-                    tracing::warn!(
-                        "SERVER_IDENT lossy flag mismatch: client declared is_lossy={}, \
-                         server responded is_lossy={}; adopting server's policy",
-                        self.is_lossy,
-                        server_is_lossy,
-                    );
-                }
-                if server_is_lossy && server_cookie != 0 {
-                    return Err(Error::Protocol(format!(
-                        "SERVER_IDENT protocol violation: lossy mode with non-zero \
-                         server_cookie {server_cookie:#x} (lossy connections must have \
-                         server_cookie == 0)"
-                    )));
-                }
-                if !server_is_lossy && server_cookie == 0 {
-                    return Err(Error::Protocol(
-                        "SERVER_IDENT protocol violation: lossless mode with zero \
-                         server_cookie (lossless connections must have server_cookie != 0)"
-                            .to_string(),
-                    ));
-                }
-
-                let our_features = session_supported_features();
-                let missing = features_required & !our_features;
-                if missing != 0 {
-                    return Err(Error::Protocol(format!(
-                        "Server requires unsupported features: 0x{missing:x}"
-                    )));
-                }
-
-                let negotiated_features = our_features & features_supported;
-                tracing::info!(
-                    "Session established: negotiated_features=0x{negotiated_features:x}, \
-                     server_cookie={server_cookie}, server_is_lossy={server_is_lossy}"
-                );
-                Ok(Step::Done(
-                    SessionClientOutput {
-                        negotiated_features,
-                        server_cookie,
-                        server_is_lossy: Some(server_is_lossy),
-                        reconnect_msg_seq: None,
-                    },
-                    None,
-                ))
-            }
-
-            Tag::SessionReconnectOk => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("SESSION_RECONNECT_OK missing payload"))?;
-                let mut p = segment.clone();
-                let msg_seq = u64::decode(&mut p, 0)?;
-                tracing::info!("Reconnection successful, server acked up to msg_seq={msg_seq}");
-                Ok(Step::Done(
-                    SessionClientOutput {
-                        negotiated_features: 0,
-                        server_cookie: self.server_cookie,
-                        // Session resumption does not re-exchange ident
-                        // frames, so no fresh lossy flag arrives. Preserve
-                        // the connection's existing policy by leaving this
-                        // as None; the caller will skip the is_lossy
-                        // rewrite in that case.
-                        server_is_lossy: None,
-                        reconnect_msg_seq: Some(msg_seq),
-                    },
-                    None,
-                ))
-            }
-
-            Tag::SessionRetry => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("SESSION_RETRY missing payload"))?;
-                let mut p = segment.clone();
-                let server_connect_seq = u64::decode(&mut p, 0)?;
-                tracing::warn!(
-                    "SESSION_RETRY: server_connect_seq={server_connect_seq}, incrementing ours"
-                );
-                self.connect_seq += 1;
-                let retry_frame = self.build_session_reconnect()?;
-                Ok(Step::Next {
-                    state: self,
-                    send: Some(retry_frame),
-                })
-            }
-
-            Tag::SessionRetryGlobal => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("SESSION_RETRY_GLOBAL missing payload"))?;
-                let mut p = segment.clone();
-                let server_global_seq = u64::decode(&mut p, 0)?;
-                tracing::warn!("SESSION_RETRY_GLOBAL: updating global_seq to {server_global_seq}");
-                self.global_seq = server_global_seq.max(self.global_seq + 1);
-                let retry_frame = self.build_session_reconnect()?;
-                Ok(Step::Next {
-                    state: self,
-                    send: Some(retry_frame),
-                })
-            }
-
-            Tag::SessionReset => {
-                let segment = frame
-                    .segments
-                    .first()
-                    .ok_or_else(|| Error::protocol_error("SESSION_RESET missing payload"))?;
-                let mut p = segment.clone();
-                let full = bool::decode(&mut p, 0)?;
-                tracing::warn!("SESSION_RESET (full={full}): sending CLIENT_IDENT");
-                self.server_cookie = 0;
-                if full {
-                    self.global_seq = 0;
-                    self.connect_seq = 0;
-                    self.in_seq = 0;
-                }
-                let ident_frame = self.build_client_ident()?;
-                Ok(Step::Next {
-                    state: self,
-                    send: Some(ident_frame),
-                })
-            }
-
+            Tag::ServerIdent => self.handle_server_ident(frame),
+            Tag::SessionReconnectOk => self.handle_session_reconnect_ok(frame),
+            Tag::SessionRetry => self.handle_session_retry(frame),
+            Tag::SessionRetryGlobal => self.handle_session_retry_global(frame),
+            Tag::SessionReset => self.handle_session_reset(frame),
             Tag::Wait => {
                 tracing::debug!("Server sent WAIT, continuing to wait");
                 Ok(Step::Next {
@@ -354,21 +322,9 @@ impl Phase for SessionClient {
                     send: None,
                 })
             }
-
-            Tag::IdentMissingFeatures => {
-                let segment = frame.segments.first().ok_or_else(|| {
-                    Error::protocol_error("IDENT_MISSING_FEATURES missing payload")
-                })?;
-                let mut p = segment.clone();
-                let missing_features = u64::decode(&mut p, 0)?;
-                Err(Error::Protocol(format!(
-                    "Server reported missing required features: 0x{missing_features:x}"
-                )))
-            }
-
-            _ => Err(Error::protocol_error(&format!(
-                "Unexpected frame {:?} in session phase (client)",
-                frame.preamble.tag
+            Tag::IdentMissingFeatures => Self::handle_ident_missing_features(frame),
+            other => Err(Error::protocol_error(&format!(
+                "Unexpected frame {other:?} in session phase (client)"
             ))),
         }
     }
@@ -426,12 +382,7 @@ impl Phase for SessionServer {
                     let client_flags = u64::decode(&mut p, 0)?;
                     let _cookie = u64::decode(&mut p, 0)?;
 
-                    // Target-address validation. Mirrors Ceph C++
-                    // `handle_client_ident` at
-                    // src/msg/async/ProtocolV2.cc:2425-2431: if the
-                    // client's `target_addr` isn't us, fault the
-                    // connection. Defense against misrouted clients
-                    // during cluster topology changes.
+                    // Fault misrouted clients (Ceph `ProtocolV2::handle_client_ident`).
                     if client_target_addr != self.server_addr {
                         return Err(Error::Protocol(format!(
                             "CLIENT_IDENT target addr mismatch: we are {:?}, client is \
@@ -453,12 +404,8 @@ impl Phase for SessionServer {
                         });
                     }
 
-                    // Honour the client's declared lossy flag. Ceph C++
-                    // (`ProtocolV2.cc:2458-2462`) uses the flag to decide
-                    // whether to register the connection; we simply
-                    // mirror it in our SERVER_IDENT response so the
-                    // protocol invariant `lossy <=> cookie == 0` holds
-                    // on the wire.
+                    // Mirror the client's lossy flag so `lossy <=> cookie == 0`
+                    // holds on the wire (Ceph `ProtocolV2::handle_client_ident`).
                     let client_is_lossy = (client_flags & CEPH_MSG_CONNECT_LOSSY) != 0;
                     let (response_flags, response_cookie) = if client_is_lossy {
                         (CEPH_MSG_CONNECT_LOSSY, 0)
