@@ -53,6 +53,7 @@ pub struct AuthOutput {
 /// Drives the full AUTH_REQUEST ↔ AUTH_DONE exchange, including method
 /// re-negotiation (`AUTH_BAD_METHOD`) and multi-round CephX challenge
 /// (`AUTH_REPLY_MORE`).
+#[derive(Clone)]
 pub struct AuthClient {
     method: AuthMethod,
     preferred_modes: Vec<ConnectionMode>,
@@ -62,21 +63,6 @@ pub struct AuthClient {
     service_id: u32,
     entity_name: crate::EntityName,
     global_id: u64,
-}
-
-impl Clone for AuthClient {
-    fn clone(&self) -> Self {
-        Self {
-            method: self.method,
-            preferred_modes: self.preferred_modes.clone(),
-            supported_methods: self.supported_methods.clone(),
-            tried_methods: self.tried_methods.clone(),
-            auth_provider: self.auth_provider.clone(),
-            service_id: self.service_id,
-            entity_name: self.entity_name.clone(),
-            global_id: self.global_id,
-        }
-    }
 }
 
 impl AuthClient {
