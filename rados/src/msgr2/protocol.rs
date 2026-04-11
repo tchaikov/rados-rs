@@ -649,7 +649,7 @@ struct SessionState {
     /// Connection sequence number - incremented on each reconnection attempt
     connect_seq: u64,
     /// Queue of sent messages awaiting acknowledgment (for replay on reconnect)
-    replay: crate::msgr2::split::ReplayQueue,
+    replay: crate::msgr2::replay_queue::ReplayQueue,
 }
 
 impl ConnectionState {
@@ -673,7 +673,7 @@ impl ConnectionState {
                 server_cookie: 0, // Will be assigned by server
                 global_seq: 0,
                 connect_seq: 0,
-                replay: crate::msgr2::split::ReplayQueue::new(None),
+                replay: crate::msgr2::replay_queue::ReplayQueue::new(None),
             },
             is_lossy,
         }
@@ -856,11 +856,6 @@ impl ConnectionState {
     /// Get the server cookie (0 if not yet assigned)
     pub(crate) fn server_cookie(&self) -> u64 {
         self.session.server_cookie
-    }
-
-    /// Whether this connection uses lossy policy (no replay, no reconnect).
-    pub(crate) fn is_lossy(&self) -> bool {
-        self.is_lossy
     }
 
     /// Check if this connection has a valid session that can be reconnected
@@ -1092,7 +1087,8 @@ impl Connection {
         Self::exchange_banner(&mut stream, &mut state_machine, &config).await?;
 
         let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
-        state.session.replay = crate::msgr2::split::ReplayQueue::new(config.max_replay_queue_len);
+        state.session.replay =
+            crate::msgr2::replay_queue::ReplayQueue::new(config.max_replay_queue_len);
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1226,7 +1222,8 @@ impl Connection {
         Self::exchange_banner_server(&mut stream, &mut state_machine, &config).await?;
 
         let mut state = ConnectionState::new(stream, state_machine, config.is_lossy);
-        state.session.replay = crate::msgr2::split::ReplayQueue::new(config.max_replay_queue_len);
+        state.session.replay =
+            crate::msgr2::replay_queue::ReplayQueue::new(config.max_replay_queue_len);
 
         // Initialize throttle from config if present
         let throttle = config
@@ -1861,68 +1858,6 @@ impl Connection {
     /// Get the current state kind
     pub fn current_state_kind(&self) -> StateKind {
         self.state.current_state_kind()
-    }
-
-    /// Split the connection into separate send and receive halves
-    ///
-    /// This allows concurrent sending and receiving of messages from different
-    /// tasks. The connection is consumed and cannot be used directly after splitting.
-    ///
-    /// # Example
-    ///
-    /// ```no_run
-    /// # use crate::msgr2::protocol::Connection;
-    /// # async fn example() -> crate::msgr2::Result<()> {
-    /// # let addr = "127.0.0.1:6789".parse().unwrap();
-    /// # let config = crate::msgr2::ConnectionConfig::default();
-    /// let mut conn = Connection::connect(addr, config).await?;
-    /// conn.establish_session().await?;
-    ///
-    /// // Split the connection
-    /// let (send_half, mut recv_half) = conn.split();
-    ///
-    /// // Spawn a task to receive messages
-    /// tokio::spawn(async move {
-    ///     loop {
-    ///         match recv_half.recv_message().await {
-    ///             Ok(msg) => println!("Received: {:?}", msg.msg_type()),
-    ///             Err(_) => break,
-    ///         }
-    ///     }
-    /// });
-    ///
-    /// // Send messages from the main task
-    /// // send_half.send_message(msg).await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    ///
-    /// # Note
-    ///
-    /// The split halves do not support automatic reconnection. If the connection
-    /// fails, both halves will return errors and you'll need to establish a new
-    /// connection.
-    pub fn split(self) -> (crate::msgr2::split::SendHalf, crate::msgr2::split::RecvHalf) {
-        use crate::msgr2::split::{SharedState, SplitBuilder};
-
-        let shared = SharedState {
-            out_seq: self.state.out_seq,
-            in_seq: self.state.in_seq,
-            client_cookie: self.state.session.client_cookie,
-            server_cookie: self.state.session.server_cookie,
-            global_seq: self.state.session.global_seq,
-            connect_seq: self.state.session.connect_seq,
-            replay: self.state.session.replay.clone(),
-            global_id: self.state.state_machine.global_id(),
-        };
-
-        let builder = SplitBuilder {
-            connection_state: self.state,
-            shared,
-            throttle: self.throttle,
-        };
-
-        builder.build()
     }
 
     /// Close the connection and discard all pending messages

@@ -17,7 +17,7 @@ pub mod message;
 pub(crate) mod phase;
 pub(crate) mod priority_queue;
 pub(crate) mod protocol;
-pub(crate) mod split;
+pub(crate) mod replay_queue;
 pub(crate) mod state_machine;
 pub mod throttle;
 
