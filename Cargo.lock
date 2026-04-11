@@ -1371,6 +1371,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "snap",
+ "subtle",
  "tempfile",
  "thiserror",
  "tokio",
