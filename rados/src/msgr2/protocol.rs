@@ -928,16 +928,16 @@ impl ConnectionState {
     fn complete_auth(
         &mut self,
         auth_out: &crate::msgr2::phase::auth::AuthOutput,
-    ) -> Result<(Bytes, Option<Bytes>)> {
+    ) -> Result<(Bytes, Bytes)> {
         // Compute HMAC-SHA256 signatures over pre-auth byte streams.
         let our_sig = StateMachine::hmac_sha256(
             auth_out.session_key.as_ref(),
             self.state_machine.get_pre_auth_rxbuf(),
         )?;
-        let exp_sig = Some(StateMachine::hmac_sha256(
+        let exp_sig = StateMachine::hmac_sha256(
             auth_out.session_key.as_ref(),
             self.state_machine.get_pre_auth_txbuf(),
-        )?);
+        )?;
 
         // Commit auth state and install encryption.
         self.state_machine

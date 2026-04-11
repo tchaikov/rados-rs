@@ -47,7 +47,7 @@ pub struct AuthSignClient {
     /// HMAC(session_key, all_rx_bytes) — what we send to the server.
     our_sig: Bytes,
     /// HMAC(session_key, all_tx_bytes) — what we expect the server to send.
-    expected_server_sig: Option<Bytes>,
+    expected_server_sig: Bytes,
     /// Peer's msgr2 feature bits (from banner).
     peer_features: u64,
     /// Our own advertised msgr2 feature bits.
@@ -57,7 +57,7 @@ pub struct AuthSignClient {
 impl AuthSignClient {
     pub fn new(
         our_sig: Bytes,
-        expected_server_sig: Option<Bytes>,
+        expected_server_sig: Bytes,
         peer_features: u64,
         our_features: u64,
     ) -> Self {
@@ -88,23 +88,20 @@ impl Phase for AuthSignClient {
     fn step(self, frame: Frame) -> Result<Step<Self, AuthSignClientOutput>> {
         match frame.preamble.tag {
             Tag::AuthSignature => {
-                if let Some(ref expected) = self.expected_server_sig {
-                    let server_sig = frame.segments.first().ok_or_else(|| {
-                        Error::protocol_error("AUTH_SIGNATURE frame missing payload")
-                    })?;
+                let server_sig = frame
+                    .segments
+                    .first()
+                    .ok_or_else(|| Error::protocol_error("AUTH_SIGNATURE frame missing payload"))?;
 
-                    if !verify_hmac(server_sig, expected) {
-                        return Err(Error::protocol_error(
-                            "Server AUTH_SIGNATURE verification failed",
-                        ));
-                    }
-                    tracing::info!(
-                        "Server AUTH_SIGNATURE verified ({} bytes)",
-                        server_sig.len()
-                    );
-                } else {
-                    tracing::debug!("AUTH_SIGNATURE: CRC mode, no verification needed");
+                if !verify_hmac(server_sig, &self.expected_server_sig) {
+                    return Err(Error::protocol_error(
+                        "Server AUTH_SIGNATURE verification failed",
+                    ));
                 }
+                tracing::info!(
+                    "Server AUTH_SIGNATURE verified ({} bytes)",
+                    server_sig.len()
+                );
 
                 let peer_fs = crate::msgr2::FeatureSet::from(self.peer_features);
                 let our_fs = crate::msgr2::FeatureSet::from(self.our_features);
@@ -131,11 +128,11 @@ pub struct AuthSignServer {
     /// HMAC(session_key, all_rx_bytes) — what we send to the client.
     our_sig: Bytes,
     /// HMAC(session_key, all_tx_bytes) — what we expect the client to send.
-    expected_client_sig: Option<Bytes>,
+    expected_client_sig: Bytes,
 }
 
 impl AuthSignServer {
-    pub fn new(our_sig: Bytes, expected_client_sig: Option<Bytes>) -> Self {
+    pub fn new(our_sig: Bytes, expected_client_sig: Bytes) -> Self {
         Self {
             our_sig,
             expected_client_sig,
@@ -161,23 +158,20 @@ impl Phase for AuthSignServer {
     fn step(self, frame: Frame) -> Result<Step<Self, ()>> {
         match frame.preamble.tag {
             Tag::AuthSignature => {
-                if let Some(ref expected) = self.expected_client_sig {
-                    let client_sig = frame.segments.first().ok_or_else(|| {
-                        Error::protocol_error("AUTH_SIGNATURE frame missing payload")
-                    })?;
+                let client_sig = frame
+                    .segments
+                    .first()
+                    .ok_or_else(|| Error::protocol_error("AUTH_SIGNATURE frame missing payload"))?;
 
-                    if !verify_hmac(client_sig, expected) {
-                        return Err(Error::protocol_error(
-                            "Client AUTH_SIGNATURE verification failed",
-                        ));
-                    }
-                    tracing::info!(
-                        "Client AUTH_SIGNATURE verified ({} bytes)",
-                        client_sig.len()
-                    );
-                } else {
-                    tracing::debug!("Server AUTH_SIGNATURE: CRC/AUTH_NONE mode, no verification");
+                if !verify_hmac(client_sig, &self.expected_client_sig) {
+                    return Err(Error::protocol_error(
+                        "Client AUTH_SIGNATURE verification failed",
+                    ));
                 }
+                tracing::info!(
+                    "Client AUTH_SIGNATURE verified ({} bytes)",
+                    client_sig.len()
+                );
 
                 Ok(Step::Done((), None))
             }
