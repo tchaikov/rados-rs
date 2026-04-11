@@ -355,54 +355,70 @@ impl AuthServer {
 impl Phase for AuthServer {
     type Output = AuthOutput;
 
-    fn step(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
-        if frame.preamble.tag != Tag::AuthRequest && frame.preamble.tag != Tag::AuthRequestMore {
-            return Err(Error::protocol_error(&format!(
-                "Unexpected frame {:?} in auth phase (server)",
-                frame.preamble.tag
-            )));
+    fn step(self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+        match (self.phase, frame.preamble.tag) {
+            (0, Tag::AuthRequest) => self.handle_auth_request(frame),
+            (1, Tag::AuthRequestMore) => self.handle_auth_request_more(frame),
+            (phase, tag) => Err(Error::protocol_error(&format!(
+                "Unexpected frame {tag:?} in auth phase (server) at phase={phase}"
+            ))),
         }
+    }
+}
 
+impl AuthServer {
+    fn handle_auth_request(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
         let auth_request = AuthRequestFrame::from_frame(&frame)?;
+        self.client_preferred_modes = auth_request.preferred_modes.clone();
+        let connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
+        self.connection_mode = Some(connection_mode);
 
-        if self.phase == 0 {
-            self.client_preferred_modes = auth_request.preferred_modes.clone();
-            let connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
-            self.connection_mode = Some(connection_mode);
+        if let Some(ref mut handler) = self.auth_handler {
+            let (entity_name, global_id, challenge) =
+                handler.handle_initial_request(&auth_request.auth_payload)?;
+            tracing::debug!("Server auth phase 0: entity={entity_name}, gid={global_id}");
+            self.entity_name = Some(entity_name);
+            self.global_id = Some(global_id);
+            self.phase = 1;
 
-            if let Some(ref mut handler) = self.auth_handler {
-                let (entity_name, global_id, challenge) =
-                    handler.handle_initial_request(&auth_request.auth_payload)?;
-                tracing::debug!("Server auth phase 0: entity={entity_name}, gid={global_id}");
-                self.entity_name = Some(entity_name);
-                self.global_id = Some(global_id);
-                self.phase = 1;
-
-                let more = AuthRequestMoreFrame::new(challenge);
-                let frame = create_frame_from_trait(&more, Tag::AuthReplyMore)?;
-                return Ok(Step::Next {
-                    state: self,
-                    send: Some(frame),
-                });
-            }
-
-            // No auth handler — accept without authentication
-            tracing::warn!("Server: no auth handler, skipping authentication");
-            let global_id = NO_AUTH_SERVER_GLOBAL_ID;
-            let done = AuthDoneFrame::new(global_id, connection_mode, Bytes::new());
-            let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;
-            return Ok(Step::Done(
-                AuthOutput {
-                    global_id,
-                    connection_mode,
-                    session_key: None,
-                    connection_secret: None,
-                },
-                Some(done_frame),
-            ));
+            let more = AuthRequestMoreFrame::new(challenge);
+            let reply = create_frame_from_trait(&more, Tag::AuthReplyMore)?;
+            return Ok(Step::Next {
+                state: self,
+                send: Some(reply),
+            });
         }
 
-        // Phase 1: CephX challenge response
+        // No auth handler — accept without authentication
+        tracing::warn!("Server: no auth handler, skipping authentication");
+        let global_id = NO_AUTH_SERVER_GLOBAL_ID;
+        let done = AuthDoneFrame::new(global_id, connection_mode, Bytes::new());
+        let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;
+        Ok(Step::Done(
+            AuthOutput {
+                global_id,
+                connection_mode,
+                session_key: None,
+                connection_secret: None,
+            },
+            Some(done_frame),
+        ))
+    }
+
+    fn handle_auth_request_more(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
+        // `AuthRequestMoreFrame` carries only `auth_payload: Bytes`; there is
+        // no public helper on the frame type, so decode the single field
+        // inline rather than hand-rolling one. Do NOT reuse
+        // `AuthRequestFrame::from_frame` here — that expects the
+        // `method + preferred_modes + auth_payload` layout, which is a
+        // different wire format and would silently misparse.
+        let mut p = frame
+            .segments
+            .first()
+            .ok_or_else(|| Error::protocol_error("AUTH_REQUEST_MORE missing payload"))?
+            .clone();
+        let auth_payload = Bytes::decode(&mut p, 0)?;
+
         let handler = self
             .auth_handler
             .as_mut()
@@ -419,7 +435,7 @@ impl Phase for AuthServer {
             .ok_or_else(|| Error::protocol_error("Missing connection_mode in phase 1"))?;
 
         let (session_key, connection_secret, auth_payload) =
-            handler.handle_authenticate(entity_name, global_id, &auth_request.auth_payload)?;
+            handler.handle_authenticate(entity_name, global_id, &auth_payload)?;
         tracing::info!("Server: {entity_name} authenticated successfully");
 
         let done_payload = handler.build_auth_done_response(
