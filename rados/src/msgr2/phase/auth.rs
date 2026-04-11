@@ -1,7 +1,12 @@
 //! Authentication phase: AUTH_REQUEST / AUTH_DONE (and optional AUTH_REPLY_MORE).
 //!
 //! **Client** sends `AUTH_REQUEST`, handles server replies:
-//! - `AUTH_BAD_METHOD` → retry with a different auth method (up to 3 tries)
+//! - `AUTH_BAD_METHOD` → retry with a different auth method, using the
+//!   ordered-search semantics from Ceph C++ `MonConnection::handle_auth_bad_method`
+//!   (`src/mon/MonClient.cc:1870-1894`): anchor at the position of the
+//!   rejected method in our preference-ordered supported list and search
+//!   forward. The search terminates naturally when no more methods are
+//!   viable, so there is no explicit retry counter.
 //! - `AUTH_REPLY_MORE` → CephX challenge-response round-trip
 //! - `AUTH_DONE`       → authentication complete, phase finishes
 //!
@@ -19,6 +24,14 @@ use crate::msgr2::{
     phase::{Phase, Step},
 };
 use bytes::Bytes;
+
+/// Render a Ceph result code (negative errno, kernel convention) as a
+/// human-readable string by delegating to `std::io::Error`, which calls
+/// libc `strerror_r` under the hood. Displays as e.g.
+/// `"Permission denied (os error 13)"`.
+fn strerror(result: i32) -> std::io::Error {
+    std::io::Error::from_raw_os_error(result.unsigned_abs() as i32)
+}
 
 // ── Shared output ─────────────────────────────────────────────────────────────
 
@@ -130,23 +143,6 @@ impl AuthClient {
         Ok(create_frame_from_trait(&req, Tag::AuthRequest)?)
     }
 
-    fn negotiate_method(&self, allowed: &[u32]) -> Result<AuthMethod> {
-        let server: Vec<AuthMethod> = allowed
-            .iter()
-            .filter_map(|&m| AuthMethod::try_from(m).ok())
-            .collect();
-        self.supported_methods
-            .iter()
-            .find(|m| server.contains(m))
-            .copied()
-            .ok_or_else(|| {
-                Error::Protocol(format!(
-                    "No common auth method. Client: {:?}, Server: {:?}",
-                    self.supported_methods, server
-                ))
-            })
-    }
-
     fn negotiate_modes(&self, allowed: &[u32]) -> Vec<ConnectionMode> {
         let server: Vec<ConnectionMode> = allowed
             .iter()
@@ -184,29 +180,104 @@ impl Phase for AuthClient {
                     return Err(Error::protocol_error("AUTH_BAD_METHOD missing payload"));
                 }
                 let mut p = frame.segments[0].as_ref();
-                let _rejected: u32 = u32::decode(&mut p, 0)?;
-                let _result: i32 = i32::decode(&mut p, 0)?;
+                let server_rejected: u32 = u32::decode(&mut p, 0)?;
+                let server_result: i32 = i32::decode(&mut p, 0)?;
                 let allowed_methods: Vec<u32> = Vec::decode(&mut p, 0)?;
                 let allowed_modes: Vec<u32> = Vec::decode(&mut p, 0)?;
 
-                if self.tried_methods.len() >= 3 {
-                    return Err(Error::Protocol(format!(
-                        "Auth retry limit exceeded after {:?}",
-                        self.tried_methods
-                    )));
-                }
-                let new_method = self.negotiate_method(&allowed_methods)?;
-                let mut tried = self.tried_methods.clone();
-                tried.push(self.method);
-                if tried.contains(&new_method) {
-                    return Err(Error::Protocol(format!(
-                        "Already tried auth method {new_method:?}"
-                    )));
-                }
-                let new_modes = self.negotiate_modes(&allowed_modes);
+                // The server tells us which method it rejected; in the
+                // normal case it's the same method we just sent
+                // (`self.method`), but decoding it separately lets the
+                // ordered search below anchor at the server's position
+                // even if the two ever differ. If the server reports a
+                // method we don't know about (e.g. a future auth method)
+                // we fall back to searching from the start of our
+                // supported list.
+                let rejected_method = AuthMethod::try_from(server_rejected).ok();
+
+                // Log the rejected method and result errno at info level
+                // so operators can correlate a failure with the Ceph
+                // monitor's own logs. Previously these fields were
+                // decoded and dropped, leaving operators to guess why
+                // authentication failed.
                 tracing::info!(
-                    "AUTH_BAD_METHOD: retrying with {new_method:?}, modes={new_modes:?}"
+                    "AUTH_BAD_METHOD: server rejected method={} ({:?}) with \
+                     result={} ({}), allowed_methods={:?}, allowed_modes={:?}",
+                    server_rejected,
+                    rejected_method,
+                    server_result,
+                    strerror(server_result),
+                    allowed_methods,
+                    allowed_modes,
                 );
+
+                // Mark the method we sent (and the one the server
+                // reports rejecting, if different) as tried so the
+                // ordered search below won't pick either.
+                let mut tried = self.tried_methods.clone();
+                if !tried.contains(&self.method) {
+                    tried.push(self.method);
+                }
+                if let Some(rm) = rejected_method
+                    && !tried.contains(&rm)
+                {
+                    tried.push(rm);
+                }
+
+                // Decode the server's allowed-methods list, dropping
+                // any values we don't recognise.
+                let server_allowed: Vec<AuthMethod> = allowed_methods
+                    .iter()
+                    .filter_map(|&m| AuthMethod::try_from(m).ok())
+                    .collect();
+
+                // Ordered search, mirroring Ceph C++
+                // `MonConnection::handle_auth_bad_method`
+                // (`src/mon/MonClient.cc:1880-1890`): anchor at the
+                // position of the rejected method in our
+                // preference-ordered supported list, then search forward
+                // for the first method that is (a) also in the server's
+                // allowed list and (b) not already in `tried`. Moving
+                // forward only prevents falling back to a less-preferred
+                // method that we've already moved past.
+                //
+                // If the server reports a rejected method we don't know,
+                // `anchor_pos` is `None` and we search from the start of
+                // the supported list. The `tried` set still prevents
+                // re-sending any method we've already attempted.
+                //
+                // The search terminates naturally when no more methods
+                // are viable; that's why there's no explicit retry
+                // counter here. The `3`-attempt cap that previously
+                // lived in this arm was a magic number with no basis in
+                // the msgr2 protocol — neither Ceph C++ nor the Linux
+                // kernel imposes such a limit. The ordered search
+                // bounds the iteration by `supported_methods.len()`
+                // naturally.
+                let anchor_pos = rejected_method
+                    .and_then(|rm| self.supported_methods.iter().position(|&m| m == rm));
+                let search_start = anchor_pos.map(|pos| pos + 1).unwrap_or(0);
+
+                let new_method = self.supported_methods[search_start..]
+                    .iter()
+                    .find(|m| server_allowed.contains(m) && !tried.contains(m))
+                    .copied()
+                    .ok_or_else(|| {
+                        Error::Protocol(format!(
+                            "No viable auth method remaining: client supported={:?}, \
+                             server allowed={:?}, already tried={:?}; server last \
+                             rejected method={} with result={} ({})",
+                            self.supported_methods,
+                            server_allowed,
+                            tried,
+                            server_rejected,
+                            server_result,
+                            strerror(server_result),
+                        ))
+                    })?;
+
+                let new_modes = self.negotiate_modes(&allowed_modes);
+                tracing::info!("Retrying auth with method={new_method:?}, modes={new_modes:?}");
                 let mut next = Self {
                     method: new_method,
                     preferred_modes: new_modes,
@@ -406,5 +477,234 @@ impl Phase for AuthServer {
             },
             Some(done_frame),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::msgr2::frames::{FrameFlags, MAX_NUM_SEGMENTS, Preamble, SegmentDescriptor};
+    use bytes::BytesMut;
+
+    /// Build an AUTH_BAD_METHOD frame's first segment from raw field
+    /// values. Payload layout matches what `AuthClient::step` decodes:
+    ///
+    ///   u32 rejected_method
+    ///   i32 result
+    ///   Vec<u32> allowed_methods
+    ///   Vec<u32> allowed_modes
+    fn bad_method_payload(
+        rejected: u32,
+        result: i32,
+        allowed_methods: &[u32],
+        allowed_modes: &[u32],
+    ) -> Bytes {
+        let mut buf = BytesMut::new();
+        Denc::encode(&rejected, &mut buf, 0).unwrap();
+        Denc::encode(&result, &mut buf, 0).unwrap();
+        Denc::encode(&allowed_methods.to_vec(), &mut buf, 0).unwrap();
+        Denc::encode(&allowed_modes.to_vec(), &mut buf, 0).unwrap();
+        buf.freeze()
+    }
+
+    /// Wrap a payload segment into a minimal `Frame` with the
+    /// `AuthBadMethod` tag so it can be fed to `AuthClient::step`.
+    fn bad_method_frame(payload: Bytes) -> Frame {
+        let segments = vec![payload];
+        let preamble = Preamble {
+            tag: Tag::AuthBadMethod,
+            num_segments: 1,
+            segments: [SegmentDescriptor::default(); MAX_NUM_SEGMENTS],
+            flags: FrameFlags::default(),
+            reserved: 0,
+            crc: 0,
+        };
+        Frame { preamble, segments }
+    }
+
+    /// Construct an AuthClient with a deterministic set of supported
+    /// methods and starting with `method` as the first attempt. No
+    /// auth_provider is installed because the tests that exercise the
+    /// ordered-search path either fall through to `AuthMethod::None`
+    /// (which does not consult the provider) or exit with an error
+    /// before `build_auth_request` is called.
+    fn client(
+        supported: Vec<AuthMethod>,
+        method: AuthMethod,
+        tried: Vec<AuthMethod>,
+    ) -> AuthClient {
+        AuthClient {
+            method,
+            preferred_modes: vec![ConnectionMode::Crc],
+            supported_methods: supported,
+            tried_methods: tried,
+            auth_provider: None,
+            service_id: 0,
+            entity_name: crate::EntityName::client(""),
+            global_id: 0,
+        }
+    }
+
+    #[test]
+    fn bad_method_ordered_search_picks_next_method_after_rejected() {
+        // Supported: [Cephx, None] in preference order. Server rejects
+        // the current method (Cephx) and advertises [None] as allowed.
+        // The ordered search should anchor at Cephx's position (0) and
+        // find None at position 1.
+        let session = client(
+            vec![AuthMethod::Cephx, AuthMethod::None],
+            AuthMethod::Cephx,
+            vec![],
+        );
+        let payload = bad_method_payload(
+            AuthMethod::Cephx.into(),
+            -13,
+            &[AuthMethod::None.into()],
+            &[ConnectionMode::Crc as u32],
+        );
+        let frame = bad_method_frame(payload);
+
+        match session.step(frame).unwrap() {
+            Step::Next {
+                state,
+                send: Some(_),
+            } => {
+                assert_eq!(state.method, AuthMethod::None);
+                assert!(
+                    state.tried_methods.contains(&AuthMethod::Cephx),
+                    "Cephx must be recorded as tried"
+                );
+            }
+            _ => panic!("expected Step::Next with new method and a frame to send"),
+        }
+    }
+
+    #[test]
+    fn bad_method_ordered_search_skips_method_not_in_allowed_list() {
+        // Supported: [Cephx, None]. Server rejects Cephx and advertises
+        // [Cephx] only (pathological but possible). The ordered search
+        // should find no viable method because:
+        //   - position 0 (Cephx) is anchor+0, skipped (we start at 1)
+        //   - position 1 (None) is not in server_allowed
+        // So we get the "no viable method" error.
+        let session = client(
+            vec![AuthMethod::Cephx, AuthMethod::None],
+            AuthMethod::Cephx,
+            vec![],
+        );
+        let payload = bad_method_payload(
+            AuthMethod::Cephx.into(),
+            -95,
+            &[AuthMethod::Cephx.into()],
+            &[ConnectionMode::Crc as u32],
+        );
+        let frame = bad_method_frame(payload);
+
+        let err = match session.step(frame) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected no-viable-method error"),
+        };
+        assert!(
+            err.contains("No viable auth method"),
+            "unexpected error: {err}"
+        );
+        // Error should include the server's result errno for operator
+        // debugging — this covers change 2. `strerror` delegates to
+        // `std::io::Error::from_raw_os_error`, which formats as
+        // "<strerror text> (os error <n>)", so we check for the
+        // signed raw code and for the "os error" token rather than a
+        // symbolic name whose wording could vary by libc.
+        assert!(
+            err.contains("-95") && err.contains("(os error 95)"),
+            "error should carry result errno: {err}"
+        );
+    }
+
+    #[test]
+    fn bad_method_fails_cleanly_when_only_method_is_rejected() {
+        // Supported: [Cephx] (only one method). Server rejects Cephx.
+        // The ordered search should fail because nothing comes after
+        // position 0.
+        let session = client(vec![AuthMethod::Cephx], AuthMethod::Cephx, vec![]);
+        let payload = bad_method_payload(
+            AuthMethod::Cephx.into(),
+            -13,
+            &[AuthMethod::Cephx.into()],
+            &[ConnectionMode::Crc as u32],
+        );
+        let frame = bad_method_frame(payload);
+
+        let err = match session.step(frame) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected single-method exhaustion error"),
+        };
+        assert!(
+            err.contains("No viable auth method"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            err.contains("(os error 13)"),
+            "error should render -13: {err}"
+        );
+    }
+
+    #[test]
+    fn bad_method_unknown_rejected_method_falls_back_to_supported_list_start() {
+        // Server reports a rejected method (99) that we don't know.
+        // `rejected_method = None`, so `anchor_pos = None`, and
+        // `search_start = 0`. The tried set still contains our current
+        // method (Cephx) so the search picks the next unvisited
+        // supported method — None.
+        let session = client(
+            vec![AuthMethod::Cephx, AuthMethod::None],
+            AuthMethod::Cephx,
+            vec![],
+        );
+        let payload = bad_method_payload(
+            99,
+            -22,
+            &[AuthMethod::None.into(), AuthMethod::Cephx.into()],
+            &[ConnectionMode::Crc as u32],
+        );
+        let frame = bad_method_frame(payload);
+
+        match session.step(frame).unwrap() {
+            Step::Next {
+                state,
+                send: Some(_),
+            } => {
+                assert_eq!(state.method, AuthMethod::None);
+            }
+            _ => panic!("expected Step::Next with AuthMethod::None"),
+        }
+    }
+
+    #[test]
+    fn bad_method_error_preserves_result_errno_for_operator_debug() {
+        // The main observability improvement (change 2): when the
+        // ordered search fails, the error message must carry the
+        // server's errno so operators can tell WHY it failed without
+        // consulting the Ceph daemon logs.
+        let session = client(vec![AuthMethod::Cephx], AuthMethod::Cephx, vec![]);
+        let payload = bad_method_payload(
+            AuthMethod::Cephx.into(),
+            -1,
+            &[],
+            &[ConnectionMode::Crc as u32],
+        );
+        let frame = bad_method_frame(payload);
+
+        let err = match session.step(frame) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("expected error"),
+        };
+        assert!(
+            err.contains("-1") && err.contains("(os error 1)"),
+            "error should expose errno: {err}"
+        );
+        assert!(
+            err.contains("rejected method"),
+            "error should mention the rejected method: {err}"
+        );
     }
 }
