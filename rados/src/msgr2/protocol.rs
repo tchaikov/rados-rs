@@ -749,6 +749,38 @@ impl ConnectionState {
         self.state_machine.record_keepalive_ack();
     }
 
+    /// Flush any buffered output and shut down the writer half of the
+    /// underlying TCP stream.
+    ///
+    /// Only meaningful on the [`Io::Established`] post-handshake path: the
+    /// [`FramedWrite`]'s internal `BytesMut` may hold bytes from a prior
+    /// `send` that hasn't been fully drained to the kernel's TCP send
+    /// buffer, and the underlying [`OwnedWriteHalf`] needs an explicit
+    /// `poll_shutdown` to trigger a FIN instead of dying on drop with a
+    /// reset. Without this call, `Client::shutdown` and the io_task
+    /// teardown path work but leave a wire-level shutdown inelegance
+    /// (RST instead of FIN) that peers notice in their logs.
+    ///
+    /// For the [`Io::Raw`] handshake path this is a no-op — the handshake
+    /// uses `FrameIO::send_frame` which writes synchronously and does not
+    /// buffer beyond the kernel socket layer, so there's nothing for us
+    /// to flush above the socket.
+    ///
+    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
+    /// [`OwnedWriteHalf`]: tokio::net::tcp::OwnedWriteHalf
+    pub(crate) async fn close(&mut self) -> Result<()> {
+        match &mut self.io {
+            Io::Raw(_) => Ok(()),
+            Io::Established(eio) => {
+                use futures::SinkExt;
+                eio.framed_tx.close().await
+            }
+            Io::Transitioning => {
+                panic!("close: ConnectionState::Io is in the Transitioning sentinel state")
+            }
+        }
+    }
+
     /// Drive a phase to completion, handling the enter / recv / send loop.
     pub(crate) async fn drive_phase<P: crate::msgr2::phase::Phase>(
         &mut self,
@@ -1857,13 +1889,32 @@ impl Connection {
     /// Close the connection and discard all pending messages
     ///
     /// This matches Ceph's `discard_out_queue()` behavior:
+    /// - Flushes the Framed writer (post-handshake) and shuts down the
+    ///   TCP write half so the peer observes a clean FIN instead of an
+    ///   RST on drop
     /// - Discards all sent messages (they won't be retransmitted)
-    /// - Closes the TCP connection
     /// - Resets the session state
+    ///
+    /// Errors from the Framed `close` are logged rather than propagated:
+    /// this method runs in shutdown paths where the caller has already
+    /// committed to dropping the connection, and a best-effort flush is
+    /// the only meaningful behaviour.
     ///
     /// Use this when permanently closing a connection (not reconnecting).
     pub async fn close(&mut self) {
         tracing::info!("Closing connection to {}", self.server_addr);
+
+        // Flush any buffered output and poll_shutdown the underlying
+        // TcpStream's write half on the Framed path. Raw-path connections
+        // (handshake-only, or connections that failed before the post-
+        // handshake transition) see this as a no-op.
+        if let Err(e) = self.state.close().await {
+            tracing::warn!(
+                "Graceful close of connection to {} reported an error (dropping anyway): {}",
+                self.server_addr,
+                e
+            );
+        }
 
         // Discard all sent messages (won't be retransmitted)
         self.state.clear_sent_messages();
@@ -1871,7 +1922,6 @@ impl Connection {
         // Reset session state
         self.state.reset_session();
 
-        // TCP stream will be dropped when ConnectionState is dropped
         tracing::debug!("Connection closed, all pending messages discarded");
     }
 
