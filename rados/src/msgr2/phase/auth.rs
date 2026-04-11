@@ -318,7 +318,8 @@ pub struct AuthServer {
     global_id: Option<u64>,
     /// 0 = initial request, 1 = challenge response
     phase: u8,
-    connection_mode: u32,
+    /// `Some` once phase 0 has negotiated a mode from the client's list.
+    connection_mode: Option<u32>,
     client_preferred_modes: Vec<u32>,
 }
 
@@ -329,7 +330,7 @@ impl AuthServer {
             entity_name: None,
             global_id: None,
             phase: 0,
-            connection_mode: ConnectionMode::Crc as u32,
+            connection_mode: None,
             client_preferred_modes: Vec::new(),
         }
     }
@@ -359,7 +360,8 @@ impl Phase for AuthServer {
 
         if self.phase == 0 {
             self.client_preferred_modes = auth_request.preferred_modes.clone();
-            self.connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
+            let connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
+            self.connection_mode = Some(connection_mode);
 
             if let Some(ref mut handler) = self.auth_handler {
                 let (entity_name, global_id, challenge) =
@@ -380,12 +382,12 @@ impl Phase for AuthServer {
             // No auth handler — accept without authentication
             tracing::warn!("Server: no auth handler, skipping authentication");
             let global_id = 1001u64;
-            let done = AuthDoneFrame::new(global_id, self.connection_mode, Bytes::new());
+            let done = AuthDoneFrame::new(global_id, connection_mode, Bytes::new());
             let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;
             return Ok(Step::Done(
                 AuthOutput {
                     global_id,
-                    connection_mode: self.connection_mode,
+                    connection_mode,
                     session_key: None,
                     connection_secret: None,
                 },
@@ -405,6 +407,9 @@ impl Phase for AuthServer {
         let global_id = self
             .global_id
             .ok_or_else(|| Error::protocol_error("Missing global_id in phase 1"))?;
+        let connection_mode = self
+            .connection_mode
+            .ok_or_else(|| Error::protocol_error("Missing connection_mode in phase 1"))?;
 
         let (session_key, connection_secret, auth_payload) =
             handler.handle_authenticate(entity_name, global_id, &auth_request.auth_payload)?;
@@ -412,19 +417,19 @@ impl Phase for AuthServer {
 
         let done_payload = handler.build_auth_done_response(
             global_id,
-            self.connection_mode as u8,
+            connection_mode as u8,
             &session_key,
             &connection_secret,
             auth_payload,
         )?;
 
-        let done = AuthDoneFrame::new(global_id, self.connection_mode, done_payload);
+        let done = AuthDoneFrame::new(global_id, connection_mode, done_payload);
         let done_frame = create_frame_from_trait(&done, Tag::AuthDone)?;
 
         Ok(Step::Done(
             AuthOutput {
                 global_id,
-                connection_mode: self.connection_mode,
+                connection_mode,
                 session_key: Some(session_key.secret.clone()),
                 connection_secret: Some(connection_secret.secret.clone()),
             },
