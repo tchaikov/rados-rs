@@ -15,6 +15,18 @@ use crate::msgr2::{
     phase::{Phase, Step},
 };
 use bytes::Bytes;
+use subtle::ConstantTimeEq;
+
+/// Constant-time equality check for HMAC tags. Unequal-length inputs
+/// return `false` immediately — length is not secret (HMAC-SHA256 is
+/// always 32 bytes, so a length mismatch is a framing bug rather than
+/// a MAC forgery attempt). The byte-level comparison must be
+/// constant-time to avoid leaking the expected tag via a timing side
+/// channel, which is why this routes through `subtle::ConstantTimeEq`
+/// instead of `Bytes::PartialEq` / `==`.
+fn verify_hmac(got: &[u8], expected: &[u8]) -> bool {
+    got.len() == expected.len() && got.ct_eq(expected).into()
+}
 
 // ── Client output ─────────────────────────────────────────────────────────────
 
@@ -81,12 +93,7 @@ impl Phase for AuthSignClient {
                         Error::protocol_error("AUTH_SIGNATURE frame missing payload")
                     })?;
 
-                    if server_sig != expected {
-                        tracing::error!(
-                            "Server AUTH_SIGNATURE mismatch: expected {} bytes, got {} bytes",
-                            expected.len(),
-                            server_sig.len()
-                        );
+                    if !verify_hmac(server_sig, expected) {
                         return Err(Error::protocol_error(
                             "Server AUTH_SIGNATURE verification failed",
                         ));
@@ -159,12 +166,7 @@ impl Phase for AuthSignServer {
                         Error::protocol_error("AUTH_SIGNATURE frame missing payload")
                     })?;
 
-                    if client_sig != expected {
-                        tracing::error!(
-                            "Client AUTH_SIGNATURE mismatch: expected {} bytes, got {} bytes",
-                            expected.len(),
-                            client_sig.len()
-                        );
+                    if !verify_hmac(client_sig, expected) {
                         return Err(Error::protocol_error(
                             "Client AUTH_SIGNATURE verification failed",
                         ));

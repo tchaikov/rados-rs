@@ -66,6 +66,7 @@ hickory-resolver = { version = "0.24", default-features = false, features = ["to
 crc32c = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
+subtle = "2.6"
 aes-gcm = "0.10"
 num_enum = { workspace = true }
 snap = "1.1"
