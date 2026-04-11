@@ -106,7 +106,6 @@ impl FrameIO {
     ///
     /// [`FramedRead`]: tokio_util::codec::FramedRead
     /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    #[allow(dead_code)]
     pub(crate) fn into_stream(self) -> TcpStream {
         self.stream
     }
@@ -555,7 +554,6 @@ impl FrameIO {
 ///
 /// [`FramedRead`]: tokio_util::codec::FramedRead
 /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-#[allow(dead_code)] // consumed in step 3
 pub(crate) struct EstablishedIo {
     pub(crate) framed_rx: tokio_util::codec::FramedRead<
         tokio::net::tcp::OwnedReadHalf,
@@ -588,7 +586,6 @@ pub(crate) struct EstablishedIo {
 /// [`FramedWrite`]: tokio_util::codec::FramedWrite
 /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
 /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
-#[allow(dead_code)] // Established / Transitioning consumed in step 3
 pub(crate) enum Io {
     /// Handshake + legacy data plane: the TcpStream lives inside a FrameIO.
     Raw(FrameIO),
@@ -682,19 +679,71 @@ impl ConnectionState {
         }
     }
 
-    /// Send a frame through the state machine and frame I/O
-    pub(crate) async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
-        // Split borrows: `self.io.as_raw_mut()` and `&mut self.state_machine`
-        // touch disjoint fields of `self`, so the borrow checker is happy
-        // to hand out both at once.
-        let frame_io = self.io.as_raw_mut()?;
-        frame_io.send_frame(frame, &mut self.state_machine).await
+    /// Send a frame through whichever data-plane the connection is currently
+    /// driving.
+    ///
+    /// During the handshake and (while the legacy path still exists) the
+    /// pre-transition phases, `self.io` is [`Io::Raw`] and this method
+    /// delegates to the same [`FrameIO::send_frame`] path that has always
+    /// driven the wire. After `transition_to_framed` has run,
+    /// `self.io` is [`Io::Established`] and the frame is handed to the
+    /// [`Msgr2Encoder`] inside [`FramedWrite`] via the [`Sink`] interface —
+    /// the encoder handles preamble, inline-encryption splicing, CRC
+    /// assembly, and optional compression exactly as [`FrameIO::send_frame`]
+    /// used to, but with zero per-frame heap allocations on the encoder's
+    /// reused [`bytes::BytesMut`].
+    ///
+    /// Takes the frame by value so the Framed path can move it directly
+    /// into the sink without cloning; the Raw path still borrows it
+    /// internally.
+    ///
+    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
+    /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
+    /// [`Sink`]: futures::Sink
+    pub(crate) async fn send_frame(&mut self, frame: Frame) -> Result<()> {
+        match &mut self.io {
+            Io::Raw(frame_io) => {
+                // Split borrows keep this valid: self.io and
+                // self.state_machine touch disjoint fields.
+                frame_io.send_frame(&frame, &mut self.state_machine).await
+            }
+            Io::Established(eio) => {
+                use futures::SinkExt;
+                eio.framed_tx.send(frame).await
+            }
+            Io::Transitioning => {
+                panic!("send_frame: ConnectionState::Io is in the Transitioning sentinel state")
+            }
+        }
     }
 
-    /// Receive a frame through the frame I/O and state machine
+    /// Receive a frame from whichever data-plane is currently active.
+    ///
+    /// Mirror of [`send_frame`](Self::send_frame): the [`Io::Raw`] arm runs
+    /// the legacy [`FrameIO::recv_frame`] path, while the [`Io::Established`]
+    /// arm pulls the next frame off the [`FramedRead`] stream. A `None` from
+    /// the stream means the peer closed cleanly — we map that to a protocol
+    /// error because the msgr2 protocol has no concept of "graceful EOF
+    /// mid-session"; any such close is unexpected.
+    ///
+    /// [`FramedRead`]: tokio_util::codec::FramedRead
     pub(crate) async fn recv_frame(&mut self) -> Result<Frame> {
-        let frame_io = self.io.as_raw_mut()?;
-        frame_io.recv_frame(&mut self.state_machine).await
+        match &mut self.io {
+            Io::Raw(frame_io) => frame_io.recv_frame(&mut self.state_machine).await,
+            Io::Established(eio) => {
+                use futures::StreamExt;
+                match eio.framed_rx.next().await {
+                    Some(Ok(frame)) => Ok(frame),
+                    Some(Err(e)) => Err(e),
+                    None => Err(Error::connection_error(
+                        "recv_frame: Framed stream ended (peer closed connection)",
+                    )),
+                }
+            }
+            Io::Transitioning => {
+                panic!("recv_frame: ConnectionState::Io is in the Transitioning sentinel state")
+            }
+        }
     }
 
     /// Record that a Keepalive2Ack was received.
@@ -743,7 +792,6 @@ impl ConnectionState {
     /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
     /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
     /// [`TcpStream::into_split`]: tokio::net::TcpStream::into_split
-    #[allow(dead_code)] // first real caller lands in step 3
     pub(crate) fn transition_to_framed(&mut self) -> Result<()> {
         use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -1379,10 +1427,18 @@ impl Connection {
                 for msg in messages_to_replay {
                     let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
                     let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-                    self.state.send_frame(&frame).await?;
+                    self.state.send_frame(frame).await?;
                 }
             }
         }
+
+        // Post-handshake transition: hand the raw TcpStream over to the
+        // Framed codec pair. Everything beyond this point — data-plane
+        // messages, keepalives, Ack frames — flows through
+        // Msgr2Decoder/Msgr2Encoder instead of FrameIO. The replay loop
+        // above deliberately runs before this call, because it still needs
+        // the raw path to interleave sends with the just-completed phase.
+        self.state.transition_to_framed()?;
 
         tracing::info!("Session established!");
         Ok(())
@@ -1641,7 +1697,7 @@ impl Connection {
         // Convert Message to MessageFrame and send (move fields from owned msg)
         let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
         let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-        self.state.send_frame(&frame).await?;
+        self.state.send_frame(frame).await?;
 
         // Record send with throttle
         if let Some(throttle) = &self.throttle {
@@ -1778,7 +1834,7 @@ impl Connection {
         );
 
         // Send the frame
-        self.state.send_frame(&frame).await
+        self.state.send_frame(frame).await
     }
 
     /// Get the last keepalive ACK timestamp

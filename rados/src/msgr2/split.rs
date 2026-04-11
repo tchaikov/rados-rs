@@ -322,7 +322,7 @@ async fn send_outbound_entry(
             return SendOutcome::Continue;
         }
     };
-    let result = connection_state.send_frame(&frame).await;
+    let result = connection_state.send_frame(frame).await;
     let success = result.is_ok();
     if success && let Some(recorded_msg) = recorded_msg {
         let mut state = shared.lock().await;
@@ -369,7 +369,7 @@ async fn io_task(
                 }
                 Ok(IoCommand::SendFrame(frame, reply)) => {
                     // Non-message frames (keepalive) bypass priority queue
-                    let result = connection_state.send_frame(&frame).await;
+                    let result = connection_state.send_frame(frame).await;
                     let failed = result.is_err();
                     let _ = reply.send(result);
                     if failed {
@@ -408,7 +408,7 @@ async fn io_task(
                         // commands that arrived, so we can prioritise correctly
                     }
                     Some(IoCommand::SendFrame(frame, reply)) => {
-                        let result = connection_state.send_frame(&frame).await;
+                        let result = connection_state.send_frame(frame).await;
                         let failed = result.is_err();
                         let _ = reply.send(result);
                         if failed {
@@ -467,7 +467,7 @@ async fn io_task(
                                         &Keepalive2AckFrame::new(ts_sec, ts_nsec),
                                         crate::msgr2::frames::Tag::Keepalive2Ack,
                                     ) {
-                                        let _ = connection_state.send_frame(&ack).await;
+                                        let _ = connection_state.send_frame(ack).await;
                                     }
                                 }
                                 tracing::trace!("I/O task: received Keepalive2, sent Keepalive2Ack");

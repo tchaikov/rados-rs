@@ -29,12 +29,6 @@
 //! nonce counters on the AES-GCM sides are already independent — they've
 //! always been separate objects on `StateMachine` — so splitting into two
 //! codec types introduces no new shared state.
-//!
-//! The `allow(dead_code)` attribute below is load-bearing: this is step 1 of
-//! a multi-step refactor, and nothing outside the unit tests calls the codec
-//! yet. It's removed in step 2 when the codec gets its first real caller.
-
-#![allow(dead_code)]
 
 use std::sync::Arc;
 

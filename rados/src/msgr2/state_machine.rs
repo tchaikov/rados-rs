@@ -353,11 +353,12 @@ impl StateMachine {
         ));
     }
 
-    // The three take_* methods below support the post-handshake Framed
-    // codec transition. They're wired into ConnectionState::transition_to_framed
-    // in step 2, and will gain their first real caller in step 3 when
-    // run_io_loop starts using the Framed data plane. The `allow(dead_code)`
-    // attributes keep the intermediate commits compiling under -D warnings.
+    // The three take_* methods below hand ownership of the post-handshake
+    // encryption and compression state off to the Framed codec pair inside
+    // `ConnectionState::transition_to_framed`. The state machine itself has
+    // no remaining use for these fields after the transition, so "take"
+    // (not "clone") is the right verb — the data plane flows through
+    // Msgr2Decoder / Msgr2Encoder from that point on.
 
     /// Take ownership of the frame decryptor for the post-handshake codec.
     ///
@@ -368,7 +369,6 @@ impl StateMachine {
     ///
     /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
     /// [`FramedRead`]: tokio_util::codec::FramedRead
-    #[allow(dead_code)]
     pub fn take_frame_decryptor(
         &mut self,
     ) -> Option<Box<dyn crate::msgr2::crypto::FrameDecryptor>> {
@@ -383,7 +383,6 @@ impl StateMachine {
     ///
     /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
     /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    #[allow(dead_code)]
     pub fn take_frame_encryptor(
         &mut self,
     ) -> Option<Box<dyn crate::msgr2::crypto::FrameEncryptor>> {
@@ -395,7 +394,6 @@ impl StateMachine {
     /// the same instance. Returns `None` if no compression was negotiated.
     ///
     /// [`Arc`]: std::sync::Arc
-    #[allow(dead_code)]
     pub fn take_compression_ctx_arc(
         &mut self,
     ) -> Option<std::sync::Arc<crate::msgr2::compression::CompressionContext>> {
