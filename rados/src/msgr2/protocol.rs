@@ -1288,8 +1288,13 @@ impl Connection {
 
         tracing::info!("Accepting msgr2 session...");
 
-        // Phase 1: HELLO exchange (server receives, then sends)
-        self.state.drive_phase(HelloServer).await?;
+        // Phase 1: HELLO exchange (server receives, then sends).
+        // This server role is test scaffolding; default to MON so the
+        // reply advertises a plausible daemon type. Real daemons would
+        // plumb their own EntityType through here.
+        self.state
+            .drive_phase(HelloServer::new(crate::EntityType::MON))
+            .await?;
 
         // Phase 2: Authentication
         let auth_handler = self.state.state_machine.take_server_auth_handler();

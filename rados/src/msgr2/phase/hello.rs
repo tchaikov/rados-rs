@@ -53,8 +53,18 @@ impl Phase for HelloClient {
 
 /// Server-side HELLO exchange.
 ///
-/// Waits for the client's `HELLO`, then sends the server's own `HELLO` reply.
-pub struct HelloServer;
+/// Waits for the client's `HELLO`, then sends the server's own `HELLO`
+/// reply. Each daemon (MON/OSD/MDS/MGR) must advertise its own type in
+/// the reply, so the caller supplies it via [`HelloServer::new`].
+pub struct HelloServer {
+    entity_type: crate::EntityType,
+}
+
+impl HelloServer {
+    pub fn new(entity_type: crate::EntityType) -> Self {
+        Self { entity_type }
+    }
+}
 
 impl Phase for HelloServer {
     type Output = ();
@@ -69,10 +79,8 @@ impl Phase for HelloServer {
                 let entity_type = u8::decode(&mut payload, 0)?;
                 tracing::debug!("Received client HELLO: entity_type={entity_type}");
 
-                let response = HelloFrame::new(
-                    crate::EntityType::CLIENT.bits() as u8,
-                    crate::EntityAddr::default(),
-                );
+                let response =
+                    HelloFrame::new(self.entity_type.bits() as u8, crate::EntityAddr::default());
                 let response_frame = create_frame_from_trait(&response, Tag::Hello)?;
                 Ok(Step::Done((), Some(response_frame)))
             }
