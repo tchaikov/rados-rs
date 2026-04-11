@@ -567,10 +567,9 @@ pub(crate) struct EstablishedIo {
 
 /// Current I/O surface of a msgr2 [`Connection`].
 ///
-/// During the handshake (banner, auth, session ident) and the legacy
-/// data-plane path the connection owns a [`FrameIO`] directly wrapped in
-/// [`Io::Raw`]. After `ConnectionState::transition_to_framed` runs —
-/// which step 2 makes possible but does not yet call — the stream is
+/// During the handshake (banner, auth, session ident) the connection owns a
+/// [`FrameIO`] directly wrapped in [`Io::Raw`]. After
+/// `ConnectionState::transition_to_framed` runs the stream is
 /// unwrapped, split into owned halves, and handed to a
 /// [`FramedRead`] + [`FramedWrite`] pair driven by [`Msgr2Decoder`] and
 /// [`Msgr2Encoder`] respectively. That is the [`Io::Established`] state,
@@ -682,8 +681,7 @@ impl ConnectionState {
     /// Send a frame through whichever data-plane the connection is currently
     /// driving.
     ///
-    /// During the handshake and (while the legacy path still exists) the
-    /// pre-transition phases, `self.io` is [`Io::Raw`] and this method
+    /// During the handshake `self.io` is [`Io::Raw`] and this method
     /// delegates to the same [`FrameIO::send_frame`] path that has always
     /// driven the wire. After `transition_to_framed` has run,
     /// `self.io` is [`Io::Established`] and the frame is handed to the
@@ -782,10 +780,6 @@ impl ConnectionState {
     /// If the prior state was already `Established` or `Transitioning`, it
     /// is put back unchanged and an error is returned — calling this method
     /// twice is a programmer bug but doesn't corrupt state.
-    ///
-    /// Step 2 adds this method but does not call it from anywhere;
-    /// step 3 wires it into the post-handshake state machine transition
-    /// and introduces the first real caller.
     ///
     /// [`FramedRead`]: tokio_util::codec::FramedRead
     /// [`FramedWrite`]: tokio_util::codec::FramedWrite

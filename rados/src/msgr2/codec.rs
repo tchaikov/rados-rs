@@ -221,7 +221,6 @@ impl Msgr2Decoder {
             return Ok(Frame { preamble, segments });
         }
 
-        let has_encryption = self.has_encryption();
         let total_payload_size = self.total_payload_size(&preamble);
 
         // Build the combined payload view used for segment extraction.
@@ -231,24 +230,19 @@ impl Msgr2Decoder {
         // - SECURE / inline-only (short frame): slice inline_data down to the
         //   actual payload size.
         // - CRC: the remaining_payload IS the payload (inline_data is empty).
-        let full_payload = if has_encryption {
-            if !remaining_payload.is_empty() {
-                let decryptor = self
-                    .decryptor
-                    .as_mut()
-                    .expect("has_encryption() true implies decryptor is Some");
+        let full_payload = match self.decryptor.as_mut() {
+            Some(decryptor) if !remaining_payload.is_empty() => {
                 let decrypted_remaining = decryptor.decrypt(&remaining_payload)?;
                 let mut combined =
                     BytesMut::with_capacity(inline_data.len() + decrypted_remaining.len());
                 combined.extend_from_slice(&inline_data);
                 combined.extend_from_slice(&decrypted_remaining);
                 combined.freeze()
-            } else {
-                inline_data.slice(..total_payload_size.min(inline_data.len()))
             }
-        } else {
-            remaining_payload
+            Some(_) => inline_data.slice(..total_payload_size.min(inline_data.len())),
+            None => remaining_payload,
         };
+        let has_encryption = self.decryptor.is_some();
 
         // Walk the preamble's segment descriptors, slicing each one out of
         // the combined payload. Mirrors the layout that `FrameIO::send_frame`
@@ -527,7 +521,7 @@ impl Encoder<Frame> for Msgr2Encoder {
             }
         }
 
-        if self.encryptor.is_none() {
+        let Some(encryptor) = self.encryptor.as_mut() else {
             // CRC mode: let the existing scatter-gather assembler produce
             // the byte layout, then append each chunk to `dst`. This matches
             // `FrameIO::send_frame`'s unencrypted path.
@@ -538,7 +532,7 @@ impl Encoder<Frame> for Msgr2Encoder {
                 dst.extend_from_slice(chunk);
             }
             return Ok(());
-        }
+        };
 
         // SECURE mode.
         let num_segments = normalized_num_segments(&frame);
@@ -558,10 +552,6 @@ impl Encoder<Frame> for Msgr2Encoder {
             preamble_block.extend_from_slice(&ZEROS[..INLINE_SIZE - inline_size]);
         }
 
-        let encryptor = self
-            .encryptor
-            .as_mut()
-            .expect("branch above ensures encryptor is Some");
         let encrypted_preamble = encryptor.encrypt(&preamble_block)?;
         dst.reserve(encrypted_preamble.len() + remaining_size + GCM_TAG_SIZE);
         dst.extend_from_slice(&encrypted_preamble);
