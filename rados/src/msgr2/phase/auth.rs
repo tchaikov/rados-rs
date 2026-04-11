@@ -23,11 +23,10 @@ use crate::msgr2::{
 };
 use bytes::Bytes;
 
-/// Render a Ceph result code (negative errno, kernel convention) as a
-/// human-readable string by delegating to `std::io::Error`, which calls
-/// libc `strerror_r` under the hood. Displays as e.g.
+/// Wrap a Ceph result code (negative errno, kernel convention) as an
+/// `io::Error` so its `Display` yields the libc `strerror_r` text, e.g.
 /// `"Permission denied (os error 13)"`.
-fn strerror(result: i32) -> std::io::Error {
+fn os_error(result: i32) -> std::io::Error {
     std::io::Error::from_raw_os_error(result.unsigned_abs() as i32)
 }
 
@@ -171,7 +170,7 @@ impl AuthClient {
             server_rejected,
             rejected_method,
             server_result,
-            strerror(server_result),
+            os_error(server_result),
             allowed_methods,
             allowed_modes,
         );
@@ -215,7 +214,7 @@ impl AuthClient {
                     tried,
                     server_rejected,
                     server_result,
-                    strerror(server_result),
+                    os_error(server_result),
                 ))
             })?;
 
