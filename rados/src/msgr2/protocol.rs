@@ -1289,11 +1289,13 @@ impl Connection {
         tracing::info!("Accepting msgr2 session...");
 
         // Phase 1: HELLO exchange (server receives, then sends).
+        // peer_addr = client's address as seen by us → enables address
+        // learning on the client side (NAT traversal).
         // This server role is test scaffolding; default to MON so the
-        // reply advertises a plausible daemon type. Real daemons would
-        // plumb their own EntityType through here.
+        // reply advertises a plausible daemon type.
+        let client_addr = self.state.state_machine.client_addr_clone();
         self.state
-            .drive_phase(HelloServer::new(crate::EntityType::MON))
+            .drive_phase(HelloServer::new(crate::EntityType::MON, client_addr))
             .await?;
 
         // Phase 2: Authentication
@@ -1383,8 +1385,13 @@ impl Connection {
         let entity_name = self.state.state_machine.config_entity_name().clone();
         let client_cookie = self.state.session.client_cookie;
 
-        // Phase 1: HELLO exchange
-        self.state.drive_phase(HelloClient).await?;
+        // Phase 1: HELLO exchange.
+        // peer_addr = server's address as we dialed it → enables address
+        // learning on the server side (NAT traversal).
+        let server_addr = self.state.state_machine.server_addr_clone();
+        self.state
+            .drive_phase(HelloClient::new(server_addr))
+            .await?;
 
         // Phase 2: Authentication
         let initial_global_id = self.state.state_machine.global_id();
