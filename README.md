@@ -13,11 +13,11 @@ A native Rust implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ## Workspace layout
 
-The workspace now keeps only the main public crate and the proc-macro support crate as published packages:
+The workspace contains two published crates plus a root examples package:
 
 | Package | Description |
 |---|---|
-| `rados` | Main public library crate. Contains the former `denc`, `auth`, `cephconfig`, `crush`, `msgr2`, `monclient`, and `osdclient` crates as internal modules, plus the internal `dencoder` binary. |
+| `rados` | Main library crate (`denc`, `auth`, `cephconfig`, `crush`, `msgr2`, `monclient`, `osdclient` modules, plus the `dencoder` binary). |
 | `rados-denc-macros` | Proc-macro crate providing DENC derive macros. |
 | `examples` | Non-published root examples package, including the `rados` CLI example. |
 
@@ -84,18 +84,11 @@ Integration tests require a running Ceph cluster. Point `CEPH_CONF` at your clus
 ```bash
 export CEPH_CONF=/path/to/ceph.conf
 
-cargo test -p rados --test msgr2_connection_tests -- --ignored --nocapture
-cargo test -p rados --test monclient_command_operations -- --ignored --test-threads=1 --nocapture
-cargo test -p rados --test osdclient_integration_test -- --ignored --nocapture
+# Run all integration tests
+cargo test -p rados --tests -- --ignored --nocapture
+
+# Or a single suite
 cargo test -p rados --test osdclient_object_io_test -- --ignored --nocapture
-cargo test -p rados --test osdclient_pool_operations -- --ignored --nocapture
-cargo test -p rados --test osdclient_rados_operations -- --ignored --nocapture
-```
-
-For the dencoder corpus comparison test:
-
-```bash
-cargo test -p rados --test dencoder_corpus_comparison_test -- --ignored --nocapture
 ```
 
 A Docker-based single-node Ceph cluster for local development is available under `docker/`:
