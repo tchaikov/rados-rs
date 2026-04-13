@@ -281,31 +281,43 @@ impl FrameIO {
         Ok(())
     }
 
-    /// Receive a frame with optional decryption and decompression
+    /// Receive a frame, decrypting and decompressing as needed.
     ///
-    /// Processing order: decryption → decompression
-    /// - If encryption is enabled, decrypt the frame first
-    /// - If FRAME_EARLY_DATA_COMPRESSED flag is set, decompress the frame
+    /// The work splits cleanly between the two modes:
     ///
-    /// If encryption is enabled, this handles msgr2.1 inline optimization:
-    /// - Reads 96 bytes (preamble + inline + GCM tag) and decrypts to 80 bytes
-    /// - Reads remaining encrypted payload if needed
+    /// 1. Read the preamble block (32 bytes plaintext, 96 bytes with the
+    ///    msgr2.1 inline-encryption optimisation: preamble + 48 inline
+    ///    payload bytes + GCM tag).
+    /// 2. In SECURE mode decrypt that block to recover the plaintext
+    ///    preamble and the 48-byte `inline_data` slice.
+    /// 3. Parse the [`Preamble`] and decide whether the frame has a
+    ///    payload at all — empty frames short-circuit here.
+    /// 4. Hand off to [`recv_frame_secure`] or [`recv_frame_crc`], which
+    ///    each own the mode-specific payload read + segment extraction
+    ///    in a single linear flow.
+    /// 5. If the frame advertised `FRAME_EARLY_DATA_COMPRESSED`,
+    ///    decompress per-segment before returning.
+    ///
+    /// [`recv_frame_secure`]: Self::recv_frame_secure
+    /// [`recv_frame_crc`]: Self::recv_frame_crc
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
         let has_encryption = state_machine.has_encryption();
 
         let preamble_block_size = if has_encryption {
-            crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE + Self::GCM_TAG_SIZE // 96 bytes
+            crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE + Self::GCM_TAG_SIZE // 96
         } else {
-            crate::msgr2::frames::PREAMBLE_SIZE // 32 bytes
+            crate::msgr2::frames::PREAMBLE_SIZE // 32
         };
 
         // Stack buffer avoids a heap allocation per frame receive.
         let mut preamble_stack = [0u8; 96]; // max(32 plaintext, 96 encrypted)
         let preamble_block_buf = &mut preamble_stack[..preamble_block_size];
         self.stream.read_exact(preamble_block_buf).await?;
-
         state_machine.record_received(preamble_block_buf);
 
+        // SECURE mode: the 96-byte block decrypts to a 80-byte buffer
+        // holding [32 preamble | 48 inline payload]. CRC mode: the 32
+        // plaintext bytes are the preamble and there is no inline data.
         let preamble_and_inline = if has_encryption {
             let decrypted = state_machine.decrypt_frame_data(preamble_block_buf)?;
             tracing::debug!(
@@ -317,18 +329,8 @@ impl FrameIO {
         } else {
             Bytes::copy_from_slice(preamble_block_buf)
         };
-
-        let preamble_bytes = preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE);
-        let inline_data = if has_encryption {
-            preamble_and_inline.slice(
-                crate::msgr2::frames::PREAMBLE_SIZE
-                    ..crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE,
-            )
-        } else {
-            Bytes::new()
-        };
-
-        let preamble = Preamble::decode(preamble_bytes)?;
+        let preamble =
+            Preamble::decode(preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE))?;
 
         tracing::debug!(
             "Received preamble: tag={:?}, num_segments={}, segments={:?}",
@@ -342,40 +344,7 @@ impl FrameIO {
             .map(|s| s.logical_len as usize)
             .sum();
 
-        let total_payload_size = if has_encryption && total_segment_size > 0 {
-            if preamble.num_segments == 1 {
-                // Secure mode single segment: align to 16-byte boundary
-                align_to_crypto_block(total_segment_size)
-            } else {
-                // Secure mode multi-segment: pad each segment + add epilogue.
-                // `align_to_crypto_block(0) == 0`, so empty segments contribute
-                // nothing and don't need a special case.
-                let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
-                    .iter()
-                    .map(|s| align_to_crypto_block(s.logical_len as usize))
-                    .sum();
-                padded_size + CRYPTO_BLOCK_SIZE // epilogue
-            }
-        } else {
-            // Plaintext (CRC mode)
-            if total_segment_size == 0 {
-                0
-            } else if preamble.num_segments == 1 {
-                // Single segment (rev1): segment + 4-byte CRC inline, no epilogue
-                total_segment_size + crate::msgr2::frames::FRAME_CRC_SIZE
-            } else {
-                // Multi-segment: 17 extra bytes total
-                // Rev1: CRC(4) after seg0 + epilogue_rev1(1 + 3×4 = 13) = 17
-                // Rev0: epilogue_rev0(1 + 4×4 = 17) = 17
-                total_segment_size
-                    + crate::msgr2::frames::FRAME_CRC_SIZE
-                    + 1
-                    + (crate::msgr2::frames::MAX_NUM_SEGMENTS - 1)
-                        * crate::msgr2::frames::FRAME_CRC_SIZE
-            }
-        };
-
-        if total_payload_size == 0 {
+        if total_segment_size == 0 {
             tracing::debug!("Empty frame, returning immediately");
             return Ok(Frame {
                 preamble,
@@ -383,132 +352,20 @@ impl FrameIO {
             });
         }
 
-        let remaining_needed = if has_encryption {
-            if total_payload_size > Self::INLINE_SIZE {
-                let remaining_plaintext = total_payload_size - Self::INLINE_SIZE;
-                remaining_plaintext + Self::GCM_TAG_SIZE
-            } else {
-                0
-            }
+        let mut frame = if has_encryption {
+            // Slice out the 48-byte inline payload only on the path that
+            // will consume it. CRC mode's helper never touches inline_data.
+            let inline_data = preamble_and_inline.slice(
+                crate::msgr2::frames::PREAMBLE_SIZE
+                    ..crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE,
+            );
+            self.recv_frame_secure(preamble, inline_data, total_segment_size, state_machine)
+                .await?
         } else {
-            total_payload_size
+            self.recv_frame_crc(preamble, total_segment_size, state_machine)
+                .await?
         };
 
-        let full_payload = if remaining_needed > 0 {
-            let mut remaining_buf = vec![0u8; remaining_needed];
-            self.stream.read_exact(&mut remaining_buf).await?;
-
-            state_machine.record_received(&remaining_buf);
-
-            if has_encryption {
-                let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
-                let mut combined =
-                    BytesMut::with_capacity(Self::INLINE_SIZE + decrypted_remaining.len());
-                combined.extend_from_slice(&inline_data);
-                combined.extend_from_slice(&decrypted_remaining);
-                combined.freeze()
-            } else {
-                Bytes::from(remaining_buf)
-            }
-        } else if has_encryption {
-            inline_data.slice(..total_payload_size)
-        } else {
-            Bytes::new()
-        };
-
-        let is_rev1 = state_machine.is_rev1();
-        let is_multi = preamble.num_segments > 1;
-        let mut segments = Vec::with_capacity(preamble.num_segments as usize);
-        let mut offset = 0;
-        for i in 0..preamble.num_segments as usize {
-            let segment_len = preamble.segments[i].logical_len as usize;
-            if segment_len > 0 {
-                let segment_data = full_payload.slice(offset..offset + segment_len);
-                segments.push(segment_data);
-
-                if has_encryption {
-                    let aligned_len = align_to_crypto_block(segment_len);
-                    offset += aligned_len;
-                } else {
-                    offset += segment_len;
-                    // Plaintext rev1: 4-byte CRC follows segment 0 (both single and multi-segment)
-                    if is_rev1 && i == 0 {
-                        if let Some(crc_bytes) = full_payload
-                            .get(offset..offset + crate::msgr2::frames::FRAME_CRC_SIZE)
-                            .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                        {
-                            let received_crc = u32::from_le_bytes(crc_bytes);
-                            let expected_crc =
-                                !crc32c::crc32c(segments.last().ok_or_else(|| {
-                                    Error::protocol_error("CRC check: empty segments list")
-                                })?);
-                            if received_crc != expected_crc {
-                                return Err(Error::Protocol(format!(
-                                    "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                                    expected_crc, received_crc
-                                )));
-                            }
-                        }
-                        offset += crate::msgr2::frames::FRAME_CRC_SIZE;
-                    }
-                }
-            } else {
-                // Empty segment - still add it to maintain segment indices
-                segments.push(Bytes::new());
-            }
-        }
-
-        // Verify epilogue for plaintext multi-segment frames
-        if !has_encryption && is_multi && total_segment_size > 0 {
-            // Epilogue: first byte is late_status (rev1) or late_flags (rev0)
-            if offset < full_payload.len() {
-                let late_status = full_payload[offset];
-                if (late_status & crate::msgr2::frames::FRAME_LATE_STATUS_ABORTED_MASK)
-                    == crate::msgr2::frames::FRAME_LATE_STATUS_ABORTED
-                {
-                    return Err(crate::msgr2::Msgr2Error::Protocol(
-                        "Frame transmission aborted by sender".to_string(),
-                    ));
-                }
-                offset += 1;
-
-                // Verify epilogue segment CRCs.
-                // Rev1: 3 CRCs for segments 1-3 (segment 0 was verified inline above).
-                //   Stored as !crc32c(segment_data).
-                // Rev0: 4 CRCs for segments 0-3.
-                //   Stored as crc32c(segment_data).
-                let (crc_start_seg, num_epilogue_crcs, invert) = if is_rev1 {
-                    (1usize, crate::msgr2::frames::MAX_NUM_SEGMENTS - 1, true)
-                } else {
-                    (0usize, crate::msgr2::frames::MAX_NUM_SEGMENTS, false)
-                };
-                for seg_idx in crc_start_seg..crc_start_seg + num_epilogue_crcs {
-                    let Some(crc_bytes) = full_payload
-                        .get(offset..offset + crate::msgr2::frames::FRAME_CRC_SIZE)
-                        .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                    else {
-                        break;
-                    };
-                    let received_crc = u32::from_le_bytes(crc_bytes);
-                    offset += crate::msgr2::frames::FRAME_CRC_SIZE;
-
-                    if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
-                        let computed = crc32c::crc32c(&segments[seg_idx]);
-                        let expected_crc = if invert { !computed } else { computed };
-                        if received_crc != expected_crc {
-                            return Err(Error::Protocol(format!(
-                                "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                                seg_idx, expected_crc, received_crc
-                            )));
-                        }
-                    }
-                }
-            }
-        }
-
-        let mut frame = Frame { preamble, segments };
-
-        // Apply decompression if frame is compressed
         if frame.preamble.is_compressed() {
             if let Some(ctx) = state_machine.compression_ctx() {
                 frame = frame.decompress(ctx).map_err(|e| {
@@ -527,6 +384,205 @@ impl FrameIO {
         }
 
         Ok(frame)
+    }
+
+    /// Payload half of SECURE-mode frame receive.
+    ///
+    /// The caller ([`recv_frame`](Self::recv_frame)) has already read and
+    /// decrypted the preamble block and handed us the 48-byte `inline_data`
+    /// slice that arrived alongside the preamble. Here we:
+    ///
+    /// 1. Compute how many encrypted bytes are still on the wire
+    ///    (each segment is padded to a 16-byte crypto block, and
+    ///    multi-segment frames carry a final block-sized epilogue).
+    /// 2. Read + decrypt them (if any), concatenating with `inline_data`
+    ///    to form the full plaintext payload.
+    /// 3. Walk the preamble's segment descriptors, slicing each segment
+    ///    out of the plaintext with crypto-block alignment.
+    ///
+    /// `record_received` is called on the raw ciphertext of the remaining
+    /// buffer to keep the AUTH_SIGNATURE running hash in sync with the
+    /// wire bytes — same obligation as the preamble-block read in
+    /// [`recv_frame`](Self::recv_frame).
+    async fn recv_frame_secure(
+        &mut self,
+        preamble: Preamble,
+        inline_data: Bytes,
+        total_segment_size: usize,
+        state_machine: &mut StateMachine,
+    ) -> Result<Frame> {
+        // Per-segment 16-byte alignment, plus an extra crypto-block-sized
+        // epilogue for multi-segment frames. `align_to_crypto_block(0) == 0`
+        // so empty segments contribute nothing and need no special case.
+        let total_payload_size = if preamble.num_segments == 1 {
+            align_to_crypto_block(total_segment_size)
+        } else {
+            let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
+                .iter()
+                .map(|s| align_to_crypto_block(s.logical_len as usize))
+                .sum();
+            padded_size + CRYPTO_BLOCK_SIZE
+        };
+
+        // INLINE_SIZE bytes of plaintext already arrived alongside the
+        // preamble. Pull off anything beyond that (plus its GCM tag),
+        // decrypt, and stitch the two halves together.
+        let full_payload = if total_payload_size > Self::INLINE_SIZE {
+            let remaining_plaintext = total_payload_size - Self::INLINE_SIZE;
+            let remaining_needed = remaining_plaintext + Self::GCM_TAG_SIZE;
+            let mut remaining_buf = vec![0u8; remaining_needed];
+            self.stream.read_exact(&mut remaining_buf).await?;
+            state_machine.record_received(&remaining_buf);
+
+            let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
+            let mut combined =
+                BytesMut::with_capacity(Self::INLINE_SIZE + decrypted_remaining.len());
+            combined.extend_from_slice(&inline_data);
+            combined.extend_from_slice(&decrypted_remaining);
+            combined.freeze()
+        } else {
+            // Whole payload fit inside the 48-byte inline region.
+            inline_data.slice(..total_payload_size)
+        };
+
+        // Walk segment descriptors with crypto-block alignment. Empty
+        // segments still occupy an index position so `segments[i]` maps
+        // to `preamble.segments[i]`.
+        let mut segments = Vec::with_capacity(preamble.num_segments as usize);
+        let mut offset = 0;
+        for i in 0..preamble.num_segments as usize {
+            let segment_len = preamble.segments[i].logical_len as usize;
+            if segment_len == 0 {
+                segments.push(Bytes::new());
+                continue;
+            }
+            segments.push(full_payload.slice(offset..offset + segment_len));
+            offset += align_to_crypto_block(segment_len);
+        }
+
+        Ok(Frame { preamble, segments })
+    }
+
+    /// Payload half of CRC-mode frame receive.
+    ///
+    /// The caller ([`recv_frame`](Self::recv_frame)) has already read and
+    /// decoded the preamble. Here we pull the full plaintext payload off
+    /// the wire in one `read_exact`, then verify CRCs while walking the
+    /// segment descriptors:
+    ///
+    /// - Rev1 single- and multi-segment: a 4-byte inverted CRC32C follows
+    ///   segment 0 inline (right after its bytes). Verified on the fly.
+    /// - Multi-segment (rev0 or rev1): a trailing epilogue carries a
+    ///   `late_status` byte plus per-segment CRCs (4 for rev0 covering
+    ///   segments 0-3; 3 for rev1 covering segments 1-3 since segment 0
+    ///   was verified inline). Aborted frames are rejected here.
+    ///
+    /// `record_received` is called on the payload buffer to keep the
+    /// AUTH_SIGNATURE running hash in sync with the wire bytes.
+    async fn recv_frame_crc(
+        &mut self,
+        preamble: Preamble,
+        total_segment_size: usize,
+        state_machine: &mut StateMachine,
+    ) -> Result<Frame> {
+        let is_multi = preamble.num_segments > 1;
+        // Single-segment: segments + 4-byte inline CRC after seg 0.
+        // Multi-segment : segments + 4-byte inline CRC after seg 0
+        //               + 1-byte late_status
+        //               + (MAX_NUM_SEGMENTS - 1) * 4-byte epilogue CRCs.
+        let total_payload_size = if !is_multi {
+            total_segment_size + crate::msgr2::frames::FRAME_CRC_SIZE
+        } else {
+            total_segment_size
+                + crate::msgr2::frames::FRAME_CRC_SIZE
+                + 1
+                + (crate::msgr2::frames::MAX_NUM_SEGMENTS - 1)
+                    * crate::msgr2::frames::FRAME_CRC_SIZE
+        };
+
+        let mut payload_buf = vec![0u8; total_payload_size];
+        self.stream.read_exact(&mut payload_buf).await?;
+        state_machine.record_received(&payload_buf);
+        let full_payload = Bytes::from(payload_buf);
+
+        let is_rev1 = state_machine.is_rev1();
+        let mut segments = Vec::with_capacity(preamble.num_segments as usize);
+        let mut offset = 0;
+        for i in 0..preamble.num_segments as usize {
+            let segment_len = preamble.segments[i].logical_len as usize;
+            if segment_len == 0 {
+                segments.push(Bytes::new());
+                continue;
+            }
+            segments.push(full_payload.slice(offset..offset + segment_len));
+            offset += segment_len;
+
+            // Rev1: 4-byte inverted CRC32C follows segment 0 inline.
+            if is_rev1 && i == 0 {
+                if let Some(crc_bytes) = full_payload
+                    .get(offset..offset + crate::msgr2::frames::FRAME_CRC_SIZE)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                {
+                    let received_crc = u32::from_le_bytes(crc_bytes);
+                    let expected_crc =
+                        !crc32c::crc32c(segments.last().ok_or_else(|| {
+                            Error::protocol_error("CRC check: empty segments list")
+                        })?);
+                    if received_crc != expected_crc {
+                        return Err(Error::Protocol(format!(
+                            "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                            expected_crc, received_crc
+                        )));
+                    }
+                }
+                offset += crate::msgr2::frames::FRAME_CRC_SIZE;
+            }
+        }
+
+        // Multi-segment epilogue verification.
+        if is_multi && offset < full_payload.len() {
+            let late_status = full_payload[offset];
+            if (late_status & crate::msgr2::frames::FRAME_LATE_STATUS_ABORTED_MASK)
+                == crate::msgr2::frames::FRAME_LATE_STATUS_ABORTED
+            {
+                return Err(Error::Protocol(
+                    "Frame transmission aborted by sender".to_string(),
+                ));
+            }
+            offset += 1;
+
+            // Rev1: 3 CRCs for segments 1-3 (seg 0 verified inline above),
+            //       stored as !crc32c(segment).
+            // Rev0: 4 CRCs for segments 0-3, stored as plain crc32c(segment).
+            let (crc_start_seg, num_epilogue_crcs, invert) = if is_rev1 {
+                (1usize, crate::msgr2::frames::MAX_NUM_SEGMENTS - 1, true)
+            } else {
+                (0usize, crate::msgr2::frames::MAX_NUM_SEGMENTS, false)
+            };
+            for seg_idx in crc_start_seg..crc_start_seg + num_epilogue_crcs {
+                let Some(crc_bytes) = full_payload
+                    .get(offset..offset + crate::msgr2::frames::FRAME_CRC_SIZE)
+                    .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                else {
+                    break;
+                };
+                let received_crc = u32::from_le_bytes(crc_bytes);
+                offset += crate::msgr2::frames::FRAME_CRC_SIZE;
+
+                if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
+                    let computed = crc32c::crc32c(&segments[seg_idx]);
+                    let expected_crc = if invert { !computed } else { computed };
+                    if received_crc != expected_crc {
+                        return Err(Error::Protocol(format!(
+                            "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
+                            seg_idx, expected_crc, received_crc
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(Frame { preamble, segments })
     }
 }
 
