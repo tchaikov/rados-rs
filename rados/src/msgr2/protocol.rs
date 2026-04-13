@@ -98,16 +98,10 @@ impl FrameIO {
         Self { stream }
     }
 
-    /// Consume this `FrameIO` and return its underlying [`TcpStream`].
-    ///
-    /// Used by `ConnectionState::transition_to_framed` to unwrap the stream
-    /// so it can be split into owned halves and handed to the post-handshake
-    /// [`FramedRead`] / [`FramedWrite`] pair.
-    ///
-    /// [`FramedRead`]: tokio_util::codec::FramedRead
-    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    pub(crate) fn into_stream(self) -> TcpStream {
-        self.stream
+    /// Shut down the writer half of the underlying TCP stream to
+    /// trigger a clean FIN instead of a RST on drop.
+    pub(crate) async fn shutdown(&mut self) -> Result<()> {
+        self.stream.shutdown().await.map_err(Error::from)
     }
 
     fn normalized_num_segments(frame: &Frame) -> usize {
@@ -178,19 +172,17 @@ impl FrameIO {
         payload_bytes
     }
 
-    /// Write all chunks using vectored I/O (scatter-gather).
+    /// Send a frame with optional compression and encryption.
     ///
-    /// Uses `write_vectored` to send multiple non-contiguous buffers in a
-    /// single syscall where possible, avoiding memcpy of large segments.
-    /// Send a frame with optional compression and encryption
+    /// Processing order: compression → encryption.
+    /// - If compression is enabled, compress frame segments first.
+    /// - If encryption is enabled, encrypt the (possibly compressed) frame.
     ///
-    /// Processing order: compression → encryption
-    /// - If compression is enabled, compress frame segments first
-    /// - If encryption is enabled, encrypt the (possibly compressed) frame
-    ///
-    /// If encryption is enabled in the state machine, this implements msgr2.1 inline optimization:
-    /// - First 48 bytes of payload are encrypted together with preamble (32+48=80 → 96 bytes with GCM tag)
-    /// - Remaining payload bytes are encrypted separately (N bytes → N+16 bytes with GCM tag)
+    /// If encryption is enabled in the state machine, this implements the
+    /// msgr2.1 inline optimization:
+    /// - First 48 bytes of payload are encrypted together with the preamble
+    ///   (32+48=80 → 96 bytes with GCM tag).
+    /// - Remaining payload bytes are encrypted separately (N → N+16 bytes).
     pub async fn send_frame(
         &mut self,
         frame: &Frame,
@@ -236,57 +228,53 @@ impl FrameIO {
             return Ok(());
         }
 
-        let final_bytes = {
-            let num_segments = Self::normalized_num_segments(&frame_to_send);
-            let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments)?;
-            let payload_bytes = Self::build_secure_payload(&frame_to_send, num_segments);
+        let num_segments = Self::normalized_num_segments(&frame_to_send);
+        let preamble_bytes = Self::build_secure_preamble(&frame_to_send, num_segments)?;
+        let payload_bytes = Self::build_secure_payload(&frame_to_send, num_segments);
 
-            tracing::debug!(
-                "Sending frame: tag={:?}, {} segments, secure payload {} bytes, compressed={}",
-                frame_to_send.preamble.tag,
-                num_segments,
-                payload_bytes.len(),
-                is_compressed,
-            );
+        tracing::debug!(
+            "Sending frame: tag={:?}, {} segments, secure payload {} bytes, compressed={}",
+            frame_to_send.preamble.tag,
+            num_segments,
+            payload_bytes.len(),
+            is_compressed,
+        );
 
-            let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
-            let remaining_size = payload_bytes.len().saturating_sub(Self::INLINE_SIZE);
+        let inline_size = payload_bytes.len().min(Self::INLINE_SIZE);
+        let remaining_size = payload_bytes.len().saturating_sub(Self::INLINE_SIZE);
 
-            let mut preamble_block =
-                BytesMut::with_capacity(crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE);
-            preamble_block.extend_from_slice(&preamble_bytes);
-            preamble_block.extend_from_slice(&payload_bytes[..inline_size]);
+        let mut preamble_block =
+            BytesMut::with_capacity(crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE);
+        preamble_block.extend_from_slice(&preamble_bytes);
+        preamble_block.extend_from_slice(&payload_bytes[..inline_size]);
 
-            if inline_size < Self::INLINE_SIZE {
-                preamble_block.extend_from_slice(&ZEROS[..Self::INLINE_SIZE - inline_size]);
-            }
+        if inline_size < Self::INLINE_SIZE {
+            preamble_block.extend_from_slice(&ZEROS[..Self::INLINE_SIZE - inline_size]);
+        }
 
-            let encrypted_preamble = state_machine.encrypt_frame_data(&preamble_block)?;
+        let encrypted_preamble = state_machine.encrypt_frame_data(&preamble_block)?;
 
-            let mut result =
-                BytesMut::with_capacity(encrypted_preamble.len() + remaining_size + 16);
-            result.extend_from_slice(&encrypted_preamble);
+        let mut result = BytesMut::with_capacity(encrypted_preamble.len() + remaining_size + 16);
+        result.extend_from_slice(&encrypted_preamble);
 
+        if remaining_size > 0 {
+            let remaining_data = &payload_bytes[Self::INLINE_SIZE..];
+            let encrypted_remaining = state_machine.encrypt_frame_data(remaining_data)?;
+            result.extend_from_slice(&encrypted_remaining);
+        }
+
+        tracing::trace!(
+            "Encrypted frame: {} bytes (preamble_block={}, remaining={})",
+            result.len(),
+            encrypted_preamble.len(),
             if remaining_size > 0 {
-                let remaining_data = &payload_bytes[Self::INLINE_SIZE..];
-                let encrypted_remaining = state_machine.encrypt_frame_data(remaining_data)?;
-                result.extend_from_slice(&encrypted_remaining);
+                remaining_size + 16
+            } else {
+                0
             }
+        );
 
-            tracing::trace!(
-                "Encrypted frame: {} bytes (preamble_block={}, remaining={})",
-                result.len(),
-                encrypted_preamble.len(),
-                if remaining_size > 0 {
-                    remaining_size + 16
-                } else {
-                    0
-                }
-            );
-
-            result.freeze()
-        };
-
+        let final_bytes = result.freeze();
         state_machine.record_sent(&final_bytes);
         self.stream.write_all(&final_bytes).await?;
         self.stream.flush().await?;
@@ -359,15 +347,13 @@ impl FrameIO {
                 // Secure mode single segment: align to 16-byte boundary
                 align_to_crypto_block(total_segment_size)
             } else {
-                // Secure mode multi-segment: pad each segment + add epilogue
-                let mut padded_size = 0;
-                for i in 0..preamble.num_segments as usize {
-                    let seg_len = preamble.segments[i].logical_len as usize;
-                    if seg_len > 0 {
-                        let aligned = align_to_crypto_block(seg_len);
-                        padded_size += aligned;
-                    }
-                }
+                // Secure mode multi-segment: pad each segment + add epilogue.
+                // `align_to_crypto_block(0) == 0`, so empty segments contribute
+                // nothing and don't need a special case.
+                let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
+                    .iter()
+                    .map(|s| align_to_crypto_block(s.logical_len as usize))
+                    .sum();
                 padded_size + CRYPTO_BLOCK_SIZE // epilogue
             }
         } else {
@@ -544,85 +530,10 @@ impl FrameIO {
     }
 }
 
-/// Post-handshake I/O surface: a [`FramedRead`]/[`FramedWrite`] pair bound
-/// to opposite halves of the same `TcpStream`.
-///
-/// Extracted into its own struct (and boxed inside [`Io::Established`])
-/// purely so the [`Io`] enum stays small — `FramedRead`/`FramedWrite` own
-/// substantial internal read/write buffers, so without the indirection the
-/// enum would balloon to match its largest variant on every `Io` allocation.
-///
-/// [`FramedRead`]: tokio_util::codec::FramedRead
-/// [`FramedWrite`]: tokio_util::codec::FramedWrite
-pub(crate) struct EstablishedIo {
-    pub(crate) framed_rx: tokio_util::codec::FramedRead<
-        tokio::net::tcp::OwnedReadHalf,
-        crate::msgr2::codec::Msgr2Decoder,
-    >,
-    pub(crate) framed_tx: tokio_util::codec::FramedWrite<
-        tokio::net::tcp::OwnedWriteHalf,
-        crate::msgr2::codec::Msgr2Encoder,
-    >,
-}
-
-/// Current I/O surface of a msgr2 [`Connection`].
-///
-/// During the handshake (banner, auth, session ident) the connection owns a
-/// [`FrameIO`] directly wrapped in [`Io::Raw`]. After
-/// `ConnectionState::transition_to_framed` runs the stream is
-/// unwrapped, split into owned halves, and handed to a
-/// [`FramedRead`] + [`FramedWrite`] pair driven by [`Msgr2Decoder`] and
-/// [`Msgr2Encoder`] respectively. That is the [`Io::Established`] state,
-/// stored in a `Box<EstablishedIo>` to keep the enum size uniform across
-/// variants (clippy's `large_enum_variant` lint).
-///
-/// [`Io::Transitioning`] is a transient sentinel used only inside
-/// `transition_to_framed` while the swap is in progress — any accessor
-/// observing it externally indicates a programmer bug, not a runtime
-/// condition, and therefore panics rather than returning an error.
-///
-/// [`FramedRead`]: tokio_util::codec::FramedRead
-/// [`FramedWrite`]: tokio_util::codec::FramedWrite
-/// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
-/// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
-pub(crate) enum Io {
-    /// Handshake + legacy data plane: the TcpStream lives inside a FrameIO.
-    Raw(FrameIO),
-    /// Post-handshake Framed wrapper pair, boxed to keep enum size uniform.
-    Established(Box<EstablishedIo>),
-    /// Transient state during `transition_to_framed`. Never observed by
-    /// external callers under normal operation.
-    Transitioning,
-}
-
-impl Io {
-    /// Borrow the inner [`FrameIO`] out of the [`Io::Raw`] variant.
-    ///
-    /// Called by the handshake and legacy data-plane methods of
-    /// [`ConnectionState`]. Returning `&mut FrameIO` here rather than
-    /// destructuring inside each caller lets the borrow checker see
-    /// `self.io` and `self.state_machine` as disjoint fields, so a caller
-    /// can hold a mutable borrow of both at once through split borrows.
-    fn as_raw_mut(&mut self) -> Result<&mut FrameIO> {
-        match self {
-            Io::Raw(f) => Ok(f),
-            Io::Established { .. } => Err(Error::protocol_error(
-                "raw I/O operation attempted on an established (Framed) connection",
-            )),
-            Io::Transitioning => {
-                // A panic here means some code path observed the sentinel
-                // outside of `transition_to_framed`, which is a programmer
-                // bug, not a runtime condition.
-                panic!("ConnectionState::Io is in the Transitioning sentinel state")
-            }
-        }
-    }
-}
-
 /// Connection state coordination layer
 pub(crate) struct ConnectionState {
     state_machine: StateMachine,
-    io: Io,
+    io: FrameIO,
     /// Outgoing message sequence number (incremented for each message sent)
     out_seq: u64,
     /// Incoming message sequence number (last received from peer)
@@ -657,14 +568,12 @@ impl ConnectionState {
     /// When `is_lossy` is true, client_cookie is set to 0 so the server
     /// knows not to keep session state (mirrors C++ `lossy_client` policy).
     fn new(stream: TcpStream, state_machine: StateMachine, is_lossy: bool) -> Self {
-        let frame_io = FrameIO::new(stream);
-
         // Lossy connections send client_cookie = 0; lossless get a random one.
         let client_cookie = if is_lossy { 0 } else { rand::random::<u64>() };
 
         Self {
             state_machine,
-            io: Io::Raw(frame_io),
+            io: FrameIO::new(stream),
             out_seq: 0, // Starts at 0, first message will get seq=1
             in_seq: 0,
             session: SessionState {
@@ -678,70 +587,14 @@ impl ConnectionState {
         }
     }
 
-    /// Send a frame through whichever data-plane the connection is currently
-    /// driving.
-    ///
-    /// During the handshake `self.io` is [`Io::Raw`] and this method
-    /// delegates to the same [`FrameIO::send_frame`] path that has always
-    /// driven the wire. After `transition_to_framed` has run,
-    /// `self.io` is [`Io::Established`] and the frame is handed to the
-    /// [`Msgr2Encoder`] inside [`FramedWrite`] via the [`Sink`] interface —
-    /// the encoder handles preamble, inline-encryption splicing, CRC
-    /// assembly, and optional compression exactly as [`FrameIO::send_frame`]
-    /// used to, but with zero per-frame heap allocations on the encoder's
-    /// reused [`bytes::BytesMut`].
-    ///
-    /// Takes the frame by value so the Framed path can move it directly
-    /// into the sink without cloning; the Raw path still borrows it
-    /// internally.
-    ///
-    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
-    /// [`Sink`]: futures::Sink
-    pub(crate) async fn send_frame(&mut self, frame: Frame) -> Result<()> {
-        match &mut self.io {
-            Io::Raw(frame_io) => {
-                // Split borrows keep this valid: self.io and
-                // self.state_machine touch disjoint fields.
-                frame_io.send_frame(&frame, &mut self.state_machine).await
-            }
-            Io::Established(eio) => {
-                use futures::SinkExt;
-                eio.framed_tx.send(frame).await
-            }
-            Io::Transitioning => {
-                panic!("send_frame: ConnectionState::Io is in the Transitioning sentinel state")
-            }
-        }
+    /// Send a frame over the wire.
+    pub(crate) async fn send_frame(&mut self, frame: &Frame) -> Result<()> {
+        self.io.send_frame(frame, &mut self.state_machine).await
     }
 
-    /// Receive a frame from whichever data-plane is currently active.
-    ///
-    /// Mirror of [`send_frame`](Self::send_frame): the [`Io::Raw`] arm runs
-    /// the legacy [`FrameIO::recv_frame`] path, while the [`Io::Established`]
-    /// arm pulls the next frame off the [`FramedRead`] stream. A `None` from
-    /// the stream means the peer closed cleanly — we map that to a protocol
-    /// error because the msgr2 protocol has no concept of "graceful EOF
-    /// mid-session"; any such close is unexpected.
-    ///
-    /// [`FramedRead`]: tokio_util::codec::FramedRead
+    /// Receive a frame from the wire.
     pub(crate) async fn recv_frame(&mut self) -> Result<Frame> {
-        match &mut self.io {
-            Io::Raw(frame_io) => frame_io.recv_frame(&mut self.state_machine).await,
-            Io::Established(eio) => {
-                use futures::StreamExt;
-                match eio.framed_rx.next().await {
-                    Some(Ok(frame)) => Ok(frame),
-                    Some(Err(e)) => Err(e),
-                    None => Err(Error::connection_error(
-                        "recv_frame: Framed stream ended (peer closed connection)",
-                    )),
-                }
-            }
-            Io::Transitioning => {
-                panic!("recv_frame: ConnectionState::Io is in the Transitioning sentinel state")
-            }
-        }
+        self.io.recv_frame(&mut self.state_machine).await
     }
 
     /// Record that a Keepalive2Ack was received.
@@ -749,36 +602,11 @@ impl ConnectionState {
         self.state_machine.record_keepalive_ack();
     }
 
-    /// Flush any buffered output and shut down the writer half of the
-    /// underlying TCP stream.
-    ///
-    /// Only meaningful on the [`Io::Established`] post-handshake path: the
-    /// [`FramedWrite`]'s internal `BytesMut` may hold bytes from a prior
-    /// `send` that hasn't been fully drained to the kernel's TCP send
-    /// buffer, and the underlying [`OwnedWriteHalf`] needs an explicit
-    /// `poll_shutdown` to trigger a FIN instead of dying on drop with a
-    /// reset. Without this call, `Client::shutdown` and the io_task
-    /// teardown path work but leave a wire-level shutdown inelegance
-    /// (RST instead of FIN) that peers notice in their logs.
-    ///
-    /// For the [`Io::Raw`] handshake path this is a no-op — the handshake
-    /// uses `FrameIO::send_frame` which writes synchronously and does not
-    /// buffer beyond the kernel socket layer, so there's nothing for us
-    /// to flush above the socket.
-    ///
-    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    /// [`OwnedWriteHalf`]: tokio::net::tcp::OwnedWriteHalf
+    /// Shut down the writer half of the underlying TCP stream so the
+    /// peer observes a clean FIN instead of a RST when the connection
+    /// is dropped afterward.
     pub(crate) async fn close(&mut self) -> Result<()> {
-        match &mut self.io {
-            Io::Raw(_) => Ok(()),
-            Io::Established(eio) => {
-                use futures::SinkExt;
-                eio.framed_tx.close().await
-            }
-            Io::Transitioning => {
-                panic!("close: ConnectionState::Io is in the Transitioning sentinel state")
-            }
-        }
+        self.io.shutdown().await
     }
 
     /// Drive a phase to completion, handling the enter / recv / send loop.
@@ -786,80 +614,7 @@ impl ConnectionState {
         &mut self,
         phase: P,
     ) -> Result<P::Output> {
-        let frame_io = self.io.as_raw_mut()?;
-        crate::msgr2::phase::drive(frame_io, &mut self.state_machine, phase).await
-    }
-
-    /// Transition the connection from the raw `TcpStream` data plane to the
-    /// post-handshake [`Io::Established`] Framed codec pair.
-    ///
-    /// Call this exactly once, after the handshake reaches SESSION_READY. The
-    /// sequence of operations is:
-    ///
-    /// 1. Atomically replace `self.io` with the [`Io::Transitioning`]
-    ///    sentinel using [`std::mem::replace`], so the old variant can be
-    ///    moved out by value.
-    /// 2. If the prior state was [`Io::Raw`], consume the [`FrameIO`] and
-    ///    split the underlying stream into owned read and write halves via
-    ///    [`TcpStream::into_split`].
-    /// 3. Harvest the encryptor, decryptor, and compression context from
-    ///    the state machine (the state machine no longer needs them once
-    ///    the codec owns them).
-    /// 4. Wrap each half in [`FramedRead`] / [`FramedWrite`] with a freshly
-    ///    constructed [`Msgr2Decoder`] / [`Msgr2Encoder`] pair, and install
-    ///    them as [`Io::Established`].
-    ///
-    /// If the prior state was already `Established` or `Transitioning`, it
-    /// is put back unchanged and an error is returned — calling this method
-    /// twice is a programmer bug but doesn't corrupt state.
-    ///
-    /// [`FramedRead`]: tokio_util::codec::FramedRead
-    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
-    /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
-    /// [`TcpStream::into_split`]: tokio::net::TcpStream::into_split
-    pub(crate) fn transition_to_framed(&mut self) -> Result<()> {
-        use tokio_util::codec::{FramedRead, FramedWrite};
-
-        // Step 1: atomically move the current Io out so we can pattern-match
-        // it by value. The sentinel remains in place throughout the rest of
-        // this function; if we bail early, the `already` arm restores the
-        // prior variant.
-        let prev = std::mem::replace(&mut self.io, Io::Transitioning);
-        let frame_io = match prev {
-            Io::Raw(f) => f,
-            already @ (Io::Established { .. } | Io::Transitioning) => {
-                self.io = already;
-                return Err(Error::protocol_error(
-                    "transition_to_framed: connection is not in Io::Raw",
-                ));
-            }
-        };
-
-        // Step 2: unwrap the TcpStream and split it into owned halves.
-        let stream = frame_io.into_stream();
-        let (read_half, write_half) = stream.into_split();
-
-        // Step 3: harvest codec state from the state machine. The
-        // compression context is wrapped in Arc at take time so both codec
-        // halves can hold a clone without racing on interior-mutable stats.
-        let compression_arc = self.state_machine.take_compression_ctx_arc();
-        let is_rev1 = self.state_machine.is_rev1();
-        let decryptor = self.state_machine.take_frame_decryptor();
-        let encryptor = self.state_machine.take_frame_encryptor();
-
-        // Step 4: construct the Framed pair and install as Established.
-        let decoder =
-            crate::msgr2::codec::Msgr2Decoder::new(decryptor, is_rev1, compression_arc.clone());
-        let encoder = crate::msgr2::codec::Msgr2Encoder::new(encryptor, is_rev1, compression_arc);
-
-        self.io = Io::Established(Box::new(EstablishedIo {
-            framed_rx: FramedRead::new(read_half, decoder),
-            framed_tx: FramedWrite::new(write_half, encoder),
-        }));
-
-        tracing::info!("ConnectionState transitioned to Io::Established (Framed codec)");
-        Ok(())
+        crate::msgr2::phase::drive(&mut self.io, &mut self.state_machine, phase).await
     }
 
     /// Get the current state name
@@ -1337,13 +1092,6 @@ impl Connection {
 
         self.state.state_machine.transition_to_ready(0);
 
-        // Symmetric with establish_session on the client side: hand the raw
-        // TcpStream over to the Framed codec pair now that the handshake is
-        // finished. Any future server-driven data-plane code — or a client
-        // roundtripping messages back to us — flows through
-        // Msgr2Decoder/Msgr2Encoder from this point on.
-        self.state.transition_to_framed()?;
-
         tracing::info!("Session established (server-side)");
         Ok(())
     }
@@ -1495,18 +1243,10 @@ impl Connection {
                 for msg in messages_to_replay {
                     let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
                     let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-                    self.state.send_frame(frame).await?;
+                    self.state.send_frame(&frame).await?;
                 }
             }
         }
-
-        // Post-handshake transition: hand the raw TcpStream over to the
-        // Framed codec pair. Everything beyond this point — data-plane
-        // messages, keepalives, Ack frames — flows through
-        // Msgr2Decoder/Msgr2Encoder instead of FrameIO. The replay loop
-        // above deliberately runs before this call, because it still needs
-        // the raw path to interleave sends with the just-completed phase.
-        self.state.transition_to_framed()?;
 
         tracing::info!("Session established!");
         Ok(())
@@ -1765,7 +1505,7 @@ impl Connection {
         // Convert Message to MessageFrame and send (move fields from owned msg)
         let msg_frame = MessageFrame::new(msg.header, msg.front, msg.middle, msg.data);
         let frame = create_frame_from_trait(&msg_frame, Tag::Message)?;
-        self.state.send_frame(frame).await?;
+        self.state.send_frame(&frame).await?;
 
         // Record send with throttle
         if let Some(throttle) = &self.throttle {
@@ -1902,7 +1642,7 @@ impl Connection {
         );
 
         // Send the frame
-        self.state.send_frame(frame).await
+        self.state.send_frame(&frame).await
     }
 
     /// Get the last keepalive ACK timestamp
@@ -1926,25 +1666,20 @@ impl Connection {
     /// Close the connection and discard all pending messages
     ///
     /// This matches Ceph's `discard_out_queue()` behavior:
-    /// - Flushes the Framed writer (post-handshake) and shuts down the
-    ///   TCP write half so the peer observes a clean FIN instead of an
-    ///   RST on drop
+    /// - Shuts down the TCP write half so the peer observes a clean FIN
+    ///   instead of an RST on drop
     /// - Discards all sent messages (they won't be retransmitted)
     /// - Resets the session state
     ///
-    /// Errors from the Framed `close` are logged rather than propagated:
-    /// this method runs in shutdown paths where the caller has already
-    /// committed to dropping the connection, and a best-effort flush is
+    /// Errors from the shutdown are logged rather than propagated: this
+    /// method runs in shutdown paths where the caller has already
+    /// committed to dropping the connection, and a best-effort close is
     /// the only meaningful behaviour.
     ///
     /// Use this when permanently closing a connection (not reconnecting).
     pub async fn close(&mut self) {
         tracing::info!("Closing connection to {}", self.server_addr);
 
-        // Flush any buffered output and poll_shutdown the underlying
-        // TcpStream's write half on the Framed path. Raw-path connections
-        // (handshake-only, or connections that failed before the post-
-        // handshake transition) see this as a no-op.
         if let Err(e) = self.state.close().await {
             tracing::warn!(
                 "Graceful close of connection to {} reported an error (dropping anyway): {}",

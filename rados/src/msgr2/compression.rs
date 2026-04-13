@@ -247,10 +247,7 @@ impl CompressionStats {
 }
 
 /// Internal per-field atomic storage — lets `compress()`/`decompress()` update
-/// counters through a shared `&self` reference without requiring `&mut self`,
-/// and (unlike the prior `Cell<u64>` version) is `Sync`, which matters because
-/// `CompressionContext` is shared via `Arc` across the separate rx/tx tasks
-/// that drive `FramedRead` / `FramedWrite` in the post-handshake data plane.
+/// counters through a shared `&self` reference without requiring `&mut self`.
 /// `Relaxed` ordering is sufficient: the counters are observational — no
 /// other state is gated on them.
 #[derive(Default)]

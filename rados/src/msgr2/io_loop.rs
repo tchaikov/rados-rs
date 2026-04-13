@@ -253,11 +253,11 @@ pub async fn run_io_loop<R, Fut>(
         }
     }
 
-    // Graceful close: flush any remaining Framed buffer and trigger FIN on
-    // the underlying TCP write half before `connection` drops. Bounded by a
-    // short timeout so a pathologically stuck kernel TCP send buffer cannot
-    // hang the task forever — if we can't flush in 1s we log and proceed
-    // with the drop, which matches the pre-Framed behaviour exactly.
+    // Graceful close: shut down the TCP write half before `connection`
+    // drops so the peer observes a clean FIN instead of an RST. Bounded
+    // by a short timeout so a pathologically stuck kernel TCP send buffer
+    // cannot hang the task forever — if we can't shut down in 1s we log
+    // and proceed with the drop.
     match tokio::time::timeout(Duration::from_secs(1), connection.close()).await {
         Ok(()) => tracing::debug!("I/O loop: graceful close complete"),
         Err(_) => {

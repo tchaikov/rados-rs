@@ -353,53 +353,6 @@ impl StateMachine {
         ));
     }
 
-    // The three take_* methods below hand ownership of the post-handshake
-    // encryption and compression state off to the Framed codec pair inside
-    // `ConnectionState::transition_to_framed`. The state machine itself has
-    // no remaining use for these fields after the transition, so "take"
-    // (not "clone") is the right verb — the data plane flows through
-    // Msgr2Decoder / Msgr2Encoder from that point on.
-
-    /// Take ownership of the frame decryptor for the post-handshake codec.
-    ///
-    /// After the call the state machine no longer has a decryptor, which is
-    /// correct because all subsequent recv traffic is driven by the
-    /// [`Msgr2Decoder`] owning it inside a [`FramedRead`]. Used by
-    /// `ConnectionState::transition_to_framed`.
-    ///
-    /// [`Msgr2Decoder`]: crate::msgr2::codec::Msgr2Decoder
-    /// [`FramedRead`]: tokio_util::codec::FramedRead
-    pub fn take_frame_decryptor(
-        &mut self,
-    ) -> Option<Box<dyn crate::msgr2::crypto::FrameDecryptor>> {
-        self.frame_decryptor.take()
-    }
-
-    /// Take ownership of the frame encryptor for the post-handshake codec.
-    ///
-    /// Counterpart to [`take_frame_decryptor`](Self::take_frame_decryptor).
-    /// After the call all subsequent send traffic is driven by the
-    /// [`Msgr2Encoder`] owning the encryptor inside a [`FramedWrite`].
-    ///
-    /// [`Msgr2Encoder`]: crate::msgr2::codec::Msgr2Encoder
-    /// [`FramedWrite`]: tokio_util::codec::FramedWrite
-    pub fn take_frame_encryptor(
-        &mut self,
-    ) -> Option<Box<dyn crate::msgr2::crypto::FrameEncryptor>> {
-        self.frame_encryptor.take()
-    }
-
-    /// Take ownership of the compression context, wrapping it in [`Arc`] so
-    /// both the decoder and encoder halves of a split codec pair can hold
-    /// the same instance. Returns `None` if no compression was negotiated.
-    ///
-    /// [`Arc`]: std::sync::Arc
-    pub fn take_compression_ctx_arc(
-        &mut self,
-    ) -> Option<std::sync::Arc<crate::msgr2::compression::CompressionContext>> {
-        self.compression_ctx.take().map(std::sync::Arc::new)
-    }
-
     /// Record bytes sent during pre-auth phase (for AUTH_SIGNATURE)
     pub fn record_sent(&mut self, data: &[u8]) {
         if self.pre_auth_enabled {
