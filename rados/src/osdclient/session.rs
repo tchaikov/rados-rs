@@ -253,6 +253,25 @@ impl OSDSession {
         self.next_tid.fetch_add(1, Ordering::Relaxed)
     }
 
+    /// Ensure the next tid allocated by `next_tid()` is strictly greater
+    /// than `floor`.  Used by `insert_migrated_op` to prevent a fresh submit
+    /// from colliding with a migrated tid carried over from a prior session.
+    fn bump_next_tid_past(&self, floor: u64) {
+        let target = floor.saturating_add(1);
+        let mut current = self.next_tid.load(Ordering::Relaxed);
+        while current < target {
+            match self.next_tid.compare_exchange_weak(
+                current,
+                target,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
     /// Get current connection incarnation
     ///
     /// Used to detect stale operations from previous connections.
@@ -1071,6 +1090,15 @@ impl OSDSession {
     ) -> Result<()> {
         let tid = pending_op.tid;
 
+        // Each session has its own next_tid counter starting at 1.  A migrated
+        // op carries its original tid from the previous session, which can
+        // collide with a fresh submit_op on this new session: `next_tid()`
+        // would return a value already occupied by a migrated PendingOp, and
+        // the fresh insert would overwrite it (dropping the migrated op's
+        // result_tx and hanging its caller until the 30s tracker deadline).
+        // Bump next_tid past the migrated tid so fresh submits never collide.
+        self.bump_next_tid_past(tid);
+
         pending_op.osdmap_epoch = new_osdmap_epoch;
         pending_op.attempts += 1;
 
@@ -1102,17 +1130,34 @@ impl OSDSession {
         let op = Arc::clone(&pending_op.op);
         let priority = pending_op.priority;
 
-        // Insert into pending operations
+        // Encode first so an encode failure does not leave a dangling
+        // PendingOp (with its owned result_tx) in the pending_ops map.
+        let msg = match Self::encode_operation(&op, tid, priority, self.negotiated_features) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = pending_op
+                    .result_tx
+                    .send(Err(OSDClientError::Connection(format!(
+                        "Failed to encode migrated op tid={tid}: {e}"
+                    ))));
+                return Err(e);
+            }
+        };
+
+        // Insert into pending operations so the reply dispatcher can find it.
         self.pending_ops.insert(tid, pending_op);
 
-        // Encode and send the operation using shared helper (priority preserved from original)
-        let msg = Self::encode_operation(&op, tid, priority, self.negotiated_features)?;
-
-        // Send to channel
-        self.send_tx
-            .send(msg)
-            .await
-            .map_err(|_| OSDClientError::Connection("Send channel closed".into()))?;
+        // Send to channel.  On failure, remove the just-inserted PendingOp
+        // and fire its result_tx with a Connection error so the caller sees
+        // a prompt failure instead of hanging on its 30 s operation tracker.
+        if let Err(e) = self.send_tx.send(msg).await {
+            if let Some((_, stuck)) = self.pending_ops.remove(&tid) {
+                let _ = stuck.result_tx.send(Err(OSDClientError::Connection(format!(
+                    "Send channel closed while migrating op tid={tid}: {e}"
+                ))));
+            }
+            return Err(OSDClientError::Connection("Send channel closed".into()));
+        }
 
         info!(
             "Migrated operation {} to OSD {} (attempt {}, epoch {})",
