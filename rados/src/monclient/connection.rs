@@ -98,12 +98,15 @@ impl MonConnection {
         );
 
         // Create connection config with authentication
-        let config = if let Some(auth_provider) = params.auth_provider {
+        let mut config = if let Some(auth_provider) = params.auth_provider {
             ConnectionConfig::with_auth_provider(Box::new(auth_provider))
         } else {
             // No auth provider, use no authentication
             ConnectionConfig::with_no_auth()
         };
+        // Monitor connections are lossy (mirrors librados Policy::lossy_client):
+        // the client does not replay messages on reconnect; it reconnects fresh.
+        config.is_lossy = true;
 
         // Connect using msgr2 (banner exchange only)
         let mut connection = Msgr2Connection::connect(params.addr, config).await?;
