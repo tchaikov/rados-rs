@@ -294,6 +294,15 @@ impl OSDClient {
         }
     }
 
+    /// Return the current OSDMap epoch, or 0 if no map has been received yet.
+    fn current_epoch_u32(&self) -> u32 {
+        self.osdmap_rx
+            .borrow()
+            .as_ref()
+            .map(|m| m.epoch.as_u32())
+            .unwrap_or(0)
+    }
+
     /// Wait for OSDMap to be received
     ///
     /// This waits until the OSDClient has received an OSDMap from the monitor cluster.
@@ -782,21 +791,13 @@ impl OSDClient {
             // auth handshake (hundreds of milliseconds), during which the OSDMap
             // may have advanced.  If so our routing is stale — retry before
             // allocating a TID so the continue costs nothing.
-            {
-                let current_epoch = self
-                    .osdmap_rx
-                    .borrow()
-                    .as_ref()
-                    .map(|m| m.epoch.as_u32())
-                    .unwrap_or(0);
-                if current_epoch != osdmap.epoch.as_u32() {
-                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                    if remaining.is_zero() {
-                        return Err(OSDClientError::Timeout(effective_timeout));
-                    }
-                    osdmap = self.get_osdmap().await?;
-                    continue;
+            if self.current_epoch_u32() != osdmap.epoch.as_u32() {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(OSDClientError::Timeout(effective_timeout));
                 }
+                osdmap = self.get_osdmap().await?;
+                continue;
             }
 
             // Build request ID with fresh TID and stamp pgid
@@ -1427,12 +1428,7 @@ impl OSDClient {
         }
 
         let target_epoch = result.epoch;
-        let current_epoch = self
-            .osdmap_rx
-            .borrow()
-            .as_ref()
-            .map(|m| m.epoch.as_u32())
-            .unwrap_or(0);
+        let current_epoch = self.current_epoch_u32();
 
         if target_epoch > current_epoch {
             debug!(
@@ -1592,16 +1588,10 @@ impl OSDClient {
                 .await?;
 
             if any_migrated {
-                // At least one op was removed from this session's pending_ops and its
-                // io_loop was signalled to stop (cancel_io_loop was called inside
-                // collect_resend_ops).  Close the session so the io_loop exits and
-                // drops any still-buffered encoded bytes before we resend to the new
-                // primary.  Drain remaining ops unconditionally — they need a new
-                // connection regardless.
+                // collect_resend_ops already cancelled the io_loop; close the
+                // session fully and drain any remaining ops (those whose primary
+                // didn't change but whose connection is being torn down).
                 sessions_to_close.push(osd_id);
-                // Drain path: collect_resend_ops already migrated the changed ops;
-                // this call picks up any ops whose primary didn't change but whose
-                // connection is now being torn down.
                 let _ = self
                     .collect_resend_ops(&session, &osdmap, new_epoch, None, &mut need_resend)
                     .await;
@@ -1701,10 +1691,9 @@ impl OSDClient {
             };
 
             if should_resend && let Some(mut op) = session.remove_pending_op(tid).await {
-                // Scan path only: signal the io_loop to stop immediately after
-                // removing the pending_op.  This closes the TOCTOU window between
-                // the pre_send contains_key check and the actual wire write —
-                // the io_loop's post-pre_send cancellation check will catch it.
+                // Scan path only: cancel the io_loop so any message already
+                // encoded for this tid is dropped before reaching the wire.
+                // See `cancel_io_loop`'s doc comment for the full rationale.
                 if current_osd.is_some() {
                     session.cancel_io_loop();
                     any_migrated = true;
@@ -1739,93 +1728,97 @@ impl OSDClient {
         }
     }
 
-    /// Resend migrated operations to their new target OSDs
+    /// Resend migrated operations to their new target OSDs.
     async fn resend_migrated_operations(
         &self,
         need_resend: Vec<(i32, crate::osdclient::session::PendingOp)>,
         new_epoch: u32,
     ) -> Result<()> {
         for (new_osd, pending_op) in need_resend {
-            let mut target_osd = new_osd;
-            let mut epoch_for_op = new_epoch;
-            let mut reroute_attempts = 0u32;
-
-            // get_or_create_session can block (TCP connect + auth handshake).
-            // Re-check the epoch after it returns; if it advanced, re-route the
-            // op before inserting into the new session so we don't send to a
-            // stale primary.  This mirrors the same check in execute_op.
-            //
-            // Cap reroute_attempts: if the epoch is churning faster than we can
-            // reconnect, give up and let the op fail rather than loop forever.
-            'route: loop {
-                match self.get_or_create_session(target_osd).await {
-                    Ok(session) => {
-                        let live_epoch = self
-                            .osdmap_rx
-                            .borrow()
-                            .as_ref()
-                            .map(|m| m.epoch.as_u32())
-                            .unwrap_or(0);
-                        if live_epoch != epoch_for_op {
-                            let new_osdmap = self.get_osdmap().await?;
-                            match self.object_to_osds_in_map(
-                                &new_osdmap,
-                                pending_op.op.object.pool,
-                                &pending_op.op.object.oid,
-                            ) {
-                                Ok((_, osds)) => {
-                                    target_osd = osds[0];
-                                    epoch_for_op = new_osdmap.epoch.as_u32();
-                                    reroute_attempts += 1;
-                                    if reroute_attempts > 8 {
-                                        warn!(
-                                            "Epoch churning too fast, giving up re-route \
-                                             for pool={} oid={}",
-                                            pending_op.op.object.pool, pending_op.op.object.oid,
-                                        );
-                                        let _ = pending_op.result_tx.send(Err(
-                                            OSDClientError::Timeout(
-                                                std::time::Duration::from_secs(0),
-                                            ),
-                                        ));
-                                        break 'route;
-                                    }
-                                    continue 'route;
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "Cannot re-route op after epoch change: pool={} oid={}: {}",
-                                        pending_op.op.object.pool, pending_op.op.object.oid, e
-                                    );
-                                    let _ =
-                                        pending_op.result_tx.send(Err(OSDClientError::Connection(
-                                            format!("Routing failed after epoch change: {}", e),
-                                        )));
-                                    break 'route;
-                                }
-                            }
-                        }
-                        if let Err(e) = session.insert_migrated_op(pending_op, epoch_for_op).await {
-                            warn!("Failed to migrate operation to OSD {}: {}", target_osd, e);
-                        }
-                        break 'route;
-                    }
-                    Err(e) => {
-                        // Fail this individual op instead of aborting the entire loop.
-                        warn!("Cannot resend op to OSD {}: {}", target_osd, e);
-                        let _ =
-                            pending_op
-                                .result_tx
-                                .send(Err(OSDClientError::Connection(format!(
-                                    "OSD {} unavailable: {}",
-                                    target_osd, e
-                                ))));
-                        break 'route;
-                    }
-                }
-            }
+            self.resend_single_migrated_op(pending_op, new_osd, new_epoch)
+                .await?;
         }
         Ok(())
+    }
+
+    /// Resend a single migrated op, re-routing if the OSDMap advanced during
+    /// `get_or_create_session` (which can block for TCP connect + auth handshake).
+    /// Mirrors the epoch re-check in `execute_op`.
+    ///
+    /// All failure modes (session creation failed, re-route placement failed,
+    /// epoch churning too fast) are reported via `pending_op.result_tx` so the
+    /// caller's `for` loop continues with the next op.  Only propagated errors
+    /// (from `get_osdmap`) return `Err`.
+    async fn resend_single_migrated_op(
+        &self,
+        pending_op: crate::osdclient::session::PendingOp,
+        mut target_osd: i32,
+        mut epoch_for_op: u32,
+    ) -> Result<()> {
+        // Cap re-route attempts: if the epoch is churning faster than we can
+        // reconnect, give up and fail the op rather than loop forever.
+        const MAX_REROUTE_ATTEMPTS: u32 = 8;
+        let mut reroute_attempts = 0u32;
+
+        loop {
+            let session = match self.get_or_create_session(target_osd).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Cannot resend op to OSD {}: {}", target_osd, e);
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::Connection(format!(
+                            "OSD {} unavailable: {}",
+                            target_osd, e
+                        ))));
+                    return Ok(());
+                }
+            };
+
+            if self.current_epoch_u32() == epoch_for_op {
+                if let Err(e) = session.insert_migrated_op(pending_op, epoch_for_op).await {
+                    warn!("Failed to migrate operation to OSD {}: {}", target_osd, e);
+                }
+                return Ok(());
+            }
+
+            // Epoch advanced during connect/auth — re-route before inserting.
+            let new_osdmap = self.get_osdmap().await?;
+            let (_, osds) = match self.object_to_osds_in_map(
+                &new_osdmap,
+                pending_op.op.object.pool,
+                &pending_op.op.object.oid,
+            ) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        "Cannot re-route op after epoch change: pool={} oid={}: {}",
+                        pending_op.op.object.pool, pending_op.op.object.oid, e
+                    );
+                    let _ = pending_op
+                        .result_tx
+                        .send(Err(OSDClientError::Connection(format!(
+                            "Routing failed after epoch change: {}",
+                            e
+                        ))));
+                    return Ok(());
+                }
+            };
+
+            target_osd = osds[0];
+            epoch_for_op = new_osdmap.epoch.as_u32();
+            reroute_attempts += 1;
+            if reroute_attempts > MAX_REROUTE_ATTEMPTS {
+                warn!(
+                    "Epoch churning too fast, giving up re-route for pool={} oid={}",
+                    pending_op.op.object.pool, pending_op.op.object.oid,
+                );
+                let _ = pending_op
+                    .result_tx
+                    .send(Err(OSDClientError::Timeout(std::time::Duration::ZERO)));
+                return Ok(());
+            }
+        }
     }
 
     /// Check if a session's address no longer matches the OSDMap.

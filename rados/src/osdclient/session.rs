@@ -408,22 +408,10 @@ impl OSDSession {
         });
 
         // Pre-send filter: drop OSD_OP messages whose pending_op has already
-        // been migrated to another session by scan_requests_on_map_change().
-        //
-        // Race (Timeline A): submit_op queues both pending_ops[tid] and the
-        // encoded Message.  If the OSDMap changes before the message reaches
-        // the wire, scan_requests removes pending_ops[tid] and resubmits to the
-        // new primary.  The encoded bytes are already in the mpsc buffer; this
-        // check drops them right before the wire write so the old OSD never
-        // sees the misdirected op.
-        //
-        // The primary TOCTOU mitigation: scan_requests calls
-        // session.cancel_io_loop() immediately after remove_pending_op(), and
-        // run_io_loop re-checks is_cancelled() between this filter returning
-        // true and the actual wire write.  A nanosecond-scale residual window
-        // remains on multi-threaded runtimes (cancel() fires after is_cancelled()
-        // but before send_message() starts); that residual is handled by
-        // Timeline B (ENXIO → fetch new map, retry in execute_op) as backstop.
+        // been migrated away by scan_requests_on_map_change().  See the
+        // doc comment on `cancel_io_loop` for the full TOCTOU rationale; the
+        // ENXIO retry path in `execute_op` is the backstop for the residual
+        // window between cancel() and send_message().
         let pending_ops_for_filter = Arc::clone(&ctx.pending_ops);
         let pre_send = move |msg: &crate::msgr2::message::Message| {
             if msg.msg_type() != crate::osdclient::messages::CEPH_MSG_OSD_OP {
@@ -966,25 +954,20 @@ impl OSDSession {
 
     /// Signal the io_loop to stop without waiting for it to exit.
     ///
-    /// Called by `scan_requests_on_map_change` immediately after migrating an
-    /// op away from this session.  The cancellation fires the pre_send/send
-    /// window check in `run_io_loop`, preventing any buffered message for the
-    /// migrated op from reaching the wire.
-    ///
-    /// The session is later fully closed by `close_stale_sessions`.
+    /// Called by `scan_requests_on_map_change` after migrating an op away from
+    /// this session.  `run_io_loop` polls the per-session token before each
+    /// wire write, so any message whose `pending_op` was just removed from
+    /// `pending_ops` will be dropped instead of sent to a stale primary.  The
+    /// session is later fully closed by `close_stale_sessions`.
     pub fn cancel_io_loop(&self) {
         self.io_loop_token.cancel();
     }
 
-    /// Cancel the session's io_loop and await the I/O task to ensure it has stopped.
+    /// Cancel the session's io_loop and wait for the I/O task to exit.
     ///
-    /// Cancels `io_loop_token` (the per-session child token) so the io_loop exits
-    /// without waiting for the global client shutdown.  Safe to call concurrently:
-    /// `cancel()` is idempotent and the Mutex serialises the `take()`.
+    /// Safe to call concurrently: `cancel()` is idempotent and the Mutex
+    /// serialises the `take()` of the join handle.
     pub async fn close(&self) {
-        // Signal the io_loop to stop.  The early-exit check at the top of the
-        // io_loop body and the pre_send/send_message window check both poll this
-        // token, so cancellation takes effect on the next cooperative yield.
         self.io_loop_token.cancel();
         info!("Waiting for OSD {} I/O task to stop", self.osd_id);
         let handle = self.io_task_handle.lock().await.take();
