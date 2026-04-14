@@ -109,6 +109,13 @@ impl StateMachine {
         config: crate::msgr2::ConnectionConfig,
         server_auth_handler: Option<crate::auth::CephXServerHandler>,
     ) -> Self {
+        // Seed global_id from config so service connections (OSD/MDS/MGR)
+        // advertise the global_id already assigned by the monitor during
+        // cephx auth, or 0 for the initial monitor connection. `AuthClient`
+        // uses this value to decide whether to send an AuthNonePayload as a
+        // service or as a monitor; a wrong zero here makes the service's
+        // no-auth handshake fail with EACCES.
+        let initial_global_id = config.global_id;
         Self {
             state_kind,
             frame_decryptor: None,
@@ -125,7 +132,7 @@ impl StateMachine {
             peer_supported_features: 0,
             config,
             server_auth_handler,
-            global_id: 0,
+            global_id: initial_global_id,
             negotiated_features: 0,
             last_keepalive_ack: None,
         }
