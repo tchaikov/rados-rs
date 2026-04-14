@@ -480,24 +480,52 @@ impl OSDSession {
 
         // Update connection state based on exit reason:
         // cancelled → Closed (terminal), otherwise → Disconnected (can reconnect)
-        let final_state = if ctx.shutdown_token.is_cancelled() {
+        let cancelled = ctx.shutdown_token.is_cancelled();
+        let final_state = if cancelled {
             ConnectionState::Closed
         } else {
             ConnectionState::Disconnected
         };
         ctx.conn_state.store(final_state);
 
-        // Leave pending ops in the session.
-        // They are migrated eagerly by get_or_create_session() the next time any operation
-        // targets this OSD (see kick_into_session() there), or by scan_requests_on_map_change()
-        // when an OSDMap update arrives. This avoids a type cycle that would arise from
-        // spawning kick_requests() here (io_task → kick → get_or_create_session → connect →
-        // io_task forms an opaque-async-return cycle the compiler cannot resolve).
-        let n = ctx.pending_ops.len();
+        // Drain pending ops on io_loop exit.
+        //
+        // Mirrors librados AsyncMessenger `ms_handle_reset` behaviour for lossy
+        // connections: when the underlying socket fails (recv error, send error,
+        // protocol decode error) or the session is closed, the Objecter finishes
+        // every in-flight op on that connection with an EPIPE-equivalent so
+        // callers see a prompt error instead of blocking on a reply that can
+        // never arrive.
+        //
+        // Cancellation path (scan_requests closing a migrated session) is the
+        // happy case: collect_resend_ops has already removed each op from
+        // pending_ops and handed it to a new session via `need_resend`, so this
+        // drain is typically a no-op.  Any stragglers here are ops that raced
+        // the collect-then-cancel window — submitted after the scan but before
+        // the token fired.  They have no new home, so failing them prompts the
+        // caller to reissue against a fresh session instead of waiting 30 s for
+        // a reply that will never arrive.
+        let drained: Vec<_> = ctx.pending_ops.iter().map(|entry| *entry.key()).collect();
+        let n = drained.len();
+        for tid in drained {
+            if let Some((_, pending_op)) = ctx.pending_ops.remove(&tid) {
+                let _ = pending_op
+                    .result_tx
+                    .send(Err(OSDClientError::Connection(format!(
+                        "OSD {} connection lost",
+                        osd_id
+                    ))));
+            }
+        }
         if n > 0 {
-            info!(
-                "OSD {} I/O task exited with {} pending ops; will be kicked on next session use",
-                ctx.osd_id, n
+            let reason = if cancelled {
+                "after cancel"
+            } else {
+                "unexpectedly"
+            };
+            warn!(
+                "OSD {} I/O task exited {}; drained {} in-flight op(s) with connection error",
+                ctx.osd_id, reason, n
             );
         }
     }
