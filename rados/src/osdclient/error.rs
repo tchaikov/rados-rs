@@ -6,10 +6,11 @@ use thiserror::Error;
 
 // Standard errno constants (as negative values, matching Ceph conventions)
 pub const ENOENT: i32 = -2; // No such file or directory
+pub const ENXIO: i32 = -6; // No such device or address (misdirected op: sent to wrong OSD)
+pub const EAGAIN: i32 = -11; // Try again
 pub const EACCES: i32 = -13; // Permission denied
 pub const EEXIST: i32 = -17; // File exists
 pub const EINVAL: i32 = -22; // Invalid argument
-pub const EAGAIN: i32 = -11; // Try again
 pub const ENOSPC: i32 = -28; // No space left on device
 
 /// Errors that can occur during OSD client operations.
@@ -118,6 +119,9 @@ impl OSDClientError {
             Self::Backoff(_) => ErrorCategory::RetriableWithBackoff,
             Self::OSDError { code, .. } => match *code {
                 ENOENT => ErrorCategory::Permanent,
+                // ENXIO: OSD rejected op as misdirected (we sent to a replica, not primary).
+                // Mirrors Objecter handling: fetch a newer OSDMap and retry.
+                ENXIO => ErrorCategory::NeedsMapUpdate,
                 EAGAIN => ErrorCategory::NeedsMapUpdate,
                 ENOSPC => ErrorCategory::RetriableWithBackoff,
                 _ => ErrorCategory::Transient,

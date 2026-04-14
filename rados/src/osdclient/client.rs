@@ -803,6 +803,28 @@ impl OSDClient {
             }
             let result = await_op_result(result_rx, remaining).await?;
 
+            // ENXIO: OSD rejected the op as misdirected — we sent to a replica instead of the
+            // primary (our PG→acting-primary mapping was stale).  In production, the OSD returns
+            // ENXIO rather than asserting; we must fetch a newer OSDMap and retry so the next
+            // iteration of this loop picks the correct primary.
+            //
+            // This mirrors Objecter::handle_osd_op_reply()'s ENXIO path in C++.
+            if result.result == crate::osdclient::error::ENXIO {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(OSDClientError::Timeout(effective_timeout));
+                }
+                warn!(
+                    "Op got ENXIO from OSD {} (misdirected op — stale acting-set mapping); \
+                     fetching newer OSDMap and retrying",
+                    primary_osd
+                );
+                Arc::make_mut(&mut msg).retry_attempt += 1;
+                osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
+                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
+                continue;
+            }
+
             // Check for redirect
             if let Some(redirect) = result.redirect {
                 debug!(
