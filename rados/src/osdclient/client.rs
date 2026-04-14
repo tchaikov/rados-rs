@@ -800,11 +800,35 @@ impl OSDClient {
                 continue;
             }
 
+            // Final pgid re-derivation: between the post-session re-check above
+            // and submit_op below, the OSDMap can still advance (e.g. autoscaler
+            // growing pg_num), which invalidates the seed we just computed.
+            // Re-read the live map once more and recompute spg if the epoch has
+            // moved. If the primary also changed, restart the outer loop so we
+            // pick up the correct session; otherwise just refresh the pgid
+            // before stamping it. Mirrors librados Objecter's rwlock-guarded
+            // "compute target + enqueue" ordering without needing a real lock.
+            let (final_spg, final_epoch) = {
+                let live = self.get_osdmap().await?;
+                if live.epoch != osdmap.epoch {
+                    let (new_spg, new_osds) =
+                        self.object_to_osds_in_map(&live, msg.object.pool, &msg.object.oid)?;
+                    if new_osds.first().copied() != Some(primary_osd) {
+                        osdmap = live;
+                        continue;
+                    }
+                    (new_spg, live.epoch.as_u32())
+                } else {
+                    (spg, osdmap.epoch.as_u32())
+                }
+            };
+
             // Build request ID with fresh TID and stamp pgid
             let tid = session.next_tid();
             {
                 let m = Arc::make_mut(&mut msg);
-                m.pgid = spg;
+                m.pgid = final_spg;
+                m.osdmap_epoch = final_epoch;
                 m.reqid = crate::osdclient::types::RequestId::new(
                     &self.entity_name,
                     tid,
