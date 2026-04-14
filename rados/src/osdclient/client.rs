@@ -778,6 +778,23 @@ impl OSDClient {
             // Get session
             let session = self.get_or_create_session(primary_osd).await?;
 
+            // Re-check epoch: get_or_create_session can block for TCP connect +
+            // auth handshake (hundreds of milliseconds), during which the OSDMap
+            // may have advanced.  If so our routing is stale — retry before
+            // allocating a TID so the continue costs nothing.
+            {
+                let current_epoch = self
+                    .osdmap_rx
+                    .borrow()
+                    .as_ref()
+                    .map(|m| m.epoch.as_u32())
+                    .unwrap_or(0);
+                if current_epoch != osdmap.epoch.as_u32() {
+                    osdmap = self.get_osdmap().await?;
+                    continue;
+                }
+            }
+
             // Build request ID with fresh TID and stamp pgid
             let tid = session.next_tid();
             {
@@ -1725,21 +1742,67 @@ impl OSDClient {
         new_epoch: u32,
     ) -> Result<()> {
         for (new_osd, pending_op) in need_resend {
-            match self.get_or_create_session(new_osd).await {
-                Ok(session) => {
-                    if let Err(e) = session.insert_migrated_op(pending_op, new_epoch).await {
-                        warn!("Failed to migrate operation to OSD {}: {}", new_osd, e);
+            let mut target_osd = new_osd;
+            let mut epoch_for_op = new_epoch;
+
+            // get_or_create_session can block (TCP connect + auth handshake).
+            // Re-check the epoch after it returns; if it advanced, re-route the
+            // op before inserting into the new session so we don't send to a
+            // stale primary.  This mirrors the same check in execute_op.
+            //
+            // We loop rather than just checking once because the reconnect itself
+            // may take long enough for a second epoch bump to slip in.
+            'route: loop {
+                match self.get_or_create_session(target_osd).await {
+                    Ok(session) => {
+                        let live_epoch = self
+                            .osdmap_rx
+                            .borrow()
+                            .as_ref()
+                            .map(|m| m.epoch.as_u32())
+                            .unwrap_or(0);
+                        if live_epoch != epoch_for_op {
+                            let new_osdmap = self.get_osdmap().await?;
+                            match self.object_to_osds_in_map(
+                                &new_osdmap,
+                                pending_op.op.object.pool,
+                                &pending_op.op.object.oid,
+                            ) {
+                                Ok((_, osds)) => {
+                                    target_osd = osds[0];
+                                    epoch_for_op = new_osdmap.epoch.as_u32();
+                                    continue 'route;
+                                }
+                                Err(e) => {
+                                    warn!(
+                                        "Cannot re-route op after epoch change: pool={} oid={}: {}",
+                                        pending_op.op.object.pool, pending_op.op.object.oid, e
+                                    );
+                                    let _ =
+                                        pending_op.result_tx.send(Err(OSDClientError::Connection(
+                                            format!("Routing failed after epoch change: {}", e),
+                                        )));
+                                    break 'route;
+                                }
+                            }
+                        }
+                        if let Err(e) = session.insert_migrated_op(pending_op, epoch_for_op).await {
+                            warn!("Failed to migrate operation to OSD {}: {}", target_osd, e);
+                        }
+                        break 'route;
                     }
-                }
-                Err(e) => {
-                    // Fail this individual op instead of aborting the entire loop.
-                    warn!("Cannot resend op to OSD {}: {}", new_osd, e);
-                    let _ = pending_op
-                        .result_tx
-                        .send(Err(OSDClientError::Connection(format!(
-                            "OSD {} unavailable: {}",
-                            new_osd, e
-                        ))));
+                    Err(e) => {
+                        // Fail this individual op instead of aborting the entire loop.
+                        warn!("Cannot resend op to OSD {}: {}", target_osd, e);
+                        let _ =
+                            pending_op
+                                .result_tx
+                                .send(Err(OSDClientError::Connection(format!(
+                                    "OSD {} unavailable: {}",
+                                    target_osd, e
+                                ))));
+                        break 'route;
+                    }
                 }
             }
         }
