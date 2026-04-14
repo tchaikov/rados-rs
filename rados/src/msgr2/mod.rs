@@ -263,7 +263,7 @@ pub struct ConnectionConfig {
     pub required_features: u64,
 
     /// Preferred connection modes for authentication (in order of preference)
-    /// Default: vec![ConnectionMode::Secure, ConnectionMode::Crc] (prefer encryption)
+    /// Default: vec![ConnectionMode::Crc, ConnectionMode::Secure] (prefer CRC, matching librados)
     /// The server will choose the final mode from this list
     pub preferred_modes: Vec<ConnectionMode>,
 
@@ -331,7 +331,7 @@ impl Default for ConnectionConfig {
         Self {
             supported_features: FeatureSet::REVISION_1.bits(),
             required_features: 0,
-            preferred_modes: vec![ConnectionMode::Secure, ConnectionMode::Crc],
+            preferred_modes: vec![ConnectionMode::Crc, ConnectionMode::Secure],
             supported_auth_methods,
             auth_provider: None,
             service_id: 0, // Default to monitor
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(config.required_features, 0);
         assert_eq!(
             config.preferred_modes,
-            vec![ConnectionMode::Secure, ConnectionMode::Crc]
+            vec![ConnectionMode::Crc, ConnectionMode::Secure]
         );
         assert!(config.throttle_config.is_none());
         assert_eq!(config.max_replay_queue_len, None);

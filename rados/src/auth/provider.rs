@@ -282,11 +282,14 @@ impl AuthProvider for ServiceAuthProvider {
             CephXError::ProtocolError("No service_type set in ServiceAuthProvider".into())
         })?;
 
-        // Encrypted authorize challenge: u32 length prefix (4) + 2 AES blocks (32) = 36 bytes.
-        // The inner plaintext is: struct_v(1) + magic(8) + CephXAuthorizeReply(1+8) = 18 bytes,
-        // PKCS7-padded to 32 bytes.
-        const ENCRYPTED_AUTHORIZE_CHALLENGE_LEN: usize = 36;
-        if payload.len() == ENCRYPTED_AUTHORIZE_CHALLENGE_LEN {
+        // AUTH_REPLY_MORE carries an encrypted authorize challenge (u32 length
+        // prefix + 2 AES blocks = 36 bytes).  AUTH_DONE carries the authorize
+        // reply, which in CRC mode is also 36 bytes (nonce_plus_one only, no
+        // connection secret).  Distinguishing by payload size is therefore
+        // ambiguous: use con_mode == 0 instead, which is only set by the
+        // AUTH_REPLY_MORE call path (handle_auth_reply_more passes global_id=0,
+        // con_mode=0, while handle_auth_done always passes the real con_mode ≥ 1).
+        if con_mode == 0 {
             debug!("Received encrypted authorize challenge, decrypting...");
 
             let server_challenge = {
