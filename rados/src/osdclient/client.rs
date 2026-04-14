@@ -735,6 +735,13 @@ impl OSDClient {
         // only copies on redirect, which is an EC-pool corner case.
         let mut msg = Arc::new(msg);
 
+        // Cap connection-error retries so a persistently broken OSD can't spin
+        // the caller forever.  Mirrors librados Objecter's reopen-on-reset
+        // pattern: when a lossy connection drops mid-op, re-route to a fresh
+        // session and resubmit, but only a bounded number of times.
+        const MAX_CONNECTION_RETRIES: u32 = 4;
+        let mut connection_retries = 0u32;
+
         // Redirect/pause retry loop
         loop {
             // Refresh the epoch in the message to reflect the current OSDMap.
@@ -840,14 +847,62 @@ impl OSDClient {
             // Arc::clone is a cheap refcount bump; submit_op stores the Arc in
             // pending_ops and drops it when the reply arrives, so by the time
             // we reach the next iteration the refcount is back to 1.
-            let result_rx = session.submit_op(Arc::clone(&msg), priority).await?;
+            let result_rx = match session.submit_op(Arc::clone(&msg), priority).await {
+                Ok(rx) => rx,
+                Err(OSDClientError::Connection(msg_str)) => {
+                    // Session died between get_or_create_session and submit_op
+                    // (io_loop exited, drain fired).  Reopen on the next
+                    // iteration — get_or_create_session will build a fresh
+                    // session and we'll re-encode and resubmit.
+                    connection_retries += 1;
+                    if connection_retries > MAX_CONNECTION_RETRIES {
+                        return Err(OSDClientError::Connection(format!(
+                            "OSD {} connection repeatedly lost (submit): {}",
+                            primary_osd, msg_str
+                        )));
+                    }
+                    warn!(
+                        "Op submit failed on OSD {} (attempt {}/{}): {}; retrying on fresh session",
+                        primary_osd, connection_retries, MAX_CONNECTION_RETRIES, msg_str
+                    );
+                    // Don't bump retry_attempt — the OSD never saw this send.
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             // Wait for result using the remaining time towards the deadline.
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 return Err(OSDClientError::Timeout(effective_timeout));
             }
-            let result = await_op_result(result_rx, remaining).await?;
+            let result = match await_op_result(result_rx, remaining).await {
+                Ok(r) => r,
+                Err(OSDClientError::Connection(msg_str)) => {
+                    // io_loop exited while we were awaiting the reply (drain
+                    // fired a Connection error through result_tx).  Reopen on
+                    // the next iteration.
+                    connection_retries += 1;
+                    if connection_retries > MAX_CONNECTION_RETRIES {
+                        return Err(OSDClientError::Connection(format!(
+                            "OSD {} connection repeatedly lost (await): {}",
+                            primary_osd, msg_str
+                        )));
+                    }
+                    warn!(
+                        "Op lost connection to OSD {} mid-flight (attempt {}/{}): {}; retrying",
+                        primary_osd, connection_retries, MAX_CONNECTION_RETRIES, msg_str
+                    );
+                    // Don't bump retry_attempt: the next loop iteration
+                    // allocates a fresh tid and submit_op builds a new
+                    // PendingOp with attempts=1, so the OSD's echoed
+                    // retry_attempt must stay at 0 to satisfy
+                    // validate_reply_freshness.
+                    Arc::make_mut(&mut msg).retry_attempt = 0;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             // ENXIO: OSD rejected the op as misdirected — we sent to a replica instead of the
             // primary (our PG→acting-primary mapping was stale).  In production, the OSD returns
