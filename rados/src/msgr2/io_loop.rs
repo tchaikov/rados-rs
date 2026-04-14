@@ -133,6 +133,14 @@ pub async fn run_io_loop<R, Fut, P>(
     let mut outbound = PriorityQueue::new();
 
     loop {
+        // Fast-path shutdown: check before draining so that buffered messages
+        // for migrated ops (whose sessions were closed by scan_requests) are
+        // never sent to the wire.
+        if shutdown_token.is_cancelled() {
+            tracing::debug!("I/O loop: shutdown token cancelled (pre-drain check)");
+            break;
+        }
+
         // Phase 1: Drain all pending messages into PriorityQueue (non-blocking)
         let mut drained_count = 0;
         while let Ok(msg) = send_rx.try_recv() {
@@ -206,6 +214,17 @@ pub async fn run_io_loop<R, Fut, P>(
                 );
                 consecutive_outbound_sends = 0;
                 continue;
+            }
+            // Second shutdown check: close the TOCTOU window between pre_send
+            // returning true and the actual wire write.  scan_requests cancels
+            // the session token immediately after removing the pending_op, so
+            // this re-check catches the case where cancellation was observed
+            // between the contains_key test inside pre_send and here.
+            if shutdown_token.is_cancelled() {
+                tracing::debug!(
+                    "I/O loop: shutdown cancelled between pre_send and send (dropping buffered op)"
+                );
+                break;
             }
             if let Err(e) = connection.send_message(msg).await {
                 tracing::error!("I/O loop: send error: {}", e);

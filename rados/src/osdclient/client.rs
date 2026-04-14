@@ -1566,8 +1566,25 @@ impl OSDClient {
 
             // Scan ops: only re-target those whose primary OSD changed or whose pool
             // bumped last_force_op_resend since this op was sent.
-            self.collect_resend_ops(&session, &osdmap, new_epoch, Some(osd_id), &mut need_resend)
+            let any_migrated = self
+                .collect_resend_ops(&session, &osdmap, new_epoch, Some(osd_id), &mut need_resend)
                 .await?;
+
+            if any_migrated {
+                // At least one op was removed from this session's pending_ops and its
+                // io_loop was signalled to stop (cancel_io_loop was called inside
+                // collect_resend_ops).  Close the session so the io_loop exits and
+                // drops any still-buffered encoded bytes before we resend to the new
+                // primary.  Drain remaining ops unconditionally — they need a new
+                // connection regardless.
+                sessions_to_close.push(osd_id);
+                // Drain path: collect_resend_ops already migrated the changed ops;
+                // this call picks up any ops whose primary didn't change but whose
+                // connection is now being torn down.
+                let _ = self
+                    .collect_resend_ops(&session, &osdmap, new_epoch, None, &mut need_resend)
+                    .await;
+            }
         }
 
         // Close stale sessions
@@ -1621,6 +1638,9 @@ impl OSDClient {
     ///     whose pool's `last_force_op_resend` epoch was bumped since the op was sent.
     ///   - `None`     — drain path: collect every op unconditionally (session is closing).
     ///
+    /// Returns `true` if at least one op was migrated (scan path only; always `false` for
+    /// the drain path because all ops stay within the same "session is closing" group).
+    ///
     /// CRUSH placement errors are propagated; drain callers should discard with `let _ =`.
     async fn collect_resend_ops(
         &self,
@@ -1629,9 +1649,10 @@ impl OSDClient {
         new_epoch: u32,
         current_osd: Option<i32>,
         need_resend: &mut Vec<(i32, crate::osdclient::session::PendingOp)>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let metadata = session.get_pending_ops_metadata().await;
         let mut placement_cache = HashMap::new();
+        let mut any_migrated = false;
 
         for (tid, pool_id, object_id, op_osdmap_epoch) in metadata {
             if Self::fail_if_pool_deleted(session, tid, pool_id, osdmap).await {
@@ -1659,13 +1680,21 @@ impl OSDClient {
             };
 
             if should_resend && let Some(mut op) = session.remove_pending_op(tid).await {
+                // Scan path only: signal the io_loop to stop immediately after
+                // removing the pending_op.  This closes the TOCTOU window between
+                // the pre_send contains_key check and the actual wire write —
+                // the io_loop's post-pre_send cancellation check will catch it.
+                if current_osd.is_some() {
+                    session.cancel_io_loop();
+                    any_migrated = true;
+                }
                 op.target.update(new_epoch, new_primary, new_osds.clone());
                 op.state = crate::osdclient::types::OpState::Queued;
                 need_resend.push((new_primary, op));
             }
         }
 
-        Ok(())
+        Ok(any_migrated)
     }
 
     /// Close sessions that are stale

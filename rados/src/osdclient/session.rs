@@ -165,6 +165,16 @@ pub struct OSDSession {
     /// `.take()`s the handle to `.await` it, and subsequent calls need to
     /// observe "already taken".
     io_task_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Per-session cancellation token for the io_loop.
+    ///
+    /// Created as a child of the parent `shutdown_token` passed to `connect()`,
+    /// so it fires on either global client shutdown OR individual session close.
+    /// Stored here so `close()` can cancel it directly without the caller
+    /// needing to hold the parent token.
+    ///
+    /// Initialized to a fresh (uncancelled) token in `new()` and replaced
+    /// with a proper child token in `connect()`.
+    io_loop_token: tokio_util::sync::CancellationToken,
 }
 
 /// Tracking information for a pending operation
@@ -233,6 +243,8 @@ impl OSDSession {
             connecting_lock: Arc::new(tokio::sync::Mutex::new(())),
             // No I/O task handle until connect() is called
             io_task_handle: Mutex::new(None),
+            // Placeholder; replaced with a proper child token in connect().
+            io_loop_token: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -333,6 +345,11 @@ impl OSDSession {
         let (send_tx, send_rx) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
         self.send_tx = send_tx;
 
+        // Create a per-session child token so this session can be cancelled
+        // independently (e.g. when scan_requests migrates ops away) while still
+        // being cancelled transitively by the global client shutdown_token.
+        self.io_loop_token = shutdown_token.child_token();
+
         // Spawn I/O task that owns the connection
         // This task multiplexes send/receive using tokio::select!
         let context = IoTaskContext {
@@ -341,7 +358,7 @@ impl OSDSession {
             osdmap_tx: self.osdmap_tx.clone(),
             client: self.client.clone(),
             conn_state: Arc::clone(&self.conn_state),
-            shutdown_token,
+            shutdown_token: self.io_loop_token.clone(),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -400,9 +417,13 @@ impl OSDSession {
         // check drops them right before the wire write so the old OSD never
         // sees the misdirected op.
         //
-        // A narrow race remains: the check returns true, then scan_requests
-        // removes the pending_op before send_message() completes.  That is
-        // handled by Timeline B (ENXIO → fetch new map, retry in execute_op).
+        // The primary TOCTOU mitigation: scan_requests calls
+        // session.cancel_io_loop() immediately after remove_pending_op(), and
+        // run_io_loop re-checks is_cancelled() between this filter returning
+        // true and the actual wire write.  A nanosecond-scale residual window
+        // remains on multi-threaded runtimes (cancel() fires after is_cancelled()
+        // but before send_message() starts); that residual is handled by
+        // Timeline B (ENXIO → fetch new map, retry in execute_op) as backstop.
         let pending_ops_for_filter = Arc::clone(&ctx.pending_ops);
         let pre_send = move |msg: &crate::msgr2::message::Message| {
             if msg.msg_type() != crate::osdclient::messages::CEPH_MSG_OSD_OP {
@@ -943,11 +964,28 @@ impl OSDSession {
         self.conn_state.load() == ConnectionState::Connected
     }
 
-    /// Await the I/O task to ensure it has stopped
+    /// Signal the io_loop to stop without waiting for it to exit.
     ///
-    /// The caller must have already cancelled the shutdown token (via the OSDClient's
-    /// shutdown_token, whose child token is passed to each session's connect()).
+    /// Called by `scan_requests_on_map_change` immediately after migrating an
+    /// op away from this session.  The cancellation fires the pre_send/send
+    /// window check in `run_io_loop`, preventing any buffered message for the
+    /// migrated op from reaching the wire.
+    ///
+    /// The session is later fully closed by `close_stale_sessions`.
+    pub fn cancel_io_loop(&self) {
+        self.io_loop_token.cancel();
+    }
+
+    /// Cancel the session's io_loop and await the I/O task to ensure it has stopped.
+    ///
+    /// Cancels `io_loop_token` (the per-session child token) so the io_loop exits
+    /// without waiting for the global client shutdown.  Safe to call concurrently:
+    /// `cancel()` is idempotent and the Mutex serialises the `take()`.
     pub async fn close(&self) {
+        // Signal the io_loop to stop.  The early-exit check at the top of the
+        // io_loop body and the pre_send/send_message window check both poll this
+        // token, so cancellation takes effect on the next cooperative yield.
+        self.io_loop_token.cancel();
         info!("Waiting for OSD {} I/O task to stop", self.osd_id);
         let handle = self.io_task_handle.lock().await.take();
         if let Some(handle) = handle {
