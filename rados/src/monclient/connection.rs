@@ -169,6 +169,7 @@ impl MonConnection {
                 send_rx,
                 task_shutdown_token,
                 keepalive,
+                |_| true, // monitor messages are never filtered
                 move |msg| {
                     let osdmap_tx = osdmap_tx_for_task.clone();
                     let mon_msg_tx = mon_msg_tx_for_task.clone();

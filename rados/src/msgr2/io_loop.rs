@@ -113,15 +113,17 @@ async fn handle_keepalive_tick(
 /// - `connection.send_message()` returns an error
 /// - Keepalive timeout fires (when `keepalive.timeout` is `Some`)
 /// - `route` returns `false`
-pub async fn run_io_loop<R, Fut>(
+pub async fn run_io_loop<R, Fut, P>(
     mut connection: Connection,
     mut send_rx: mpsc::Receiver<Message>,
     shutdown_token: CancellationToken,
     keepalive: Option<KeepaliveConfig>,
+    mut pre_send: P,
     mut route: R,
 ) where
     R: FnMut(Message) -> Fut,
     Fut: Future<Output = bool>,
+    P: FnMut(&Message) -> bool,
 {
     let mut keepalive_interval = keepalive
         .as_ref()
@@ -190,8 +192,21 @@ pub async fn run_io_loop<R, Fut>(
             }
         }
 
-        // Phase 3: If we have queued messages, send highest priority first
+        // Phase 3: If we have queued messages, send highest priority first.
+        // pre_send is checked just before writing to the wire so that callers
+        // can drop messages whose backing state has been invalidated (e.g., an
+        // OSD op whose pending_op was migrated to a different session while the
+        // encoded bytes were already queued here).
         if let Some(msg) = outbound.pop_front() {
+            if !pre_send(&msg) {
+                tracing::debug!(
+                    "I/O loop: dropping message type=0x{:04x} tid={} (pre_send filter)",
+                    msg.msg_type(),
+                    msg.header.get_tid(),
+                );
+                consecutive_outbound_sends = 0;
+                continue;
+            }
             if let Err(e) = connection.send_message(msg).await {
                 tracing::error!("I/O loop: send error: {}", e);
                 break;

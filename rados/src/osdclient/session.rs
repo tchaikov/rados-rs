@@ -390,11 +390,43 @@ impl OSDSession {
             timeout: None,
         });
 
+        // Pre-send filter: drop OSD_OP messages whose pending_op has already
+        // been migrated to another session by scan_requests_on_map_change().
+        //
+        // Race (Timeline A): submit_op queues both pending_ops[tid] and the
+        // encoded Message.  If the OSDMap changes before the message reaches
+        // the wire, scan_requests removes pending_ops[tid] and resubmits to the
+        // new primary.  The encoded bytes are already in the mpsc buffer; this
+        // check drops them right before the wire write so the old OSD never
+        // sees the misdirected op.
+        //
+        // A narrow race remains: the check returns true, then scan_requests
+        // removes the pending_op before send_message() completes.  That is
+        // handled by Timeline B (ENXIO → fetch new map, retry in execute_op).
+        let pending_ops_for_filter = Arc::clone(&ctx.pending_ops);
+        let pre_send = move |msg: &crate::msgr2::message::Message| {
+            if msg.msg_type() != crate::osdclient::messages::CEPH_MSG_OSD_OP {
+                return true; // non-OSD-OP messages are always sent
+            }
+            let tid = msg.header.get_tid();
+            if pending_ops_for_filter.contains_key(&tid) {
+                true
+            } else {
+                debug!(
+                    "dropping stale OSD_OP tid={} to OSD {} \
+                     (pending_op already migrated to new primary)",
+                    tid, osd_id
+                );
+                false
+            }
+        };
+
         run_io_loop(
             connection,
             send_rx,
             ctx.shutdown_token.clone(),
             keepalive,
+            pre_send,
             move |msg| {
                 let osdmap_tx = osdmap_tx.clone();
                 let client = client.clone();
