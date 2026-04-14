@@ -790,6 +790,10 @@ impl OSDClient {
                     .map(|m| m.epoch.as_u32())
                     .unwrap_or(0);
                 if current_epoch != osdmap.epoch.as_u32() {
+                    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                    if remaining.is_zero() {
+                        return Err(OSDClientError::Timeout(effective_timeout));
+                    }
                     osdmap = self.get_osdmap().await?;
                     continue;
                 }
@@ -1744,14 +1748,15 @@ impl OSDClient {
         for (new_osd, pending_op) in need_resend {
             let mut target_osd = new_osd;
             let mut epoch_for_op = new_epoch;
+            let mut reroute_attempts = 0u32;
 
             // get_or_create_session can block (TCP connect + auth handshake).
             // Re-check the epoch after it returns; if it advanced, re-route the
             // op before inserting into the new session so we don't send to a
             // stale primary.  This mirrors the same check in execute_op.
             //
-            // We loop rather than just checking once because the reconnect itself
-            // may take long enough for a second epoch bump to slip in.
+            // Cap reroute_attempts: if the epoch is churning faster than we can
+            // reconnect, give up and let the op fail rather than loop forever.
             'route: loop {
                 match self.get_or_create_session(target_osd).await {
                     Ok(session) => {
@@ -1771,6 +1776,20 @@ impl OSDClient {
                                 Ok((_, osds)) => {
                                     target_osd = osds[0];
                                     epoch_for_op = new_osdmap.epoch.as_u32();
+                                    reroute_attempts += 1;
+                                    if reroute_attempts > 8 {
+                                        warn!(
+                                            "Epoch churning too fast, giving up re-route \
+                                             for pool={} oid={}",
+                                            pending_op.op.object.pool, pending_op.op.object.oid,
+                                        );
+                                        let _ = pending_op.result_tx.send(Err(
+                                            OSDClientError::Timeout(
+                                                std::time::Duration::from_secs(0),
+                                            ),
+                                        ));
+                                        break 'route;
+                                    }
                                     continue 'route;
                                 }
                                 Err(e) => {
@@ -2124,23 +2143,47 @@ impl OSDClient {
         }
     }
 
-    /// Load initial map when no current map exists
+    /// Load initial map when no current map exists.
+    ///
+    /// Picks the latest full map in the message, then applies any incrementals
+    /// from the same message that are newer than that full map.  The monitor
+    /// bundles a base full map plus trailing incrementals in a single MOSDMap
+    /// message; without this second step, pg_temp entries (and other incremental
+    /// changes) set during PG peering are silently discarded.
     fn load_initial_map(
         &self,
         mosdmap: &crate::monclient::messages::MOSDMap,
     ) -> Option<Arc<crate::osdclient::osdmap::OSDMap>> {
-        let (&latest_epoch, full_bl) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)?;
+        let (&base_epoch, full_bl) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)?;
 
-        debug!("Using latest full OSDMap (epoch {})", latest_epoch);
-        match crate::osdclient::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
-            Ok(full_map) => {
-                info!("Initial OSDMap loaded: epoch={}", full_map.epoch);
-                Some(Arc::new(full_map))
-            }
-            Err(err) => {
-                warn!("Failed to decode initial full map: {}", err);
-                None
-            }
+        debug!("Using latest full OSDMap (epoch {})", base_epoch);
+        let full_map =
+            match crate::osdclient::osdmap::OSDMap::decode_versioned(&mut full_bl.as_ref(), 0) {
+                Ok(m) => {
+                    info!("Initial OSDMap loaded: epoch={}", m.epoch);
+                    Arc::new(m)
+                }
+                Err(err) => {
+                    warn!("Failed to decode initial full map: {}", err);
+                    return None;
+                }
+            };
+
+        // Apply any incrementals that are newer than the full map and are
+        // included in the same MOSDMap message (e.g. pg_temp changes from PG
+        // peering that happened after the base-epoch snapshot was taken).
+        let full_epoch = crate::Epoch::new(base_epoch);
+        if mosdmap.get_last() > base_epoch {
+            debug!(
+                "Applying {} incremental(s) on top of initial full map (epoch {}..{})",
+                mosdmap.get_last() - base_epoch,
+                base_epoch,
+                mosdmap.get_last(),
+            );
+            self.apply_sequential_updates(mosdmap, full_epoch, Some(full_map.clone()))
+                .or(Some(full_map))
+        } else {
+            Some(full_map)
         }
     }
 
