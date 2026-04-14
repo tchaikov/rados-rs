@@ -532,19 +532,19 @@ impl OSDClient {
 
     fn cached_rescan_osds(
         &self,
-        cache: &mut HashMap<(u64, String), Vec<i32>>,
+        cache: &mut HashMap<(u64, String), (StripedPgId, Vec<i32>)>,
         osdmap: &crate::osdclient::osdmap::OSDMap,
         pool_id: u64,
         object_id: &str,
-    ) -> Result<Vec<i32>> {
+    ) -> Result<(StripedPgId, Vec<i32>)> {
         let key = (pool_id, object_id.to_owned());
-        if let Some(osds) = cache.get(&key) {
-            return Ok(osds.clone());
+        if let Some(entry) = cache.get(&key) {
+            return Ok(entry.clone());
         }
 
-        let (_, osds) = self.object_to_osds_in_map(osdmap, pool_id, object_id)?;
-        cache.insert(key, osds.clone());
-        Ok(osds)
+        let entry = self.object_to_osds_in_map(osdmap, pool_id, object_id)?;
+        cache.insert(key, entry.clone());
+        Ok(entry)
     }
 
     /// Map a PG to its acting OSD set, applying CRUSH placement and all overrides.
@@ -1694,7 +1694,7 @@ impl OSDClient {
                 continue;
             }
 
-            let new_osds =
+            let (new_spg, new_osds) =
                 self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
             let new_primary = new_osds.first().copied().unwrap_or(-1);
 
@@ -1723,6 +1723,16 @@ impl OSDClient {
                     any_migrated = true;
                 }
                 op.target.update(new_epoch, new_primary, new_osds.clone());
+                // Restamp the MOSDOp pgid from the new map.  A pg_num change
+                // (autoscaler split, manual resize) shifts the seed even when
+                // the primary OSD is unchanged; without this, the migrated op
+                // would be re-encoded with the stale seed and rejected by the
+                // target OSD (ENXIO in prod, assertion with debug_misdirected).
+                {
+                    let msg = Arc::make_mut(&mut op.op);
+                    msg.pgid = new_spg;
+                    msg.osdmap_epoch = new_epoch;
+                }
                 op.state = crate::osdclient::types::OpState::Queued;
                 need_resend.push((new_primary, op));
             }
@@ -1775,7 +1785,7 @@ impl OSDClient {
     /// (from `get_osdmap`) return `Err`.
     async fn resend_single_migrated_op(
         &self,
-        pending_op: crate::osdclient::session::PendingOp,
+        mut pending_op: crate::osdclient::session::PendingOp,
         mut target_osd: i32,
         mut epoch_for_op: u32,
     ) -> Result<()> {
@@ -1807,8 +1817,11 @@ impl OSDClient {
             }
 
             // Epoch advanced during connect/auth — re-route before inserting.
+            // Also refresh the op's pgid: a pg_num change bumps the seed even
+            // when the primary OSD is unchanged, so keeping the old pgid would
+            // send a stale seed to the fresh session.
             let new_osdmap = self.get_osdmap().await?;
-            let (_, osds) = match self.object_to_osds_in_map(
+            let (new_spg, osds) = match self.object_to_osds_in_map(
                 &new_osdmap,
                 pending_op.op.object.pool,
                 &pending_op.op.object.oid,
@@ -1831,6 +1844,11 @@ impl OSDClient {
 
             target_osd = osds[0];
             epoch_for_op = new_osdmap.epoch.as_u32();
+            {
+                let msg = Arc::make_mut(&mut pending_op.op);
+                msg.pgid = new_spg;
+                msg.osdmap_epoch = epoch_for_op;
+            }
             reroute_attempts += 1;
             if reroute_attempts > MAX_REROUTE_ATTEMPTS {
                 warn!(
