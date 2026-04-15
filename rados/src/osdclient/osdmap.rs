@@ -2219,6 +2219,32 @@ impl OSDMapIncremental {
             inc_crc: _,              // CRC of the incremental
         } = self;
 
+        // Sanity-check the incremental against the base before mutating
+        // anything.  C++ `OSDMap::apply_incremental` does the same checks
+        // (the fsid clause adopts the inc's fsid on epoch == 1 and
+        // returns -EINVAL otherwise; the epoch clause asserts).  An
+        // out-of-order or wrong-cluster incremental landing in our base
+        // would silently corrupt routing state, so we refuse instead.
+        if base.epoch.as_u32() == 0 {
+            // First-ever apply: adopt the inc's fsid (matches the
+            // `if (inc.epoch == 1) fsid = inc.fsid` branch).
+            base.fsid = self.fsid;
+        } else if self.fsid != base.fsid {
+            return Err(RadosError::Protocol(format!(
+                "OSDMap incremental fsid {:?} does not match base {:?}; \
+                 refusing to apply (wrong cluster?)",
+                self.fsid, base.fsid
+            )));
+        }
+        if self.epoch.as_u32() != base.epoch.as_u32() + 1 {
+            return Err(RadosError::Protocol(format!(
+                "OSDMap incremental epoch {} is not base epoch {} + 1; \
+                 out-of-order incremental application would corrupt state",
+                self.epoch.as_u32(),
+                base.epoch.as_u32()
+            )));
+        }
+
         // Invalidate placement caches on any OSDMap update.
         // Clear acting_cache first: a thread that misses it and falls through
         // to CRUSH must also miss crush_cache, forcing a full recompute from
@@ -3975,6 +4001,47 @@ mod tests {
         // of the primaryfirst view.  pgtemp_undo_primaryfirst(0) is
         // the early-return short circuit, so shard = 0.
         assert_eq!(shard, ShardId::new(0));
+    }
+
+    #[test]
+    fn test_apply_to_refuses_out_of_order_epoch() {
+        let mut base = OSDMap::new();
+        base.epoch = Epoch::new(5);
+        let inc = OSDMapIncremental::new(Epoch::new(7)); // skip epoch 6
+        let err = inc
+            .apply_to(&mut base)
+            .expect_err("out-of-order epoch should be refused");
+        assert!(
+            matches!(err, RadosError::Protocol(ref m) if m.contains("out-of-order")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_to_refuses_wrong_fsid() {
+        let mut base = OSDMap::new();
+        base.epoch = Epoch::new(1);
+        // base.fsid is default
+        let mut inc = OSDMapIncremental::new(Epoch::new(2));
+        // Set inc.fsid to a non-default value via UuidD::new
+        inc.fsid = UuidD::from_bytes([0xAA; 16]);
+        let err = inc
+            .apply_to(&mut base)
+            .expect_err("fsid mismatch should be refused");
+        assert!(
+            matches!(err, RadosError::Protocol(ref m) if m.contains("fsid")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_to_adopts_fsid_on_first_apply() {
+        let mut base = OSDMap::new();
+        // base.epoch is 0 → first apply should adopt the inc's fsid.
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.fsid = UuidD::from_bytes([0xBB; 16]);
+        inc.apply_to(&mut base).expect("first apply should succeed");
+        assert_eq!(base.fsid, UuidD::from_bytes([0xBB; 16]));
     }
 
     #[test]
