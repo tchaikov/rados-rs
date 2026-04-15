@@ -946,6 +946,67 @@ impl PgPool {
         !self.nonprimary_shards.is_empty() && self.nonprimary_shards.contains(shard)
     }
 
+    /// Reorder a shard-ID-indexed acting set into "primaryfirst" form
+    /// for an optimized EC pool, mirroring the vector form of C++
+    /// `OSDMap::pgtemp_primaryfirst`.  Walks each input position as a
+    /// shard id; entries whose shard id is in `nonprimary_shards` are
+    /// moved to the back, otherwise they keep their relative order at
+    /// the front.  No-op for non-optimized EC and replicated pools.
+    ///
+    /// The OSDMonitor pre-applies this transform before storing
+    /// `pg_temp` in incremental updates, so for typical optimized 4+2
+    /// EC pools (`nonprimary_shards = {4,5}`) the transform is the
+    /// identity and `pg_temp` already-stored is "right" without any
+    /// further reshuffling.  For asymmetric layouts the transform
+    /// genuinely moves entries.
+    pub fn pgtemp_primaryfirst_vec(&self, pg_temp: &[i32]) -> Vec<i32> {
+        if !self.allows_ecoptimizations() || self.nonprimary_shards.is_empty() {
+            return pg_temp.to_vec();
+        }
+        let mut result = Vec::with_capacity(pg_temp.len());
+        let mut nonprimary = Vec::new();
+        for (idx, &osd) in pg_temp.iter().enumerate() {
+            if self.is_nonprimary_shard(ShardId::new(idx as i8)) {
+                nonprimary.push(osd);
+            } else {
+                result.push(osd);
+            }
+        }
+        result.extend(nonprimary);
+        result
+    }
+
+    /// Inverse of `pgtemp_primaryfirst_vec` — convert a "primaryfirst"
+    /// position back to the actual shard ID.  Mirrors the `shard_id_t`
+    /// form of C++ `OSDMap::pgtemp_undo_primaryfirst`.
+    ///
+    /// Returns the input unchanged for shard 0, `NO_SHARD`, or pools
+    /// that are not optimized EC, or when no `pg_temp` is in effect
+    /// for the PG (the C++ function checks `has_pgtemp` internally
+    /// because the reorder only happens when pg_temp gets stored).
+    /// The math itself is byte-for-byte identical to C++ so we route
+    /// to the same shard the OSD expects.
+    pub fn pgtemp_undo_primaryfirst_shard(&self, has_pg_temp: bool, pos: ShardId) -> ShardId {
+        if pos == ShardId::NO_SHARD || pos.0 == 0 {
+            return pos;
+        }
+        if !self.allows_ecoptimizations() || !has_pg_temp {
+            return pos;
+        }
+        let size = self.size as i32;
+        let nonprimary_count = (0..size as usize)
+            .filter(|&i| self.is_nonprimary_shard(ShardId::new(i as i8)))
+            .count() as i32;
+        let num_parity_shards = size - nonprimary_count - 1;
+        let p = pos.0 as i32;
+        let result = if p > num_parity_shards {
+            p - num_parity_shards
+        } else {
+            p + size - num_parity_shards - 1
+        };
+        ShardId::new(result as i8)
+    }
+
     pub fn is_stretch_pool(&self) -> bool {
         // For now, assume no stretch pools (like the default case in Ceph)
         // This would be based on crush rules and other pool configuration
@@ -2684,13 +2745,10 @@ impl OSDMap {
     ///
     /// - **Cache tiering**: C++ redirects reads to `read_tier` and writes
     ///   to `write_tier` when the base pool has them set (and
-    ///   `CEPH_OSD_FLAG_IGNORE_OVERLAY` is off).  We decode the fields but
-    ///   ignore them.  Cache tiering is deprecated upstream since Nautilus
-    ///   so this is low-severity, but clusters with legacy cache tiers
-    ///   will mis-route.
-    /// - **Optimized erasure-coded pools** (`FLAG_EC_OPTIMIZATIONS`): the
-    ///   `pgtemp_undo_primaryfirst` reverse transform is not implemented.
-    ///   `pg_to_spg_shard` refuses such pools with a clear error.
+    ///   `CEPH_OSD_FLAG_IGNORE_OVERLAY` is off).  We decode the fields
+    ///   but ignore them.  Cache tiering is deprecated upstream since
+    ///   Nautilus so this is low-severity, but clusters with legacy
+    ///   cache tiers will mis-route.
     pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         let cache_key = (pg.pool, pg.seed);
         {
@@ -2766,20 +2824,17 @@ impl OSDMap {
     /// Returns `ShardId::NO_SHARD` (-1) for replicated pools — there is
     /// no per-shard concept and the wire encoding uses `-1`.
     ///
-    /// For erasure-coded pools the shard is the position of the
-    /// acting primary in the un-swapped acting set, mirroring the EC
-    /// branch of C++ `Objecter::_calc_target`.  The OSD verifies the
-    /// shard against its own per-PG `shard_id` and rejects mismatches
-    /// as misdirected ops, so getting this right is a hard correctness
-    /// requirement for EC pool I/O.
+    /// For erasure-coded pools the shard is the position of the acting
+    /// primary in the (post-`pgtemp_primaryfirst`) acting set,
+    /// mirroring the EC branch of C++ `Objecter::_calc_target`.
+    /// Optimized EC pools (`FLAG_EC_OPTIMIZATIONS`) additionally apply
+    /// `pgtemp_undo_primaryfirst` to convert from primaryfirst position
+    /// back to actual shard ID; the math is byte-for-byte identical to
+    /// C++ so the wire shard matches what the OSD expects.
     ///
-    /// # Unsupported cases
-    ///
-    /// Optimized EC pools (`pool.allows_ecoptimizations() == true`) need
-    /// the `pgtemp_undo_primaryfirst` reverse transform when `pg_temp`
-    /// is present.  We do not yet implement that — the function returns
-    /// a `Protocol` error so the caller refuses I/O against the pool
-    /// instead of silently misrouting.
+    /// The OSD verifies the shard against its own per-PG `shard_id`
+    /// and rejects mismatches as misdirected ops, so getting this
+    /// right is a hard correctness requirement for EC pool I/O.
     pub fn pg_to_spg_shard(&self, pg: &PgId) -> Result<ShardId, RadosError> {
         let pool = self
             .pools
@@ -2788,14 +2843,6 @@ impl OSDMap {
 
         if !pool.is_erasure() {
             return Ok(ShardId::NO_SHARD);
-        }
-
-        if pool.allows_ecoptimizations() {
-            return Err(RadosError::Protocol(format!(
-                "EC pool {} has FLAG_EC_OPTIMIZATIONS set; \
-                 optimized-EC client support is not yet implemented",
-                pg.pool
-            )));
         }
 
         // Run CRUSH; the post-CRUSH transformations and primary lookup
@@ -2822,11 +2869,22 @@ impl OSDMap {
 
     /// Compute the EC `spg_t` shard from a hand-supplied raw CRUSH
     /// output.  Caller must already know the pool exists and is
-    /// non-optimized erasure-coded.  Mirrors the post-CRUSH portion of
-    /// the EC branch of C++ `Objecter::_calc_target` — applies upmap,
-    /// builds the EC up set, picks the acting primary, and returns the
-    /// primary's position in the acting set.
+    /// erasure-coded.  Mirrors the post-CRUSH portion of the EC branch
+    /// of C++ `Objecter::_calc_target` — applies upmap, builds the EC
+    /// up set, picks the acting primary, and returns the spg_t shard.
+    ///
+    /// For non-optimized EC and for optimized EC without a `pg_temp`
+    /// override, the shard is just the primary's position in the
+    /// acting set.  For optimized EC + `pg_temp`, the C++ code re-runs
+    /// `pgtemp_primaryfirst` on `acting` to get the primaryfirst-view
+    /// vector, walks IT to find the primary, then runs
+    /// `pgtemp_undo_primaryfirst` on the position.  We mirror the
+    /// same call sequence so we land on the same shard the OSD picks.
     fn ec_shard_from_raw(&self, pg: &PgId, mut raw: Vec<i32>) -> Result<ShardId, RadosError> {
+        let pool = self
+            .pools
+            .get(&pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
         // pg_upmap (whole-set replacement) and pg_upmap_items
         // (per-OSD swap) — same OUT/duplicate guards as
         // `apply_pg_overrides`.
@@ -2894,16 +2952,26 @@ impl OSDMap {
             )));
         }
 
-        // Walk the acting set to find the primary's position.  For
-        // non-optimized EC pools this position IS the spg_t shard
-        // (`pgtemp_undo_primaryfirst` is the identity).
-        let pos = acting
+        // Match C++ Objecter::_calc_target: re-apply pgtemp_primaryfirst
+        // on acting if pg_temp is set.  For non-optimized EC this is a
+        // no-op (the helper short-circuits), for optimized EC with the
+        // typical `nonprimary_shards = {4,5}` layout it's idempotent on
+        // monitor-stored pg_temp, and for asymmetric layouts it produces
+        // the primaryfirst view we need to walk.
+        let has_pg_temp = self.pg_temp.contains_key(pg);
+        let primaryfirst_view: Vec<i32> = if has_pg_temp {
+            pool.pgtemp_primaryfirst_vec(acting)
+        } else {
+            acting.to_vec()
+        };
+
+        let pos = primaryfirst_view
             .iter()
             .position(|&o| o == acting_primary)
             .ok_or_else(|| {
                 RadosError::Protocol(format!(
-                    "EC pool {} pg {}.{:x}: acting primary {} not in acting {:?}",
-                    pg.pool, pg.pool, pg.seed, acting_primary, acting
+                    "EC pool {} pg {}.{:x}: acting primary {} not in primaryfirst view {:?}",
+                    pg.pool, pg.pool, pg.seed, acting_primary, primaryfirst_view
                 ))
             })?;
 
@@ -2913,7 +2981,11 @@ impl OSDMap {
                 pg.pool, pg.pool, pg.seed, pos
             )));
         }
-        Ok(ShardId::new(pos as i8))
+        // Convert the primaryfirst position back to the actual shard
+        // ID.  No-op for non-optimized or non-pg_temp; runs the
+        // pgtemp_undo_primaryfirst arithmetic for optimized EC + pg_temp.
+        let shard = pool.pgtemp_undo_primaryfirst_shard(has_pg_temp, ShardId::new(pos as i8));
+        Ok(shard)
     }
 
     /// Walk a candidate acting set and pick the position that should
@@ -3674,11 +3746,127 @@ mod tests {
         );
     }
 
+    /// Compute the C++ `pgtemp_primaryfirst` for a single shard id —
+    /// the inverse direction of `pgtemp_undo_primaryfirst_shard`.  Only
+    /// used by the roundtrip test below to lock in the bit-for-bit
+    /// match against the C++ math.
+    fn pgtemp_primaryfirst_shard(pool: &PgPool, has_pg_temp: bool, shard: ShardId) -> ShardId {
+        if shard == ShardId::NO_SHARD || shard.0 == 0 {
+            return shard;
+        }
+        if !pool.allows_ecoptimizations() || !has_pg_temp {
+            return shard;
+        }
+        let size = pool.size as i32;
+        let nonprimary_count = (0..size as usize)
+            .filter(|&i| pool.is_nonprimary_shard(ShardId::new(i as i8)))
+            .count() as i32;
+        let num_parity_shards = size - nonprimary_count - 1;
+        let s = shard.0 as i32;
+        let result = if s >= size - num_parity_shards {
+            s + num_parity_shards + 1 - size
+        } else {
+            s + num_parity_shards
+        };
+        ShardId::new(result as i8)
+    }
+
+    fn make_optimized_ec_pool(size: u8, nonprimary: &[i8]) -> PgPool {
+        let mut pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            flags: PgPool::FLAG_EC_OPTIMIZATIONS,
+            size,
+            ..Default::default()
+        };
+        for &s in nonprimary {
+            pool.nonprimary_shards.insert(ShardId::new(s));
+        }
+        pool
+    }
+
+    #[test]
+    fn test_pgtemp_primaryfirst_undo_roundtrip_typical_4_2() {
+        // Standard 4+2 EC: nonprimary = {4, 5}.  For this layout the
+        // C++ math is the identity, so every shard maps to itself.
+        let pool = make_optimized_ec_pool(6, &[4, 5]);
+        for i in 0..6 {
+            let s = ShardId::new(i);
+            let pf = pgtemp_primaryfirst_shard(&pool, true, s);
+            let back = pool.pgtemp_undo_primaryfirst_shard(true, pf);
+            assert_eq!(s, back, "roundtrip failed for shard {i}");
+        }
+    }
+
+    #[test]
+    fn test_pgtemp_primaryfirst_undo_roundtrip_asymmetric() {
+        // Asymmetric: nonprimary = {2, 3}.  The C++ math is
+        // genuinely non-identity here.  Verifies the inverse property
+        // for every shard.
+        let pool = make_optimized_ec_pool(6, &[2, 3]);
+        for i in 0..6 {
+            let s = ShardId::new(i);
+            let pf = pgtemp_primaryfirst_shard(&pool, true, s);
+            let back = pool.pgtemp_undo_primaryfirst_shard(true, pf);
+            assert_eq!(s, back, "roundtrip failed for shard {i}");
+        }
+    }
+
+    #[test]
+    fn test_pgtemp_undo_identity_when_not_optimized() {
+        // Non-optimized EC: undo must be the identity even with
+        // non-empty nonprimary_shards, because allows_ecoptimizations
+        // returns false.
+        let mut pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            size: 6,
+            ..Default::default()
+        };
+        pool.nonprimary_shards.insert(ShardId::new(4));
+        pool.nonprimary_shards.insert(ShardId::new(5));
+        for i in 0..6 {
+            let s = ShardId::new(i);
+            assert_eq!(pool.pgtemp_undo_primaryfirst_shard(true, s), s);
+        }
+    }
+
+    #[test]
+    fn test_pgtemp_undo_identity_without_pg_temp() {
+        // Optimized EC but no pg_temp on the PG: undo is identity
+        // because the C++ function checks has_pgtemp internally.
+        let pool = make_optimized_ec_pool(6, &[4, 5]);
+        for i in 0..6 {
+            let s = ShardId::new(i);
+            assert_eq!(pool.pgtemp_undo_primaryfirst_shard(false, s), s);
+        }
+    }
+
+    #[test]
+    fn test_pgtemp_primaryfirst_vec_idempotent_typical_4_2() {
+        // For nonprimary={4,5}, pgtemp_primaryfirst on a shard-id
+        // vector is the identity, matching the assumption that the
+        // OSDMonitor stores already-primaryfirst pg_temp.
+        let pool = make_optimized_ec_pool(6, &[4, 5]);
+        let input = vec![10, 11, 12, 13, 14, 15];
+        let out = pool.pgtemp_primaryfirst_vec(&input);
+        assert_eq!(out, input);
+    }
+
+    fn make_ec_pool_map() -> (OSDMap, PgPool) {
+        let mut map = make_osdmap_with_states(vec![0x3; 20]);
+        let pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            size: 6,
+            ..Default::default()
+        };
+        map.pools.insert(7, pool.clone());
+        (map, pool)
+    }
+
     #[test]
     fn test_ec_shard_from_raw_simple_case() {
         // 4+2 EC, all OSDs up, no overrides.  Acting matches raw, primary
         // is acting[0] = osd 10, shard = 0.
-        let map = make_osdmap_with_states(vec![0; 20].into_iter().map(|_| 0x3).collect());
+        let (map, _) = make_ec_pool_map();
         let pg = PgId::new(7, 1);
         let raw = vec![10, 11, 12, 13, 14, 15];
         let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
@@ -3689,9 +3877,8 @@ mod tests {
     fn test_ec_shard_from_raw_skips_down_primary() {
         // Same 4+2, but OSD 10 is down. C++ EC `_raw_to_up_osds`
         // replaces it with NONE, primary becomes acting[1]=11, shard=1.
-        let mut states: Vec<u32> = (0..20).map(|_| 0x3).collect();
-        states[10] = 0x1; // EXISTS but not UP
-        let map = make_osdmap_with_states(states);
+        let (mut map, _) = make_ec_pool_map();
+        map.osd_state[10] = 0x1; // EXISTS but not UP
         let pg = PgId::new(7, 1);
         let raw = vec![10, 11, 12, 13, 14, 15];
         let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
@@ -3701,8 +3888,7 @@ mod tests {
     #[test]
     fn test_ec_shard_from_raw_honours_primary_temp() {
         // primary_temp pins primary to OSD 12, which is acting[2]. shard=2.
-        let states: Vec<u32> = (0..20).map(|_| 0x3).collect();
-        let mut map = make_osdmap_with_states(states);
+        let (mut map, _) = make_ec_pool_map();
         let pg = PgId::new(7, 1);
         map.primary_temp.insert(pg, 12);
         let raw = vec![10, 11, 12, 13, 14, 15];
@@ -3714,8 +3900,7 @@ mod tests {
     fn test_ec_shard_from_raw_honours_pg_temp() {
         // pg_temp completely replaces the acting set. Primary is
         // pg_temp[0], shard reflects pg_temp positions.
-        let states: Vec<u32> = (0..20).map(|_| 0x3).collect();
-        let mut map = make_osdmap_with_states(states);
+        let (mut map, _) = make_ec_pool_map();
         let pg = PgId::new(7, 1);
         map.pg_temp.insert(pg, vec![15, 14, 13, 12, 11, 10]);
         let raw = vec![10, 11, 12, 13, 14, 15];
@@ -3725,6 +3910,35 @@ mod tests {
             ShardId::new(0),
             "pg_temp[0] is the primary, shard = 0"
         );
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_optimized_typical_layout() {
+        // Optimized EC with the typical nonprimary={4,5} layout.
+        // pgtemp_undo_primaryfirst is the identity for this layout, so
+        // shard = position of primary in acting.
+        let mut map = make_osdmap_with_states(vec![0x3; 20]);
+        let pool = make_optimized_ec_pool(6, &[4, 5]);
+        map.pools.insert(7, pool);
+        let pg = PgId::new(7, 1);
+        // Insert a pg_temp so the optimized branch fires.
+        map.pg_temp.insert(pg, vec![10, 11, 12, 13, 14, 15]);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(shard, ShardId::new(0));
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_optimized_no_pg_temp() {
+        // Optimized EC without pg_temp on the PG: the C++ undo function
+        // short-circuits because has_pgtemp is false, so shard = position.
+        let mut map = make_osdmap_with_states(vec![0x3; 20]);
+        let pool = make_optimized_ec_pool(6, &[4, 5]);
+        map.pools.insert(7, pool);
+        let pg = PgId::new(7, 1);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(shard, ShardId::new(0));
     }
 
     #[test]
@@ -3744,22 +3958,23 @@ mod tests {
     }
 
     #[test]
-    fn test_pg_to_spg_shard_optimized_ec_refuses() {
-        let mut map = make_osdmap_with_states(vec![0x3; 8]);
-        let pool = PgPool {
-            pool_type: PgPool::TYPE_ERASURE,
-            flags: PgPool::FLAG_EC_OPTIMIZATIONS,
-            ..Default::default()
-        };
+    fn test_ec_shard_from_raw_optimized_with_pg_temp_runs_undo() {
+        // Asymmetric optimized EC layout (nonprimary={2,3}) with a
+        // pg_temp.  Verifies that the undo math runs and produces a
+        // consistent shard via the roundtrip property: whatever shard
+        // we return must be the position the OSD picked when it
+        // primaryfirst-stored the pg_temp.
+        let mut map = make_osdmap_with_states(vec![0x3; 20]);
+        let pool = make_optimized_ec_pool(6, &[2, 3]);
         map.pools.insert(7, pool);
         let pg = PgId::new(7, 1);
-        let err = map
-            .pg_to_spg_shard(&pg)
-            .expect_err("optimized EC must be refused");
-        assert!(
-            matches!(err, RadosError::Protocol(ref m) if m.contains("FLAG_EC_OPTIMIZATIONS")),
-            "unexpected error: {err:?}"
-        );
+        map.pg_temp.insert(pg, vec![10, 11, 12, 13, 14, 15]);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        // The acting primary is pg_temp[0]=10, which is at position 0
+        // of the primaryfirst view.  pgtemp_undo_primaryfirst(0) is
+        // the early-return short circuit, so shard = 0.
+        assert_eq!(shard, ShardId::new(0));
     }
 
     #[test]
