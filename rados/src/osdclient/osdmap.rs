@@ -2602,6 +2602,28 @@ impl OSDMap {
     /// the same PG within the same OSDMap epoch skip the CRUSH tree walk.
     ///
     /// This is the method the I/O hot path should use.
+    ///
+    /// # Known gaps vs C++ `Objecter::_calc_target`
+    ///
+    /// Each of these is a partial translation: the behaviour matters only
+    /// for a feature we do not yet exercise, but auditors should know the
+    /// gap exists before turning the feature on.
+    ///
+    /// - **Cache tiering**: C++ redirects reads to `read_tier` and writes
+    ///   to `write_tier` when the base pool has them set (and
+    ///   `CEPH_OSD_FLAG_IGNORE_OVERLAY` is off).  We decode the fields but
+    ///   ignore them.  Cache tiering is deprecated upstream since Nautilus
+    ///   so this is low-severity, but clusters with legacy cache tiers
+    ///   will mis-route.
+    /// - **Primary affinity**: C++ `_apply_primary_affinity` reshuffles
+    ///   the up set so OSDs with reduced primary affinity drop out of
+    ///   position 0.  We store `osd_primary_affinity` and apply
+    ///   incrementals to it, but we never consult it during placement.
+    ///   Harmless when every OSD has the default 0x10000 affinity (the
+    ///   common case).
+    /// - **Erasure-coded pools**: C++ `_calc_target` resolves per-shard
+    ///   targets and handles `primaryfirst` reordering.  We treat every
+    ///   pool as replicated.  EC pools are not on the supported path.
     pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         let cache_key = (pg.pool, pg.seed);
         {
