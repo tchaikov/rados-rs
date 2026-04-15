@@ -3,6 +3,7 @@
 use crate::denc::{Denc, EVersion, Epoch, FixedSize, RadosError, UTime, Version, VersionedEncode};
 use crate::osdclient::osdmap::PgId;
 use bytes::{Buf, BufMut};
+use std::collections::BTreeMap;
 
 /// Wire size of ObjectStatSum at version 20: 36 × i64 + 4 × i32
 const OBJECT_STAT_SUM_ENCODED_SIZE: usize =
@@ -671,14 +672,14 @@ pub struct OsdStat {
     pub num_shards_repaired: u64,
     pub op_queue_age_hist: Pow2Hist,
     pub os_perf_stat: ObjectstorePerfStat,
-    pub os_alerts: std::collections::BTreeMap<i32, std::collections::BTreeMap<String, String>>,
+    pub os_alerts: BTreeMap<i32, BTreeMap<String, String>>,
     pub up_from: u32, // epoch_t
     pub seq: u64,
     pub num_pgs: u32,
     pub num_osds: u32,
     pub num_per_pool_osds: u32,
     pub num_per_pool_omap_osds: u32,
-    pub hb_pingtime: std::collections::BTreeMap<i32, OsdStatInterfaces>,
+    pub hb_pingtime: BTreeMap<i32, OsdStatInterfaces>,
 }
 
 #[allow(dead_code)]
@@ -813,9 +814,9 @@ impl VersionedEncode for OsdStat {
         };
 
         let os_alerts = if version >= 11 {
-            std::collections::BTreeMap::decode(buf, features)?
+            BTreeMap::decode(buf, features)?
         } else {
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         };
 
         let num_shards_repaired = if version >= 12 {
@@ -847,7 +848,7 @@ impl VersionedEncode for OsdStat {
             let map_size: usize = i32::decode(buf, features)?
                 .try_into()
                 .map_err(|_| crate::RadosError::InvalidData("negative map size".into()))?;
-            let mut map = std::collections::BTreeMap::new();
+            let mut map = BTreeMap::new();
             for _ in 0..map_size {
                 let osd_id = i32::decode(buf, features)?;
                 let interfaces = OsdStatInterfaces::decode(buf, features)?;
@@ -855,7 +856,7 @@ impl VersionedEncode for OsdStat {
             }
             map
         } else {
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         };
 
         Ok(OsdStat {
@@ -934,7 +935,6 @@ impl Denc for OsdStat {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use std::collections::BTreeMap;
 
     #[test]
     fn test_pg_count_roundtrip() {
@@ -1422,7 +1422,7 @@ where
     T: Ord,
 {
     /// Map of interval start -> length
-    pub intervals: std::collections::BTreeMap<T, T>,
+    pub intervals: BTreeMap<T, T>,
 }
 
 impl<T> Denc for IntervalSet<T>
@@ -1434,7 +1434,7 @@ where
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let intervals = std::collections::BTreeMap::<T, T>::decode(buf, features)?;
+        let intervals = BTreeMap::<T, T>::decode(buf, features)?;
         Ok(IntervalSet { intervals })
     }
 
@@ -1510,7 +1510,7 @@ pub struct PgStat {
     pub up: Vec<i32>,
     pub acting: Vec<i32>,
     pub avail_no_missing: Vec<PgShard>,
-    pub object_location_counts: std::collections::BTreeMap<Vec<PgShard>, i32>,
+    pub object_location_counts: BTreeMap<Vec<PgShard>, i32>,
     pub mapping_epoch: Epoch,
 
     pub blocked_by: Vec<i32>,
@@ -1701,8 +1701,7 @@ impl VersionedEncode for PgStat {
         let purged_snaps = IntervalSet::<u64>::decode(buf, features)?;
         let manifest_stats_invalid = bool::decode(buf, features)?;
         let avail_no_missing = Vec::<PgShard>::decode(buf, features)?;
-        let object_location_counts =
-            std::collections::BTreeMap::<Vec<PgShard>, i32>::decode(buf, features)?;
+        let object_location_counts = BTreeMap::<Vec<PgShard>, i32>::decode(buf, features)?;
         let last_scrub_duration = i32::decode(buf, features)?;
 
         // Decode pg_scrubbing_status_t fields (first 6, v27+)
@@ -1807,21 +1806,21 @@ pub struct PgMapDigest {
     pub num_pg_active: i64,
     pub num_pg_unknown: i64,
     pub num_osd: i64,
-    pub pg_pool_sum: std::collections::BTreeMap<i32, PoolStat>,
+    pub pg_pool_sum: BTreeMap<i32, PoolStat>,
     pub pg_sum: PoolStat,
     pub osd_sum: OsdStat,
-    pub num_pg_by_state: std::collections::BTreeMap<u64, i32>,
-    pub num_pg_by_osd: std::collections::BTreeMap<i32, PgCount>,
-    pub num_pg_by_pool: std::collections::BTreeMap<i64, i64>,
+    pub num_pg_by_state: BTreeMap<u64, i32>,
+    pub num_pg_by_osd: BTreeMap<i32, PgCount>,
+    pub num_pg_by_pool: BTreeMap<i64, i64>,
     pub osd_last_seq: Vec<u64>,
-    pub per_pool_sum_delta: std::collections::BTreeMap<i64, (PoolStat, UTime)>,
-    pub per_pool_sum_deltas_stamps: std::collections::BTreeMap<i64, UTime>,
+    pub per_pool_sum_delta: BTreeMap<i64, (PoolStat, UTime)>,
+    pub per_pool_sum_deltas_stamps: BTreeMap<i64, UTime>,
     pub pg_sum_delta: PoolStat,
     pub stamp_delta: UTime,
-    pub avail_space_by_rule: std::collections::BTreeMap<i32, i64>,
-    pub purged_snaps: std::collections::BTreeMap<i64, IntervalSet<u64>>,
-    pub osd_sum_by_class: std::collections::BTreeMap<String, OsdStat>,
-    pub pool_pg_unavailable_map: std::collections::BTreeMap<u64, Vec<PgId>>,
+    pub avail_space_by_rule: BTreeMap<i32, i64>,
+    pub purged_snaps: BTreeMap<i64, IntervalSet<u64>>,
+    pub osd_sum_by_class: BTreeMap<String, OsdStat>,
+    pub pool_pg_unavailable_map: BTreeMap<u64, Vec<PgId>>,
 }
 
 impl VersionedEncode for PgMapDigest {
@@ -1888,34 +1887,30 @@ impl VersionedEncode for PgMapDigest {
         let num_pg_unknown = i64::decode(buf, features)?;
         let num_osd = i64::decode(buf, features)?;
 
-        let pg_pool_sum = std::collections::BTreeMap::<i32, PoolStat>::decode(buf, features)?;
+        let pg_pool_sum = BTreeMap::<i32, PoolStat>::decode(buf, features)?;
         let pg_sum = PoolStat::decode(buf, features)?;
         let osd_sum = OsdStat::decode(buf, features)?;
 
-        let num_pg_by_state = std::collections::BTreeMap::<u64, i32>::decode(buf, features)?;
-        let num_pg_by_osd = std::collections::BTreeMap::<i32, PgCount>::decode(buf, features)?;
-        let num_pg_by_pool = std::collections::BTreeMap::<i64, i64>::decode(buf, features)?;
+        let num_pg_by_state = BTreeMap::<u64, i32>::decode(buf, features)?;
+        let num_pg_by_osd = BTreeMap::<i32, PgCount>::decode(buf, features)?;
+        let num_pg_by_pool = BTreeMap::<i64, i64>::decode(buf, features)?;
         let osd_last_seq = Vec::<u64>::decode(buf, features)?;
 
-        let per_pool_sum_delta =
-            std::collections::BTreeMap::<i64, (PoolStat, UTime)>::decode(buf, features)?;
-        let per_pool_sum_deltas_stamps =
-            std::collections::BTreeMap::<i64, UTime>::decode(buf, features)?;
+        let per_pool_sum_delta = BTreeMap::<i64, (PoolStat, UTime)>::decode(buf, features)?;
+        let per_pool_sum_deltas_stamps = BTreeMap::<i64, UTime>::decode(buf, features)?;
         let pg_sum_delta = PoolStat::decode(buf, features)?;
 
         let stamp_delta = UTime::decode(buf, features)?;
-        let avail_space_by_rule = std::collections::BTreeMap::<i32, i64>::decode(buf, features)?;
-        let purged_snaps =
-            std::collections::BTreeMap::<i64, IntervalSet<u64>>::decode(buf, features)?;
+        let avail_space_by_rule = BTreeMap::<i32, i64>::decode(buf, features)?;
+        let purged_snaps = BTreeMap::<i64, IntervalSet<u64>>::decode(buf, features)?;
 
-        let osd_sum_by_class =
-            std::collections::BTreeMap::<String, OsdStat>::decode(buf, features)?;
+        let osd_sum_by_class = BTreeMap::<String, OsdStat>::decode(buf, features)?;
 
         // Version 5+ field
         let pool_pg_unavailable_map = if version >= 5 {
-            std::collections::BTreeMap::<u64, Vec<PgId>>::decode(buf, features)?
+            BTreeMap::<u64, Vec<PgId>>::decode(buf, features)?
         } else {
-            std::collections::BTreeMap::new()
+            BTreeMap::new()
         };
 
         Ok(PgMapDigest {
@@ -1956,12 +1951,12 @@ crate::denc::impl_denc_for_versioned!(PgMapDigest);
 #[allow(dead_code)]
 pub struct PgMap {
     pub version: Version,
-    pub pg_stat: std::collections::BTreeMap<PgId, PgStat>,
-    pub osd_stat: std::collections::BTreeMap<i32, OsdStat>,
+    pub pg_stat: BTreeMap<PgId, PgStat>,
+    pub osd_stat: BTreeMap<i32, OsdStat>,
     pub last_osdmap_epoch: Epoch,
     pub last_pg_scan: Epoch,
     pub stamp: UTime,
-    pub pool_statfs: std::collections::BTreeMap<(i64, i32), StoreStatfs>,
+    pub pool_statfs: BTreeMap<(i64, i32), StoreStatfs>,
 }
 
 #[cfg(test)]
@@ -2022,7 +2017,7 @@ mod pg_stat_support_tests {
 
     #[test]
     fn test_interval_set_u64() {
-        let mut intervals = std::collections::BTreeMap::new();
+        let mut intervals = BTreeMap::new();
         intervals.insert(0u64, 10u64); // [0, 10)
         intervals.insert(20u64, 5u64); // [20, 25)
 
