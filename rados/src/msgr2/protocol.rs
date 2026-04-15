@@ -87,6 +87,39 @@ enum ReconnectAction<T> {
 /// Frame I/O layer - handles encryption-aware frame send/recv
 pub(crate) struct FrameIO {
     stream: TcpStream,
+    /// Resumable recv state.  `tokio::io::AsyncReadExt::read_exact` is NOT
+    /// cancel-safe: dropping the future mid-read loses the partial buffer
+    /// while the TCP stream cursor has already advanced, leaving the next
+    /// `read_exact` decoding garbage from the middle of the previous frame
+    /// ("Unknown tag: N").  We work around this by owning the read state
+    /// (partial preamble block + partial payload) as struct fields and
+    /// looping over `stream.read()` (which IS cancel-safe).  When
+    /// `recv_frame` is cancelled inside `tokio::select!`, this state
+    /// survives and the next call picks up exactly where we left off.
+    pending_recv: Option<PendingRecv>,
+}
+
+/// Resumable receive state for a single frame.
+///
+/// Walks through two phases:
+///  1. `Preamble` — reading the 32/96-byte preamble block off the wire.
+///  2. `Payload`  — the preamble has been decoded; we're reading the
+///     variable-length payload (segments + CRCs or encrypted blob).
+#[derive(Debug)]
+enum PendingRecv {
+    Preamble {
+        buf: Vec<u8>,
+        filled: usize,
+    },
+    Payload {
+        /// Decoded preamble header for the in-progress frame.
+        preamble: crate::msgr2::frames::Preamble,
+        /// SECURE mode only: the 48-byte inline plaintext that came
+        /// embedded in the decrypted preamble block.  Empty in CRC mode.
+        inline: Bytes,
+        buf: Vec<u8>,
+        filled: usize,
+    },
 }
 
 impl FrameIO {
@@ -95,7 +128,39 @@ impl FrameIO {
 
     /// Create a new FrameIO from an existing TCP stream
     pub fn new(stream: TcpStream) -> Self {
-        Self { stream }
+        Self {
+            stream,
+            pending_recv: None,
+        }
+    }
+
+    /// Cancel-safe fill of `buf[*filled..]` by looping over `stream.read()`.
+    ///
+    /// `stream.read()` is documented as cancel-safe: if the returned future
+    /// is dropped before it completes, no data has been read from the
+    /// stream.  By owning `filled` and `buf` outside the future and calling
+    /// `read` in a loop, we get a cancel-safe `read_exact`: dropping our
+    /// caller's future preserves `filled` and `buf` for the next call.
+    async fn fill_from_stream(
+        stream: &mut TcpStream,
+        buf: &mut [u8],
+        filled: &mut usize,
+    ) -> Result<()> {
+        use tokio::io::AsyncReadExt;
+        while *filled < buf.len() {
+            let n = stream
+                .read(&mut buf[*filled..])
+                .await
+                .map_err(Error::from)?;
+            if n == 0 {
+                return Err(Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "eof while filling frame buffer",
+                )));
+            }
+            *filled += n;
+        }
+        Ok(())
     }
 
     /// Shut down the writer half of the underlying TCP stream to
@@ -300,70 +365,139 @@ impl FrameIO {
     ///
     /// [`recv_frame_secure`]: Self::recv_frame_secure
     /// [`recv_frame_crc`]: Self::recv_frame_crc
+    ///
+    /// ## Cancel safety
+    ///
+    /// This function is **cancel-safe**.  If the caller drops the future
+    /// mid-read (e.g. a `tokio::select!` branch fires), the partial
+    /// receive state is preserved in `self.pending_recv` and the next
+    /// call to `recv_frame` resumes exactly where the previous call left
+    /// off.  The underlying I/O primitive is `stream.read()` (which is
+    /// cancel-safe by tokio contract), not `stream.read_exact()` (which
+    /// is NOT — it loses its internal loop state on cancellation while
+    /// the stream cursor has already advanced).
     pub async fn recv_frame(&mut self, state_machine: &mut StateMachine) -> Result<Frame> {
         let has_encryption = state_machine.has_encryption();
 
-        let preamble_block_size = if has_encryption {
-            crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE + Self::GCM_TAG_SIZE // 96
-        } else {
-            crate::msgr2::frames::PREAMBLE_SIZE // 32
-        };
-
-        // Stack buffer avoids a heap allocation per frame receive.
-        let mut preamble_stack = [0u8; 96]; // max(32 plaintext, 96 encrypted)
-        let preamble_block_buf = &mut preamble_stack[..preamble_block_size];
-        self.stream.read_exact(preamble_block_buf).await?;
-        state_machine.record_received(preamble_block_buf);
-
-        // SECURE mode: the 96-byte block decrypts to a 80-byte buffer
-        // holding [32 preamble | 48 inline payload]. CRC mode: the 32
-        // plaintext bytes are the preamble and there is no inline data.
-        let preamble_and_inline = if has_encryption {
-            let decrypted = state_machine.decrypt_frame_data(preamble_block_buf)?;
-            tracing::debug!(
-                "Decrypted preamble block: {} bytes → {} bytes",
-                preamble_block_buf.len(),
-                decrypted.len()
-            );
-            decrypted
-        } else {
-            Bytes::copy_from_slice(preamble_block_buf)
-        };
-        let preamble =
-            Preamble::decode(preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE))?;
-
-        tracing::debug!(
-            "Received preamble: tag={:?}, num_segments={}, segments={:?}",
-            preamble.tag,
-            preamble.num_segments,
-            &preamble.segments[0..preamble.num_segments as usize]
-        );
-
-        let total_segment_size: usize = preamble.segments[..preamble.num_segments as usize]
-            .iter()
-            .map(|s| s.logical_len as usize)
-            .sum();
-
-        if total_segment_size == 0 {
-            tracing::debug!("Empty frame, returning immediately");
-            return Ok(Frame {
-                preamble,
-                segments: vec![],
+        // Phase 1: Fill the preamble block (resumable via self.pending_recv).
+        if self.pending_recv.is_none() {
+            let size = if has_encryption {
+                crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE + Self::GCM_TAG_SIZE // 96
+            } else {
+                crate::msgr2::frames::PREAMBLE_SIZE // 32
+            };
+            self.pending_recv = Some(PendingRecv::Preamble {
+                buf: vec![0u8; size],
+                filled: 0,
             });
         }
 
-        let mut frame = if has_encryption {
-            // Slice out the 48-byte inline payload only on the path that
-            // will consume it. CRC mode's helper never touches inline_data.
-            let inline_data = preamble_and_inline.slice(
-                crate::msgr2::frames::PREAMBLE_SIZE
-                    ..crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE,
+        if let Some(PendingRecv::Preamble { buf, filled }) = self.pending_recv.as_mut() {
+            Self::fill_from_stream(&mut self.stream, buf, filled).await?;
+
+            // Transition: take ownership of the completed preamble block
+            // and decode it.  If we're cancelled before the next `.await`,
+            // `pending_recv` is left in the Payload state (or cleared for
+            // empty frames) and the next call picks up from payload read.
+            let Some(PendingRecv::Preamble {
+                buf: preamble_block,
+                ..
+            }) = self.pending_recv.take()
+            else {
+                unreachable!()
+            };
+
+            state_machine.record_received(&preamble_block);
+
+            // SECURE mode: the 96-byte block decrypts to a 80-byte buffer
+            // holding [32 preamble | 48 inline payload]. CRC mode: the 32
+            // plaintext bytes are the preamble and there is no inline data.
+            let preamble_and_inline = if has_encryption {
+                let decrypted = state_machine.decrypt_frame_data(&preamble_block)?;
+                tracing::debug!(
+                    "Decrypted preamble block: {} bytes → {} bytes",
+                    preamble_block.len(),
+                    decrypted.len()
+                );
+                decrypted
+            } else {
+                Bytes::copy_from_slice(&preamble_block)
+            };
+            let preamble =
+                Preamble::decode(preamble_and_inline.slice(..crate::msgr2::frames::PREAMBLE_SIZE))?;
+
+            tracing::debug!(
+                "Received preamble: tag={:?}, num_segments={}, segments={:?}",
+                preamble.tag,
+                preamble.num_segments,
+                &preamble.segments[0..preamble.num_segments as usize]
             );
-            self.recv_frame_secure(preamble, inline_data, total_segment_size, state_machine)
-                .await?
+
+            let total_segment_size: usize = preamble.segments[..preamble.num_segments as usize]
+                .iter()
+                .map(|s| s.logical_len as usize)
+                .sum();
+
+            if total_segment_size == 0 {
+                tracing::debug!("Empty frame, returning immediately");
+                return Ok(Frame {
+                    preamble,
+                    segments: vec![],
+                });
+            }
+
+            // Compute payload size and allocate the resumable buffer.
+            let payload_size = if has_encryption {
+                Self::compute_secure_payload_size(&preamble, total_segment_size)
+            } else {
+                Self::compute_crc_payload_size(total_segment_size, preamble.num_segments > 1)
+            };
+
+            // Stash the decrypted inline bytes (for secure mode).  CRC mode
+            // leaves this empty.
+            let inline = if has_encryption {
+                preamble_and_inline.slice(
+                    crate::msgr2::frames::PREAMBLE_SIZE
+                        ..crate::msgr2::frames::PREAMBLE_SIZE + Self::INLINE_SIZE,
+                )
+            } else {
+                Bytes::new()
+            };
+
+            self.pending_recv = Some(PendingRecv::Payload {
+                preamble,
+                inline,
+                buf: vec![0u8; payload_size],
+                filled: 0,
+            });
+        }
+
+        // Phase 2: Fill the payload buffer (resumable via self.pending_recv).
+        if let Some(PendingRecv::Payload { buf, filled, .. }) = self.pending_recv.as_mut() {
+            Self::fill_from_stream(&mut self.stream, buf, filled).await?;
         } else {
-            self.recv_frame_crc(preamble, total_segment_size, state_machine)
-                .await?
+            unreachable!("pending_recv must be in Payload phase by now");
+        }
+
+        // Take the completed payload state.  From here on, there are no
+        // `.await` points that could cancel us mid-decode — the caller
+        // will get either a completed frame or an error synchronously.
+        let Some(PendingRecv::Payload {
+            preamble,
+            inline,
+            buf: payload_buf,
+            ..
+        }) = self.pending_recv.take()
+        else {
+            unreachable!()
+        };
+
+        state_machine.record_received(&payload_buf);
+
+        let mut frame = if has_encryption {
+            Self::decode_secure_payload(preamble, inline, payload_buf, state_machine)?
+        } else {
+            Self::decode_crc_payload(preamble, payload_buf, state_machine.is_rev1())?
         };
 
         if frame.preamble.is_compressed() {
@@ -386,36 +520,63 @@ impl FrameIO {
         Ok(frame)
     }
 
-    /// Payload half of SECURE-mode frame receive.
+    fn compute_secure_payload_size(preamble: &Preamble, total_segment_size: usize) -> usize {
+        if preamble.num_segments == 1 {
+            let total = align_to_crypto_block(total_segment_size);
+            // Only the bytes BEYOND the 48-byte inline region need to be
+            // read off the wire; but when total <= INLINE_SIZE we still
+            // return 0 here, meaning no additional read is needed.
+            if total > Self::INLINE_SIZE {
+                total - Self::INLINE_SIZE + Self::GCM_TAG_SIZE
+            } else {
+                0
+            }
+        } else {
+            let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
+                .iter()
+                .map(|s| align_to_crypto_block(s.logical_len as usize))
+                .sum();
+            let total = padded_size + CRYPTO_BLOCK_SIZE;
+            if total > Self::INLINE_SIZE {
+                total - Self::INLINE_SIZE + Self::GCM_TAG_SIZE
+            } else {
+                0
+            }
+        }
+    }
+
+    fn compute_crc_payload_size(total_segment_size: usize, is_multi: bool) -> usize {
+        if !is_multi {
+            total_segment_size + crate::msgr2::frames::FRAME_CRC_SIZE
+        } else {
+            total_segment_size
+                + crate::msgr2::frames::FRAME_CRC_SIZE
+                + 1
+                + (crate::msgr2::frames::MAX_NUM_SEGMENTS - 1)
+                    * crate::msgr2::frames::FRAME_CRC_SIZE
+        }
+    }
+
+    /// Synchronous decode helper for SECURE-mode frame payload.
     ///
-    /// The caller ([`recv_frame`](Self::recv_frame)) has already read and
-    /// decrypted the preamble block and handed us the 48-byte `inline_data`
-    /// slice that arrived alongside the preamble. Here we:
-    ///
-    /// 1. Compute how many encrypted bytes are still on the wire
-    ///    (each segment is padded to a 16-byte crypto block, and
-    ///    multi-segment frames carry a final block-sized epilogue).
-    /// 2. Read + decrypt them (if any), concatenating with `inline_data`
-    ///    to form the full plaintext payload.
-    /// 3. Walk the preamble's segment descriptors, slicing each segment
-    ///    out of the plaintext with crypto-block alignment.
-    ///
-    /// `record_received` is called on the raw ciphertext of the remaining
-    /// buffer to keep the AUTH_SIGNATURE running hash in sync with the
-    /// wire bytes — same obligation as the preamble-block read in
-    /// [`recv_frame`](Self::recv_frame).
-    async fn recv_frame_secure(
-        &mut self,
+    /// Caller provides the already-read (possibly empty) remaining
+    /// ciphertext bytes in `buf` plus the plaintext `inline` bytes that
+    /// arrived in the decrypted preamble block.  Decrypts the remaining
+    /// bytes, stitches the two halves, and extracts segments.  All I/O
+    /// happened in `recv_frame` via `fill_from_stream` before this call.
+    fn decode_secure_payload(
         preamble: Preamble,
         inline_data: Bytes,
-        total_segment_size: usize,
+        remaining_buf: Vec<u8>,
         state_machine: &mut StateMachine,
     ) -> Result<Frame> {
-        // Per-segment 16-byte alignment, plus an extra crypto-block-sized
-        // epilogue for multi-segment frames. `align_to_crypto_block(0) == 0`
-        // so empty segments contribute nothing and need no special case.
         let total_payload_size = if preamble.num_segments == 1 {
-            align_to_crypto_block(total_segment_size)
+            align_to_crypto_block(
+                preamble.segments[..preamble.num_segments as usize]
+                    .iter()
+                    .map(|s| s.logical_len as usize)
+                    .sum::<usize>(),
+            )
         } else {
             let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
                 .iter()
@@ -424,16 +585,7 @@ impl FrameIO {
             padded_size + CRYPTO_BLOCK_SIZE
         };
 
-        // INLINE_SIZE bytes of plaintext already arrived alongside the
-        // preamble. Pull off anything beyond that (plus its GCM tag),
-        // decrypt, and stitch the two halves together.
-        let full_payload = if total_payload_size > Self::INLINE_SIZE {
-            let remaining_plaintext = total_payload_size - Self::INLINE_SIZE;
-            let remaining_needed = remaining_plaintext + Self::GCM_TAG_SIZE;
-            let mut remaining_buf = vec![0u8; remaining_needed];
-            self.stream.read_exact(&mut remaining_buf).await?;
-            state_machine.record_received(&remaining_buf);
-
+        let full_payload = if !remaining_buf.is_empty() {
             let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
             let mut combined =
                 BytesMut::with_capacity(Self::INLINE_SIZE + decrypted_remaining.len());
@@ -463,49 +615,20 @@ impl FrameIO {
         Ok(Frame { preamble, segments })
     }
 
-    /// Payload half of CRC-mode frame receive.
+    /// Synchronous decode helper for CRC-mode frame payload.
     ///
-    /// The caller ([`recv_frame`](Self::recv_frame)) has already read and
-    /// decoded the preamble. Here we pull the full plaintext payload off
-    /// the wire in one `read_exact`, then verify CRCs while walking the
-    /// segment descriptors:
-    ///
-    /// - Rev1 single- and multi-segment: a 4-byte inverted CRC32C follows
-    ///   segment 0 inline (right after its bytes). Verified on the fly.
-    /// - Multi-segment (rev0 or rev1): a trailing epilogue carries a
-    ///   `late_status` byte plus per-segment CRCs (4 for rev0 covering
-    ///   segments 0-3; 3 for rev1 covering segments 1-3 since segment 0
-    ///   was verified inline). Aborted frames are rejected here.
-    ///
-    /// `record_received` is called on the payload buffer to keep the
-    /// AUTH_SIGNATURE running hash in sync with the wire bytes.
-    async fn recv_frame_crc(
-        &mut self,
+    /// Caller provides the already-read plaintext payload bytes in
+    /// `payload_buf`.  Walks the preamble's segment descriptors slicing
+    /// each segment out and verifies inline + epilogue CRCs.  All I/O
+    /// happened in `recv_frame` via `fill_from_stream` before this call.
+    fn decode_crc_payload(
         preamble: Preamble,
-        total_segment_size: usize,
-        state_machine: &mut StateMachine,
+        payload_buf: Vec<u8>,
+        is_rev1: bool,
     ) -> Result<Frame> {
         let is_multi = preamble.num_segments > 1;
-        // Single-segment: segments + 4-byte inline CRC after seg 0.
-        // Multi-segment : segments + 4-byte inline CRC after seg 0
-        //               + 1-byte late_status
-        //               + (MAX_NUM_SEGMENTS - 1) * 4-byte epilogue CRCs.
-        let total_payload_size = if !is_multi {
-            total_segment_size + crate::msgr2::frames::FRAME_CRC_SIZE
-        } else {
-            total_segment_size
-                + crate::msgr2::frames::FRAME_CRC_SIZE
-                + 1
-                + (crate::msgr2::frames::MAX_NUM_SEGMENTS - 1)
-                    * crate::msgr2::frames::FRAME_CRC_SIZE
-        };
-
-        let mut payload_buf = vec![0u8; total_payload_size];
-        self.stream.read_exact(&mut payload_buf).await?;
-        state_machine.record_received(&payload_buf);
         let full_payload = Bytes::from(payload_buf);
 
-        let is_rev1 = state_machine.is_rev1();
         let mut segments = Vec::with_capacity(preamble.num_segments as usize);
         let mut offset = 0;
         for i in 0..preamble.num_segments as usize {
