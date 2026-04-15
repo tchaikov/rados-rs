@@ -2320,10 +2320,7 @@ impl OSDMapIncremental {
         }
 
         // Apply primary_affinity changes.  C++ stores this as a parallel
-        // vector indexed by osd_id; we mirror that shape.  The default
-        // primary affinity is `CEPH_OSD_MAX_PRIMARY_AFFINITY` (0x10000),
-        // meaning "always primary if acting[0]".
-        const CEPH_OSD_DEFAULT_PRIMARY_AFFINITY: u32 = 0x10000;
+        // vector indexed by osd_id; we mirror that shape.
         for (osd, affinity) in &self.new_primary_affinity {
             let idx = *osd as usize;
             if idx >= base.osd_primary_affinity.len() {
@@ -2537,6 +2534,13 @@ const CEPH_OSD_UP: u32 = 1 << 1;
 /// Cleared whenever a mon emits a `new_up_client` entry for the OSD.
 const CEPH_OSD_STOP: u32 = 1 << 9;
 
+/// Maximum (and default) value for `osd_primary_affinity`.
+///
+/// Reference: `CEPH_OSD_MAX_PRIMARY_AFFINITY` /
+/// `CEPH_OSD_DEFAULT_PRIMARY_AFFINITY` in `include/rados.h`.
+/// `0x10000` means "always primary if acting[0]".
+const CEPH_OSD_DEFAULT_PRIMARY_AFFINITY: u32 = 0x10000;
+
 impl Default for OSDMap {
     fn default() -> Self {
         Self {
@@ -2735,7 +2739,12 @@ impl OSDMap {
         let pg_temp = self.pg_temp.get(pg).cloned();
         let primary_temp = self.primary_temp.get(pg).copied();
 
-        self.apply_pg_overrides(pg, &mut osds);
+        // `pps` is the same seed CRUSH consumed and the same seed
+        // `_apply_primary_affinity` uses for its rejection hash.  Re-
+        // computing it here keeps the affinity decision in lockstep
+        // with the OSD's view.
+        let pps = crate::crush::placement::pg_to_pps(*pg, pool.pgp_num, hashpspool);
+        self.apply_pg_overrides(pg, pps, &mut osds);
 
         tracing::trace!(
             target: "rados::osdclient::crush",
@@ -2917,20 +2926,80 @@ impl OSDMap {
         Ok(ShardId::new(pos as i8))
     }
 
+    /// Walk a candidate acting set and pick the position that should
+    /// become primary, honouring `osd_primary_affinity`.
+    ///
+    /// Returns `Some(position)` of the chosen primary, or `None` if no
+    /// usable up OSD is in the set.  Mirrors the leaf logic of C++
+    /// `OSDMap::_pick_primary` + `_apply_primary_affinity`:
+    ///
+    ///   - Skip `CRUSH_ITEM_NONE` and down OSDs.
+    ///   - If every up OSD has the default affinity, return the first
+    ///     non-skipped position (the cheap path — no hash, no walk past
+    ///     the first up OSD).
+    ///   - Otherwise walk the set and reject each up OSD with
+    ///     probability `1 - affinity / MAX`, using the same rjenkins1
+    ///     hash of `(pps, osd_id)` C++ uses.  Take the first non-rejected
+    ///     OSD; if every up OSD gets rejected, fall back to the first
+    ///     up OSD we saw.
+    ///
+    /// `pps` is the post-`raw_pg_to_pps` seed — the same value CRUSH
+    /// took as input.  Drift between this seed and the OSD's view would
+    /// produce a different primary on the client and OSD sides, so
+    /// callers must use `placement::pg_to_pps`.
+    fn select_primary_index(&self, pps: u32, osds: &[i32]) -> Option<usize> {
+        let any_non_default = osds.iter().any(|&o| {
+            o >= 0
+                && self.is_up(o)
+                && self
+                    .osd_primary_affinity
+                    .get(o as usize)
+                    .copied()
+                    .unwrap_or(CEPH_OSD_DEFAULT_PRIMARY_AFFINITY)
+                    != CEPH_OSD_DEFAULT_PRIMARY_AFFINITY
+        });
+
+        let mut fallback: Option<usize> = None;
+        for (i, &o) in osds.iter().enumerate() {
+            if o == CRUSH_ITEM_NONE || o < 0 || self.is_down(o) {
+                continue;
+            }
+            if !any_non_default {
+                return Some(i);
+            }
+            let a = self
+                .osd_primary_affinity
+                .get(o as usize)
+                .copied()
+                .unwrap_or(CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            if a < CEPH_OSD_DEFAULT_PRIMARY_AFFINITY
+                && (crate::crush::hash::crush_hash32_2(pps, o as u32) >> 16) >= a
+            {
+                if fallback.is_none() {
+                    fallback = Some(i);
+                }
+            } else {
+                return Some(i);
+            }
+        }
+        fallback
+    }
+
     /// Apply PG placement overrides from the OSDMap.
     ///
     /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
     /// 1. pg_upmap — complete acting set replacement
     /// 2. pg_upmap_items — fine-grained OSD swaps
-    /// 3. Filter down OSDs: if the primary (osds[0]) is down and no
-    ///    explicit override is present, swap in the first up OSD.
-    ///    Mirrors `_raw_to_up_osds` + `_pick_primary` in C++.
+    /// 3. Pick a primary respecting `osd_primary_affinity` (and skipping
+    ///    down OSDs).  Mirrors `_raw_to_up_osds` + `_pick_primary` +
+    ///    `_apply_primary_affinity` in C++.  `pps` is the post-CRUSH
+    ///    seed used as the affinity hash key.
     /// 4. pg_upmap_primaries — primary override within the up set
     /// 5. pg_temp — if present, overrides the entire acting set
     /// 6. primary_temp — overrides the primary (acting[0] in our flat-vec
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
-    fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
+    fn apply_pg_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
         // pg_upmap (complete acting-set replacement).  Reject the
         // upmap if any target OSD is marked OUT.  Mirrors the
         // OUT-target check at the top of `OSDMap::_apply_upmap` —
@@ -2961,20 +3030,16 @@ impl OSDMap {
             }
         }
 
-        // Promote the first up OSD to the primary slot.  Without this,
-        // CRUSH can hand us a down OSD as primary during the window
-        // between `ceph osd down` and the mon installing a pg_temp
-        // override, and every op would hit the dead socket until the
-        // next OSDMap arrived.  Explicit overrides (pg_upmap_primaries,
-        // pg_temp, primary_temp) below still take precedence — they're
-        // admin-trusted even if the target is down.
-        if osds
-            .first()
-            .map(|&o| o >= 0 && self.is_down(o))
-            .unwrap_or(false)
-            && let Some(up_pos) = osds.iter().position(|&o| o >= 0 && self.is_up(o))
+        // Pick the primary, respecting `osd_primary_affinity` and
+        // skipping down OSDs.  This consolidates two C++ steps
+        // (`_pick_primary` and `_apply_primary_affinity`) and replaces
+        // the previous "swap first up to position 0" hack.  Explicit
+        // overrides below still take precedence — they're admin-trusted
+        // even if the target is down or has reduced affinity.
+        if let Some(pos) = self.select_primary_index(pps, osds)
+            && pos > 0
         {
-            osds.swap(0, up_pos);
+            osds.swap(0, pos);
         }
 
         // pg_upmap_primaries (primary override).  Mirrors the
@@ -3528,6 +3593,58 @@ mod tests {
     }
 
     #[test]
+    fn test_select_primary_index_default_affinity_picks_first_up() {
+        // All up, all default affinity → first non-NONE wins.
+        let map = make_osdmap_with_states(vec![0x3; 4]);
+        let osds = vec![0, 1, 2, 3];
+        assert_eq!(map.select_primary_index(0, &osds), Some(0));
+    }
+
+    #[test]
+    fn test_select_primary_index_skips_down_with_default_affinity() {
+        let mut states = vec![0x3; 4];
+        states[0] = 0x1; // down
+        let map = make_osdmap_with_states(states);
+        let osds = vec![0, 1, 2, 3];
+        assert_eq!(map.select_primary_index(0, &osds), Some(1));
+    }
+
+    #[test]
+    fn test_select_primary_index_zero_affinity_is_rejected() {
+        // Set OSD 0's affinity to 0 — should always be rejected.  All
+        // other OSDs at default → first non-rejected (OSD 1) wins.
+        let mut map = make_osdmap_with_states(vec![0x3; 4]);
+        map.osd_primary_affinity = vec![
+            0,
+            CEPH_OSD_DEFAULT_PRIMARY_AFFINITY,
+            CEPH_OSD_DEFAULT_PRIMARY_AFFINITY,
+            CEPH_OSD_DEFAULT_PRIMARY_AFFINITY,
+        ];
+        let osds = vec![0, 1, 2, 3];
+        assert_eq!(map.select_primary_index(0, &osds), Some(1));
+    }
+
+    #[test]
+    fn test_select_primary_index_all_zero_affinity_falls_back_to_first() {
+        // When every up OSD is rejected, the fallback path takes the
+        // first up OSD in the input order.  This matches C++
+        // `_apply_primary_affinity` which remembers `pos = i` on the
+        // first rejection but keeps walking, returning that fallback
+        // if nothing else passes.
+        let mut map = make_osdmap_with_states(vec![0x3; 3]);
+        map.osd_primary_affinity = vec![0, 0, 0];
+        let osds = vec![0, 1, 2];
+        assert_eq!(map.select_primary_index(0, &osds), Some(0));
+    }
+
+    #[test]
+    fn test_select_primary_index_all_none_or_down_returns_none() {
+        let map = make_osdmap_with_states(vec![0x1, 0x1, 0x1]);
+        let osds = vec![0, 1, CRUSH_ITEM_NONE];
+        assert_eq!(map.select_primary_index(0, &osds), None);
+    }
+
+    #[test]
     fn test_apply_pg_overrides_swaps_down_primary() {
         // OSD 0 DOWN, OSD 1 UP, OSD 2 UP. CRUSH gives us [0, 1, 2].
         // Expected: primary gets swapped to OSD 1, no explicit overrides
@@ -3535,7 +3652,7 @@ mod tests {
         let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
         let pg = PgId::new(1, 42);
         let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(
             osds[0], 1,
             "down primary should have been replaced with first up OSD"
@@ -3548,7 +3665,7 @@ mod tests {
         let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3]);
         let pg = PgId::new(1, 42);
         let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(osds, vec![0, 1, 2]);
     }
 
@@ -3560,7 +3677,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.primary_temp.insert(pg, 0);
         let mut osds = vec![0, 1];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
@@ -3709,7 +3826,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.pg_upmap.insert(pg, vec![3, 4, 5]);
         let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(
             osds,
             vec![0, 1, 2],
@@ -3727,7 +3844,7 @@ mod tests {
         map.osd_weight = vec![0x10000; 4];
         map.pg_upmap_items.insert(pg, vec![(2, 3)]);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(
             osds,
             vec![1, 2, 3],
@@ -3744,7 +3861,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.pg_upmap_items.insert(pg, vec![(2, 4)]);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(osds, vec![1, 2, 3], "OUT-target swap should be skipped");
     }
 
@@ -3757,7 +3874,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.pg_upmap_primaries.insert(pg, 2);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, &mut osds);
+        map.apply_pg_overrides(&pg, 0, &mut osds);
         assert_eq!(
             osds[0], 1,
             "OUT primary override should not promote OSD 2 to primary"

@@ -331,31 +331,33 @@ pub fn pg_to_osds(
     result_max: usize,
     hashpspool: bool,
 ) -> Result<Vec<i32>> {
+    let x = pg_to_pps(pg, pgp_num, hashpspool);
     let mut result = Vec::new();
+    crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
+    Ok(result)
+}
 
-    // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps().
-    //
-    // When pg_num and pgp_num diverge — the transient state during an
-    // autoscaler-driven split where pg_num has already bumped but the
-    // mon is still gradually raising pgp_num toward it — Ceph applies
-    // `ceph_stable_mod(ps, pgp_num, pgp_num_mask)` to the seed BEFORE
-    // feeding it into `crush_hash32_2`.  Skipping this step produces a
-    // different CRUSH input for any PG whose `ps >= pgp_num`, which
-    // surfaces later as a "misdirected op" silent drop on the OSD side.
+/// Compute the `pps` (placement seed) C++ feeds to CRUSH and to the
+/// primary-affinity hash.  Mirrors `pg_pool_t::raw_pg_to_pps`: fold
+/// `pg.seed` onto `pgp_num` via `ceph_stable_mod`, then optionally
+/// hash with the pool id (`hashpspool`).
+///
+/// Skipping the `ceph_stable_mod` fold is what produces a different
+/// CRUSH input on the client vs OSD side during an autoscaler-driven
+/// pgp_num ramp, surfacing as misdirected-op silent drops.  It also
+/// matters here because `_apply_primary_affinity` uses the same `pps`
+/// as a seed in its rejection hash, and any drift would change which
+/// OSD the client picks as primary vs the OSD's own view.
+#[inline]
+pub fn pg_to_pps(pg: PgId, pgp_num: u32, hashpspool: bool) -> u32 {
     let pgp_num_mask_val = pg_num_mask(pgp_num);
     let pps_seed = ceph_stable_mod(pg.seed, pgp_num, pgp_num_mask_val);
-
-    let x = if hashpspool {
-        // Hash PG seed with pool ID to avoid PG overlap between pools
+    if hashpspool {
         use crate::crush::hash::crush_hash32_2;
         crush_hash32_2(pps_seed, pg.pool as u32)
     } else {
         pps_seed
-    };
-
-    crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
-
-    Ok(result)
+    }
 }
 
 /// Map an object directly to OSDs
