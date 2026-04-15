@@ -47,7 +47,15 @@ jobs:
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Run clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        # `uninlined_format_args` lives in the `clippy::pedantic` category and
+        # is allow-by-default, so `-D warnings` alone does NOT catch it.
+        # Lifting it explicitly to `deny` pins the "format!(\"...{x}\")" style
+        # across the workspace and prevents regressions after the one-shot
+        # sweep in commit 91b59c3.
+        run: >-
+          cargo clippy --workspace --all-targets --
+          -D warnings
+          -D clippy::uninlined_format_args
 
   test:
     name: Unit Tests
