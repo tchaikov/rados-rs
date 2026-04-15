@@ -2251,6 +2251,31 @@ impl OSDMapIncremental {
             base.last_in_change = self.new_last_in_change;
         }
 
+        // Blocklist deltas: remove old entries first, then merge new ones.
+        for addr in &self.old_blocklist {
+            base.blocklist.remove(addr);
+        }
+        for (addr, expire) in &self.new_blocklist {
+            base.blocklist.insert(*addr, *expire);
+        }
+        for addr in &self.old_range_blocklist {
+            base.range_blocklist.remove(addr);
+        }
+        for (addr, expire) in &self.new_range_blocklist {
+            base.range_blocklist.insert(*addr, *expire);
+        }
+
+        // `-1.0` is the "unchanged" sentinel in the incremental encoding.
+        if self.new_full_ratio >= 0.0 {
+            base.full_ratio = self.new_full_ratio;
+        }
+        if self.new_nearfull_ratio >= 0.0 {
+            base.nearfull_ratio = self.new_nearfull_ratio;
+        }
+        if self.new_backfillfull_ratio >= 0.0 {
+            base.backfillfull_ratio = self.new_backfillfull_ratio;
+        }
+
         Ok(())
     }
 }
@@ -3114,6 +3139,33 @@ mod tests {
         assert!(
             matches!(err, RadosError::Codec(ref ce) if matches!(ce, crate::CodecError::VersionTooOld { type_name: "OSDMapIncremental", .. })),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_to_applies_blocklist_deltas() {
+        let mut base = OSDMap::new();
+        let stale = EntityAddr::default();
+        let fresh = EntityAddr {
+            nonce: 42,
+            ..EntityAddr::default()
+        };
+        base.blocklist.insert(stale, UTime::new(1, 0));
+
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.old_blocklist.push(stale);
+        inc.new_blocklist.insert(fresh, UTime::new(99, 0));
+
+        inc.apply_to(&mut base).expect("apply_to");
+
+        assert!(
+            !base.blocklist.contains_key(&stale),
+            "old entry not removed"
+        );
+        assert_eq!(
+            base.blocklist.get(&fresh).copied(),
+            Some(UTime::new(99, 0)),
+            "new entry not inserted"
         );
     }
 
