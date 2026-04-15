@@ -1246,9 +1246,8 @@ impl VersionedEncode for PgPool {
         pool.last_force_op_resend = Epoch::decode(buf, features)?;
         pool.pg_autoscale_mode = u8::decode(buf, features)?;
 
-        if version >= 29 {
-            pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
-        }
+        // v29+: always present at Quincy floor
+        pool.last_pg_merge_meta = PgMergeMeta::decode_versioned(buf, features)?;
 
         // Version 30 fields (special handling)
         if version == 30 {
