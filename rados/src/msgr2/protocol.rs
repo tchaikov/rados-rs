@@ -163,6 +163,7 @@ impl FrameIO {
     ///     call writes them.
     ///  3. When we finally hand the whole buffer to `Bytes::from(buf)`,
     ///     `filled == size`, so every byte of the Vec has been written.
+    #[allow(clippy::uninit_vec)]
     fn alloc_payload_buf(size: usize) -> Vec<u8> {
         let mut buf = Vec::with_capacity(size);
         // SAFETY: `buf` was just allocated with at least `size` bytes of
@@ -688,7 +689,7 @@ impl FrameIO {
                 {
                     let received_crc = u32::from_le_bytes(crc_bytes);
                     let expected_crc =
-                        !crc32c::crc32c(segments.last().ok_or_else(|| {
+                        !crate::msgr2::frames::crc32c_iscsi(segments.last().ok_or_else(|| {
                             Error::protocol_error("CRC check: empty segments list")
                         })?);
                     if received_crc != expected_crc {
@@ -733,7 +734,7 @@ impl FrameIO {
                 offset += crate::msgr2::frames::FRAME_CRC_SIZE;
 
                 if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
-                    let computed = crc32c::crc32c(&segments[seg_idx]);
+                    let computed = crate::msgr2::frames::crc32c_iscsi(&segments[seg_idx]);
                     let expected_crc = if invert { !computed } else { computed };
                     if received_crc != expected_crc {
                         return Err(Error::Protocol(format!(

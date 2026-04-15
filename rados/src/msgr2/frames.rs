@@ -15,10 +15,28 @@ use bytes::{Buf, Bytes, BytesMut};
 /// Ceph's preamble CRC: `!crc32c_append(0xFFFFFFFF, data)`.
 ///
 /// Used for the 28-byte preamble CRC field.  Note: segment CRCs use
-/// `!crc32c::crc32c(data)` (initial value 0) instead — see the
+/// `!crc32c_iscsi(data)` (initial value 0) instead — see the
 /// assemble/verify paths for details.
 pub(crate) fn ceph_crc32c(data: &[u8]) -> u32 {
     !crc32c::crc32c_append(0xFFFFFFFF, data)
+}
+
+/// CRC-32C/iSCSI (Castagnoli) — the polynomial Ceph uses for message
+/// footer and segment CRCs.
+///
+/// Wraps `crc_fast::checksum` which uses PCLMULQDQ SIMD (~90 GB/s on
+/// x86_64) instead of the scalar `crc32q`-based `crc32c` crate
+/// (~11 GB/s).  For 4 MiB payloads this is the difference between
+/// ~50 µs and ~390 µs per CRC pass, which is large enough to show up
+/// in the end-to-end read latency benchmark vs librados.
+///
+/// Used everywhere except the preamble (`ceph_crc32c` above — custom
+/// init state) and incremental OSDMap decoding (cold path, stream-of-
+/// pieces append semantics). Output matches `crc32c::crc32c` byte-for-
+/// byte — verified against a known vector.
+#[inline]
+pub(crate) fn crc32c_iscsi(data: &[u8]) -> u32 {
+    crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32
 }
 
 // Protocol constants
@@ -555,7 +573,7 @@ impl FrameAssembler {
                 let mut crc_bytes = [0u8; FRAME_CRC_SIZE];
                 crc_bytes.copy_from_slice(&buf[..FRAME_CRC_SIZE]);
                 let received_crc = u32::from_le_bytes(crc_bytes);
-                let expected_crc = !crc32c::crc32c(&segments[0]);
+                let expected_crc = !crc32c_iscsi(&segments[0]);
                 if received_crc != expected_crc {
                     return Err(RadosError::Protocol(format!(
                         "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
@@ -592,7 +610,7 @@ impl FrameAssembler {
                 epilogue_offset += FRAME_CRC_SIZE;
 
                 if seg_idx < segments.len() && !segments[seg_idx].is_empty() {
-                    let expected_crc = !crc32c::crc32c(&segments[seg_idx]);
+                    let expected_crc = !crc32c_iscsi(&segments[seg_idx]);
                     if received_crc != expected_crc {
                         return Err(RadosError::Protocol(format!(
                             "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
@@ -709,7 +727,7 @@ impl FrameAssembler {
         for (i, segment) in segments.iter().enumerate().take(self.descs.len()) {
             frame.extend_from_slice(segment);
             epilogue.crc_values[i] = if self.with_data_crc {
-                crc32c::crc32c(segment)
+                crc32c_iscsi(segment)
             } else {
                 0
             };
@@ -731,7 +749,7 @@ impl FrameAssembler {
         if !segments.is_empty() && !segments[0].is_empty() {
             buf.extend_from_slice(&segments[0]);
             let crc = if self.with_data_crc {
-                !crc32c::crc32c(&segments[0])
+                !crc32c_iscsi(&segments[0])
             } else {
                 0u32
             };
@@ -753,7 +771,7 @@ impl FrameAssembler {
             .take(self.descs.len() - 1)
         {
             epilogue.crc_values[i - 1] = if self.with_data_crc {
-                !crc32c::crc32c(segment)
+                !crc32c_iscsi(segment)
             } else {
                 0
             };
@@ -1299,6 +1317,35 @@ pub fn create_frame_from_trait<F: FrameTrait>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_crc32c_iscsi_matches_crc32c_crate() {
+        // Empty / 1-byte / aligned / unaligned / large — anything where a
+        // PCLMULQDQ fast path and the `crc32c` crate's SSE4.2 scalar path
+        // could disagree on boundary handling.
+        let inputs: &[&[u8]] = &[
+            b"",
+            b"a",
+            b"0123456789",
+            b"The quick brown fox jumps over the lazy dog",
+            &[0xABu8; 63],
+            &[0xABu8; 64],
+            &[0xABu8; 4095],
+            &[0xCDu8; 1 << 20],
+        ];
+        for buf in inputs {
+            let fast = crc32c_iscsi(buf);
+            let scalar = crc32c::crc32c(buf);
+            assert_eq!(
+                fast,
+                scalar,
+                "CRC mismatch on {}-byte input: fast=0x{:08x} scalar=0x{:08x}",
+                buf.len(),
+                fast,
+                scalar
+            );
+        }
+    }
 
     #[test]
     fn test_frame_assembler_rev0() {

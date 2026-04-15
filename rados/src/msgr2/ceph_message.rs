@@ -11,8 +11,8 @@
 //! Reference: ~/dev/ceph/src/msg/Message.h and ~/dev/ceph/src/msg/Message.cc
 
 use crate::msgr2::error::{Msgr2Error as Error, Result};
+use crate::msgr2::frames::crc32c_iscsi as crc32c;
 use bytes::{Buf, Bytes, BytesMut};
-use crc32c::crc32c;
 
 // Re-export message type constants
 pub use crate::msgr2::message::{
