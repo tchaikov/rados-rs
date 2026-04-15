@@ -326,7 +326,7 @@ impl OSDSession {
         let mut connection =
             crate::msgr2::protocol::Connection::connect_with_target(addr, entity_addr, config)
                 .await
-                .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {}", e)))?;
+                .map_err(|e| OSDClientError::Connection(format!("Failed to connect: {e}")))?;
 
         info!(
             "Banner exchange complete, establishing session with OSD {}",
@@ -334,9 +334,10 @@ impl OSDSession {
         );
 
         // Complete the full handshake
-        connection.establish_session().await.map_err(|e| {
-            OSDClientError::Connection(format!("Failed to establish session: {}", e))
-        })?;
+        connection
+            .establish_session()
+            .await
+            .map_err(|e| OSDClientError::Connection(format!("Failed to establish session: {e}")))?;
 
         info!("Session established with OSD {}", self.osd_id);
 
@@ -525,8 +526,7 @@ impl OSDSession {
                 let _ = pending_op
                     .result_tx
                     .send(Err(OSDClientError::Connection(format!(
-                        "OSD {} connection lost",
-                        osd_id
+                        "OSD {osd_id} connection lost"
                     ))));
             }
         }
@@ -852,7 +852,7 @@ impl OSDSession {
             let _ = pending_op
                 .result_tx
                 .send(Err(crate::osdclient::error::OSDClientError::Other(
-                    format!("Exceeded maximum redirects ({})", MAX_REDIRECTS),
+                    format!("Exceeded maximum redirects ({MAX_REDIRECTS})"),
                 )));
             return None;
         }

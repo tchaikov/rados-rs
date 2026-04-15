@@ -246,7 +246,7 @@ impl Denc for OSDOp {
         // 1. op (u16)
         let op_code = buf.get_u16_le();
         let op = OpCode::from_u16(op_code).ok_or_else(|| {
-            RadosError::Protocol(format!("Unknown operation code: 0x{:04x}", op_code))
+            RadosError::Protocol(format!("Unknown operation code: 0x{op_code:04x}"))
         })?;
 
         // 2. flags (u32)

@@ -32,9 +32,9 @@ pub enum CryptoError {
 impl fmt::Display for CryptoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CryptoError::EncryptionFailed(msg) => write!(f, "Encryption failed: {}", msg),
-            CryptoError::DecryptionFailed(msg) => write!(f, "Decryption failed: {}", msg),
-            CryptoError::InvalidParameters(msg) => write!(f, "Invalid parameters: {}", msg),
+            CryptoError::EncryptionFailed(msg) => write!(f, "Encryption failed: {msg}"),
+            CryptoError::DecryptionFailed(msg) => write!(f, "Decryption failed: {msg}"),
+            CryptoError::InvalidParameters(msg) => write!(f, "Invalid parameters: {msg}"),
         }
     }
 }
@@ -89,7 +89,7 @@ fn new_aes128gcm_cipher(key: &[u8], nonce: &[u8]) -> Result<aes_gcm::Aes128Gcm, 
     }
 
     aes_gcm::Aes128Gcm::new_from_slice(key)
-        .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {:?}", e)))
+        .map_err(|e| CryptoError::InvalidParameters(format!("Invalid key: {e:?}")))
 }
 
 /// Build a 12-byte AES-GCM nonce by adding the sequence number to the counter
@@ -206,9 +206,10 @@ impl FrameEncryptor for Aes128GcmEncryptor {
         let full_nonce = build_nonce(&self.nonce, self.sequence);
         let nonce_array = Nonce::from_slice(&full_nonce);
 
-        let ciphertext = self.cipher.encrypt(nonce_array, plaintext).map_err(|e| {
-            CryptoError::EncryptionFailed(format!("AES-GCM encrypt failed: {:?}", e))
-        })?;
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce_array, plaintext)
+            .map_err(|e| CryptoError::EncryptionFailed(format!("AES-GCM encrypt failed: {e:?}")))?;
 
         self.sequence += 1;
 
@@ -280,7 +281,7 @@ mod tests {
 
         // Encrypt and decrypt multiple messages
         for i in 0..5 {
-            let plaintext = format!("Message {}", i);
+            let plaintext = format!("Message {i}");
             let ciphertext = encryptor.encrypt(plaintext.as_bytes()).unwrap();
             let decrypted = decryptor.decrypt(&ciphertext).unwrap();
             assert_eq!(&decrypted[..], plaintext.as_bytes());

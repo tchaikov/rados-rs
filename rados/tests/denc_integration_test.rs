@@ -55,7 +55,7 @@ fn test_entity_addr_decode_encode_roundtrip() {
         total_count += 1;
         let filename = path.file_name().unwrap().to_string_lossy();
 
-        println!("Testing file: {}", filename);
+        println!("Testing file: {filename}");
 
         // Read original data
         let original_data = fs::read(&path).expect("Failed to read test file");
@@ -98,27 +98,24 @@ fn test_entity_addr_decode_encode_roundtrip() {
                             let enc_hex = hex::encode(
                                 &encoded_bytes[..std::cmp::min(32, encoded_bytes.len())],
                             );
-                            println!("    Original: {}", orig_hex);
-                            println!("    Encoded:  {}", enc_hex);
+                            println!("    Original: {orig_hex}");
+                            println!("    Encoded:  {enc_hex}");
                         }
                     }
                     Err(e) => {
-                        println!("  ✗ Failed to encode: {}", e);
+                        println!("  ✗ Failed to encode: {e}");
                     }
                 }
             }
             Err(e) => {
-                println!("  ✗ Failed to decode: {}", e);
+                println!("  ✗ Failed to decode: {e}");
             }
         }
 
         println!();
     }
 
-    println!(
-        "Results: {}/{} files processed successfully",
-        success_count, total_count
-    );
+    println!("Results: {success_count}/{total_count} files processed successfully");
 
     // We expect at least some files to work
     assert!(success_count > 0, "No test files processed successfully");

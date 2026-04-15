@@ -20,7 +20,7 @@ fn bench_concurrent_operations(c: &mut Criterion) {
                             .map(|i| {
                                 tokio::spawn(async move {
                                     for _ in 0..100 {
-                                        let object = ObjectId::new(1, &format!("obj_{}", i));
+                                        let object = ObjectId::new(1, &format!("obj_{i}"));
                                         let pgid = StripedPgId::from_pg(1, 0x12345678);
                                         let ops = vec![OSDOp::read(0, 4096)];
                                         let reqid = RequestId::from_str_name("client.0", 1, i);

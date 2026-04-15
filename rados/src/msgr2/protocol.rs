@@ -543,9 +543,9 @@ impl FrameIO {
 
         if frame.preamble.is_compressed() {
             if let Some(ctx) = state_machine.compression_ctx() {
-                frame = frame.decompress(ctx).map_err(|e| {
-                    Error::protocol_error(&format!("Decompression failed: {:?}", e))
-                })?;
+                frame = frame
+                    .decompress(ctx)
+                    .map_err(|e| Error::protocol_error(&format!("Decompression failed: {e:?}")))?;
                 tracing::debug!(
                     "Frame decompressed: tag={:?}, algorithm={:?}",
                     frame.preamble.tag,
@@ -694,8 +694,7 @@ impl FrameIO {
                         })?);
                     if received_crc != expected_crc {
                         return Err(Error::Protocol(format!(
-                            "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                            expected_crc, received_crc
+                            "Segment 0 CRC mismatch: expected 0x{expected_crc:08x}, got 0x{received_crc:08x}"
                         )));
                     }
                 }
@@ -738,8 +737,7 @@ impl FrameIO {
                     let expected_crc = if invert { !computed } else { computed };
                     if received_crc != expected_crc {
                         return Err(Error::Protocol(format!(
-                            "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                            seg_idx, expected_crc, received_crc
+                            "Segment {seg_idx} CRC mismatch: expected 0x{expected_crc:08x}, got 0x{received_crc:08x}"
                         )));
                     }
                 }
@@ -1056,7 +1054,7 @@ impl Connection {
     ) -> Result<Self> {
         // Validate config
         if let Err(e) = config.validate() {
-            return Err(Error::Protocol(format!("Invalid config: {}", e)));
+            return Err(Error::Protocol(format!("Invalid config: {e}")));
         }
 
         // Establish TCP connection
@@ -1206,7 +1204,7 @@ impl Connection {
 
         // Validate config
         if let Err(e) = config.validate() {
-            return Err(Error::Protocol(format!("Invalid config: {}", e)));
+            return Err(Error::Protocol(format!("Invalid config: {e}")));
         }
 
         // Create state machine for server BEFORE banner exchange
@@ -1662,8 +1660,7 @@ impl Connection {
         }
 
         Err(Error::Protocol(format!(
-            "Failed to {} after {} attempts",
-            operation_name, MAX_RECONNECT_ATTEMPTS
+            "Failed to {operation_name} after {MAX_RECONNECT_ATTEMPTS} attempts"
         )))
     }
 

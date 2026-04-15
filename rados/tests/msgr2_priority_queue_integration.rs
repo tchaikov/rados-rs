@@ -61,8 +61,8 @@ fn test_priority_queue_maintains_fifo_within_priority() {
 
     // Add multiple normal priority messages
     for i in 0..10 {
-        let msg = Message::new(i, Bytes::from(format!("msg{}", i)))
-            .with_priority(MessagePriority::Normal);
+        let msg =
+            Message::new(i, Bytes::from(format!("msg{i}"))).with_priority(MessagePriority::Normal);
         queue.push_back(msg);
     }
 
@@ -72,8 +72,8 @@ fn test_priority_queue_maintains_fifo_within_priority() {
 
     // Add more normal priority messages
     for i in 10..20 {
-        let msg = Message::new(i, Bytes::from(format!("msg{}", i)))
-            .with_priority(MessagePriority::Normal);
+        let msg =
+            Message::new(i, Bytes::from(format!("msg{i}"))).with_priority(MessagePriority::Normal);
         queue.push_back(msg);
     }
 

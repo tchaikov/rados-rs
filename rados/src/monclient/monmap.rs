@@ -140,7 +140,7 @@ impl MonMapState {
             addrs.sort_by_key(|a| if a.is_msgr2() { 0 } else { 1 });
 
             let mon_info = MonInfo {
-                name: format!("mon.{}", rank),
+                name: format!("mon.{rank}"),
                 rank,
                 addrs: EntityAddrvec { addrs },
                 priority: 0,
@@ -381,8 +381,7 @@ impl MonMapState {
         for (rank, name) in ranks.iter().enumerate() {
             let mon = mon_info.remove(name).ok_or_else(|| {
                 MonClientError::InvalidMonMap(format!(
-                    "MonMapState ranks referenced missing monitor {}",
-                    name
+                    "MonMapState ranks referenced missing monitor {name}"
                 ))
             })?;
 
@@ -475,9 +474,9 @@ fn parse_mon_addr(addr_str: &str) -> Result<EntityAddr> {
         (EntityAddrType::Msgr2, addr_str)
     };
 
-    let socket_addr: SocketAddr = addr_part.parse().map_err(|e| {
-        MonClientError::InvalidMonMap(format!("Invalid address {}: {}", addr_part, e))
-    })?;
+    let socket_addr: SocketAddr = addr_part
+        .parse()
+        .map_err(|e| MonClientError::InvalidMonMap(format!("Invalid address {addr_part}: {e}")))?;
 
     Ok(EntityAddr::from_socket_addr(addr_type, socket_addr))
 }

@@ -61,7 +61,7 @@ fn lock_cephx_handler(
 ) -> Result<std::sync::MutexGuard<'_, crate::auth::client::CephXClientHandler>> {
     handler
         .lock()
-        .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {}", e)))
+        .map_err(|e| CephXError::ProtocolError(format!("Failed to lock handler: {e}")))
 }
 
 /// Monitor authentication provider (full CephX authentication)
@@ -118,7 +118,7 @@ impl MonitorAuthProvider {
 
         let entity_str = handler.entity_name.to_string();
         let key = keyring.get_key(&entity_str).ok_or_else(|| {
-            crate::auth::error::CephXError::InvalidKey(format!("Key not found for {}", entity_str))
+            crate::auth::error::CephXError::InvalidKey(format!("Key not found for {entity_str}"))
         })?;
         handler.set_secret_key(key.clone());
         Ok(())

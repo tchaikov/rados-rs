@@ -43,7 +43,7 @@ impl TestConfig {
 
         // Load configuration from ceph.conf
         Self::from_ceph_conf(&conf_path)
-            .unwrap_or_else(|e| panic!("Failed to load configuration from {}: {}", conf_path, e))
+            .unwrap_or_else(|e| panic!("Failed to load configuration from {conf_path}: {e}"))
     }
 
     fn from_ceph_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
@@ -90,7 +90,7 @@ async fn parse_pool(
     // Otherwise, look up pool by name in OSDMap
     let osdmap = match osd_client.get_osdmap().await {
         Ok(map) => map,
-        Err(e) => return Err(format!("OSDMap not available: {}", e).into()),
+        Err(e) => return Err(format!("OSDMap not available: {e}").into()),
     };
 
     // Search for pool by name
@@ -100,7 +100,7 @@ async fn parse_pool(
         }
     }
 
-    Err(format!("Pool '{}' not found in OSDMap", pool).into())
+    Err(format!("Pool '{pool}' not found in OSDMap").into())
 }
 
 /// Create pool via monitor command if it doesn't already exist.

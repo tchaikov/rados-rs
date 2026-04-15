@@ -742,7 +742,7 @@ impl IoCtx {
 
         let result = self.execute(&oid_str, op).await?;
 
-        OSDClient::check_op_result(&result, &format!("exec {}::{}", class, method))?;
+        OSDClient::check_op_result(&result, &format!("exec {class}::{method}"))?;
         Ok(result.first_outdata()?.clone())
     }
 

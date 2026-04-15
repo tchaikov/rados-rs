@@ -13,7 +13,7 @@ fn test_osdmap_crush_integration() {
         .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap");
 
     if !corpus_path.exists() {
-        eprintln!("Corpus directory not found: {:?}", corpus_path);
+        eprintln!("Corpus directory not found: {corpus_path:?}");
         eprintln!("Skipping test");
         return;
     }
@@ -42,7 +42,7 @@ fn test_osdmap_crush_integration() {
         let data = match fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("  Failed to read file: {:?}", e);
+                eprintln!("  Failed to read file: {e:?}");
                 continue;
             }
         };
@@ -71,8 +71,7 @@ fn test_osdmap_crush_integration() {
                         let crush_rule = osdmap.get_pool_crush_rule(*pool_id);
 
                         println!(
-                            "      Pool {}: name={:?}, crush_rule={:?}",
-                            pool_id, pool_name, crush_rule
+                            "      Pool {pool_id}: name={pool_name:?}, crush_rule={crush_rule:?}"
                         );
 
                         // Verify crush_rule exists in the CRUSH map
@@ -86,7 +85,7 @@ fn test_osdmap_crush_integration() {
                                     );
                                 }
                                 Err(e) => {
-                                    println!("        ⚠ CRUSH rule {} not found: {:?}", rule_id, e);
+                                    println!("        ⚠ CRUSH rule {rule_id} not found: {e:?}");
                                 }
                             }
                         }
@@ -96,14 +95,14 @@ fn test_osdmap_crush_integration() {
                 }
             }
             Err(e) => {
-                eprintln!("  ✗ Failed to decode: {:?}", e);
+                eprintln!("  ✗ Failed to decode: {e:?}");
             }
         }
     }
 
     println!("\n=== Summary ===");
-    println!("OSDMaps decoded: {}", tested_count);
-    println!("CRUSH maps parsed: {}", crush_parsed_count);
+    println!("OSDMaps decoded: {tested_count}");
+    println!("CRUSH maps parsed: {crush_parsed_count}");
 
     // We expect at least some files to be tested
     assert!(

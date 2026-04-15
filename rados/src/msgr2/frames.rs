@@ -173,7 +173,7 @@ impl TryFrom<u8> for Tag {
             20 => Ok(Self::Ack),
             21 => Ok(Self::CompressionRequest),
             22 => Ok(Self::CompressionDone),
-            _ => Err(RadosError::Protocol(format!("Unknown tag: {}", value))),
+            _ => Err(RadosError::Protocol(format!("Unknown tag: {value}"))),
         }
     }
 }
@@ -471,8 +471,7 @@ impl Preamble {
         // Verify CRC matches
         if calculated_crc != received_crc {
             return Err(RadosError::Protocol(format!(
-                "Preamble CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                calculated_crc, received_crc
+                "Preamble CRC mismatch: expected 0x{calculated_crc:08x}, got 0x{received_crc:08x}"
             )));
         }
 
@@ -576,8 +575,7 @@ impl FrameAssembler {
                 let expected_crc = !crc32c_iscsi(&segments[0]);
                 if received_crc != expected_crc {
                     return Err(RadosError::Protocol(format!(
-                        "Segment 0 CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                        expected_crc, received_crc
+                        "Segment 0 CRC mismatch: expected 0x{expected_crc:08x}, got 0x{received_crc:08x}"
                     )));
                 }
                 buf.advance(FRAME_CRC_SIZE);
@@ -613,8 +611,7 @@ impl FrameAssembler {
                     let expected_crc = !crc32c_iscsi(&segments[seg_idx]);
                     if received_crc != expected_crc {
                         return Err(RadosError::Protocol(format!(
-                            "Segment {} CRC mismatch: expected 0x{:08x}, got 0x{:08x}",
-                            seg_idx, expected_crc, received_crc
+                            "Segment {seg_idx} CRC mismatch: expected 0x{expected_crc:08x}, got 0x{received_crc:08x}"
                         )));
                     }
                 }
@@ -1445,7 +1442,7 @@ mod tests {
         let result = MessageFrame::from_wire(corrupted.freeze());
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("aborted"), "Expected 'aborted' in '{}'", err);
+        assert!(err.contains("aborted"), "Expected 'aborted' in '{err}'");
     }
 
     #[test]

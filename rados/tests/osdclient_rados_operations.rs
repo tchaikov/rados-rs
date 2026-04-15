@@ -203,7 +203,6 @@ async fn test_client_shutdown_is_clean_and_idempotent() {
     let post_shutdown = ioctx.stat(&object_name).await;
     assert!(
         post_shutdown.is_err(),
-        "stat after shutdown should fail, got {:?}",
-        post_shutdown
+        "stat after shutdown should fail, got {post_shutdown:?}"
     );
 }

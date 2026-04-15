@@ -14,8 +14,8 @@ fn test_crc32c_equivalence() {
     // What the current code does: !crc32c_append(0xFFFFFFFF, data)
     let crc_inverted = !crc32c::crc32c_append(0xFFFFFFFF, &data);
 
-    println!("Standard crc32c:           0x{:08x}", crc_standard);
-    println!("Inverted crc32c_append:    0x{:08x}", crc_inverted);
+    println!("Standard crc32c:           0x{crc_standard:08x}");
+    println!("Inverted crc32c_append:    0x{crc_inverted:08x}");
     println!("Are they equal? {}", crc_standard == crc_inverted);
 
     // Test shows they are NOT equal!

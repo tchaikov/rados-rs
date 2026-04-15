@@ -24,7 +24,7 @@ impl Keyring {
     /// Load keyring from file path
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self> {
         let content = fs::read_to_string(path.as_ref())
-            .map_err(|e| CephXError::InvalidKey(format!("Failed to read keyring file: {}", e)))?;
+            .map_err(|e| CephXError::InvalidKey(format!("Failed to read keyring file: {e}")))?;
 
         Self::from_string(&content)
     }

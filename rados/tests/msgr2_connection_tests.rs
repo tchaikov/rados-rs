@@ -30,7 +30,7 @@ fn get_ceph_mon_addr() -> SocketAddr {
         env::var("CEPH_CONF").unwrap_or_else(|_| "/home/kefu/dev/ceph/build/ceph.conf".to_string());
 
     let config = rados::cephconfig::CephConfig::from_file(&conf_path)
-        .unwrap_or_else(|_| panic!("Failed to read ceph.conf at {}", conf_path));
+        .unwrap_or_else(|_| panic!("Failed to read ceph.conf at {conf_path}"));
 
     let addr = config
         .first_v2_mon_addr()
@@ -39,11 +39,11 @@ fn get_ceph_mon_addr() -> SocketAddr {
     // Parse v2:IP:PORT format
     let stripped = addr
         .strip_prefix("v2:")
-        .unwrap_or_else(|| panic!("Monitor address does not have v2: prefix: {}", addr));
+        .unwrap_or_else(|| panic!("Monitor address does not have v2: prefix: {addr}"));
 
     stripped
         .parse::<SocketAddr>()
-        .unwrap_or_else(|_| panic!("Failed to parse monitor address: {}", stripped))
+        .unwrap_or_else(|_| panic!("Failed to parse monitor address: {stripped}"))
 }
 
 /// Helper function to configure authentication method based on ceph.conf

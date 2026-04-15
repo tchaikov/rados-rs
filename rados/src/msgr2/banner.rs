@@ -81,8 +81,7 @@ impl Banner {
         let newline = u8::decode(src, 0)?;
         if newline != b'\n' {
             return Err(Error::Protocol(format!(
-                "Expected newline after banner, got: {}",
-                newline
+                "Expected newline after banner, got: {newline}"
             )));
         }
 
@@ -94,8 +93,7 @@ impl Banner {
         // Banner payload: supported_features (8 bytes) + required_features (8 bytes) = 16 bytes
         if payload_size < 16 {
             return Err(Error::Protocol(format!(
-                "Invalid banner payload size: expected 16 bytes, got {}",
-                payload_size
+                "Invalid banner payload size: expected 16 bytes, got {payload_size}"
             )));
         }
 

@@ -242,8 +242,7 @@ impl fmt::Display for DencoderError {
             }
             Self::UnknownType(t) => write!(
                 f,
-                "Error: Unknown type '{}'. Use 'list_types' to see available types.",
-                t
+                "Error: Unknown type '{t}'. Use 'list_types' to see available types."
             ),
             Self::NoDataImported => {
                 write!(f, "Error: No data loaded. Use 'import <file>' first.")
@@ -251,15 +250,14 @@ impl fmt::Display for DencoderError {
             Self::NothingDecoded => {
                 write!(f, "Error: Nothing decoded yet. Use 'decode' first.")
             }
-            Self::Rados(e) => write!(f, "{}", e),
-            Self::Io(e) => write!(f, "I/O error: {}", e),
-            Self::InvalidFeatures(s) => write!(f, "Invalid features: {}", s),
-            Self::Json(e) => write!(f, "JSON error: {}", e),
-            Self::MissingArgument(cmd) => write!(f, "Error: Missing argument for '{}'", cmd),
+            Self::Rados(e) => write!(f, "{e}"),
+            Self::Io(e) => write!(f, "I/O error: {e}"),
+            Self::InvalidFeatures(s) => write!(f, "Invalid features: {s}"),
+            Self::Json(e) => write!(f, "JSON error: {e}"),
+            Self::MissingArgument(cmd) => write!(f, "Error: Missing argument for '{cmd}'"),
             Self::UnknownCommand(cmd) => write!(
                 f,
-                "Error: Unknown command '{}'. Use 'list_types' to see available commands.",
-                cmd
+                "Error: Unknown command '{cmd}'. Use 'list_types' to see available commands."
             ),
         }
     }
@@ -290,7 +288,7 @@ fn cmd_type(state: &mut DencoderState, typename: &str) -> Result<()> {
         get_type_info(typename).ok_or_else(|| DencoderError::UnknownType(typename.to_string()))?;
 
     state.current_type = Some(type_info);
-    println!("Selected type: {}", typename);
+    println!("Selected type: {typename}");
     Ok(())
 }
 
@@ -387,7 +385,7 @@ fn cmd_hexdump(state: &DencoderState) -> Result<()> {
             if j == 8 {
                 print!(" ");
             }
-            print!("{:02x} ", byte);
+            print!("{byte:02x} ");
         }
 
         // Padding
@@ -422,7 +420,7 @@ fn cmd_set_features(state: &mut DencoderState, features_str: &str) -> Result<()>
     .map_err(|e| DencoderError::InvalidFeatures(format!("{features_str}: {e}")))?;
 
     state.features = features;
-    println!("Set features to 0x{:x}", features);
+    println!("Set features to 0x{features:x}");
     Ok(())
 }
 
@@ -528,7 +526,7 @@ fn main() {
 
         // Process the command
         if let Err(e) = process_command(&mut state, cmd, &cmd_args) {
-            eprintln!("{}", e);
+            eprintln!("{e}");
             process::exit(1);
         }
 

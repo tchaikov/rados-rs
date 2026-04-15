@@ -244,7 +244,7 @@ async fn main() -> Result<()> {
                 .context("Failed to delete object")?;
 
             if cli.debug {
-                eprintln!("Removed {}", object);
+                eprintln!("Removed {object}");
             }
         }
         Commands::Ls { max } => {
@@ -254,7 +254,7 @@ async fn main() -> Result<()> {
                 .context("Failed to list objects")?;
 
             for obj in &objects {
-                println!("{}", obj);
+                println!("{obj}");
             }
 
             if cli.debug {
@@ -290,7 +290,7 @@ async fn parse_pool(pool: &str, osd_client: &Arc<rados::OSDClient>) -> Result<u6
         .pool_name
         .iter()
         .find_map(|(&id, name)| (name == pool).then_some(id))
-        .ok_or_else(|| anyhow!("Pool '{}' not found", pool))
+        .ok_or_else(|| anyhow!("Pool '{pool}' not found"))
 }
 
 fn read_input(file: &str) -> Result<Bytes> {
@@ -301,7 +301,7 @@ fn read_input(file: &str) -> Result<Bytes> {
             .context("Failed to read from stdin")?;
         buffer
     } else {
-        std::fs::read(file).with_context(|| format!("Failed to read file: {}", file))?
+        std::fs::read(file).with_context(|| format!("Failed to read file: {file}"))?
     };
     Ok(Bytes::from(data))
 }
@@ -313,7 +313,7 @@ fn write_output(file: &str, data: &[u8]) -> Result<()> {
             .context("Failed to write to stdout")?;
         io::stdout().flush().context("Failed to flush stdout")?;
     } else {
-        std::fs::write(file, data).with_context(|| format!("Failed to write file: {}", file))?;
+        std::fs::write(file, data).with_context(|| format!("Failed to write file: {file}"))?;
     }
     Ok(())
 }

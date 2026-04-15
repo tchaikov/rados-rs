@@ -42,7 +42,7 @@ fn bench_string_encode(c: &mut Criterion) {
         let s = "x".repeat(*size);
         group.throughput(Throughput::Bytes((4 + size) as u64)); // length prefix + data
 
-        group.bench_function(format!("encode/{}", size), |b| {
+        group.bench_function(format!("encode/{size}"), |b| {
             let mut buf = BytesMut::with_capacity(4 + size);
 
             b.iter(|| {
@@ -52,7 +52,7 @@ fn bench_string_encode(c: &mut Criterion) {
             });
         });
 
-        group.bench_function(format!("decode/{}", size), |b| {
+        group.bench_function(format!("decode/{size}"), |b| {
             let mut buf = BytesMut::with_capacity(4 + size);
             s.encode(&mut buf, 0).unwrap();
             let encoded = buf.freeze();
@@ -76,7 +76,7 @@ fn bench_bytes_encode(c: &mut Criterion) {
         let bytes = Bytes::from(data);
         group.throughput(Throughput::Bytes((4 + size) as u64)); // length prefix + data
 
-        group.bench_function(format!("encode/{}", size), |b| {
+        group.bench_function(format!("encode/{size}"), |b| {
             let mut buf = BytesMut::with_capacity(4 + size);
 
             b.iter(|| {
@@ -86,7 +86,7 @@ fn bench_bytes_encode(c: &mut Criterion) {
             });
         });
 
-        group.bench_function(format!("decode/{}", size), |b| {
+        group.bench_function(format!("decode/{size}"), |b| {
             let mut buf = BytesMut::with_capacity(4 + size);
             bytes.encode(&mut buf, 0).unwrap();
             let encoded = buf.freeze();

@@ -563,7 +563,7 @@ impl ConnectionConfig {
     /// ```
     pub fn from_ceph_conf(path: &str) -> Result<Self> {
         let ceph_config = crate::cephconfig::CephConfig::from_file(path)
-            .map_err(|e| Msgr2Error::config_error(&format!("Failed to read ceph.conf: {}", e)))?;
+            .map_err(|e| Msgr2Error::config_error(&format!("Failed to read ceph.conf: {e}")))?;
 
         let mut config = Self::default();
 
@@ -831,8 +831,7 @@ mod tests {
             config.service_id = service_id;
             assert!(
                 config.validate().is_ok(),
-                "Service ID {} should be valid",
-                service_id
+                "Service ID {service_id} should be valid"
             );
         }
     }

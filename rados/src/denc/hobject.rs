@@ -206,7 +206,7 @@ mod tests {
         println!("Encoded {} bytes", buf.len());
         println!(
             "Hex: {}",
-            buf.iter().map(|b| format!("{:02x}", b)).collect::<String>()
+            buf.iter().map(|b| format!("{b:02x}")).collect::<String>()
         );
     }
 

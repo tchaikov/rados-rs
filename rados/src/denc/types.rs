@@ -189,7 +189,7 @@ impl FromStr for EntityType {
             "client" => Ok(EntityType::CLIENT),
             "mgr" => Ok(EntityType::MGR),
             "auth" => Ok(EntityType::AUTH),
-            _ => Err(RadosError::Protocol(format!("Unknown entity type: {}", s))),
+            _ => Err(RadosError::Protocol(format!("Unknown entity type: {s}"))),
         }
     }
 }
@@ -258,7 +258,7 @@ impl FromStr for EntityName {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let (type_str, id) = s
             .split_once('.')
-            .ok_or_else(|| RadosError::Protocol(format!("Invalid entity name format: {}", s)))?;
+            .ok_or_else(|| RadosError::Protocol(format!("Invalid entity name format: {s}")))?;
         let entity_type = type_str.parse()?;
         Ok(Self::new(entity_type, id))
     }

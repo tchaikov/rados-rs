@@ -11,7 +11,7 @@ fn test_osdmap_decode() {
         .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap/303e0d4679afb7b809fd924c7825eecd");
 
     if !corpus_path.exists() {
-        eprintln!("Corpus file not found: {:?}", corpus_path);
+        eprintln!("Corpus file not found: {corpus_path:?}");
         eprintln!("Skipping test");
         return;
     }
@@ -45,7 +45,7 @@ fn test_osdmap_decode() {
             assert_eq!(osdmap.flags, 0, "Flags should be 0");
         }
         Err(e) => {
-            panic!("Failed to decode OSDMap: {:?}", e);
+            panic!("Failed to decode OSDMap: {e:?}");
         }
     }
 }
@@ -56,7 +56,7 @@ fn test_all_osdmap_corpus_files() {
         .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap");
 
     if !corpus_dir.exists() {
-        eprintln!("Corpus directory not found: {:?}", corpus_dir);
+        eprintln!("Corpus directory not found: {corpus_dir:?}");
         eprintln!("Skipping test");
         return;
     }
@@ -79,7 +79,7 @@ fn test_all_osdmap_corpus_files() {
         let data = match fs::read(&path) {
             Ok(d) => d,
             Err(e) => {
-                eprintln!("  Failed to read file: {:?}", e);
+                eprintln!("  Failed to read file: {e:?}");
                 failure_count += 1;
                 continue;
             }
@@ -100,16 +100,16 @@ fn test_all_osdmap_corpus_files() {
                 success_count += 1;
             }
             Err(e) => {
-                eprintln!("  ✗ Failed: {:?}", e);
-                eprintln!("    File size: {} bytes", original_len);
+                eprintln!("  ✗ Failed: {e:?}");
+                eprintln!("    File size: {original_len} bytes");
                 failure_count += 1;
             }
         }
     }
 
     println!("\n=== Summary ===");
-    println!("Success: {}", success_count);
-    println!("Failure: {}", failure_count);
+    println!("Success: {success_count}");
+    println!("Failure: {failure_count}");
     println!("Total: {}", success_count + failure_count);
 
     // We expect at least some files to decode successfully
@@ -130,7 +130,7 @@ fn test_osdmap_incremental_with_old_pools() {
         .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap::Incremental/7f73c6135ad5af1bcdd620e2097b9b94");
 
     if !corpus_path.exists() {
-        eprintln!("Corpus file not found: {:?}", corpus_path);
+        eprintln!("Corpus file not found: {corpus_path:?}");
         eprintln!("Skipping test");
         return;
     }
@@ -167,7 +167,7 @@ fn test_osdmap_incremental_with_old_pools() {
             );
         }
         Err(e) => {
-            panic!("Failed to decode OSDMapIncremental: {:?}", e);
+            panic!("Failed to decode OSDMapIncremental: {e:?}");
         }
     }
 }

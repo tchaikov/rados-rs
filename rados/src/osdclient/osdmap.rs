@@ -236,8 +236,7 @@ fn format_utime_as_timestamp(utime: &UTime) -> String {
         let tz_mins = (gmtoff.unsigned_abs() % 3600) / 60;
 
         format!(
-            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}{}{:02}{:02}",
-            year, month, day, hour, min, sec, microseconds, tz_sign, tz_hours, tz_mins
+            "{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{microseconds:06}{tz_sign}{tz_hours:02}{tz_mins:02}"
         )
     }
 }
@@ -382,8 +381,7 @@ impl VersionedEncode for HitSetParams {
                 Ok(HitSetParams::Bloom(params))
             }
             _ => Err(RadosError::Protocol(format!(
-                "Unknown HitSet type: {}",
-                hit_set_type
+                "Unknown HitSet type: {hit_set_type}"
             ))),
         }
     }
@@ -573,8 +571,7 @@ impl TryFrom<u8> for PoolType {
             1 => Ok(PoolType::Replicated),
             3 => Ok(PoolType::Erasure),
             _ => Err(crate::RadosError::InvalidData(format!(
-                "Invalid PoolType value: {}",
-                value
+                "Invalid PoolType value: {value}"
             ))),
         }
     }
@@ -3372,14 +3369,14 @@ impl OSDMap {
         // Get the pool
         let pool = self
             .get_pool(pool_id)
-            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pool_id)))?;
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {pool_id} not found")))?;
 
         // Create a simple object locator
         let locator = crate::crush::ObjectLocator::new(pool_id);
 
         // Calculate the PG using the CRUSH placement function
         let pg = crate::crush::object_to_pg(object_name, &locator, pool.pg_num)
-            .map_err(|e| RadosError::Protocol(format!("PG calculation failed: {}", e)))?;
+            .map_err(|e| RadosError::Protocol(format!("PG calculation failed: {e}")))?;
 
         Ok(PgId {
             pool: pg.pool as u64,

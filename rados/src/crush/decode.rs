@@ -32,8 +32,7 @@ impl CrushMap {
         let magic = u32::decode(data, 0)?;
         if magic != CRUSH_MAGIC {
             return Err(CrushError::DecodeError(format!(
-                "Invalid CRUSH magic: 0x{:x}, expected 0x{:x}",
-                magic, CRUSH_MAGIC
+                "Invalid CRUSH magic: 0x{magic:x}, expected 0x{CRUSH_MAGIC:x}"
             )));
         }
 
@@ -177,8 +176,7 @@ fn validate_crush_map(map: &CrushMap) -> Result<()> {
             let idx = (-1 - item) as usize;
             if idx >= map.buckets.len() || map.buckets[idx].is_none() {
                 return Err(CrushError::DecodeError(format!(
-                    "{} references non-existent bucket {}",
-                    context, item
+                    "{context} references non-existent bucket {item}"
                 )));
             }
         }
@@ -219,8 +217,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
     let id = i32::decode(data, 0)?;
     if id >= 0 {
         return Err(CrushError::DecodeError(format!(
-            "Bucket ID must be negative, got {}",
-            id
+            "Bucket ID must be negative, got {id}"
         )));
     }
 
@@ -232,15 +229,13 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
 
     if alg_byte as u32 != alg {
         return Err(CrushError::DecodeError(format!(
-            "Algorithm mismatch: header says {}, bucket says {}",
-            alg, alg_byte
+            "Algorithm mismatch: header says {alg}, bucket says {alg_byte}"
         )));
     }
 
     if size > 10000 {
         return Err(CrushError::DecodeError(format!(
-            "Bucket size too large: {}",
-            size
+            "Bucket size too large: {size}"
         )));
     }
 
@@ -267,8 +262,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             let num_nodes = u32::decode(data, 0)?;
             if num_nodes > 10000 {
                 return Err(CrushError::DecodeError(format!(
-                    "Tree num_nodes {} exceeds maximum 10000",
-                    num_nodes
+                    "Tree num_nodes {num_nodes} exceeds maximum 10000"
                 )));
             }
             let node_weights: Vec<u32> = decode_n(data, num_nodes as usize)?;
@@ -321,7 +315,7 @@ impl Denc for CrushRuleStep {
         let arg1 = i32::decode(buf, 0)?;
         let arg2 = i32::decode(buf, 0)?;
         let rule_op = RuleOp::try_from(op)
-            .map_err(|_| RadosError::Protocol(format!("Invalid rule op: {}", op)))?;
+            .map_err(|_| RadosError::Protocol(format!("Invalid rule op: {op}")))?;
         Ok(CrushRuleStep {
             op: rule_op,
             arg1,
@@ -376,10 +370,10 @@ mod tests {
 
         let result = CrushMap::decode(&mut bytes);
         if let Err(ref e) = result {
-            println!("Decode error: {:?}", e);
+            println!("Decode error: {e:?}");
             println!("Remaining bytes: {}", bytes.remaining());
         }
-        assert!(result.is_ok(), "Failed to decode CRUSH map: {:?}", result);
+        assert!(result.is_ok(), "Failed to decode CRUSH map: {result:?}");
 
         let map = result.unwrap();
         println!("Decoded CRUSH map:");

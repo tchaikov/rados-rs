@@ -29,8 +29,7 @@ impl TryFrom<u32> for EntityAddrType {
             3 => Ok(EntityAddrType::Any),
             4 => Ok(EntityAddrType::Cidr),
             _ => Err(RadosError::InvalidData(format!(
-                "Invalid EntityAddrType value: {}",
-                value
+                "Invalid EntityAddrType value: {value}"
             ))),
         }
     }
@@ -290,8 +289,7 @@ impl EntityAddr {
         const MAX_STRUCT_LEN: usize = 64 << 10;
         if struct_len > MAX_STRUCT_LEN {
             return Err(RadosError::InvalidData(format!(
-                "EntityAddr MSG_ADDR2 struct_len {} exceeds maximum {}",
-                struct_len, MAX_STRUCT_LEN,
+                "EntityAddr MSG_ADDR2 struct_len {struct_len} exceeds maximum {MAX_STRUCT_LEN}",
             )));
         }
 
@@ -472,8 +470,7 @@ impl Denc for EntityAddr {
             0 => Self::decode_legacy(buf),
             1 => Self::decode_msgr2(buf),
             marker => Err(RadosError::Protocol(format!(
-                "Unknown EntityAddr marker: {}",
-                marker
+                "Unknown EntityAddr marker: {marker}"
             ))),
         }
     }
@@ -567,8 +564,7 @@ impl crate::denc::codec::Denc for EntityAddrvec {
                 Ok(EntityAddrvec { addrs })
             }
             _ => Err(RadosError::Protocol(format!(
-                "Invalid EntityAddrvec marker: {}",
-                marker
+                "Invalid EntityAddrvec marker: {marker}"
             ))),
         }
     }

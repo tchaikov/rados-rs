@@ -327,8 +327,7 @@ impl Denc for Duration {
         let nsec = u32::decode(buf, 0)?;
         if nsec >= 1_000_000_000 {
             return Err(RadosError::InvalidData(format!(
-                "nsec {} out of range (must be < 1_000_000_000)",
-                nsec
+                "nsec {nsec} out of range (must be < 1_000_000_000)"
             )));
         }
         Ok(Duration::new(sec as u64, nsec))

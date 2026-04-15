@@ -37,7 +37,7 @@ fn main() {
     )
     .expect("Failed to map PG to OSDs");
 
-    println!("PG {} maps to OSDs: {:?}", pg, result);
+    println!("PG {pg} maps to OSDs: {result:?}");
     println!("Expected: [1, 0, 2]");
 
     if result == vec![1, 0, 2] {

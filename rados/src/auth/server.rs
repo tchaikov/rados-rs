@@ -84,7 +84,7 @@ impl CephXServerHandler {
 
         let auth_mode_byte = u8::decode(&mut buf, 0)?;
         let auth_mode = AuthMode::from_u8(auth_mode_byte).ok_or_else(|| {
-            CephXError::ProtocolError(format!("Invalid auth mode: {}", auth_mode_byte))
+            CephXError::ProtocolError(format!("Invalid auth mode: {auth_mode_byte}"))
         })?;
 
         debug!("Server: Received auth request with mode: {:?}", auth_mode);
@@ -99,8 +99,7 @@ impl CephXServerHandler {
         if !self.keyring.has_entity(&entity_name.to_string()) {
             warn!("Server: Client {} not found in keyring", entity_name);
             return Err(CephXError::AuthenticationFailed(format!(
-                "Client {} not found",
-                entity_name
+                "Client {entity_name} not found"
             )));
         }
 
@@ -169,7 +168,7 @@ impl CephXServerHandler {
             .keyring
             .get_key(&entity_name.to_string())
             .ok_or_else(|| {
-                CephXError::AuthenticationFailed(format!("No secret for {}", entity_name))
+                CephXError::AuthenticationFailed(format!("No secret for {entity_name}"))
             })?;
 
         let expected_response = self.server_challenge.ok_or_else(|| {

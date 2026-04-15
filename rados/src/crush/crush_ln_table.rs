@@ -554,11 +554,7 @@ mod tests {
 
             assert!(
                 rel_diff < 0.001,
-                "RH[{}]: formula gives {:.0}, table has {:.0}, rel_diff {:.6}",
-                k,
-                expected_rh,
-                actual_rh,
-                rel_diff
+                "RH[{k}]: formula gives {expected_rh:.0}, table has {actual_rh:.0}, rel_diff {rel_diff:.6}"
             );
         }
     }

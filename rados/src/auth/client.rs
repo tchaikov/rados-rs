@@ -552,15 +552,13 @@ impl CephXClientHandler {
 
         let handler = session.ticket_handlers.get(&service_type).ok_or_else(|| {
             CephXError::AuthenticationFailed(format!(
-                "No ticket handler for service {:?}",
-                service_type
+                "No ticket handler for service {service_type:?}"
             ))
         })?;
 
         if handler.ticket_blob.is_none() {
             return Err(CephXError::AuthenticationFailed(format!(
-                "No session key for service {:?}",
-                service_type
+                "No session key for service {service_type:?}"
             )));
         }
 
@@ -607,8 +605,7 @@ impl CephXClientHandler {
             .as_ref()
             .ok_or_else(|| {
                 CephXError::AuthenticationFailed(format!(
-                    "No ticket blob for service {:?}",
-                    service_type
+                    "No ticket blob for service {service_type:?}"
                 ))
             })?
             .clone();

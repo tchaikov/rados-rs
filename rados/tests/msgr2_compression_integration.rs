@@ -32,9 +32,7 @@ fn test_frame_compression_roundtrip_snappy() {
     let compressed_size: usize = compressed_frame.segments.iter().map(|s| s.len()).sum();
     assert!(
         compressed_size < original_size,
-        "Compressed size {} should be less than original size {}",
-        compressed_size,
-        original_size
+        "Compressed size {compressed_size} should be less than original size {original_size}"
     );
 
     // Decompress the frame
@@ -201,8 +199,7 @@ fn test_compression_ratio_logging() {
     let ratio = (compressed_size as f64 / original_size as f64) * 100.0;
     assert!(
         ratio < 10.0,
-        "Compression ratio should be < 10% for repeated data, got {:.2}%",
-        ratio
+        "Compression ratio should be < 10% for repeated data, got {ratio:.2}%"
     );
 }
 
@@ -226,12 +223,11 @@ fn test_all_algorithms_roundtrip() {
 
         let decompressed = compressed
             .decompress(&ctx)
-            .unwrap_or_else(|_| panic!("Decompression should succeed for {:?}", algo));
+            .unwrap_or_else(|_| panic!("Decompression should succeed for {algo:?}"));
 
         assert_eq!(
             decompressed.segments[0], payload,
-            "Roundtrip failed for {:?}",
-            algo
+            "Roundtrip failed for {algo:?}"
         );
     }
 }

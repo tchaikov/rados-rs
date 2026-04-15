@@ -83,7 +83,7 @@ fn test_object_placement_pipeline() {
                             // Test PG to OSD mapping
                             match osdmap.pg_to_osds(&pg) {
                                 Ok(osds) => {
-                                    println!("      -> OSDs: {:?}", osds);
+                                    println!("      -> OSDs: {osds:?}");
 
                                     // Verify we got the expected number of replicas (or less if cluster is small)
                                     assert!(
@@ -94,22 +94,22 @@ fn test_object_placement_pipeline() {
                                     tested_placements += 1;
                                 }
                                 Err(e) => {
-                                    eprintln!("      ⚠ PG to OSD mapping failed: {:?}", e);
+                                    eprintln!("      ⚠ PG to OSD mapping failed: {e:?}");
                                 }
                             }
 
                             // Test complete object_to_osds pipeline
                             match osdmap.object_to_osds(*pool_id, obj_name) {
                                 Ok(osds) => {
-                                    println!("      Full pipeline -> OSDs: {:?}", osds);
+                                    println!("      Full pipeline -> OSDs: {osds:?}");
                                 }
                                 Err(e) => {
-                                    eprintln!("      ⚠ Object placement failed: {:?}", e);
+                                    eprintln!("      ⚠ Object placement failed: {e:?}");
                                 }
                             }
                         }
                         Err(e) => {
-                            eprintln!("    ⚠ object_to_pg failed for {}: {:?}", obj_name, e);
+                            eprintln!("    ⚠ object_to_pg failed for {obj_name}: {e:?}");
                         }
                     }
                 }
@@ -118,7 +118,7 @@ fn test_object_placement_pipeline() {
     }
 
     println!("\n=== Summary ===");
-    println!("Successful placements tested: {}", tested_placements);
+    println!("Successful placements tested: {tested_placements}");
 
     // We should have tested at least some placements if corpus files are available
     // If not, the test passes (corpus may not be available in CI)
@@ -204,7 +204,7 @@ fn test_object_to_pg_deterministic() {
                     (Ok(p1), Ok(p2), Ok(p3)) => {
                         assert_eq!(p1, p2, "Same object should map to same PG");
                         assert_eq!(p2, p3, "Same object should map to same PG");
-                        println!("✓ Deterministic mapping verified for pool {}", pool_id);
+                        println!("✓ Deterministic mapping verified for pool {pool_id}");
                     }
                     _ => {
                         // If mapping fails, that's OK for this test

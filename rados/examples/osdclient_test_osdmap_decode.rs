@@ -14,7 +14,7 @@ fn main() {
     for (i, chunk) in data.chunks(16).take(2).enumerate() {
         print!("{:04x}: ", i * 16);
         for byte in chunk {
-            print!("{:02x} ", byte);
+            print!("{byte:02x} ");
         }
         println!();
     }
@@ -32,7 +32,7 @@ fn main() {
             println!("  Remaining bytes: {}", bytes.len());
         }
         Err(e) => {
-            println!("Failed to decode: {}", e);
+            println!("Failed to decode: {e}");
             println!("Remaining bytes: {}", bytes.len());
         }
     }

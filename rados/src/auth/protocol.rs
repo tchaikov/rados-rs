@@ -229,8 +229,7 @@ impl<T: Denc> Denc for CephXEncryptedEnvelope<T> {
         let magic = u64::decode(buf, 0)?;
         if magic != AUTH_ENC_MAGIC {
             return Err(RadosError::Protocol(format!(
-                "Invalid magic: expected 0x{:016x}, got 0x{:016x}",
-                AUTH_ENC_MAGIC, magic
+                "Invalid magic: expected 0x{AUTH_ENC_MAGIC:016x}, got 0x{magic:016x}"
             )));
         }
         let payload = T::decode(buf, features)?;

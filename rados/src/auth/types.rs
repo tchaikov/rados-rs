@@ -42,7 +42,7 @@ impl CryptoKey {
     pub fn from_base64(base64_str: &str) -> Result<Self> {
         let secret_data = STANDARD
             .decode(base64_str)
-            .map_err(|e| CephXError::InvalidKey(format!("Invalid base64 key: {}", e)))?;
+            .map_err(|e| CephXError::InvalidKey(format!("Invalid base64 key: {e}")))?;
         Ok(Self::new(Bytes::from(secret_data)))
     }
 
@@ -102,7 +102,7 @@ impl CryptoKey {
         let mut buffer = ciphertext.to_vec();
         let pt_len = cipher
             .decrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer)
-            .map_err(|e| CephXError::CryptographicError(format!("AES decryption failed: {:?}", e)))?
+            .map_err(|e| CephXError::CryptographicError(format!("AES decryption failed: {e:?}")))?
             .len();
         buffer.truncate(pt_len);
         Ok(Bytes::from(buffer))
@@ -128,7 +128,7 @@ impl CryptoKey {
 
         let ct_len = cipher
             .encrypt_padded_mut::<cbc::cipher::block_padding::Pkcs7>(&mut buffer, plaintext.len())
-            .map_err(|e| CephXError::CryptographicError(format!("AES encryption failed: {:?}", e)))?
+            .map_err(|e| CephXError::CryptographicError(format!("AES encryption failed: {e:?}")))?
             .len();
         buffer.truncate(ct_len);
         Ok(Bytes::from(buffer))

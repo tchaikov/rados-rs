@@ -48,11 +48,11 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMapState
     debug!("Resolving monitors via DNS SRV: {}", query_name);
 
     let resolver = TokioAsyncResolver::tokio_from_system_conf()
-        .map_err(|e| MonClientError::Other(format!("Failed to create DNS resolver: {}", e)))?;
+        .map_err(|e| MonClientError::Other(format!("Failed to create DNS resolver: {e}")))?;
 
     let srv_records = resolver.srv_lookup(&query_name).await.map_err(|e| {
         debug!("DNS SRV lookup failed for {}: {}", query_name, e);
-        MonClientError::InvalidMonMap(format!("DNS SRV lookup failed for {}: {}", query_name, e))
+        MonClientError::InvalidMonMap(format!("DNS SRV lookup failed for {query_name}: {e}"))
     })?;
 
     let mut mon_addrs = Vec::new();
@@ -78,14 +78,14 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMapState
                     let socket_addr = SocketAddr::new(ip, port);
                     // Determine address type based on port number, matching Ceph behavior
                     let addr_str = if port == CEPH_MON_PORT_LEGACY {
-                        format!("v1:{}", socket_addr)
+                        format!("v1:{socket_addr}")
                     } else if port == CEPH_MON_PORT_IANA {
-                        format!("v2:{}", socket_addr)
+                        format!("v2:{socket_addr}")
                     } else {
                         // For non-standard ports, add both v2 and v1 entries
                         // to match Ceph's _add_ambiguous_addr behavior
-                        mon_addrs.push(format!("v2:{}", socket_addr));
-                        format!("v1:{}", socket_addr)
+                        mon_addrs.push(format!("v2:{socket_addr}"));
+                        format!("v1:{socket_addr}")
                     };
                     mon_addrs.push(addr_str);
                 }

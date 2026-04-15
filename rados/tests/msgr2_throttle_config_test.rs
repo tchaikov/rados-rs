@@ -71,9 +71,8 @@ fn test_from_ceph_conf_with_various_units() {
         let conf_content = format!(
             r#"
 [global]
-ms_dispatch_throttle_bytes = {}
-"#,
-            input
+ms_dispatch_throttle_bytes = {input}
+"#
         );
 
         fs::write(&conf_path, &conf_content).unwrap();
@@ -85,8 +84,7 @@ ms_dispatch_throttle_bytes = {}
         let throttle = config.throttle_config.unwrap();
         assert_eq!(
             throttle.max_bytes_per_sec, expected,
-            "Failed for input: {}",
-            input
+            "Failed for input: {input}"
         );
     }
 }

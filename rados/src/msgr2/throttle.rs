@@ -462,8 +462,7 @@ mod tests {
         for i in 0..10 {
             assert!(
                 throttle.try_send(100).await,
-                "Message {} should be allowed",
-                i
+                "Message {i} should be allowed"
             );
             throttle.record_send(100).await;
         }
@@ -508,8 +507,7 @@ mod tests {
         for i in 0..5 {
             assert!(
                 throttle.try_send(100).await,
-                "Message {} should be allowed",
-                i
+                "Message {i} should be allowed"
             );
             throttle.record_send(100).await;
         }

@@ -314,7 +314,7 @@ impl std::str::FromStr for PackedEntityName {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = s.split('.').collect();
         if parts.len() != 2 {
-            return Err(format!("Invalid entity name format: {}", s));
+            return Err(format!("Invalid entity name format: {s}"));
         }
 
         let entity_type = match parts[0] {
@@ -329,7 +329,7 @@ impl std::str::FromStr for PackedEntityName {
 
         let num: u64 = parts[1]
             .parse()
-            .map_err(|e| format!("Invalid entity number: {}", e))?;
+            .map_err(|e| format!("Invalid entity number: {e}"))?;
         Ok(Self::new(entity_type.bits() as u8, num))
     }
 }

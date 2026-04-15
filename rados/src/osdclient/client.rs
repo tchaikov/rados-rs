@@ -510,8 +510,7 @@ impl OSDClient {
         // Check if OSD exists
         if osd_id < 0 || osd_id as usize >= osdmap.osd_addrs_client.len() {
             return Err(OSDClientError::Connection(format!(
-                "OSD {} not found in OSDMap",
-                osd_id
+                "OSD {osd_id} not found in OSDMap"
             )));
         }
 
@@ -525,7 +524,7 @@ impl OSDClient {
             .find(|addr| matches!(addr.addr_type, crate::EntityAddrType::Msgr2))
             .cloned()
             .ok_or_else(|| {
-                OSDClientError::Connection(format!("No msgr2 address found for OSD {}", osd_id))
+                OSDClientError::Connection(format!("No msgr2 address found for OSD {osd_id}"))
             })
     }
 
@@ -549,7 +548,7 @@ impl OSDClient {
 
         // Map object name to PG seed
         let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
-            .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {}", e)))?;
+            .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {e}")))?;
 
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
 
@@ -911,8 +910,7 @@ impl OSDClient {
                     connection_retries += 1;
                     if connection_retries > MAX_CONNECTION_RETRIES {
                         return Err(OSDClientError::Connection(format!(
-                            "OSD {} connection repeatedly lost (submit): {}",
-                            primary_osd, msg_str
+                            "OSD {primary_osd} connection repeatedly lost (submit): {msg_str}"
                         )));
                     }
                     warn!(
@@ -936,8 +934,7 @@ impl OSDClient {
                     connection_retries += 1;
                     if connection_retries > MAX_CONNECTION_RETRIES {
                         return Err(OSDClientError::Connection(format!(
-                            "OSD {} connection repeatedly lost (await): {}",
-                            primary_osd, msg_str
+                            "OSD {primary_osd} connection repeatedly lost (await): {msg_str}"
                         )));
                     }
                     warn!(
@@ -1007,7 +1004,7 @@ impl OSDClient {
         if result.result != 0 {
             return Err(OSDClientError::OSDError {
                 code: result.result,
-                message: format!("{} failed", op_name),
+                message: format!("{op_name} failed"),
             });
         }
         if let Some(op) = result.ops.first()
@@ -1015,7 +1012,7 @@ impl OSDClient {
         {
             return Err(OSDClientError::OSDError {
                 code: op.return_code,
-                message: format!("{} failed", op_name),
+                message: format!("{op_name} failed"),
             });
         }
         Ok(())
@@ -1242,7 +1239,7 @@ impl OSDClient {
             None => Ok(crate::HObject::empty_cursor(pool)),
             Some(s) => {
                 let hash: u32 = s.parse().map_err(|e| {
-                    OSDClientError::Other(format!("Invalid list cursor '{}': {}", s, e))
+                    OSDClientError::Other(format!("Invalid list cursor '{s}': {e}"))
                 })?;
                 Ok(crate::HObject::new(pool, String::new(), hash))
             }
@@ -1342,7 +1339,7 @@ impl OSDClient {
         if result.result < 0 {
             return Err(OSDClientError::OSDError {
                 code: result.result,
-                message: format!("List operation failed for PG {}", current_pg),
+                message: format!("List operation failed for PG {current_pg}"),
             });
         }
 
@@ -1427,7 +1424,7 @@ impl OSDClient {
         if osdmap.is_pool_eio(pool) {
             return Err(OSDClientError::OSDError {
                 code: -libc::EIO,
-                message: format!("pool {} has EIO flag set", pool),
+                message: format!("pool {pool} has EIO flag set"),
             });
         }
         let barrier = self.epoch_barrier.load(Ordering::Relaxed);
@@ -1665,7 +1662,7 @@ impl OSDClient {
                 .iter()
                 .find(|(_, name)| name.as_str() == pool_name)
                 .map(|(id, _)| *id as u32)
-                .ok_or_else(|| OSDClientError::Other(format!("Pool '{}' not found", pool_name)))?;
+                .ok_or_else(|| OSDClientError::Other(format!("Pool '{pool_name}' not found")))?;
 
             let version = osdmap.epoch.as_u32() as u64;
 
@@ -1915,8 +1912,7 @@ impl OSDClient {
                     let _ = pending_op
                         .result_tx
                         .send(Err(OSDClientError::Connection(format!(
-                            "OSD {} unavailable: {}",
-                            target_osd, e
+                            "OSD {target_osd} unavailable: {e}"
                         ))));
                     return Ok(());
                 }
@@ -1948,8 +1944,7 @@ impl OSDClient {
                     let _ = pending_op
                         .result_tx
                         .send(Err(OSDClientError::Connection(format!(
-                            "Routing failed after epoch change: {}",
-                            e
+                            "Routing failed after epoch change: {e}"
                         ))));
                     return Ok(());
                 }
@@ -2520,9 +2515,10 @@ impl OSDClient {
     /// Get session for OSD, returning error if not found
     async fn get_session_for_osd(&self, osd_id: i32) -> Result<Arc<OSDSession>> {
         let sessions = self.sessions.read().await;
-        sessions.get(&osd_id).cloned().ok_or_else(|| {
-            OSDClientError::Connection(format!("No session found for OSD {}", osd_id))
-        })
+        sessions
+            .get(&osd_id)
+            .cloned()
+            .ok_or_else(|| OSDClientError::Connection(format!("No session found for OSD {osd_id}")))
     }
 
     /// Handle BLOCK backoff operation
@@ -2590,7 +2586,7 @@ impl OSDClient {
         let backoff_id = ack.id;
         let payload = ack
             .encode_payload(0)
-            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode ACK_BLOCK: {}", e)))?;
+            .map_err(|e| OSDClientError::Encoding(format!("Failed to encode ACK_BLOCK: {e}")))?;
 
         let msg = crate::msgr2::message::Message::new(
             crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF,

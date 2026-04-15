@@ -119,7 +119,7 @@ fn ensure_corpus_available() -> Result<PathBuf, String> {
     let corpus_root = get_corpus_root();
 
     if !corpus_root.exists() {
-        eprintln!("Corpus not found at {:?}", corpus_root);
+        eprintln!("Corpus not found at {corpus_root:?}");
         eprintln!("Attempting to clone ceph-object-corpus...");
 
         let output = Command::new("git")
@@ -130,7 +130,7 @@ fn ensure_corpus_available() -> Result<PathBuf, String> {
                 corpus_root.to_str().unwrap(),
             ])
             .output()
-            .map_err(|e| format!("Failed to run git clone: {}", e))?;
+            .map_err(|e| format!("Failed to run git clone: {e}"))?;
 
         if !output.status.success() {
             return Err(format!(
@@ -139,7 +139,7 @@ fn ensure_corpus_available() -> Result<PathBuf, String> {
             ));
         }
 
-        eprintln!("Successfully cloned corpus to {:?}", corpus_root);
+        eprintln!("Successfully cloned corpus to {corpus_root:?}");
     }
 
     Ok(corpus_root)
@@ -151,14 +151,13 @@ fn get_available_versions(corpus_root: &Path) -> Result<Vec<String>, String> {
 
     if !archive_dir.exists() {
         return Err(format!(
-            "Archive directory not found at {:?}. Clone ceph-object-corpus repository.",
-            archive_dir
+            "Archive directory not found at {archive_dir:?}. Clone ceph-object-corpus repository."
         ));
     }
 
     let mut versions = Vec::new();
     for entry in fs::read_dir(&archive_dir)
-        .map_err(|e| format!("Failed to read archive directory: {}", e))?
+        .map_err(|e| format!("Failed to read archive directory: {e}"))?
         .flatten()
     {
         if entry.path().is_dir()
@@ -178,8 +177,7 @@ fn get_corpus_path(corpus_root: &Path, version: &str) -> Result<PathBuf, String>
 
     if !version_path.exists() {
         return Err(format!(
-            "Corpus version {} not found at {:?}",
-            version, version_path
+            "Corpus version {version} not found at {version_path:?}"
         ));
     }
 
@@ -205,7 +203,7 @@ fn check_ceph_dencoder() -> Result<PathBuf, String> {
     let output = Command::new("which")
         .arg("ceph-dencoder")
         .output()
-        .map_err(|e| format!("Failed to check for ceph-dencoder: {}", e))?;
+        .map_err(|e| format!("Failed to check for ceph-dencoder: {e}"))?;
 
     if output.status.success() {
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
@@ -233,7 +231,7 @@ fn get_rust_dencoder() -> Result<PathBuf, String> {
         .args(["build", "--bin", "dencoder"])
         .current_dir(workspace_root)
         .output()
-        .map_err(|e| format!("Failed to build dencoder: {}", e))?;
+        .map_err(|e| format!("Failed to build dencoder: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -261,7 +259,7 @@ fn run_ceph_dencoder(
     cmd.arg("type").arg(type_name);
 
     if let Some(f) = features {
-        cmd.arg("set_features").arg(format!("0x{:x}", f));
+        cmd.arg("set_features").arg(format!("0x{f:x}"));
     }
 
     cmd.arg("import").arg(corpus_file).arg("decode");
@@ -274,7 +272,7 @@ fn run_ceph_dencoder(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Failed to run ceph-dencoder: {}", e))?;
+        .map_err(|e| format!("Failed to run ceph-dencoder: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -300,7 +298,7 @@ fn run_rust_dencoder(
     cmd.arg("type").arg(type_name);
 
     if let Some(f) = features {
-        cmd.arg("set_features").arg(format!("0x{:x}", f));
+        cmd.arg("set_features").arg(format!("0x{f:x}"));
     }
 
     cmd.arg("import").arg(corpus_file).arg("decode");
@@ -313,7 +311,7 @@ fn run_rust_dencoder(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Failed to run rust dencoder: {}", e))?;
+        .map_err(|e| format!("Failed to run rust dencoder: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -328,7 +326,7 @@ fn run_rust_dencoder(
     // Our dencoder prints status messages before the JSON
     let json_start = full_output
         .find(['{', '['])
-        .ok_or_else(|| format!("No JSON found in output: {}", full_output))?;
+        .ok_or_else(|| format!("No JSON found in output: {full_output}"))?;
 
     Ok(full_output[json_start..].trim().to_string())
 }
@@ -342,10 +340,10 @@ fn compare_json_outputs(
     file_name: &str,
 ) -> Result<(), String> {
     let ceph_value: serde_json::Value =
-        serde_json::from_str(ceph_json).map_err(|e| format!("Failed to parse ceph JSON: {}", e))?;
+        serde_json::from_str(ceph_json).map_err(|e| format!("Failed to parse ceph JSON: {e}"))?;
 
     let rust_value: serde_json::Value =
-        serde_json::from_str(rust_json).map_err(|e| format!("Failed to parse rust JSON: {}", e))?;
+        serde_json::from_str(rust_json).map_err(|e| format!("Failed to parse rust JSON: {e}"))?;
 
     // Perform strict comparison
     if ceph_value != rust_value {
@@ -354,8 +352,7 @@ fn compare_json_outputs(
         let rust_pretty = serde_json::to_string_pretty(&rust_value).unwrap();
 
         let error_msg = format!(
-            "JSON output mismatch for {} in {}:\n\nCeph output:\n{}\n\nRust output:\n{}\n",
-            type_name, file_name, ceph_pretty, rust_pretty
+            "JSON output mismatch for {type_name} in {file_name}:\n\nCeph output:\n{ceph_pretty}\n\nRust output:\n{rust_pretty}\n"
         );
         return Err(error_msg);
     }
@@ -383,7 +380,7 @@ fn export_encoded_binary(
     cmd.arg("type").arg(type_name);
 
     if let Some(f) = features {
-        cmd.arg("set_features").arg(format!("0x{:x}", f));
+        cmd.arg("set_features").arg(format!("0x{f:x}"));
     }
 
     cmd.arg("import")
@@ -395,7 +392,7 @@ fn export_encoded_binary(
 
     let output = cmd
         .output()
-        .map_err(|e| format!("Failed to run dencoder export: {}", e))?;
+        .map_err(|e| format!("Failed to run dencoder export: {e}"))?;
 
     if !output.status.success() {
         return Err(format!(
@@ -405,7 +402,7 @@ fn export_encoded_binary(
     }
 
     if !temp_file.exists() {
-        return Err(format!("Export file was not created: {:?}", temp_file));
+        return Err(format!("Export file was not created: {temp_file:?}"));
     }
 
     Ok(temp_file)
@@ -423,7 +420,7 @@ fn test_rust_encode_ceph_decode(
 ) -> Result<(), String> {
     // Export Rust-encoded binary
     let rust_encoded_file = export_encoded_binary(rust_dencoder, type_name, corpus_file, features)
-        .map_err(|e| format!("Rust export failed: {}", e))?;
+        .map_err(|e| format!("Rust export failed: {e}"))?;
 
     // Decode with Ceph
     let ceph_decoded_json = run_ceph_dencoder(
@@ -435,7 +432,7 @@ fn test_rust_encode_ceph_decode(
     )
     .map_err(|e| {
         let _ = fs::remove_file(&rust_encoded_file);
-        format!("Ceph decode of Rust-encoded failed: {}", e)
+        format!("Ceph decode of Rust-encoded failed: {e}")
     })?;
 
     // Clean up temp file
@@ -462,7 +459,7 @@ fn test_ceph_encode_rust_decode(
 ) -> Result<(), String> {
     // Export Ceph-encoded binary
     let ceph_encoded_file = export_encoded_binary(ceph_dencoder, type_name, corpus_file, features)
-        .map_err(|e| format!("Ceph export failed: {}", e))?;
+        .map_err(|e| format!("Ceph export failed: {e}"))?;
 
     // Decode with Rust
     let rust_decoded_json = run_rust_dencoder(
@@ -474,7 +471,7 @@ fn test_ceph_encode_rust_decode(
     )
     .map_err(|e| {
         let _ = fs::remove_file(&ceph_encoded_file);
-        format!("Rust decode of Ceph-encoded failed: {}", e)
+        format!("Rust decode of Ceph-encoded failed: {e}")
     })?;
 
     // Clean up temp file
@@ -500,7 +497,7 @@ fn test_type(
     let type_dir = corpus_base.join(type_name);
 
     if !type_dir.exists() {
-        eprintln!("  [WARN] No corpus directory found for {}", type_name);
+        eprintln!("  [WARN] No corpus directory found for {type_name}");
         return Ok(TypeSummary::default());
     }
 
@@ -531,7 +528,7 @@ fn test_type(
             match run_ceph_dencoder(ceph_dencoder, type_name, &corpus_file, features, false) {
                 Ok(json) => json,
                 Err(e) => {
-                    eprintln!("    [FAIL] ceph-dencoder failed for {}: {}", file_name, e);
+                    eprintln!("    [FAIL] ceph-dencoder failed for {file_name}: {e}");
                     continue;
                 }
             };
@@ -540,7 +537,7 @@ fn test_type(
             match run_rust_dencoder(rust_dencoder, type_name, &corpus_file, features, false) {
                 Ok(json) => json,
                 Err(e) => {
-                    eprintln!("    [FAIL] rust dencoder failed for {}: {}", file_name, e);
+                    eprintln!("    [FAIL] rust dencoder failed for {file_name}: {e}");
                     continue;
                 }
             };
@@ -610,7 +607,7 @@ fn test_type(
             && rust_to_ceph_works
             && ceph_to_rust_works
         {
-            eprintln!("    [OK] {} (decode + roundtrip + cross-decode)", file_name);
+            eprintln!("    [OK] {file_name} (decode + roundtrip + cross-decode)");
             matched += 1;
         } else {
             // Format mismatch - both decoded but outputs differ
@@ -659,11 +656,11 @@ fn test_corpus_comparison() {
     // Get configuration from environment
     let corpus_root = match ensure_corpus_available() {
         Ok(root) => {
-            eprintln!("[OK] Found corpus root at: {:?}", root);
+            eprintln!("[OK] Found corpus root at: {root:?}");
             root
         }
         Err(e) => {
-            panic!("[ERROR] {}", e);
+            panic!("[ERROR] {e}");
         }
     };
 
@@ -692,7 +689,7 @@ fn test_corpus_comparison() {
                 }
             }
             Err(e) => {
-                panic!("[ERROR] Failed to get available versions: {}", e);
+                panic!("[ERROR] Failed to get available versions: {e}");
             }
         }
     };
@@ -705,32 +702,32 @@ fn test_corpus_comparison() {
     // Check prerequisites
     let ceph_dencoder = match check_ceph_dencoder() {
         Ok(path) => {
-            eprintln!("[OK] Found ceph-dencoder at: {:?}", path);
+            eprintln!("[OK] Found ceph-dencoder at: {path:?}");
             path
         }
         Err(e) => {
-            panic!("[ERROR] {}", e);
+            panic!("[ERROR] {e}");
         }
     };
 
     let rust_dencoder = match get_rust_dencoder() {
         Ok(path) => {
-            eprintln!("[OK] Found rust dencoder at: {:?}", path);
+            eprintln!("[OK] Found rust dencoder at: {path:?}");
             path
         }
         Err(e) => {
-            panic!("[ERROR] {}", e);
+            panic!("[ERROR] {e}");
         }
     };
 
     eprintln!();
     if let Some(ref version) = requested_version {
-        eprintln!("Testing specific version: {}", version);
+        eprintln!("Testing specific version: {version}");
     } else {
-        eprintln!("Testing versions: {:?}", versions_to_test);
+        eprintln!("Testing versions: {versions_to_test:?}");
     }
     if let Some(ref type_name) = requested_type {
-        eprintln!("Testing specific type: {}", type_name);
+        eprintln!("Testing specific type: {type_name}");
     }
     eprintln!();
 
@@ -745,24 +742,24 @@ fn test_corpus_comparison() {
     };
 
     if types_to_test.is_empty() {
-        panic!("[ERROR] No types matched filter: {:?}", requested_type);
+        panic!("[ERROR] No types matched filter: {requested_type:?}");
     }
 
     let mut version_results: Vec<VersionResult> = Vec::new();
 
     for version in &versions_to_test {
         eprintln!("===========================================");
-        eprintln!("Testing Version: {}", version);
+        eprintln!("Testing Version: {version}");
         eprintln!("===========================================");
         eprintln!();
 
         let corpus_base = match get_corpus_path(&corpus_root, version) {
             Ok(path) => {
-                eprintln!("[OK] Found corpus at: {:?}", path);
+                eprintln!("[OK] Found corpus at: {path:?}");
                 path
             }
             Err(e) => {
-                eprintln!("[WARN] Skipping version {}: {}", version, e);
+                eprintln!("[WARN] Skipping version {version}: {e}");
                 continue;
             }
         };
@@ -783,7 +780,7 @@ fn test_corpus_comparison() {
             };
             eprintln!("Testing type: {}{}", spec.name, marker);
             if let Some(f) = spec.features {
-                eprintln!("  Features: 0x{:x}", f);
+                eprintln!("  Features: 0x{f:x}");
             }
 
             match test_type(
@@ -829,9 +826,9 @@ fn test_corpus_comparison() {
         }
 
         eprintln!("-------------------------------------------");
-        eprintln!("Results for Version: {}", version);
+        eprintln!("Results for Version: {version}");
         eprintln!("-------------------------------------------");
-        eprintln!("Total samples: {}", overall_total);
+        eprintln!("Total samples: {overall_total}");
         if overall_total > 0 {
             eprintln!(
                 "  Exact match: {}/{} ({:.1}%)",
@@ -845,7 +842,7 @@ fn test_corpus_comparison() {
                 overall_total,
                 (overall_format_mismatch as f64 / overall_total as f64) * 100.0
             );
-            eprintln!("    - Exception types: {}", exception_format_mismatch);
+            eprintln!("    - Exception types: {exception_format_mismatch}");
             eprintln!(
                 "    - Non-exception types: {}",
                 overall_format_mismatch - exception_format_mismatch

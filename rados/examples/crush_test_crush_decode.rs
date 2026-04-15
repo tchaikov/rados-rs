@@ -27,7 +27,7 @@ fn main() {
             if !map.class_name.is_empty() {
                 println!("\nDevice Classes:");
                 for (class_id, class_name) in &map.class_name {
-                    println!("  Class {}: {}", class_id, class_name);
+                    println!("  Class {class_id}: {class_name}");
 
                     // Count devices in this class
                     let device_count = map
@@ -35,7 +35,7 @@ fn main() {
                         .iter()
                         .filter(|&(_, &cid)| cid == *class_id)
                         .count();
-                    println!("    Devices: {}", device_count);
+                    println!("    Devices: {device_count}");
                 }
             }
 
@@ -44,7 +44,7 @@ fn main() {
                 println!("\nSample Device Class Assignments:");
                 for (device_id, class_id) in map.class_map.iter().take(10) {
                     if let Some(class_name) = map.class_name.get(class_id) {
-                        println!("  OSD {}: {}", device_id, class_name);
+                        println!("  OSD {device_id}: {class_name}");
                     }
                 }
             }
@@ -52,7 +52,7 @@ fn main() {
             println!("\n  Remaining bytes: {}", bytes.remaining());
         }
         Err(e) => {
-            println!("Failed to decode: {:?}", e);
+            println!("Failed to decode: {e:?}");
             println!("Remaining bytes: {}", bytes.remaining());
         }
     }

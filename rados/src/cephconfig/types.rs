@@ -48,7 +48,7 @@ impl ConfigValue for Count {
     fn parse_config_value(s: &str) -> Result<Self, ConfigError> {
         s.parse()
             .map(Count)
-            .map_err(|e| ConfigError::ParseError(format!("Invalid count '{}': {}", s, e)))
+            .map_err(|e| ConfigError::ParseError(format!("Invalid count '{s}': {e}")))
     }
 }
 
@@ -60,7 +60,7 @@ impl ConfigValue for Ratio {
     fn parse_config_value(s: &str) -> Result<Self, ConfigError> {
         let val: f64 = s
             .parse()
-            .map_err(|e| ConfigError::ParseError(format!("Invalid ratio '{}': {}", s, e)))?;
+            .map_err(|e| ConfigError::ParseError(format!("Invalid ratio '{s}': {e}")))?;
         if !(0.0..=1.0).contains(&val) {
             return Err(ConfigError::ParseError(
                 "ratio must be between 0.0 and 1.0".to_string(),
@@ -75,7 +75,7 @@ impl ConfigValue for bool {
         match s.to_lowercase().as_str() {
             "true" | "yes" | "1" | "on" => Ok(true),
             "false" | "no" | "0" | "off" => Ok(false),
-            _ => Err(ConfigError::ParseError(format!("Invalid bool: {}", s))),
+            _ => Err(ConfigError::ParseError(format!("Invalid bool: {s}"))),
         }
     }
 }
@@ -149,7 +149,7 @@ fn parse_size(s: &str) -> Result<u64, ConfigError> {
 
     let num: f64 = num_str
         .parse()
-        .map_err(|e| ConfigError::ParseError(format!("Invalid number '{}': {}", num_str, e)))?;
+        .map_err(|e| ConfigError::ParseError(format!("Invalid number '{num_str}': {e}")))?;
 
     let multiplier: u64 = match unit.as_str() {
         "" | "B" => 1,
@@ -159,8 +159,7 @@ fn parse_size(s: &str) -> Result<u64, ConfigError> {
         "T" | "TB" => 1024 * 1024 * 1024 * 1024,
         _ => {
             return Err(ConfigError::ParseError(format!(
-                "Unknown size unit: {}",
-                unit
+                "Unknown size unit: {unit}"
             )));
         }
     };
@@ -168,8 +167,7 @@ fn parse_size(s: &str) -> Result<u64, ConfigError> {
     let result = num * multiplier as f64;
     if !result.is_finite() || result < 0.0 || result > u64::MAX as f64 {
         return Err(ConfigError::ParseError(format!(
-            "Size value out of range: {}",
-            result
+            "Size value out of range: {result}"
         )));
     }
     Ok(result as u64)
@@ -183,7 +181,7 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, ConfigError> {
 
     let num: f64 = num_str
         .parse()
-        .map_err(|e| ConfigError::ParseError(format!("Invalid number '{}': {}", num_str, e)))?;
+        .map_err(|e| ConfigError::ParseError(format!("Invalid number '{num_str}': {e}")))?;
 
     let seconds = match unit.as_str() {
         "" | "s" | "sec" | "second" | "seconds" => num,
@@ -194,16 +192,14 @@ fn parse_duration(s: &str) -> Result<std::time::Duration, ConfigError> {
         "d" | "day" | "days" => num * 86400.0,
         _ => {
             return Err(ConfigError::ParseError(format!(
-                "Unknown time unit: {}",
-                unit
+                "Unknown time unit: {unit}"
             )));
         }
     };
 
     if !seconds.is_finite() || seconds < 0.0 {
         return Err(ConfigError::ParseError(format!(
-            "Duration value out of range: {}",
-            seconds
+            "Duration value out of range: {seconds}"
         )));
     }
     Ok(std::time::Duration::from_secs_f64(seconds))

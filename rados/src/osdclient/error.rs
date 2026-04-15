@@ -88,7 +88,7 @@ impl From<OSDClientError> for crate::RadosError {
         match e {
             OSDClientError::Denc(error) => error,
             OSDClientError::MonClient(error) => error.into(),
-            other => crate::RadosError::Protocol(format!("OSDClient error: {}", other)),
+            other => crate::RadosError::Protocol(format!("OSDClient error: {other}")),
         }
     }
 }

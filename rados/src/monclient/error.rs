@@ -63,7 +63,7 @@ impl From<MonClientError> for crate::RadosError {
         match e {
             MonClientError::RadosError(error) => error,
             MonClientError::IoError(error) => error.into(),
-            other => crate::RadosError::Protocol(format!("MonClient error: {}", other)),
+            other => crate::RadosError::Protocol(format!("MonClient error: {other}")),
         }
     }
 }

@@ -126,8 +126,7 @@ impl Denc for PgId {
         let version = u8::decode(buf, 0)?;
         if version != 1 {
             return Err(RadosError::Protocol(format!(
-                "Unsupported PgId version: {}",
-                version
+                "Unsupported PgId version: {version}"
             )));
         }
 
@@ -429,7 +428,7 @@ mod tests {
         let pg = PgId::new(1, 0x2a);
         assert_eq!(pg.pool, 1);
         assert_eq!(pg.seed, 0x2a);
-        assert_eq!(format!("{}", pg), "1.2a");
+        assert_eq!(format!("{pg}"), "1.2a");
     }
 
     #[test]
@@ -603,7 +602,7 @@ mod tests {
 
         // Map 100 objects and count PG distribution
         for i in 0..100 {
-            let object_name = format!("object_{}", i);
+            let object_name = format!("object_{i}");
             let pg = object_to_pg(&object_name, &locator, pg_num).unwrap();
             pg_counts[pg.seed as usize] += 1;
         }
@@ -612,9 +611,7 @@ mod tests {
         let empty_pgs = pg_counts.iter().filter(|&&count| count == 0).count();
         assert!(
             empty_pgs < 3,
-            "Too many empty PGs: {} out of {}",
-            empty_pgs,
-            pg_num
+            "Too many empty PGs: {empty_pgs} out of {pg_num}"
         );
     }
 }

@@ -61,7 +61,7 @@ impl Compressor for SnappyCompressor {
         let mut encoder = snap::raw::Encoder::new();
         encoder
             .compress_vec(data)
-            .map_err(|e| Error::compression_error(&format!("Snappy compression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("Snappy compression failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
@@ -69,7 +69,7 @@ impl Compressor for SnappyCompressor {
         let mut decoder = snap::raw::Decoder::new();
         decoder
             .decompress_vec(data)
-            .map_err(|e| Error::compression_error(&format!("Snappy decompression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("Snappy decompression failed: {e}")))
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -103,13 +103,13 @@ impl Default for ZstdCompressor {
 impl Compressor for ZstdCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
         zstd::encode_all(data, self.level)
-            .map_err(|e| Error::compression_error(&format!("Zstd compression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("Zstd compression failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
         // Zstd embeds the uncompressed size in its frame header.
         zstd::decode_all(data)
-            .map_err(|e| Error::compression_error(&format!("Zstd decompression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("Zstd decompression failed: {e}")))
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -126,7 +126,7 @@ impl Compressor for Lz4Compressor {
         // prepend_size=true writes a 4-byte little-endian original size header,
         // which decompress() reads to avoid needing an external size hint.
         lz4::block::compress(data, None, true)
-            .map_err(|e| Error::compression_error(&format!("LZ4 compression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("LZ4 compression failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
@@ -145,7 +145,7 @@ impl Compressor for Lz4Compressor {
             return Err(Error::compression_error("LZ4 size header is negative"));
         }
         lz4::block::decompress(&data[4..], Some(original_size))
-            .map_err(|e| Error::compression_error(&format!("LZ4 decompression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("LZ4 decompression failed: {e}")))
     }
 
     fn algorithm(&self) -> CompressionAlgorithm {
@@ -185,10 +185,10 @@ impl Compressor for ZlibCompressor {
         let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(self.level));
         encoder
             .write_all(data)
-            .map_err(|e| Error::compression_error(&format!("Zlib compression failed: {}", e)))?;
+            .map_err(|e| Error::compression_error(&format!("Zlib compression failed: {e}")))?;
         encoder
             .finish()
-            .map_err(|e| Error::compression_error(&format!("Zlib compression failed: {}", e)))
+            .map_err(|e| Error::compression_error(&format!("Zlib compression failed: {e}")))
     }
 
     fn decompress(&self, data: &[u8]) -> Result<Vec<u8>> {
@@ -200,7 +200,7 @@ impl Compressor for ZlibCompressor {
         let mut decompressed = Vec::new();
         decoder
             .read_to_end(&mut decompressed)
-            .map_err(|e| Error::compression_error(&format!("Zlib decompression failed: {}", e)))?;
+            .map_err(|e| Error::compression_error(&format!("Zlib decompression failed: {e}")))?;
         Ok(decompressed)
     }
 
@@ -537,7 +537,7 @@ mod tests {
             let ctx = CompressionContext::new(algo);
             let compressed = ctx.compress(&data).unwrap();
             let decompressed = ctx.decompress(&compressed).unwrap();
-            assert_eq!(&decompressed[..], &data[..], "Algorithm {:?} failed", algo);
+            assert_eq!(&decompressed[..], &data[..], "Algorithm {algo:?} failed");
         }
     }
 }

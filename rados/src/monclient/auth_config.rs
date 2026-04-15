@@ -38,23 +38,20 @@ impl AuthConfig {
     /// * `Ok(AuthConfig)` with appropriate authentication provider
     /// * `Err(MonClientError)` if config parsing fails or keyring not found
     pub fn from_ceph_conf(ceph_conf_path: &str) -> Result<Self> {
-        let config = crate::cephconfig::CephConfig::from_file(ceph_conf_path).map_err(|e| {
-            MonClientError::ConfigError(format!("Failed to parse ceph.conf: {}", e))
-        })?;
+        let config = crate::cephconfig::CephConfig::from_file(ceph_conf_path)
+            .map_err(|e| MonClientError::ConfigError(format!("Failed to parse ceph.conf: {e}")))?;
 
         let entity_name = config.entity_name();
         let auth_methods = config.get_auth_client_required();
 
         let auth_provider = if auth_methods.contains(&crate::auth::protocol::CEPH_AUTH_CEPHX) {
             let keyring_path = config.keyring().map_err(|e| {
-                MonClientError::ConfigError(format!("Failed to get keyring path: {}", e))
+                MonClientError::ConfigError(format!("Failed to get keyring path: {e}"))
             })?;
             let mut provider = new_monitor_auth_provider(&entity_name)?;
             provider
                 .set_secret_key_from_keyring(&keyring_path)
-                .map_err(|e| {
-                    MonClientError::ConfigError(format!("Failed to load keyring: {}", e))
-                })?;
+                .map_err(|e| MonClientError::ConfigError(format!("Failed to load keyring: {e}")))?;
             Some(provider)
         } else {
             None
@@ -79,7 +76,7 @@ impl AuthConfig {
         let mut provider = new_monitor_auth_provider(&entity_name)?;
         provider
             .set_secret_key_from_keyring(keyring_path)
-            .map_err(|e| MonClientError::ConfigError(format!("Failed to load keyring: {}", e)))?;
+            .map_err(|e| MonClientError::ConfigError(format!("Failed to load keyring: {e}")))?;
 
         Ok(Self {
             entity_name,
@@ -100,7 +97,7 @@ impl AuthConfig {
         let mut provider = new_monitor_auth_provider(&entity_name)?;
         provider
             .set_secret_key_from_base64(secret_key_base64)
-            .map_err(|e| MonClientError::ConfigError(format!("Failed to set secret key: {}", e)))?;
+            .map_err(|e| MonClientError::ConfigError(format!("Failed to set secret key: {e}")))?;
 
         Ok(Self {
             entity_name,

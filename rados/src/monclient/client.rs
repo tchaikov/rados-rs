@@ -284,7 +284,7 @@ impl MonClient {
         let entity_name: EntityName = auth_config
             .entity_name()
             .parse()
-            .map_err(|e| MonClientError::Other(format!("Invalid entity name: {}", e)))?;
+            .map_err(|e| MonClientError::Other(format!("Invalid entity name: {e}")))?;
 
         // Build initial monmap from config or DNS SRV discovery
         let monmap = if !config.mon_addrs.is_empty() {
@@ -1074,7 +1074,7 @@ impl MonClient {
             return Ok(());
         };
 
-        let lock_err = |e| MonClientError::Other(format!("Failed to lock auth handler: {}", e));
+        let lock_err = |e| MonClientError::Other(format!("Failed to lock auth handler: {e}"));
 
         // Check which tickets need renewal and build the request in a single lock.
         let auth_payload = {
@@ -1195,8 +1195,7 @@ impl MonClient {
             }
             _ => {
                 return Err(MonClientError::Other(format!(
-                    "Received unknown message type 0x{:04x} - this is a bug! MonClient should only receive messages it subscribed for",
-                    msg_type
+                    "Received unknown message type 0x{msg_type:04x} - this is a bug! MonClient should only receive messages it subscribed for"
                 )));
             }
         }
@@ -1672,8 +1671,7 @@ impl MonClient {
             }
             MonService::MgrMap | MonService::MdsMap => {
                 return Err(MonClientError::Other(format!(
-                    "wait_for_map does not yet support {}",
-                    what
+                    "wait_for_map does not yet support {what}"
                 )));
             }
         }
