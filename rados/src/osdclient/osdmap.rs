@@ -2140,6 +2140,24 @@ impl OSDMapIncremental {
             cache.clear();
         }
 
+        // Full-map replacement.  C++ apply_incremental short-circuits
+        // here: if `inc.fullmap` is non-empty, decode it as a complete
+        // OSDMap and ignore every other field.  We do not yet decode a
+        // full OSDMap from raw bytes inside apply_to, so refuse the
+        // incremental rather than apply the other fields on top of a
+        // stale base — that would silently corrupt routing state.  The
+        // caller is expected to retry with a fresh full-map fetch from
+        // the monitor.
+        if !self.fullmap.is_empty() {
+            return Err(RadosError::Protocol(format!(
+                "OSDMap incremental epoch {} carries a {}-byte full-map \
+                 replacement; full-map application is not yet implemented \
+                 (refusing to apply diff fields on top of stale base)",
+                self.epoch.as_u32(),
+                self.fullmap.len()
+            )));
+        }
+
         // Update epoch
         base.epoch = self.epoch;
         base.modified = self.modified;
@@ -2178,7 +2196,14 @@ impl OSDMapIncremental {
             base.pool_name.insert(*pool_id, name.clone());
         }
 
-        // Apply OSD state changes
+        // new_up_client: a freshly UP OSD's client-facing address.
+        // C++ `OSDMap::apply_incremental` also sets the EXISTS|UP
+        // bits explicitly here and clears the STOP bit, so an OSD
+        // that was previously DESTROYED gets transitioned back to
+        // UP even if the paired `new_state` entry only XORs other
+        // bits.  Without this, the OSD's UP flag in our base could
+        // remain stale and `is_up()` would return false on the next
+        // routing decision.
         for (osd, addrvec) in &self.new_up_client {
             let idx = *osd as usize;
             if idx >= base.osd_addrs_client.len() {
@@ -2186,12 +2211,22 @@ impl OSDMapIncremental {
                     .resize(idx + 1, EntityAddrvec::default());
             }
             base.osd_addrs_client[idx] = addrvec.clone();
+            if idx < base.osd_state.len() {
+                base.osd_state[idx] |= CEPH_OSD_EXISTS | CEPH_OSD_UP;
+                base.osd_state[idx] &= !CEPH_OSD_STOP;
+            }
         }
 
+        // new_state: XOR the state bits.  C++
+        // `OSDMap::apply_incremental` treats a zero value as a
+        // shorthand for "toggle the UP bit", so we need the same
+        // fallback or mark-up/down events encoded that way are
+        // silently dropped.
         for (osd, state) in &self.new_state {
             let idx = *osd as usize;
             if idx < base.osd_state.len() {
-                base.osd_state[idx] ^= state; // XOR the state
+                let s = if *state == 0 { CEPH_OSD_UP } else { *state };
+                base.osd_state[idx] ^= s;
             }
         }
 
@@ -2465,6 +2500,12 @@ const CEPH_OSD_EXISTS: u32 = 1 << 0;
 /// Reference: Ceph `include/ceph_fs.h` `CEPH_OSD_UP`
 const CEPH_OSD_UP: u32 = 1 << 1;
 
+/// OSD state flag: OSD has been administratively stopped.
+///
+/// Reference: Ceph `include/ceph_fs.h` `CEPH_OSD_STOP`.
+/// Cleared whenever a mon emits a `new_up_client` entry for the OSD.
+const CEPH_OSD_STOP: u32 = 1 << 9;
+
 impl Default for OSDMap {
     fn default() -> Self {
         Self {
@@ -2704,9 +2745,10 @@ impl OSDMap {
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
-        // pg_upmap (complete acting-set replacement).  Reject the upmap
-        // if any target OSD is marked OUT — C++ `_apply_upmap` lines
-        // 2815-2821 falls back to the raw CRUSH result in that case.
+        // pg_upmap (complete acting-set replacement).  Reject the
+        // upmap if any target OSD is marked OUT.  Mirrors the
+        // OUT-target check at the top of `OSDMap::_apply_upmap` —
+        // C++ falls back to the raw CRUSH result in that case.
         if let Some(upmap_osds) = self.pg_upmap.get(pg)
             && !upmap_osds
                 .iter()
@@ -2715,9 +2757,10 @@ impl OSDMap {
             *osds = upmap_osds.clone();
         }
 
-        // pg_upmap_items (per-osd swap).  C++ `_apply_upmap` lines
-        // 2830-2852: skip the swap if `to` is already in the set (would
-        // create a duplicate) or if `to` is marked OUT.
+        // pg_upmap_items (per-osd swap).  Mirrors the duplicate-target
+        // and OUT-target guards inside `OSDMap::_apply_upmap`: skip
+        // the swap if `to` is already in the acting set (would create
+        // a duplicate) or if `to` is marked OUT.
         if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
             for &(from_osd, to_osd) in upmap_items {
                 if osds.contains(&to_osd) {
@@ -2748,10 +2791,11 @@ impl OSDMap {
             osds.swap(0, up_pos);
         }
 
-        // pg_upmap_primaries (primary override).  C++ `_apply_upmap`
-        // lines 2854-2873: skip if new primary is CRUSH_ITEM_NONE or
-        // marked OUT; search starting from index 1 so an already-at-0
-        // primary is a no-op; only swap if we found it.
+        // pg_upmap_primaries (primary override).  Mirrors the
+        // pg_upmap_primaries branch of `OSDMap::_apply_upmap`:
+        // skip if the new primary is `CRUSH_ITEM_NONE` or marked OUT,
+        // search starting from index 1 so an already-at-0 primary is
+        // a no-op, and only swap if the new primary is found.
         if let Some(&primary_osd) = self.pg_upmap_primaries.get(pg)
             && primary_osd != CRUSH_ITEM_NONE
             && !self.is_out(primary_osd)
@@ -3334,6 +3378,50 @@ mod tests {
         assert_eq!(
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
+        );
+    }
+
+    #[test]
+    fn test_apply_to_refuses_fullmap_replacement() {
+        let mut base = OSDMap::new();
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.fullmap = Bytes::from_static(b"some non-empty payload");
+        let err = inc
+            .apply_to(&mut base)
+            .expect_err("fullmap-bearing inc should be refused");
+        assert!(
+            matches!(err, RadosError::Protocol(ref m) if m.contains("full-map replacement")),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_to_new_state_zero_toggles_up_bit() {
+        let mut base = make_osdmap_with_states(vec![0x3]); // EXISTS|UP
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.new_state.insert(0, 0); // 0 should toggle UP per C++
+        inc.apply_to(&mut base).expect("apply_to");
+        assert!(!base.is_up(0), "OSD 0 UP bit should have been toggled off");
+    }
+
+    #[test]
+    fn test_apply_to_new_up_client_sets_up_and_clears_stop() {
+        let mut base = make_osdmap_with_states(vec![CEPH_OSD_STOP]);
+        // A previously-stopped OSD that is now coming back up.
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        let addr = EntityAddrvec::default();
+        inc.new_up_client.insert(0, addr);
+        inc.apply_to(&mut base).expect("apply_to");
+        assert!(base.is_up(0), "UP bit should have been set");
+        assert_eq!(
+            base.osd_state[0] & CEPH_OSD_STOP,
+            0,
+            "STOP bit should have been cleared"
+        );
+        assert_ne!(
+            base.osd_state[0] & CEPH_OSD_EXISTS,
+            0,
+            "EXISTS bit should be set"
         );
     }
 
