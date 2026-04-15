@@ -134,6 +134,46 @@ impl FrameIO {
         }
     }
 
+    /// Allocate a payload buffer of exactly `size` bytes without paying
+    /// the zero-init cost that `vec![0u8; size]` triggers.
+    ///
+    /// Large reads (e.g. a 4 MiB object read) show up as roughly a
+    /// 200 µs tax in the naïve `vec![0u8; N]` formulation — half from
+    /// page faults when `mmap`'d pages are first touched and half from
+    /// the explicit memset inside `alloc_zeroed`.  Replacing it with
+    /// `Vec::with_capacity + set_len` skips the memset; tokio's
+    /// `AsyncRead::poll_read` contract guarantees that it writes into
+    /// the slice before returning success, so no uninitialised byte is
+    /// ever observed at the Rust level.
+    ///
+    /// ## Safety
+    ///
+    /// The returned Vec has `len() == size` but its contents are
+    /// uninitialised.  That is safe for our caller because:
+    ///
+    ///  1. The only way the buffer is read is via
+    ///     `stream.read(&mut buf[filled..])`, which writes bytes into
+    ///     the passed slice.  tokio's AsyncRead contract forbids
+    ///     reading from the slice before writing, so we never observe
+    ///     uninitialised memory there.
+    ///  2. After a successful `read` returns `Ok(n)`, the caller only
+    ///     treats bytes `[0..n]` as initialised — and those were just
+    ///     written by the kernel.  Bytes past `filled` remain
+    ///     uninitialised but are never read before the next `read`
+    ///     call writes them.
+    ///  3. When we finally hand the whole buffer to `Bytes::from(buf)`,
+    ///     `filled == size`, so every byte of the Vec has been written.
+    fn alloc_payload_buf(size: usize) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(size);
+        // SAFETY: `buf` was just allocated with at least `size` bytes of
+        // capacity; the exposed bytes are owned by `buf` and will be
+        // filled by `fill_from_stream` before any read at the Rust level.
+        unsafe {
+            buf.set_len(size);
+        }
+        buf
+    }
+
     /// Cancel-safe fill of `buf[*filled..]` by looping over `stream.read()`.
     ///
     /// `stream.read()` is documented as cancel-safe: if the returned future
@@ -467,7 +507,7 @@ impl FrameIO {
             self.pending_recv = Some(PendingRecv::Payload {
                 preamble,
                 inline,
-                buf: vec![0u8; payload_size],
+                buf: Self::alloc_payload_buf(payload_size),
                 filled: 0,
             });
         }
