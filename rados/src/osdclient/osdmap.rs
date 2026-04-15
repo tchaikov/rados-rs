@@ -2023,21 +2023,20 @@ impl OSDMapIncremental {
             let crc_field_size = 4; // Size of inc_crc field
             let crc_tail_offset = crc_offset + crc_field_size;
 
-            // Calculate CRC using streaming approach (avoids large buffer allocation)
-            let mut actual_crc = crc32c::crc32c(&header_bytes);
-
-            // CRC the client and OSD sections (everything before inc_crc)
+            // Stream the covered regions through a single crc-fast Digest.
+            // OSDMap incremental payloads can be tens of KB to MB during
+            // startup, so the PCLMULQDQ path matters here too even though
+            // this is not a per-op hot path.
+            let mut digest = crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi);
+            digest.update(&header_bytes);
             if crc_offset > 0 {
-                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[..crc_offset]);
+                digest.update(&outer_bytes[..crc_offset]);
             }
-
-            // CRC the tail (full_crc field after inc_crc)
             if crc_tail_offset < outer_bytes.len() {
-                actual_crc = crc32c::crc32c_append(actual_crc, &outer_bytes[crc_tail_offset..]);
+                digest.update(&outer_bytes[crc_tail_offset..]);
             }
-
-            // Invert the CRC to match Ceph's convention
-            actual_crc = !actual_crc;
+            // Invert the CRC to match Ceph's convention.
+            let actual_crc = !(digest.finalize() as u32);
 
             // Verify CRC matches
             if actual_crc != inc.inc_crc {
