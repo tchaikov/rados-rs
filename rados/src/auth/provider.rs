@@ -237,11 +237,10 @@ impl ServiceAuthProvider {
         let sess_key = session_key?;
         let mut buf = payload.clone();
         let encrypted_data = Bytes::decode(&mut buf, 0).ok()?;
-        let decrypted = sess_key.decrypt(&encrypted_data).ok()?;
-        let mut dec_buf = decrypted;
+        let mut decrypted = sess_key.decrypt(&encrypted_data).ok()?;
         let envelope = crate::auth::protocol::CephXEncryptedEnvelope::<
             crate::auth::protocol::CephXAuthorizeReply,
-        >::decode(&mut dec_buf, 0)
+        >::decode(&mut decrypted, 0)
         .ok()?;
 
         debug!(
