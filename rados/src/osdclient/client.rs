@@ -6,7 +6,7 @@ use crate::monclient::MOSDMap;
 use crate::msgr2::{MapReceiver, MapSender};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use tokio::sync::{RwLock, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
@@ -106,6 +106,17 @@ pub struct OSDClient {
     /// held in the pause-wait loop until `osdmap.epoch >= epoch_barrier`.
     /// Mirrors `Objecter::epoch_barrier` / `set_epoch_barrier()` in C++.
     epoch_barrier: AtomicU32,
+    /// Monotonic transaction ID source, shared across all sessions.
+    ///
+    /// Tids allocated from here are strictly monotonic for the lifetime of
+    /// this `OSDClient`, including across session replacements triggered by
+    /// reconnects.  The OSD runs a `debug_op_order` check per
+    /// `(client_id, object)` that is *not* reset on TCP reconnect, so a
+    /// session-local counter would abort the OSD with
+    /// `ceph_abort_msg("out of order op")` the first time a reconnect caused
+    /// the new session's tid to fall below the highest tid the OSD had
+    /// already seen for the same object.  Mirrors `Objecter::last_tid`.
+    next_tid: Arc<AtomicU64>,
 }
 
 /// Await an OSD operation result with a timeout, mapping all error layers to `OSDClientError`.
@@ -211,6 +222,7 @@ impl OSDClient {
                 self_weak: weak.clone(),
                 blocklisted: AtomicBool::new(false),
                 epoch_barrier: AtomicU32::new(0),
+                next_tid: Arc::new(AtomicU64::new(1)),
             }
         });
 
@@ -418,6 +430,7 @@ impl OSDClient {
             self.global_id,
             self.map_tx.clone(),
             self.self_weak.clone(),
+            Arc::clone(&self.next_tid),
         );
 
         // Connect to OSD BEFORE acquiring write lock - this is the expensive operation

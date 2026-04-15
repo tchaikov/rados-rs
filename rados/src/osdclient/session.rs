@@ -123,7 +123,19 @@ pub struct OSDSession {
     // Channel for sending messages - like Linux kernel's out_queue
     send_tx: mpsc::Sender<crate::msgr2::message::Message>,
     pending_ops: Arc<DashMap<u64, PendingOp>>,
-    next_tid: AtomicU64,
+    /// Transaction ID allocator.
+    ///
+    /// Shared with `OSDClient` (all sessions for the same client read from the
+    /// same atomic counter) so that tids are monotonic *across session
+    /// replacements*, not just within a single session.  If the counter were
+    /// per-session, a reconnect would restart at 1 and the OSD —
+    /// which keys `osd_debug_op_order` per `(client_id, object)` without
+    /// restting on TCP reconnect — would abort on the first write that reused
+    /// an already-seen object:
+    ///     `ceph_abort_msg("out of order op")`
+    /// See `PrimaryLogPG::do_op` in ~/dev/ceph/src/osd/PrimaryLogPG.cc:4355.
+    /// Mirrors `Objecter::last_tid` in ~/dev/ceph/src/osdc/Objecter.h.
+    next_tid: Arc<AtomicU64>,
     auth_provider: Option<Box<dyn crate::auth::AuthProvider>>,
     /// Global ID from monitor authentication (for AUTH_NONE authorizers)
     global_id: u64,
@@ -216,6 +228,7 @@ impl OSDSession {
         global_id: u64,
         osdmap_tx: MapSender<MOSDMap>,
         client: std::sync::Weak<crate::osdclient::client::OSDClient>,
+        next_tid: Arc<AtomicU64>,
     ) -> Self {
         // Placeholder channel; replaced by connect() with a real send_rx for the I/O task.
         let (send_tx, _) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
@@ -227,7 +240,7 @@ impl OSDSession {
             osd_id,
             send_tx,
             pending_ops: Arc::new(DashMap::new()),
-            next_tid: AtomicU64::new(1),
+            next_tid,
             auth_provider,
             global_id,
             backoff_tracker: Arc::new(tokio::sync::RwLock::new(BackoffTracker::new())),
@@ -251,25 +264,6 @@ impl OSDSession {
     /// Get the next transaction ID
     pub fn next_tid(&self) -> u64 {
         self.next_tid.fetch_add(1, Ordering::Relaxed)
-    }
-
-    /// Ensure the next tid allocated by `next_tid()` is strictly greater
-    /// than `floor`.  Used by `insert_migrated_op` to prevent a fresh submit
-    /// from colliding with a migrated tid carried over from a prior session.
-    fn bump_next_tid_past(&self, floor: u64) {
-        let target = floor.saturating_add(1);
-        let mut current = self.next_tid.load(Ordering::Relaxed);
-        while current < target {
-            match self.next_tid.compare_exchange_weak(
-                current,
-                target,
-                Ordering::Relaxed,
-                Ordering::Relaxed,
-            ) {
-                Ok(_) => return,
-                Err(actual) => current = actual,
-            }
-        }
     }
 
     /// Get current connection incarnation
@@ -1090,14 +1084,9 @@ impl OSDSession {
     ) -> Result<()> {
         let tid = pending_op.tid;
 
-        // Each session has its own next_tid counter starting at 1.  A migrated
-        // op carries its original tid from the previous session, which can
-        // collide with a fresh submit_op on this new session: `next_tid()`
-        // would return a value already occupied by a migrated PendingOp, and
-        // the fresh insert would overwrite it (dropping the migrated op's
-        // result_tx and hanging its caller until the 30s tracker deadline).
-        // Bump next_tid past the migrated tid so fresh submits never collide.
-        self.bump_next_tid_past(tid);
+        // next_tid is shared across all sessions for this OSDClient, so a
+        // migrated tid is guaranteed monotonic with respect to future fresh
+        // submits — no floor bumping needed.
 
         pending_op.osdmap_epoch = new_osdmap_epoch;
         pending_op.attempts += 1;
@@ -1184,6 +1173,7 @@ mod tests {
             0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
+            Arc::new(AtomicU64::new(1)),
         );
 
         assert_eq!(session.current_incarnation(), 0);
@@ -1198,6 +1188,7 @@ mod tests {
             0, // global_id
             osdmap_tx,
             std::sync::Weak::new(),
+            Arc::new(AtomicU64::new(1)),
         );
 
         // Initial incarnation should be 0
