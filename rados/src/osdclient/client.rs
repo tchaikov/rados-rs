@@ -537,8 +537,18 @@ impl OSDClient {
 
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
 
-        let spg = StripedPgId::from_pg(pg.pool, pg.seed);
-        debug!("Mapped {}/{} to PG {:?}, OSDs: {:?}", pool, oid, pg, osds);
+        // For EC pools the wire spg_t carries a per-PG shard index.  For
+        // replicated pools `pg_to_spg_shard` returns NO_SHARD (-1), so
+        // this is correct in both cases.  Optimized EC pools currently
+        // return an error from this call rather than mis-route silently.
+        let shard = osdmap
+            .pg_to_spg_shard(&pg)
+            .map_err(|e| OSDClientError::Crush(format!("EC shard lookup: {e}")))?;
+        let spg = StripedPgId::new(pg.pool, pg.seed, shard.0);
+        debug!(
+            "Mapped {}/{} to PG {:?}, OSDs: {:?}, shard: {}",
+            pool, oid, pg, osds, shard.0
+        );
 
         Ok((spg, osds))
     }

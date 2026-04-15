@@ -585,7 +585,8 @@ impl TryFrom<u8> for PoolType {
 #[derive(Debug, Clone, Default)]
 pub struct PgPool {
     // Basic pool configuration (always present)
-    pub pool_type: u8, // TYPE_REPLICATED=1, TYPE_ERASURE=3
+    /// `pg_pool_t::TYPE_REPLICATED` (1) or `pg_pool_t::TYPE_ERASURE` (3).
+    pub pool_type: u8,
     pub size: u8,
     pub crush_rule: u8,  // Fixed: should be u8, not i32
     pub object_hash: u8, // Fixed: should be u8, not u32
@@ -914,6 +915,36 @@ impl PgPool {
     const COMPAT_VERSION: u8 = 5;
     const VERSION_OCTOPUS: u8 = 29;
     const VERSION_OCTOPUS_STRETCH: u8 = 30;
+
+    /// `pg_pool_t::TYPE_REPLICATED`
+    pub const TYPE_REPLICATED: u8 = 1;
+    /// `pg_pool_t::TYPE_ERASURE`
+    pub const TYPE_ERASURE: u8 = 3;
+
+    /// Mirrors `pg_pool_t::FLAG_EC_OPTIMIZATIONS = 1<<19`.  When set, the
+    /// monitor reorders pg_temp into "primaryfirst" form and the client
+    /// has to reverse the transform to compute the right `spg_t` shard.
+    pub const FLAG_EC_OPTIMIZATIONS: u64 = 1 << 19;
+
+    pub fn is_replicated(&self) -> bool {
+        self.pool_type == Self::TYPE_REPLICATED
+    }
+
+    pub fn is_erasure(&self) -> bool {
+        self.pool_type == Self::TYPE_ERASURE
+    }
+
+    /// Mirrors `pg_pool_t::allows_ecoptimizations()` in C++.
+    pub fn allows_ecoptimizations(&self) -> bool {
+        self.flags & Self::FLAG_EC_OPTIMIZATIONS != 0
+    }
+
+    /// Mirrors `pg_pool_t::is_nonprimary_shard(shard)` — true if the
+    /// given shard is in the pool's `nonprimary_shards` set (only
+    /// non-empty for optimized EC pools).
+    pub fn is_nonprimary_shard(&self, shard: ShardId) -> bool {
+        !self.nonprimary_shards.is_empty() && self.nonprimary_shards.contains(shard)
+    }
 
     pub fn is_stretch_pool(&self) -> bool {
         // For now, assume no stretch pools (like the default case in Ceph)
@@ -2731,6 +2762,161 @@ impl OSDMap {
         Ok(osds)
     }
 
+    /// Compute the `spg_t` shard for a PG.
+    ///
+    /// Returns `ShardId::NO_SHARD` (-1) for replicated pools — there is
+    /// no per-shard concept and the wire encoding uses `-1`.
+    ///
+    /// For erasure-coded pools the shard is the position of the
+    /// acting primary in the un-swapped acting set, mirroring the EC
+    /// branch of C++ `Objecter::_calc_target`.  The OSD verifies the
+    /// shard against its own per-PG `shard_id` and rejects mismatches
+    /// as misdirected ops, so getting this right is a hard correctness
+    /// requirement for EC pool I/O.
+    ///
+    /// # Unsupported cases
+    ///
+    /// Optimized EC pools (`pool.allows_ecoptimizations() == true`) need
+    /// the `pgtemp_undo_primaryfirst` reverse transform when `pg_temp`
+    /// is present.  We do not yet implement that — the function returns
+    /// a `Protocol` error so the caller refuses I/O against the pool
+    /// instead of silently misrouting.
+    pub fn pg_to_spg_shard(&self, pg: &PgId) -> Result<ShardId, RadosError> {
+        let pool = self
+            .pools
+            .get(&pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+
+        if !pool.is_erasure() {
+            return Ok(ShardId::NO_SHARD);
+        }
+
+        if pool.allows_ecoptimizations() {
+            return Err(RadosError::Protocol(format!(
+                "EC pool {} has FLAG_EC_OPTIMIZATIONS set; \
+                 optimized-EC client support is not yet implemented",
+                pg.pool
+            )));
+        }
+
+        // Run CRUSH; the post-CRUSH transformations and primary lookup
+        // live in `ec_shard_from_raw` so the unit tests can drive them
+        // with synthetic raw acting sets.
+        let crush_map = self
+            .crush
+            .as_ref()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+        let raw = crate::crush::placement::pg_to_osds(
+            crush_map,
+            *pg,
+            pool.pgp_num,
+            pool.crush_rule as u32,
+            &self.osd_weight,
+            pool.size as usize,
+            hashpspool,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
+
+        self.ec_shard_from_raw(pg, raw)
+    }
+
+    /// Compute the EC `spg_t` shard from a hand-supplied raw CRUSH
+    /// output.  Caller must already know the pool exists and is
+    /// non-optimized erasure-coded.  Mirrors the post-CRUSH portion of
+    /// the EC branch of C++ `Objecter::_calc_target` — applies upmap,
+    /// builds the EC up set, picks the acting primary, and returns the
+    /// primary's position in the acting set.
+    fn ec_shard_from_raw(&self, pg: &PgId, mut raw: Vec<i32>) -> Result<ShardId, RadosError> {
+        // pg_upmap (whole-set replacement) and pg_upmap_items
+        // (per-OSD swap) — same OUT/duplicate guards as
+        // `apply_pg_overrides`.
+        if let Some(upmap_osds) = self.pg_upmap.get(pg)
+            && !upmap_osds
+                .iter()
+                .any(|&o| o != CRUSH_ITEM_NONE && self.is_out(o))
+        {
+            raw = upmap_osds.clone();
+        }
+        if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
+            for &(from_osd, to_osd) in upmap_items {
+                if raw.contains(&to_osd) {
+                    continue;
+                }
+                if to_osd != CRUSH_ITEM_NONE && self.is_out(to_osd) {
+                    continue;
+                }
+                if let Some(pos) = raw.iter().position(|&osd| osd == from_osd) {
+                    raw[pos] = to_osd;
+                }
+            }
+        }
+
+        // Build the EC up set: replace downs/dne with CRUSH_ITEM_NONE
+        // (matches the EC branch of C++ `_raw_to_up_osds` — positions
+        // must be preserved).
+        let up: Vec<i32> = raw
+            .iter()
+            .map(|&osd| {
+                if osd == CRUSH_ITEM_NONE || self.is_down(osd) {
+                    CRUSH_ITEM_NONE
+                } else {
+                    osd
+                }
+            })
+            .collect();
+
+        // Acting set: pg_temp if present (and non-empty), otherwise up.
+        let acting: &[i32] = if let Some(temp) = self.pg_temp.get(pg) {
+            if temp.is_empty() {
+                &up
+            } else {
+                temp.as_slice()
+            }
+        } else {
+            &up
+        };
+
+        // Acting primary: primary_temp override if set, otherwise the
+        // first non-NONE entry of the acting set.
+        let acting_primary = match self.primary_temp.get(pg) {
+            Some(&p) if p >= 0 => p,
+            _ => acting
+                .iter()
+                .copied()
+                .find(|&o| o != CRUSH_ITEM_NONE)
+                .unwrap_or(-1),
+        };
+
+        if acting_primary < 0 {
+            return Err(RadosError::Protocol(format!(
+                "EC pool {} pg {}.{:x}: no acting primary",
+                pg.pool, pg.pool, pg.seed
+            )));
+        }
+
+        // Walk the acting set to find the primary's position.  For
+        // non-optimized EC pools this position IS the spg_t shard
+        // (`pgtemp_undo_primaryfirst` is the identity).
+        let pos = acting
+            .iter()
+            .position(|&o| o == acting_primary)
+            .ok_or_else(|| {
+                RadosError::Protocol(format!(
+                    "EC pool {} pg {}.{:x}: acting primary {} not in acting {:?}",
+                    pg.pool, pg.pool, pg.seed, acting_primary, acting
+                ))
+            })?;
+
+        if pos > i8::MAX as usize {
+            return Err(RadosError::Protocol(format!(
+                "EC pool {} pg {}.{:x}: shard position {} exceeds i8 range",
+                pg.pool, pg.pool, pg.seed, pos
+            )));
+        }
+        Ok(ShardId::new(pos as i8))
+    }
+
     /// Apply PG placement overrides from the OSDMap.
     ///
     /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
@@ -3378,6 +3564,94 @@ mod tests {
         assert_eq!(
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
+        );
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_simple_case() {
+        // 4+2 EC, all OSDs up, no overrides.  Acting matches raw, primary
+        // is acting[0] = osd 10, shard = 0.
+        let map = make_osdmap_with_states(vec![0; 20].into_iter().map(|_| 0x3).collect());
+        let pg = PgId::new(7, 1);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(shard, ShardId::new(0));
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_skips_down_primary() {
+        // Same 4+2, but OSD 10 is down. C++ EC `_raw_to_up_osds`
+        // replaces it with NONE, primary becomes acting[1]=11, shard=1.
+        let mut states: Vec<u32> = (0..20).map(|_| 0x3).collect();
+        states[10] = 0x1; // EXISTS but not UP
+        let map = make_osdmap_with_states(states);
+        let pg = PgId::new(7, 1);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(shard, ShardId::new(1), "down primary → shard rolls forward");
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_honours_primary_temp() {
+        // primary_temp pins primary to OSD 12, which is acting[2]. shard=2.
+        let states: Vec<u32> = (0..20).map(|_| 0x3).collect();
+        let mut map = make_osdmap_with_states(states);
+        let pg = PgId::new(7, 1);
+        map.primary_temp.insert(pg, 12);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(shard, ShardId::new(2));
+    }
+
+    #[test]
+    fn test_ec_shard_from_raw_honours_pg_temp() {
+        // pg_temp completely replaces the acting set. Primary is
+        // pg_temp[0], shard reflects pg_temp positions.
+        let states: Vec<u32> = (0..20).map(|_| 0x3).collect();
+        let mut map = make_osdmap_with_states(states);
+        let pg = PgId::new(7, 1);
+        map.pg_temp.insert(pg, vec![15, 14, 13, 12, 11, 10]);
+        let raw = vec![10, 11, 12, 13, 14, 15];
+        let shard = map.ec_shard_from_raw(&pg, raw).expect("ec_shard_from_raw");
+        assert_eq!(
+            shard,
+            ShardId::new(0),
+            "pg_temp[0] is the primary, shard = 0"
+        );
+    }
+
+    #[test]
+    fn test_pg_to_spg_shard_replicated_returns_no_shard() {
+        // Replicated pool: must short-circuit to NO_SHARD without
+        // touching CRUSH (which we have not set up in this test).
+        let states: Vec<u32> = vec![0x3, 0x3, 0x3];
+        let mut map = make_osdmap_with_states(states);
+        let pool = PgPool {
+            pool_type: PgPool::TYPE_REPLICATED,
+            ..Default::default()
+        };
+        map.pools.insert(7, pool);
+        let pg = PgId::new(7, 1);
+        let shard = map.pg_to_spg_shard(&pg).expect("pg_to_spg_shard");
+        assert_eq!(shard, ShardId::NO_SHARD);
+    }
+
+    #[test]
+    fn test_pg_to_spg_shard_optimized_ec_refuses() {
+        let mut map = make_osdmap_with_states(vec![0x3; 8]);
+        let pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            flags: PgPool::FLAG_EC_OPTIMIZATIONS,
+            ..Default::default()
+        };
+        map.pools.insert(7, pool);
+        let pg = PgId::new(7, 1);
+        let err = map
+            .pg_to_spg_shard(&pg)
+            .expect_err("optimized EC must be refused");
+        assert!(
+            matches!(err, RadosError::Protocol(ref m) if m.contains("FLAG_EC_OPTIMIZATIONS")),
+            "unexpected error: {err:?}"
         );
     }
 
