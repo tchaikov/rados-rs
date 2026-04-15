@@ -2770,14 +2770,10 @@ impl OSDMap {
     ///
     /// This is the method the I/O hot path should use.
     ///
-    /// # Known gaps vs C++ `Objecter::_calc_target`
-    ///
-    /// - **Cache tiering**: C++ redirects reads to `read_tier` and writes
-    ///   to `write_tier` when the base pool has them set (and
-    ///   `CEPH_OSD_FLAG_IGNORE_OVERLAY` is off).  We decode the fields
-    ///   but ignore them.  Cache tiering is deprecated upstream since
-    ///   Nautilus so this is low-severity, but clusters with legacy
-    ///   cache tiers will mis-route.
+    /// Cache tiering (`pg_pool_t::read_tier` / `write_tier`) is the one
+    /// `Objecter::_calc_target` behaviour we deliberately do not mirror.
+    /// The feature is deprecated upstream and we have no plan to
+    /// resurrect support for it.
     pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
         let cache_key = (pg.pool, pg.seed);
         {
