@@ -2131,6 +2131,14 @@ impl OSDMapIncremental {
         }
 
         // Apply pg_temp changes
+        if !self.new_pg_temp.is_empty() {
+            tracing::debug!(
+                target: "rados::osdclient::crush",
+                "incremental epoch={} applying {} pg_temp changes",
+                self.epoch.as_u32(),
+                self.new_pg_temp.len(),
+            );
+        }
         for (pgid, osds) in &self.new_pg_temp {
             if osds.is_empty() {
                 base.pg_temp.remove(pgid);
@@ -2139,12 +2147,99 @@ impl OSDMapIncremental {
             }
         }
 
-        // Apply primary_temp changes
+        // Apply primary_temp changes.  -1 means "remove the primary_temp
+        // override for this pg".
         for (pgid, osd) in &self.new_primary_temp {
             if *osd == -1 {
                 base.primary_temp.remove(pgid);
             } else {
                 base.primary_temp.insert(*pgid, *osd);
+            }
+        }
+
+        // Apply pg_upmap (full acting-set override) changes.
+        for pgid in &self.old_pg_upmap {
+            base.pg_upmap.remove(pgid);
+        }
+        for (pgid, osds) in &self.new_pg_upmap {
+            base.pg_upmap.insert(*pgid, osds.clone());
+        }
+
+        // Apply pg_upmap_items (per-osd swap) changes.
+        for pgid in &self.old_pg_upmap_items {
+            base.pg_upmap_items.remove(pgid);
+        }
+        for (pgid, items) in &self.new_pg_upmap_items {
+            base.pg_upmap_items.insert(*pgid, items.clone());
+        }
+
+        // Apply pg_upmap_primaries (primary override) changes.
+        for pgid in &self.old_pg_upmap_primary {
+            base.pg_upmap_primaries.remove(pgid);
+        }
+        for (pgid, primary) in &self.new_pg_upmap_primary {
+            base.pg_upmap_primaries.insert(*pgid, *primary);
+        }
+
+        // Apply primary_affinity changes.  C++ stores this as a parallel
+        // vector indexed by osd_id; we mirror that shape.  The default
+        // primary affinity is `CEPH_OSD_MAX_PRIMARY_AFFINITY` (0x10000),
+        // meaning "always primary if acting[0]".
+        const CEPH_OSD_DEFAULT_PRIMARY_AFFINITY: u32 = 0x10000;
+        for (osd, affinity) in &self.new_primary_affinity {
+            let idx = *osd as usize;
+            if idx >= base.osd_primary_affinity.len() {
+                base.osd_primary_affinity
+                    .resize(idx + 1, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            }
+            base.osd_primary_affinity[idx] = *affinity;
+        }
+
+        // Apply erasure-code profile changes.
+        for name in &self.old_erasure_code_profiles {
+            base.erasure_code_profiles.remove(name);
+        }
+        for (name, profile) in &self.new_erasure_code_profiles {
+            base.erasure_code_profiles
+                .insert(name.clone(), profile.clone());
+        }
+
+        // Apply snap tracking deltas.
+        for (pool, snaps) in &self.new_removed_snaps {
+            base.new_removed_snaps.insert(*pool, snaps.clone());
+        }
+        for (pool, snaps) in &self.new_purged_snaps {
+            base.new_purged_snaps.insert(*pool, snaps.clone());
+        }
+
+        // Apply CRUSH map update if the incremental carries one.  The
+        // mon inlines the full CRUSH map bytes whenever the topology,
+        // weights, or rules change; any such change invalidates our
+        // cached placement and we must re-parse.  Without this, a
+        // later `pg_to_acting_osds` call runs against the STALE crush
+        // map and can produce a different acting set than the OSD's
+        // — the exact symptom that surfaces as a "misdirected op"
+        // silent drop during autoscale-driven pool splits.
+        if !self.crush.is_empty() {
+            let mut crush_buf = self.crush.clone();
+            match CrushMap::decode(&mut crush_buf) {
+                Ok(crush_map) => {
+                    tracing::debug!(
+                        target: "rados::osdclient::crush",
+                        "incremental epoch={} applying new CRUSH map ({} bytes)",
+                        self.epoch.as_u32(),
+                        self.crush.len(),
+                    );
+                    base.crush = Some(crush_map);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rados::osdclient::crush",
+                        "incremental epoch={} failed to decode new CRUSH map: {:?}",
+                        self.epoch.as_u32(),
+                        e,
+                    );
+                }
             }
         }
 
@@ -2443,6 +2538,16 @@ impl OSDMap {
         .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
 
         self.apply_pg_overrides(pg, &mut osds);
+
+        tracing::trace!(
+            target: "rados::osdclient::crush",
+            "pg_to_acting_osds epoch={} pg={}.{:x} pg_num={} → {:?}",
+            self.epoch.as_u32(),
+            pg.pool,
+            pg.seed,
+            pool.pg_num,
+            osds,
+        );
 
         {
             let mut cache = self.lock_acting_cache()?;

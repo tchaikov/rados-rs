@@ -790,6 +790,16 @@ impl OSDClient {
             let (spg, osds) =
                 self.object_to_osds_in_map(&osdmap, msg.object.pool, &msg.object.oid)?;
             let primary_osd = osds[0];
+            tracing::trace!(
+                target: "rados::osdclient::routing",
+                "routing epoch={} pool={} oid={} spg={:?} osds={:?} hash=0x{:08x}",
+                osdmap.epoch.as_u32(),
+                msg.object.pool,
+                msg.object.oid,
+                spg,
+                osds,
+                msg.object.hash,
+            );
 
             // Get session
             let session = self.get_or_create_session(primary_osd).await?;
