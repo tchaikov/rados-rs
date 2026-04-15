@@ -266,6 +266,43 @@ pub fn object_to_pg(
     Ok(PgId::new(locator.pool_id, pg_seed))
 }
 
+/// Ceph's stable modulo — collapses `x` onto a smaller range when
+/// `pgp_num` is less than the next-higher power of 2.  Mirrors
+/// `ceph_stable_mod` in ~/dev/ceph/src/include/rados.h.
+///
+/// ```text
+///     static inline int ceph_stable_mod(int x, int b, int bmask) {
+///         if ((x & bmask) < b)
+///             return x & bmask;
+///         else
+///             return x & (bmask >> 1);
+///     }
+/// ```
+#[inline]
+pub fn ceph_stable_mod(x: u32, b: u32, bmask: u32) -> u32 {
+    let masked = x & bmask;
+    if masked < b { masked } else { x & (bmask >> 1) }
+}
+
+/// Compute the `pg_num_mask` (or `pgp_num_mask`) from a count.
+///
+/// Mirrors `pg_pool_t::calc_pg_masks` in
+/// ~/dev/ceph/src/osd/osd_types.cc:
+/// ```text
+///     pg_num_mask = (1 << cbits(pg_num-1)) - 1;
+/// ```
+/// Where `cbits(n)` is the number of bits needed to represent `n`
+/// (i.e., ceil(log2(n+1))).
+#[inline]
+pub fn pg_num_mask(count: u32) -> u32 {
+    if count <= 1 {
+        0
+    } else {
+        let bits = 32 - (count - 1).leading_zeros();
+        (1u32 << bits).wrapping_sub(1)
+    }
+}
+
 /// Map a PG to OSDs using CRUSH
 ///
 /// This is the main function that uses the CRUSH algorithm to determine
@@ -273,7 +310,11 @@ pub fn object_to_pg(
 ///
 /// # Arguments
 /// * `crush_map` - The CRUSH map
-/// * `pg` - Placement group ID
+/// * `pg` - Placement group ID (seed is the `ps` in pg_num-mask form)
+/// * `pgp_num` - Placement group number for placement (usually equals
+///   `pg_num`, but diverges during autoscaler-driven splits while the
+///   mon gradually raises `pgp_num_actual` toward `pgp_num_target`).
+///   Must be `> 0`.
 /// * `rule_id` - CRUSH rule to use (from pool configuration)
 /// * `osd_weights` - OSD weights (from OSDMap)
 /// * `result_max` - Maximum number of OSDs to return (typically pool size)
@@ -284,6 +325,7 @@ pub fn object_to_pg(
 pub fn pg_to_osds(
     crush_map: &CrushMap,
     pg: PgId,
+    pgp_num: u32,
     rule_id: u32,
     osd_weights: &[u32],
     result_max: usize,
@@ -291,13 +333,24 @@ pub fn pg_to_osds(
 ) -> Result<Vec<i32>> {
     let mut result = Vec::new();
 
-    // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps()
+    // Reference: ~/dev/ceph/src/osd/osd_types.cc pg_pool_t::raw_pg_to_pps().
+    //
+    // When pg_num and pgp_num diverge — the transient state during an
+    // autoscaler-driven split where pg_num has already bumped but the
+    // mon is still gradually raising pgp_num toward it — Ceph applies
+    // `ceph_stable_mod(ps, pgp_num, pgp_num_mask)` to the seed BEFORE
+    // feeding it into `crush_hash32_2`.  Skipping this step produces a
+    // different CRUSH input for any PG whose `ps >= pgp_num`, which
+    // surfaces later as a "misdirected op" silent drop on the OSD side.
+    let pgp_num_mask_val = pg_num_mask(pgp_num);
+    let pps_seed = ceph_stable_mod(pg.seed, pgp_num, pgp_num_mask_val);
+
     let x = if hashpspool {
         // Hash PG seed with pool ID to avoid PG overlap between pools
         use crate::crush::hash::crush_hash32_2;
-        crush_hash32_2(pg.seed, pg.pool as u32)
+        crush_hash32_2(pps_seed, pg.pool as u32)
     } else {
-        pg.seed
+        pps_seed
     };
 
     crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
@@ -327,13 +380,22 @@ pub fn object_to_osds(
     object_name: &str,
     locator: &ObjectLocator,
     pg_num: u32,
+    pgp_num: u32,
     rule_id: u32,
     osd_weights: &[u32],
     result_max: usize,
     hashpspool: bool,
 ) -> Result<(PgId, Vec<i32>)> {
     let pg = object_to_pg(object_name, locator, pg_num)?;
-    let osds = pg_to_osds(crush_map, pg, rule_id, osd_weights, result_max, hashpspool)?;
+    let osds = pg_to_osds(
+        crush_map,
+        pg,
+        pgp_num,
+        rule_id,
+        osd_weights,
+        result_max,
+        hashpspool,
+    )?;
     Ok((pg, osds))
 }
 
@@ -447,7 +509,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         let weights = vec![0x10000, 0x10000, 0x10000];
 
-        let result = pg_to_osds(&map, pg, 0, &weights, 2, true);
+        let result = pg_to_osds(&map, pg, 64, 0, &weights, 2, true);
         assert!(result.is_ok());
 
         let osds = result.unwrap();
@@ -513,7 +575,7 @@ mod tests {
         let locator = ObjectLocator::new(1);
         let weights = vec![0x10000, 0x10000];
 
-        let result = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1, true);
+        let result = object_to_osds(&map, "testobject", &locator, 100, 100, 0, &weights, 1, true);
         assert!(result.is_ok());
 
         let (pg, osds) = result.unwrap();
@@ -523,7 +585,7 @@ mod tests {
         assert!(osds[0] == 0 || osds[0] == 1);
 
         // Same object should always map to same PG and OSDs
-        let result2 = object_to_osds(&map, "testobject", &locator, 100, 0, &weights, 1, true);
+        let result2 = object_to_osds(&map, "testobject", &locator, 100, 100, 0, &weights, 1, true);
         let (pg2, osds2) = result2.unwrap();
         assert_eq!(pg, pg2);
         assert_eq!(osds, osds2);

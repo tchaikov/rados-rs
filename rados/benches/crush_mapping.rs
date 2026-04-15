@@ -71,6 +71,7 @@ fn bench_single_placement(c: &mut Criterion) {
                     let result = pg_to_osds(
                         black_box(&map),
                         black_box(pg),
+                        black_box(100u32),
                         black_box(0),
                         black_box(&weights),
                         black_box(replica_count),
@@ -104,6 +105,7 @@ fn bench_batch_placement(c: &mut Criterion) {
                         let result = pg_to_osds(
                             black_box(&map),
                             black_box(pg),
+                            black_box(100u32),
                             black_box(0),
                             black_box(&weights),
                             black_box(replica_count),

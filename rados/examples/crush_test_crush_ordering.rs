@@ -30,7 +30,8 @@ fn main() {
 
     // Use rule 0, size 3, with hashpspool enabled
     let result = pg_to_osds(
-        &crush_map, pg, 0, // rule_id
+        &crush_map, pg, 32, // pgp_num
+        0,  // rule_id
         &weights, 3,    // result_max (pool size)
         true, // hashpspool
     )

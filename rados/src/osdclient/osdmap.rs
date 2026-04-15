@@ -2530,6 +2530,7 @@ impl OSDMap {
         let mut osds = crate::crush::placement::pg_to_osds(
             crush_map,
             *pg,
+            pool.pgp_num,
             pool.crush_rule as u32,
             &self.osd_weight,
             pool.size as usize,
@@ -2537,15 +2538,28 @@ impl OSDMap {
         )
         .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
 
+        let raw_crush = osds.clone();
+        let upmap = self.pg_upmap.get(pg).cloned();
+        let upmap_primary = self.pg_upmap_primaries.get(pg).copied();
+        let pg_temp = self.pg_temp.get(pg).cloned();
+        let primary_temp = self.primary_temp.get(pg).copied();
+
         self.apply_pg_overrides(pg, &mut osds);
 
         tracing::trace!(
             target: "rados::osdclient::crush",
-            "pg_to_acting_osds epoch={} pg={}.{:x} pg_num={} → {:?}",
+            "CRUSH epoch={} pg={}.{:x} pg_num={} pgp_num={} raw_crush={:?} \
+             upmap={:?} upmap_primary={:?} pg_temp={:?} primary_temp={:?} → {:?}",
             self.epoch.as_u32(),
             pg.pool,
             pg.seed,
             pool.pg_num,
+            pool.pgp_num,
+            raw_crush,
+            upmap,
+            upmap_primary,
+            pg_temp,
+            primary_temp,
             osds,
         );
 
