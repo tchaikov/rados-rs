@@ -1261,7 +1261,6 @@ impl OSDClient {
     ) -> Result<(crate::osdclient::PgNlsResponse, i32)> {
         // Derive the target PG from the cursor hash — mirrors Objecter::pg_read(current_pg,…)
         let current_pg = Self::hash_to_pg(hobject_cursor.hash, pool_info.pg_num);
-        let spg = StripedPgId::from_pg(pool, current_pg);
         let pg = crate::crush::placement::PgId {
             pool,
             seed: current_pg,
@@ -1269,6 +1268,17 @@ impl OSDClient {
 
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
         let primary_osd = osds[0];
+
+        // For replicated pools `pg_to_spg_shard` returns NO_SHARD; for
+        // non-optimised EC it returns the primary's position; for
+        // optimised EC it runs `pgtemp_undo_primaryfirst`.  Sending a
+        // PGNLS scan with the wrong shard would land on a replica that
+        // rejects it as misdirected, so EC pool listings need this just
+        // as much as the I/O hot path.
+        let shard = osdmap
+            .pg_to_spg_shard(&pg)
+            .map_err(|e| OSDClientError::Crush(format!("EC shard lookup: {e}")))?;
+        let spg = StripedPgId::new(pool, current_pg, shard.0);
 
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
