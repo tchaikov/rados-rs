@@ -2672,9 +2672,12 @@ impl OSDMap {
     /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
     /// 1. pg_upmap — complete acting set replacement
     /// 2. pg_upmap_items — fine-grained OSD swaps
-    /// 3. pg_upmap_primaries — primary override within the up set
-    /// 4. pg_temp — if present, overrides the entire acting set
-    /// 5. primary_temp — overrides the primary (acting[0] in our flat-vec
+    /// 3. Filter down OSDs: if the primary (osds[0]) is down and no
+    ///    explicit override is present, swap in the first up OSD.
+    ///    Mirrors `_raw_to_up_osds` + `_pick_primary` in C++.
+    /// 4. pg_upmap_primaries — primary override within the up set
+    /// 5. pg_temp — if present, overrides the entire acting set
+    /// 6. primary_temp — overrides the primary (acting[0] in our flat-vec
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
@@ -2688,6 +2691,22 @@ impl OSDMap {
                     osds[pos] = to_osd;
                 }
             }
+        }
+
+        // Promote the first up OSD to the primary slot.  Without this,
+        // CRUSH can hand us a down OSD as primary during the window
+        // between `ceph osd down` and the mon installing a pg_temp
+        // override, and every op would hit the dead socket until the
+        // next OSDMap arrived.  Explicit overrides (pg_upmap_primaries,
+        // pg_temp, primary_temp) below still take precedence — they're
+        // admin-trusted even if the target is down.
+        if osds
+            .first()
+            .map(|&o| o >= 0 && self.is_down(o))
+            .unwrap_or(false)
+            && let Some(up_pos) = osds.iter().position(|&o| o >= 0 && self.is_up(o))
+        {
+            osds.swap(0, up_pos);
         }
 
         if let Some(&primary_osd) = self.pg_upmap_primaries.get(pg)
@@ -3211,6 +3230,46 @@ mod tests {
         assert!(
             matches!(err, RadosError::Codec(ref ce) if matches!(ce, crate::CodecError::VersionTooOld { type_name: "OSDMapIncremental", .. })),
             "unexpected error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_swaps_down_primary() {
+        // OSD 0 DOWN, OSD 1 UP, OSD 2 UP. CRUSH gives us [0, 1, 2].
+        // Expected: primary gets swapped to OSD 1, no explicit overrides
+        // interfere.
+        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
+        let pg = PgId::new(1, 42);
+        let mut osds = vec![0, 1, 2];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(
+            osds[0], 1,
+            "down primary should have been replaced with first up OSD"
+        );
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_leaves_up_primary() {
+        // All OSDs up. CRUSH gives [0, 1, 2]. Primary should stay at 0.
+        let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3]);
+        let pg = PgId::new(1, 42);
+        let mut osds = vec![0, 1, 2];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(osds, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_respects_primary_temp_over_down_filter() {
+        // OSD 0 DOWN, OSD 1 UP. primary_temp overrides to OSD 0 anyway.
+        // Admin override takes precedence over the down filter.
+        let mut map = make_osdmap_with_states(vec![0x1, 0x3]);
+        let pg = PgId::new(1, 42);
+        map.primary_temp.insert(pg, 0);
+        let mut osds = vec![0, 1];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(
+            osds[0], 0,
+            "primary_temp should override the down-filter promotion"
         );
     }
 
