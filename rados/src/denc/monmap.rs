@@ -175,27 +175,15 @@ impl VersionedEncode for MonInfo {
         features: u64,
         version: u8,
     ) -> Result<(), RadosError> {
+        // We always encode at v6 (see `encoding_version`); older layouts are
+        // dead on the wire for Quincy+ peers.
+        debug_assert_eq!(version, 6);
         Denc::encode(&self.name, buf, features)?;
         Denc::encode(&self.public_addrs, buf, features)?;
-
-        // v2+: priority
-        if version >= 2 {
-            Denc::encode(&self.priority, buf, features)?;
-        }
-
-        // v4+: weight
-        if version >= 4 {
-            Denc::encode(&self.weight, buf, features)?;
-        }
-        // v5+: crush_loc
-        if version >= 5 {
-            Denc::encode(&self.crush_loc, buf, features)?;
-        }
-        // v6+: time_added
-        if version >= 6 {
-            Denc::encode(&self.time_added, buf, features)?;
-        }
-
+        Denc::encode(&self.priority, buf, features)?;
+        Denc::encode(&self.weight, buf, features)?;
+        Denc::encode(&self.crush_loc, buf, features)?;
+        Denc::encode(&self.time_added, buf, features)?;
         Ok(())
     }
 
@@ -230,23 +218,15 @@ impl VersionedEncode for MonInfo {
     }
 
     fn encoded_size_content(&self, features: u64, version: u8) -> Option<usize> {
-        let mut size =
-            self.name.encoded_size(features)? + self.public_addrs.encoded_size(features)?;
-
-        if version >= 2 {
-            size += 2; // priority (u16)
-        }
-        if version >= 4 {
-            size += 2; // weight (u16)
-        }
-        if version >= 5 {
-            size += self.crush_loc.encoded_size(features)?;
-        }
-        if version >= 6 {
-            size += self.time_added.encoded_size(features)?;
-        }
-
-        Some(size)
+        debug_assert_eq!(version, 6);
+        Some(
+            self.name.encoded_size(features)?
+                + self.public_addrs.encoded_size(features)?
+                + 2 // priority (u16)
+                + 2 // weight (u16)
+                + self.crush_loc.encoded_size(features)?
+                + self.time_added.encoded_size(features)?,
+        )
     }
 }
 
