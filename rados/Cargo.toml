@@ -7,6 +7,16 @@ description = "Native Rust RADOS client library and tools for Ceph"
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+build = "build.rs"
+
+[features]
+default = []
+# Opt-in gate for the live-cluster A/B benchmarks against librados.
+# Regular users never need this — enabling it makes `build.rs` locate
+# and link against `librados.so`, and unlocks the `ab_*` bench targets
+# and the `bench_resources` example. Off by default so `cargo build`,
+# `cargo test`, and `cargo clippy` stay hermetic for downstream users.
+bench-librados = []
 
 [[bin]]
 name = "dencoder"
@@ -39,6 +49,24 @@ harness = false
 [[bench]]
 name = "placement"
 harness = false
+
+# A/B latency benchmark against librados. Requires `bench-librados` feature
+# and a live Ceph cluster (CEPH_CONF must point to a ceph.conf).
+[[bench]]
+name = "ab_single_op"
+harness = false
+required-features = ["bench-librados"]
+
+# A/B throughput benchmark against librados. Same requirements.
+[[bench]]
+name = "ab_concurrent"
+harness = false
+required-features = ["bench-librados"]
+
+# CPU + peak-RSS harness. One library per process for clean attribution.
+[[example]]
+name = "bench_resources"
+required-features = ["bench-librados"]
 
 [dependencies]
 bytes = { workspace = true }
@@ -80,9 +108,9 @@ futures = { workspace = true }
 clap = { workspace = true }
 
 [dev-dependencies]
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tokio-test = "0.4"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tempfile = "3"
 rand = { workspace = true }
 serde_json = { workspace = true }
