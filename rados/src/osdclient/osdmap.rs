@@ -8,6 +8,7 @@
 
 use super::types::PoolFlags;
 use crate::crush::CrushMap;
+use crate::crush::mapper::CRUSH_ITEM_NONE;
 use crate::denc::{
     Denc, EntityAddr, EntityAddrvec, FixedSize, RadosError, VersionedEncode,
     mark_feature_dependent_encoding, mark_simple_encoding, mark_versioned_encoding,
@@ -2703,12 +2704,28 @@ impl OSDMap {
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
-        if let Some(upmap_osds) = self.pg_upmap.get(pg) {
+        // pg_upmap (complete acting-set replacement).  Reject the upmap
+        // if any target OSD is marked OUT — C++ `_apply_upmap` lines
+        // 2815-2821 falls back to the raw CRUSH result in that case.
+        if let Some(upmap_osds) = self.pg_upmap.get(pg)
+            && !upmap_osds
+                .iter()
+                .any(|&o| o != CRUSH_ITEM_NONE && self.is_out(o))
+        {
             *osds = upmap_osds.clone();
         }
 
+        // pg_upmap_items (per-osd swap).  C++ `_apply_upmap` lines
+        // 2830-2852: skip the swap if `to` is already in the set (would
+        // create a duplicate) or if `to` is marked OUT.
         if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
             for &(from_osd, to_osd) in upmap_items {
+                if osds.contains(&to_osd) {
+                    continue;
+                }
+                if to_osd != CRUSH_ITEM_NONE && self.is_out(to_osd) {
+                    continue;
+                }
                 if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
                     osds[pos] = to_osd;
                 }
@@ -2731,9 +2748,17 @@ impl OSDMap {
             osds.swap(0, up_pos);
         }
 
+        // pg_upmap_primaries (primary override).  C++ `_apply_upmap`
+        // lines 2854-2873: skip if new primary is CRUSH_ITEM_NONE or
+        // marked OUT; search starting from index 1 so an already-at-0
+        // primary is a no-op; only swap if we found it.
         if let Some(&primary_osd) = self.pg_upmap_primaries.get(pg)
-            && let Some(pos) = osds.iter().position(|&osd| osd == primary_osd)
+            && primary_osd != CRUSH_ITEM_NONE
+            && !self.is_out(primary_osd)
+            && osds.len() > 1
+            && let Some(rel_pos) = osds[1..].iter().position(|&osd| osd == primary_osd)
         {
+            let pos = rel_pos + 1;
             osds.swap(0, pos);
         }
 
@@ -2791,6 +2816,23 @@ impl OSDMap {
     /// Reference: Ceph `OSDMap::is_down(int osd)` in `src/osd/OSDMap.h`
     pub fn is_down(&self, osd_id: i32) -> bool {
         !self.is_up(osd_id)
+    }
+
+    /// True if an OSD is marked OUT (weight == 0).
+    ///
+    /// Out-of-range or negative IDs are treated as "out" so callers can use
+    /// this as a "not a valid routing target" check without bounds-checking
+    /// separately.  Mirrors the `osd_weight[osd] == 0` checks in C++
+    /// `OSDMap::_apply_upmap` which reject upmap rules targeting OUT OSDs.
+    pub fn is_out(&self, osd_id: i32) -> bool {
+        if osd_id < 0 {
+            return true;
+        }
+        let idx = osd_id as usize;
+        if idx >= self.osd_weight.len() {
+            return true;
+        }
+        self.osd_weight[idx] == 0
     }
 
     // OSDMap-level flag constants (from include/rados.h)
@@ -3292,6 +3334,71 @@ mod tests {
         assert_eq!(
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
+        );
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_rejects_pg_upmap_with_out_target() {
+        // CRUSH gives [0, 1, 2]. Admin upmap targets [3, 4, 5] but OSD 4
+        // is OUT (weight 0). C++ rejects the entire upmap and falls back
+        // to the raw CRUSH result.
+        let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3, 0x3, 0x3]);
+        map.osd_weight = vec![0x10000, 0x10000, 0x10000, 0x10000, 0, 0x10000];
+        let pg = PgId::new(1, 42);
+        map.pg_upmap.insert(pg, vec![3, 4, 5]);
+        let mut osds = vec![0, 1, 2];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(
+            osds,
+            vec![0, 1, 2],
+            "pg_upmap with OUT target should be rejected"
+        );
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_pg_upmap_items_skips_duplicate() {
+        // CRUSH gives [1, 2, 3]. upmap_items wants to swap 2 → 3 but 3
+        // is already in the set; would create a duplicate. Skip the swap.
+        let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3]);
+        let pg = PgId::new(1, 42);
+        let mut map = map;
+        map.osd_weight = vec![0x10000; 4];
+        map.pg_upmap_items.insert(pg, vec![(2, 3)]);
+        let mut osds = vec![1, 2, 3];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(
+            osds,
+            vec![1, 2, 3],
+            "duplicate-creating swap should be skipped"
+        );
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_pg_upmap_items_skips_out_target() {
+        // CRUSH gives [1, 2, 3]. upmap_items wants 2 → 4 but 4 is OUT.
+        // Skip the swap.
+        let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3, 0x3]);
+        map.osd_weight = vec![0x10000, 0x10000, 0x10000, 0x10000, 0];
+        let pg = PgId::new(1, 42);
+        map.pg_upmap_items.insert(pg, vec![(2, 4)]);
+        let mut osds = vec![1, 2, 3];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(osds, vec![1, 2, 3], "OUT-target swap should be skipped");
+    }
+
+    #[test]
+    fn test_apply_pg_overrides_pg_upmap_primaries_rejects_out_target() {
+        // CRUSH gives [1, 2, 3]. Admin sets primary_upmap to OSD 2, but
+        // OSD 2 is OUT. C++ skips the override entirely.
+        let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3]);
+        map.osd_weight = vec![0x10000, 0x10000, 0, 0x10000];
+        let pg = PgId::new(1, 42);
+        map.pg_upmap_primaries.insert(pg, 2);
+        let mut osds = vec![1, 2, 3];
+        map.apply_pg_overrides(&pg, &mut osds);
+        assert_eq!(
+            osds[0], 1,
+            "OUT primary override should not promote OSD 2 to primary"
         );
     }
 
