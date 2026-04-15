@@ -130,6 +130,22 @@ async fn await_op_result(
         .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))?
 }
 
+/// Return the time left until `deadline`, or `Err(Timeout(effective))` if the
+/// deadline has already passed. Used by `execute_op`'s retry loop so each
+/// pause-wait / reply-await branch can budget against the absolute deadline
+/// without duplicating the "elapsed → Timeout" boilerplate.
+fn deadline_remaining(
+    deadline: std::time::Instant,
+    effective: std::time::Duration,
+) -> Result<std::time::Duration> {
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    if remaining.is_zero() {
+        Err(OSDClientError::Timeout(effective))
+    } else {
+        Ok(remaining)
+    }
+}
+
 impl OSDClient {
     /// Create a new OSD client
     pub async fn new(
@@ -797,10 +813,7 @@ impl OSDClient {
             let paused =
                 behind_barrier || (is_read && pauserd) || (is_write && (pausewr || pool_full));
             if paused {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(OSDClientError::Timeout(effective_timeout));
-                }
+                let remaining = deadline_remaining(deadline, effective_timeout)?;
                 info!(
                     "Op on pool {} is paused (barrier={}, behind_barrier={}, pauserd={}, \
                      pausewr={}, pool_full={}); waiting for OSDMap update",
@@ -836,10 +849,9 @@ impl OSDClient {
             // may have advanced.  If so our routing is stale — retry before
             // allocating a TID so the continue costs nothing.
             if self.current_epoch_u32() != osdmap.epoch.as_u32() {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(OSDClientError::Timeout(effective_timeout));
-                }
+                // Bail out early if we've run out of time; we only need the
+                // pass/fail result here (the fresh map is fetched below).
+                deadline_remaining(deadline, effective_timeout)?;
                 osdmap = self.get_osdmap().await?;
                 osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
                 continue;
@@ -914,10 +926,7 @@ impl OSDClient {
             };
 
             // Wait for result using the remaining time towards the deadline.
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Err(OSDClientError::Timeout(effective_timeout));
-            }
+            let remaining = deadline_remaining(deadline, effective_timeout)?;
             let result = match await_op_result(result_rx, remaining).await {
                 Ok(r) => r,
                 Err(OSDClientError::Connection(msg_str)) => {
@@ -953,10 +962,7 @@ impl OSDClient {
             //
             // This mirrors Objecter::handle_osd_op_reply()'s ENXIO path in C++.
             if result.result == crate::osdclient::error::ENXIO {
-                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-                if remaining.is_zero() {
-                    return Err(OSDClientError::Timeout(effective_timeout));
-                }
+                let remaining = deadline_remaining(deadline, effective_timeout)?;
                 warn!(
                     "Op got ENXIO from OSD {} (misdirected op — stale acting-set mapping); \
                      fetching newer OSDMap and retrying",
