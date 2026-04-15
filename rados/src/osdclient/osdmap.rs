@@ -2426,13 +2426,16 @@ impl OSDMapIncremental {
                 .insert(name.clone(), profile.clone());
         }
 
-        // Apply snap tracking deltas.
-        for (pool, snaps) in &self.new_removed_snaps {
-            base.new_removed_snaps.insert(*pool, snaps.clone());
-        }
-        for (pool, snaps) in &self.new_purged_snaps {
-            base.new_purged_snaps.insert(*pool, snaps.clone());
-        }
+        // Snap tracking: C++ apply_incremental REPLACES `new_removed_snaps`
+        // wholesale (it is a per-epoch delta, not an accumulator), then
+        // unions deltas into the cumulative `removed_snaps_queue` and
+        // subtracts purged intervals from that queue.  The client uses
+        // `new_removed_snaps` (the per-epoch delta) for snap-context
+        // pruning; the queue is for OSD bookkeeping.  Match those
+        // semantics exactly so callers reading `new_removed_snaps` see
+        // only the latest epoch's removals.
+        base.new_removed_snaps = self.new_removed_snaps.clone();
+        base.new_purged_snaps = self.new_purged_snaps.clone();
 
         // Apply CRUSH map update if the incremental carries one.  The
         // mon inlines the full CRUSH map bytes whenever the topology,
@@ -4001,6 +4004,53 @@ mod tests {
         // of the primaryfirst view.  pgtemp_undo_primaryfirst(0) is
         // the early-return short circuit, so shard = 0.
         assert_eq!(shard, ShardId::new(0));
+    }
+
+    #[test]
+    fn test_apply_to_replaces_new_removed_snaps_wholesale() {
+        // First apply lays down a removal for pool 7 covering snap 100..105.
+        // Second apply lays down a removal for pool 7 covering snap 200.
+        // After the second apply, base.new_removed_snaps for pool 7 must
+        // reflect ONLY the second epoch's deltas — matching C++ which
+        // assigns wholesale rather than merging.
+        let mut base = OSDMap::new();
+
+        let mut inc1 = OSDMapIncremental::new(Epoch::new(1));
+        let mut snaps1 = SnapIntervalSet::default();
+        snaps1.intervals.push(SnapInterval { start: 100, len: 5 });
+        inc1.new_removed_snaps.insert(7, snaps1);
+        inc1.apply_to(&mut base).expect("apply 1");
+
+        let mut inc2 = OSDMapIncremental::new(Epoch::new(2));
+        let mut snaps2 = SnapIntervalSet::default();
+        snaps2.intervals.push(SnapInterval { start: 200, len: 1 });
+        inc2.new_removed_snaps.insert(7, snaps2);
+        inc2.apply_to(&mut base).expect("apply 2");
+
+        let pool_snaps = base.new_removed_snaps.get(&7).expect("snaps for pool 7");
+        assert_eq!(
+            pool_snaps.intervals.len(),
+            1,
+            "wholesale replace should leave only the second epoch's interval"
+        );
+        assert_eq!(pool_snaps.intervals[0].start, 200);
+    }
+
+    #[test]
+    fn test_prune_snap_context_drops_removed_ids() {
+        // Verify the pruning math: an op carrying snap context [99, 100,
+        // 101, 200] against a pool that has removed [100..104] should
+        // come back with [99, 200].
+        let mut base = OSDMap::new();
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        let mut removed = SnapIntervalSet::default();
+        removed.intervals.push(SnapInterval { start: 100, len: 4 });
+        inc.new_removed_snaps.insert(7, removed);
+        inc.apply_to(&mut base).expect("apply");
+
+        let mut snaps = vec![99u64, 100, 101, 103, 200];
+        base.prune_snap_context(7, &mut snaps);
+        assert_eq!(snaps, vec![99, 200]);
     }
 
     #[test]

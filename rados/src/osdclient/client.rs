@@ -738,6 +738,11 @@ impl OSDClient {
         // Initialise snap context from pool (Objecter::_calc_target snapc setup).
         // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
         (msg.snap_seq, msg.snaps) = osdmap.pool_snap_context(msg.object.pool);
+        // Mirror C++ Objecter `_op_submit_with_budget` calling
+        // `_prune_snapc` right after building the snapc: catches the
+        // narrow window where a snap was just removed by the latest
+        // OSDMap delta but is still listed in `pool.snaps`.
+        osdmap.prune_snap_context(msg.object.pool, &mut msg.snaps);
 
         // Pre-compute flag-derived booleans that are constant across iterations.
         use crate::osdclient::types::OsdOpFlags;
@@ -837,6 +842,7 @@ impl OSDClient {
                     return Err(OSDClientError::Timeout(effective_timeout));
                 }
                 osdmap = self.get_osdmap().await?;
+                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
                 continue;
             }
 
@@ -851,6 +857,10 @@ impl OSDClient {
             let (final_spg, final_epoch) = {
                 let live = self.get_osdmap().await?;
                 if live.epoch != osdmap.epoch {
+                    // OSDMap moved between the routing decision above
+                    // and now — re-prune the snapc against any new
+                    // removals before we encode the wire op.
+                    live.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
                     let (new_spg, new_osds) =
                         self.object_to_osds_in_map(&live, msg.object.pool, &msg.object.oid)?;
                     if new_osds.first().copied() != Some(primary_osd) {
