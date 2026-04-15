@@ -640,7 +640,6 @@ impl OSDClient {
     ///
     /// let result = client.execute_built_op(pool_id, "my-object", op).await?;
     /// ```
-    /// Execute a pre-built operation with a plain pool/oid address.
     pub async fn execute_built_op(
         &self,
         pool: u64,
