@@ -2054,6 +2054,78 @@ impl OSDMapIncremental {
 
     /// Apply this incremental update to an OSDMap
     pub fn apply_to(&self, base: &mut OSDMap) -> Result<(), RadosError> {
+        // Exhaustive field manifest.  Every field of `OSDMapIncremental`
+        // must be named here, either because `apply_to` below writes it
+        // into `base` or because it is deliberately not applied.  Adding
+        // a new field to the struct will fail to compile until it is
+        // classified here — the compile-time checklist that would have
+        // caught the silently-dropped blocklist deltas.
+        let Self {
+            // -------- Applied below --------
+            epoch: _,
+            modified: _,
+            new_pool_max: _,
+            new_flags: _,
+            crush: _,
+            new_max_osd: _,
+            new_pools: _,
+            new_pool_names: _,
+            old_pools: _,
+            new_up_client: _,
+            new_state: _,
+            new_weight: _,
+            new_pg_temp: _,
+            new_primary_temp: _,
+            new_primary_affinity: _,
+            new_erasure_code_profiles: _,
+            old_erasure_code_profiles: _,
+            new_pg_upmap: _,
+            old_pg_upmap: _,
+            new_pg_upmap_items: _,
+            old_pg_upmap_items: _,
+            new_removed_snaps: _,
+            new_purged_snaps: _,
+            new_last_up_change: _,
+            new_last_in_change: _,
+            new_pg_upmap_primary: _,
+            old_pg_upmap_primary: _,
+            new_blocklist: _,
+            old_blocklist: _,
+            new_range_blocklist: _,
+            old_range_blocklist: _,
+            new_nearfull_ratio: _,
+            new_full_ratio: _,
+            new_backfillfull_ratio: _,
+
+            // -------- Intentionally not applied --------
+            encode_features: _,               // wire-decode metadata
+            fsid: _,                          // invariant within a session
+            fullmap: _,                       // TODO: handle full-map replacement
+            new_hb_back_up: _,                // server-side heartbeat addrs
+            new_up_thru: _,                   // server-side OSD epoch history
+            new_last_clean_interval: _,       // server-side OSD history
+            new_lost: _,                      // admin OSD lost flag
+            new_up_cluster: _,                // cluster-facing addrs (OSD-to-OSD)
+            cluster_snapshot: _,              // cephfs snapshot name
+            new_uuid: _,                      // per-OSD fsid (admin repair)
+            new_xinfo: _,                     // extended OSD info (server-side)
+            new_hb_front_up: _,               // server-side heartbeat addrs
+            new_require_min_compat_client: _, // mon-enforced feature gate
+            new_require_osd_release: _,       // mon-enforced feature gate
+            new_crush_node_flags: _,          // carried in the CRUSH map bytes
+            new_device_class_flags: _,        // carried in the CRUSH map bytes
+            change_stretch_mode: _,           // stretch mode (rare deployment)
+            new_stretch_bucket_count: _,
+            new_degraded_stretch_mode: _,
+            new_recovering_stretch_mode: _,
+            new_stretch_mode_bucket: _,
+            stretch_mode_enabled: _,
+            mutate_allow_crimson: _, // crimson experimental
+            have_crc: _,             // decode-time CRC flag
+            full_crc: _,             // CRC of the carried full map
+            inc_crc: _,              // CRC of the incremental
+        } = self;
+
         // Invalidate placement caches on any OSDMap update.
         // Clear acting_cache first: a thread that misses it and falls through
         // to CRUSH must also miss crush_cache, forcing a full recompute from
