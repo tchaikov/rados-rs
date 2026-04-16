@@ -168,7 +168,7 @@ impl Denc for CryptoKey {
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(2 + 4 + 4 + 2 + self.secret.len())
+        Some(crate::auth::protocol::CRYPTO_KEY_HEADER_SIZE + self.secret.len())
     }
 }
 
