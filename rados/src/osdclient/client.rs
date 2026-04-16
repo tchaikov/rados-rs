@@ -1599,10 +1599,7 @@ impl OSDClient {
         debug!("Creating pool: {}", pool_name);
 
         // Get current OSDMap epoch
-        let version = {
-            let osdmap = self.osdmap_rx.borrow().clone();
-            osdmap.map(|map| map.epoch.as_u32() as u64).unwrap_or(0)
-        };
+        let version = self.current_epoch_u32() as u64;
 
         // Create MPoolOp message
         let msg = crate::monclient::MPoolOp::create_pool(
