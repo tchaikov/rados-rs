@@ -265,12 +265,12 @@ async fn resources(library: Library, size: usize, iters: usize) -> Result<()> {
     println!("workload     : {iters} iters × (write_full + read) @ {size} B");
     println!("ops          : {ops}");
     println!("bytes        : {} MiB", bytes_transferred / (1024 * 1024));
-    println!("wall clock   : {:?}", wall);
+    println!("wall clock   : {wall:?}");
     println!("user cpu     : {:?}", delta.user_cpu);
     println!("sys  cpu     : {:?}", delta.sys_cpu);
-    println!("total cpu    : {:?}", cpu_total);
-    println!("cpu / op     : {:.1} µs", cpu_per_op_us);
-    println!("cpu util     : {:.1}% of wall", cpu_util_pct);
+    println!("total cpu    : {cpu_total:?}");
+    println!("cpu / op     : {cpu_per_op_us:.1} µs");
+    println!("cpu util     : {cpu_util_pct:.1}% of wall");
     println!(
         "peak rss Δ   : {} KiB  ({:.1} MiB)",
         delta.peak_rss_delta / 1024,
