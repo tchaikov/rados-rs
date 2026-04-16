@@ -21,7 +21,7 @@ const OSD_STAT_INTERFACES_SIZE: usize = OSD_STAT_INTERFACES_NUM_FIELDS * std::me
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, crate::Denc)]
 #[denc(crate = "crate")]
-pub struct PgCount {
+pub(crate) struct PgCount {
     /// Number of PGs for which this OSD is in the acting set
     pub acting: i32,
     /// Number of PGs for which this OSD is in the up set but not acting
@@ -507,7 +507,7 @@ impl serde::Serialize for PoolStat {
 #[derive(Debug, Clone, PartialEq, Eq, Default, crate::VersionedDenc)]
 #[denc(crate = "crate", version = 1, compat = 1)]
 #[allow(dead_code)]
-pub struct Pow2Hist {
+pub(crate) struct Pow2Hist {
     pub values: Vec<i32>,
 }
 
@@ -593,7 +593,7 @@ crate::denc::impl_denc_for_versioned!(ObjectstorePerfStat);
 /// C++ definition: osd_stat_t::Interfaces in osd/osd_types.h
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
-pub struct OsdStatInterfaces {
+pub(crate) struct OsdStatInterfaces {
     pub last_update: u32, // in seconds
     pub back_pingtime: [u32; 3],
     pub back_min: [u32; 3],
@@ -656,7 +656,7 @@ impl FixedSize for OsdStatInterfaces {
 /// Version 14, feature-dependent
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
-pub struct OsdStat {
+pub(crate) struct OsdStat {
     pub statfs: StoreStatfs,
     pub hb_peers: Vec<i32>,
     pub snap_trim_queue_len: i32,
@@ -1279,7 +1279,7 @@ use crate::osdclient::osdmap::ShardId;
 /// Identifies a specific shard of a PG on a specific OSD
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[allow(dead_code)]
-pub struct PgShard {
+pub(crate) struct PgShard {
     pub osd: i32,
     pub shard: ShardId,
 }
@@ -1353,7 +1353,7 @@ impl Denc for PgShard {
 /// Represents a set of non-overlapping intervals
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 #[allow(dead_code)]
-pub struct IntervalSet<T>
+pub(crate) struct IntervalSet<T>
 where
     T: Ord,
 {
@@ -1388,7 +1388,7 @@ where
 /// `PgStat::encode_content` / `decode_content`.
 #[derive(Debug, Clone, PartialEq, Default)]
 #[allow(dead_code)]
-pub struct PgScrubbingStatus {
+pub(crate) struct PgScrubbingStatus {
     pub scheduled_at: UTime,
     pub duration_seconds: i32,
     pub sched_status: u16,
@@ -1406,7 +1406,7 @@ pub struct PgScrubbingStatus {
 /// Version 30, compat 22
 #[derive(Debug, Clone, PartialEq, Default)]
 #[allow(dead_code)]
-pub struct PgStat {
+pub(crate) struct PgStat {
     pub version: EVersion,
     pub reported_seq: Version,
     pub reported_epoch: Epoch,
@@ -1737,7 +1737,7 @@ crate::denc::impl_denc_for_versioned!(PgStat);
 /// Version 5, compat 1
 #[derive(Debug, Clone, PartialEq, Default)]
 #[allow(dead_code)]
-pub struct PgMapDigest {
+pub(crate) struct PgMapDigest {
     pub num_pg: i64,
     pub num_pg_active: i64,
     pub num_pg_unknown: i64,
@@ -1886,7 +1886,7 @@ crate::denc::impl_denc_for_versioned!(PgMapDigest);
 #[derive(Debug, Clone, PartialEq, Default, crate::VersionedDenc)]
 #[denc(crate = "crate", version = 8, compat = 8, feature_dependent)]
 #[allow(dead_code)]
-pub struct PgMap {
+pub(crate) struct PgMap {
     pub version: Version,
     pub pg_stat: BTreeMap<PgId, PgStat>,
     pub osd_stat: BTreeMap<i32, OsdStat>,
