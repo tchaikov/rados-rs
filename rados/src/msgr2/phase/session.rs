@@ -382,9 +382,7 @@ impl SessionServer {
             server_addr,
         }
     }
-}
 
-impl SessionServer {
     fn handle_client_ident(self, frame: Frame) -> Result<Step<Self, ()>> {
         let mut p = frame
             .segments
