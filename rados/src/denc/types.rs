@@ -31,12 +31,6 @@ pub struct EVersion {
     pub epoch: Epoch,
 }
 
-impl EVersion {
-    pub fn new(version: Version, epoch: Epoch) -> Self {
-        EVersion { version, epoch }
-    }
-}
-
 /// Universal Time structure (utime_t in C++)
 ///
 /// Represents time with second and nanosecond precision.
@@ -97,10 +91,6 @@ impl Serialize for UuidD {
 impl UuidD {
     pub fn from_bytes(bytes: [u8; 16]) -> Self {
         Self { bytes }
-    }
-
-    pub fn is_zero(&self) -> bool {
-        self.bytes.iter().all(|&b| b == 0)
     }
 }
 
@@ -235,14 +225,6 @@ impl EntityName {
 
     pub fn client(id: impl Into<String>) -> Self {
         Self::new(EntityType::CLIENT, id)
-    }
-
-    pub fn osd(id: impl Into<String>) -> Self {
-        Self::new(EntityType::OSD, id)
-    }
-
-    pub fn mon(id: impl Into<String>) -> Self {
-        Self::new(EntityType::MON, id)
     }
 }
 
