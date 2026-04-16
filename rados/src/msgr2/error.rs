@@ -86,31 +86,6 @@ impl Msgr2Error {
             _ => false,
         }
     }
-
-    /// Check if this is a fatal error that should not be retried
-    ///
-    /// Fatal errors include protocol violations, authentication failures,
-    /// and configuration errors that won't be fixed by retrying.
-    pub fn is_fatal(&self) -> bool {
-        !self.is_recoverable()
-    }
-
-    /// Get a human-readable category for this error
-    pub fn category(&self) -> &'static str {
-        match self {
-            Msgr2Error::Protocol(_) => "Protocol",
-            Msgr2Error::Io(_) => "I/O",
-            Msgr2Error::Denc(_) => "Encoding",
-            Msgr2Error::Auth(_) | Msgr2Error::CephX(_) => "Authentication",
-            Msgr2Error::Crypto(_) => "Crypto",
-            Msgr2Error::Connection(_) => "Connection",
-            Msgr2Error::Timeout => "Timeout",
-            Msgr2Error::InvalidData(_) => "InvalidData",
-            Msgr2Error::Serialization | Msgr2Error::Deserialization(_) => "Serialization",
-            Msgr2Error::Compression(_) => "Compression",
-            Msgr2Error::ConfigError(_) => "Configuration",
-        }
-    }
 }
 
 pub type Result<T> = std::result::Result<T, Msgr2Error>;
