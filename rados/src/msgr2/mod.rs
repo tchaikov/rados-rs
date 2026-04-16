@@ -128,18 +128,11 @@ pub enum AuthMethod {
 /// These values appear as the first byte in AUTH_REQUEST payloads and determine
 /// which authentication sub-protocol is used.
 pub mod auth_mode {
-    /// No authentication mode (unused in AUTH_REQUEST)
-    pub const AUTH_MODE_NONE: u8 = 0;
-
     /// Service connection authorizer mode (OSDs, MDS, MGR)
-    /// Range: 1-9
     pub const AUTH_MODE_AUTHORIZER: u8 = 1;
-    pub const AUTH_MODE_AUTHORIZER_MAX: u8 = 9;
 
     /// Monitor authentication mode
-    /// Range: 10-19
     pub const AUTH_MODE_MON: u8 = 10;
-    pub const AUTH_MODE_MON_MAX: u8 = 19;
 }
 
 /// AUTH_NONE request payload for the AUTH_REQUEST frame.
