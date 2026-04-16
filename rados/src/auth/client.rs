@@ -140,7 +140,7 @@ impl CephXClientHandler {
         );
 
         let session_key =
-            self.calculate_session_key(secret_key, server_challenge, client_challenge)?;
+            Self::calculate_session_key(secret_key, server_challenge, client_challenge)?;
 
         let header = CephXRequestHeader {
             request_type: CEPHX_GET_AUTH_SESSION_KEY,
@@ -166,7 +166,6 @@ impl CephXClientHandler {
     ///
     /// Implements cephx_calc_client_server_challenge() from CephxProtocol.cc
     fn calculate_session_key(
-        &self,
         secret_key: &CryptoKey,
         server_challenge: u64,
         client_challenge: u64,
