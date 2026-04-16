@@ -36,7 +36,6 @@ impl FixedSize for PgCount {
 
 /// Filesystem statistics from the object store
 /// C++ definition: store_statfs_t in osd/osd_types.h
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, crate::VersionedDenc, serde::Serialize)]
 #[denc(crate = "crate", version = 1, compat = 1)]
 pub struct StoreStatfs {
@@ -62,7 +61,6 @@ pub struct StoreStatfs {
     pub internal_metadata: i64,
 }
 
-#[allow(dead_code)]
 impl StoreStatfs {
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
@@ -72,7 +70,6 @@ impl StoreStatfs {
 /// Object statistics summary
 /// C++ definition: object_stat_sum_t in osd/osd_types.h
 /// Version 20, encodes 40 fields (36 i64 + 4 i32)
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize)]
 pub struct ObjectStatSum {
     pub num_bytes: i64,
@@ -121,7 +118,6 @@ pub struct ObjectStatSum {
     pub num_objects_repaired: i64,
 }
 
-#[allow(dead_code)]
 impl ObjectStatSum {
     pub fn is_zero(&self) -> bool {
         *self == Self::default()
@@ -307,12 +303,10 @@ impl Denc for ObjectStatSum {
 /// C++ definition: object_stat_collection_t in osd/osd_types.h
 /// Version 2, wraps ObjectStatSum
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub struct ObjectStatCollection {
     pub sum: ObjectStatSum,
 }
 
-#[allow(dead_code)]
 impl ObjectStatCollection {
     pub fn is_zero(&self) -> bool {
         self.sum.is_zero()
@@ -381,7 +375,6 @@ impl Denc for ObjectStatCollection {
 /// C++ definition: pool_stat_t in osd/osd_types.h
 /// Active encode always uses version 7 for Quincy+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub struct PoolStat {
     pub stats: ObjectStatCollection,
     pub store_stats: StoreStatfs,
@@ -392,7 +385,6 @@ pub struct PoolStat {
     pub num_store_stats: i32,
 }
 
-#[allow(dead_code)]
 impl PoolStat {
     pub fn is_zero(&self) -> bool {
         self.stats.is_zero()
@@ -515,7 +507,6 @@ pub(crate) struct Pow2Hist {
 /// C++ definition: objectstore_perf_stat_t in osd/osd_types.h
 /// Active encode always uses version 2 nanosecond counters for Quincy+ peers.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-#[allow(dead_code)]
 pub struct ObjectstorePerfStat {
     /// Commit latency in nanoseconds
     pub os_commit_latency_ns: u64,
