@@ -749,6 +749,11 @@ impl VersionedEncode for OsdStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
+        // Quincy always encodes osd_stat_t at v14 (ENCODE_START(14, 2, bl)
+        // in osd_types.cc). Every `if version >= N` guard below the floor
+        // is always-true; decode unconditionally.
+        crate::denc::check_min_version!(version, 14, "OsdStat", "Quincy v17+");
+
         // Legacy compatibility fields (always present; values ignored)
         let _kb = i64::decode(buf, features)?;
         let _kb_used = i64::decode(buf, features)?;
@@ -762,94 +767,34 @@ impl VersionedEncode for OsdStat {
         // Legacy num_hb_out vector
         let _num_hb_out = Vec::<i32>::decode(buf, features)?;
 
-        let op_queue_age_hist = if version >= 4 {
-            Pow2Hist::decode(buf, features)?
-        } else {
-            Pow2Hist::default()
-        };
+        let op_queue_age_hist = Pow2Hist::decode(buf, features)?;
+        let os_perf_stat = ObjectstorePerfStat::decode(buf, features)?;
+        let up_from = u32::decode(buf, features)?;
+        let seq = u64::decode(buf, features)?;
+        let num_pgs = u32::decode(buf, features)?;
 
-        let os_perf_stat = if version >= 6 {
-            ObjectstorePerfStat::decode(buf, features)?
-        } else {
-            ObjectstorePerfStat::default()
-        };
+        // v10: more legacy compatibility fields (ignored) + statfs
+        let _kb_used_data = i64::decode(buf, features)?;
+        let _kb_used_omap = i64::decode(buf, features)?;
+        let _kb_used_meta = i64::decode(buf, features)?;
+        let statfs = StoreStatfs::decode(buf, features)?;
 
-        let up_from = if version >= 7 {
-            u32::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let seq = if version >= 8 {
-            u64::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let num_pgs = if version >= 9 {
-            u32::decode(buf, features)?
-        } else {
-            0
-        };
-
-        // More compatibility fields (ignored)
-        if version >= 10 {
-            let _kb_used_data = i64::decode(buf, features)?;
-            let _kb_used_omap = i64::decode(buf, features)?;
-            let _kb_used_meta = i64::decode(buf, features)?;
-        };
-
-        let statfs = if version >= 10 {
-            StoreStatfs::decode(buf, features)?
-        } else {
-            StoreStatfs::default()
-        };
-
-        let os_alerts = if version >= 11 {
-            BTreeMap::decode(buf, features)?
-        } else {
-            BTreeMap::new()
-        };
-
-        let num_shards_repaired = if version >= 12 {
-            u64::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let num_osds = if version >= 13 {
-            u32::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let num_per_pool_osds = if version >= 13 {
-            u32::decode(buf, features)?
-        } else {
-            0
-        };
-
-        let num_per_pool_omap_osds = if version >= 14 {
-            u32::decode(buf, features)?
-        } else {
-            0
-        };
+        let os_alerts = BTreeMap::decode(buf, features)?;
+        let num_shards_repaired = u64::decode(buf, features)?;
+        let num_osds = u32::decode(buf, features)?;
+        let num_per_pool_osds = u32::decode(buf, features)?;
+        let num_per_pool_omap_osds = u32::decode(buf, features)?;
 
         // Decode hb_pingtime map
-        let hb_pingtime = if version >= 13 {
-            let map_size: usize = i32::decode(buf, features)?
-                .try_into()
-                .map_err(|_| crate::RadosError::InvalidData("negative map size".into()))?;
-            let mut map = BTreeMap::new();
-            for _ in 0..map_size {
-                let osd_id = i32::decode(buf, features)?;
-                let interfaces = OsdStatInterfaces::decode(buf, features)?;
-                map.insert(osd_id, interfaces);
-            }
-            map
-        } else {
-            BTreeMap::new()
-        };
+        let map_size: usize = i32::decode(buf, features)?
+            .try_into()
+            .map_err(|_| crate::RadosError::InvalidData("negative map size".into()))?;
+        let mut hb_pingtime = BTreeMap::new();
+        for _ in 0..map_size {
+            let osd_id = i32::decode(buf, features)?;
+            let interfaces = OsdStatInterfaces::decode(buf, features)?;
+            hb_pingtime.insert(osd_id, interfaces);
+        }
 
         Ok(OsdStat {
             statfs,
