@@ -111,7 +111,7 @@ impl Throttle {
     /// Try to acquire budget without blocking
     ///
     /// Returns None if the budget is not available.
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn try_acquire(&self, bytes: usize) -> Option<ThrottlePermit<'_>> {
         // Try to acquire operation slot
         let op_permit = self.ops_sem.try_acquire().ok()?;
