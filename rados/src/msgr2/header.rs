@@ -94,18 +94,6 @@ impl MsgHeader {
         self.priority.get()
     }
 
-    /// Get version
-    #[inline]
-    pub fn get_version(&self) -> u16 {
-        self.version.get()
-    }
-
-    /// Get data pre-padding length
-    #[inline]
-    pub fn get_data_pre_padding_len(&self) -> u32 {
-        self.data_pre_padding_len.get()
-    }
-
     /// Get data offset
     #[inline]
     pub fn get_data_off(&self) -> u16 {
@@ -116,24 +104,6 @@ impl MsgHeader {
     #[inline]
     pub fn get_ack_seq(&self) -> u64 {
         self.ack_seq.get()
-    }
-
-    /// Get flags
-    #[inline]
-    pub fn get_flags(&self) -> u8 {
-        self.flags
-    }
-
-    /// Get compatible version
-    #[inline]
-    pub fn get_compat_version(&self) -> u16 {
-        self.compat_version.get()
-    }
-
-    /// Get reserved field
-    #[inline]
-    pub fn get_reserved(&self) -> u16 {
-        self.reserved.get()
     }
 
     // Safe setters for fields
