@@ -665,7 +665,6 @@ pub(crate) struct OsdStat {
     pub hb_pingtime: BTreeMap<i32, OsdStatInterfaces>,
 }
 
-#[allow(dead_code)]
 impl VersionedEncode for OsdStat {
     const FEATURE_DEPENDENT: bool = true;
 
@@ -1263,7 +1262,6 @@ mod tests {
 
 // ========== Supporting types for pg_stat_t ==========
 
-// Re-export ShardId from osdmap module (canonical definition)
 use crate::osdclient::osdmap::ShardId;
 
 /// PG shard identifier (pg_shard_t in C++)
