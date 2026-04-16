@@ -573,21 +573,13 @@ impl VersionedEncode for ObjectstorePerfStat {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        if version >= 2 {
-            let os_commit_latency_ns = u64::decode(buf, features)?;
-            let os_apply_latency_ns = u64::decode(buf, features)?;
-            Ok(ObjectstorePerfStat {
-                os_commit_latency_ns,
-                os_apply_latency_ns,
-            })
-        } else {
-            let commit_ms = u32::decode(buf, features)?;
-            let apply_ms = u32::decode(buf, features)?;
-            Ok(ObjectstorePerfStat {
-                os_commit_latency_ns: commit_ms as u64 * 1_000_000,
-                os_apply_latency_ns: apply_ms as u64 * 1_000_000,
-            })
-        }
+        crate::denc::check_min_version!(version, 2, "ObjectstorePerfStat", "Quincy v17+");
+        let os_commit_latency_ns = u64::decode(buf, features)?;
+        let os_apply_latency_ns = u64::decode(buf, features)?;
+        Ok(ObjectstorePerfStat {
+            os_commit_latency_ns,
+            os_apply_latency_ns,
+        })
     }
 
     fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
@@ -1201,18 +1193,17 @@ mod tests {
     }
 
     #[test]
-    fn test_objectstore_perf_stat_legacy_decode_v1() {
+    fn test_objectstore_perf_stat_rejects_v1() {
+        // v1 used millisecond fields; Quincy always encodes v2 (nanoseconds).
+        // The check_min_version! floor now rejects v1.
         let mut buf = BytesMut::new();
-        buf.put_u8(1);
-        buf.put_u8(1);
-        buf.put_u32_le(8);
+        buf.put_u8(1); // version = 1
+        buf.put_u8(1); // compat_version = 1
+        buf.put_u32_le(8); // length
         buf.put_u32_le(5);
         buf.put_u32_le(3);
-        assert_eq!(buf.len(), 14);
 
-        let decoded = ObjectstorePerfStat::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.os_commit_latency_ns, 5_000_000);
-        assert_eq!(decoded.os_apply_latency_ns, 3_000_000);
+        assert!(ObjectstorePerfStat::decode(&mut buf, 0).is_err());
     }
 
     #[test]
