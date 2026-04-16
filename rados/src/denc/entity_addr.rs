@@ -497,11 +497,6 @@ impl EntityAddrvec {
         Self { addrs: vec![addr] }
     }
 
-    /// Returns true if any address is a msgr2 (v2) address.
-    pub fn has_msgr2(&self) -> bool {
-        self.addrs.iter().any(|a| a.is_msgr2())
-    }
-
     /// Returns the first msgr2 (v2) address, if any.
     pub fn get_msgr2(&self) -> Option<&EntityAddr> {
         self.addrs.iter().find(|a| a.is_msgr2())
