@@ -782,11 +782,3 @@ impl Clone for IoCtx {
         }
     }
 }
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn test_ioctx_pool_id() {
-        // Basic test that will be expanded
-    }
-}
