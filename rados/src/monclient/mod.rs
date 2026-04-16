@@ -41,7 +41,7 @@
 pub mod auth_config;
 pub mod client;
 pub(crate) mod connection;
-pub mod defaults;
+pub(crate) mod defaults;
 pub mod dns_srv;
 pub mod error;
 pub mod messages;
