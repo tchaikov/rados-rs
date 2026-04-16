@@ -871,25 +871,13 @@ impl OSDSession {
         // Increment redirect counter
         pending_op.redirect_count += 1;
 
-        // Apply redirect to operation
-        let new_mosdop = Self::apply_redirect_to_op(&pending_op.op, redirect);
+        // Apply redirect to operation (clone + mutate)
+        let mut new_mosdop = (*pending_op.op).clone();
+        crate::osdclient::client::OSDClient::apply_redirect(&mut new_mosdop, redirect);
         let new_flags = new_mosdop.flags;
         pending_op.op = Arc::new(new_mosdop);
 
         Some((pending_op, new_flags))
-    }
-
-    /// Apply redirect information to operation (clone + mutate).
-    ///
-    /// Delegates to `OSDClient::apply_redirect` for the actual transformation,
-    /// avoiding duplication of the C++ `combine_with_locator()` logic.
-    fn apply_redirect_to_op(
-        op: &MOSDOp,
-        redirect: &crate::osdclient::types::RequestRedirect,
-    ) -> MOSDOp {
-        let mut new_mosdop = op.clone();
-        crate::osdclient::client::OSDClient::apply_redirect(&mut new_mosdop, redirect);
-        new_mosdop
     }
 
     /// Handle EAGAIN retry for replica reads
@@ -1047,7 +1035,7 @@ impl OSDSession {
     /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
     /// Used by OSDClient to determine which operations need rescanning.
     /// Note: object_id is cloned here, but this is only called during OSDMap updates (infrequent).
-    pub async fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
+    pub fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
         self.pending_ops
             .iter()
             .map(|entry| {
@@ -1066,7 +1054,7 @@ impl OSDSession {
     ///
     /// Used during OSDMap rescanning to extract operations that need to be
     /// migrated to a different OSD. Returns None if the operation doesn't exist.
-    pub async fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
+    pub fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
         self.pending_ops.remove(&tid).map(|(_, v)| v)
     }
 

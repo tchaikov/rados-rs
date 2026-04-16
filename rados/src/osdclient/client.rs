@@ -190,7 +190,7 @@ impl OSDClient {
                             };
 
                             if let Some(session) = session
-                                && let Some(pending_op) = session.remove_pending_op(tid).await
+                                && let Some(pending_op) = session.remove_pending_op(tid)
                             {
                                 // Check incarnation - operation might be from a previous connection
                                 // that has since reconnected. In that case, silently drop the timeout.
@@ -1792,7 +1792,7 @@ impl OSDClient {
         current_osd: Option<i32>,
         need_resend: &mut Vec<(i32, crate::osdclient::session::PendingOp)>,
     ) -> Result<bool> {
-        let metadata = session.get_pending_ops_metadata().await;
+        let metadata = session.get_pending_ops_metadata();
         let mut placement_cache = HashMap::new();
         let mut any_migrated = false;
 
@@ -1821,7 +1821,7 @@ impl OSDClient {
                 }
             };
 
-            if should_resend && let Some(mut op) = session.remove_pending_op(tid).await {
+            if should_resend && let Some(mut op) = session.remove_pending_op(tid) {
                 // Scan path only: cancel the io_loop so any message already
                 // encoded for this tid is dropped before reaching the wire.
                 // See `cancel_io_loop`'s doc comment for the full rationale.
@@ -2010,7 +2010,7 @@ impl OSDClient {
         if osdmap.pools.contains_key(&pool_id) {
             return false;
         }
-        if let Some(pending_op) = session.remove_pending_op(tid).await {
+        if let Some(pending_op) = session.remove_pending_op(tid) {
             let _ = pending_op
                 .result_tx
                 .send(Err(OSDClientError::PoolNotFound(pool_id)));
@@ -2045,7 +2045,7 @@ impl OSDClient {
             }
         };
 
-        let metadata = old_session.get_pending_ops_metadata().await;
+        let metadata = old_session.get_pending_ops_metadata();
         if metadata.is_empty() {
             return;
         }
@@ -2059,7 +2059,7 @@ impl OSDClient {
         let new_epoch = osdmap.epoch.as_u32();
 
         for (tid, pool_id, _, _) in metadata {
-            let Some(mut pending_op) = old_session.remove_pending_op(tid).await else {
+            let Some(mut pending_op) = old_session.remove_pending_op(tid) else {
                 continue;
             };
 
@@ -2391,12 +2391,11 @@ impl OSDClient {
         for (_osd_id, session) in session_snapshot {
             let tids: Vec<u64> = session
                 .get_pending_ops_metadata()
-                .await
                 .into_iter()
                 .map(|(tid, _, _, _)| tid)
                 .collect();
             for tid in tids {
-                if let Some(op) = session.remove_pending_op(tid).await {
+                if let Some(op) = session.remove_pending_op(tid) {
                     let _ = op.result_tx.send(Err(OSDClientError::Blocklisted));
                 }
             }
