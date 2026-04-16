@@ -29,15 +29,8 @@ pub const CEPH_OSD_BACKOFF_OP_BLOCK: u8 = 1;
 pub const CEPH_OSD_BACKOFF_OP_ACK_BLOCK: u8 = 2;
 pub const CEPH_OSD_BACKOFF_OP_UNBLOCK: u8 = 3;
 
-/// Message priority levels (from include/msgr.h)
-/// Priority is stored in the message header, not the message payload
-#[allow(dead_code)]
-pub const CEPH_MSG_PRIO_LOW: i32 = 64;
+/// Default message priority (from include/msgr.h)
 pub const CEPH_MSG_PRIO_DEFAULT: i32 = 127;
-#[allow(dead_code)]
-pub const CEPH_MSG_PRIO_HIGH: i32 = 196;
-#[allow(dead_code)]
-pub const CEPH_MSG_PRIO_HIGHEST: i32 = 255;
 
 /// Size of the ceph_osd_op union field (largest variant: extent = 3×u64 + u32)
 pub const CEPH_OSD_OP_UNION_SIZE: usize =
@@ -217,10 +210,6 @@ pub struct MOSDBackoff {
 impl MOSDBackoff {
     /// Message version (from MOSDBackoff.h HEAD_VERSION)
     pub const VERSION: u16 = 1;
-
-    /// Message compat version (from MOSDBackoff.h COMPAT_VERSION)
-    #[allow(dead_code)]
-    pub const COMPAT_VERSION: u16 = 1;
 
     /// Create a new MOSDBackoff message
     pub fn new(
