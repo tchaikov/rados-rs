@@ -29,8 +29,7 @@ pub use denc::{
     EntityAddrType, EntityAddrvec, EntityName, EntityType, Epoch, FixedSize, FsId, GlobalId,
     HObject, HasEncodingMetadata, MonCephRelease, MonFeature, MonInfo, MonMap, OsdId, PoolId,
     RadosError, SIGNIFICANT_FEATURES, SNAP_DIR, SNAP_HEAD, StructVDenc, UTime, UuidD, Version,
-    VersionedDenc, VersionedEncode, ZeroCopyDencode, encode_with_capacity,
-    get_significant_features, has_feature, has_significant_feature,
+    VersionedDenc, VersionedEncode, ZeroCopyDencode, encode_with_capacity, has_significant_feature,
 };
 // Submodule re-exports required for macro hygiene: ZeroCopyDencode derive generates
 // `$crate::zero_copy::ZeroCopyDencode` and `$crate::zerocopy::{IntoBytes,FromBytes}`.

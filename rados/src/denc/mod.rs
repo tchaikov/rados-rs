@@ -42,10 +42,7 @@ pub use monmap::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo, MonMap};
 pub use types::{EVersion, EntityName, EntityType, FsId, UTime, UuidD, Version};
 
 // Feature flags
-pub use features::{
-    CephFeatures, SIGNIFICANT_FEATURES, get_significant_features, has_feature,
-    has_significant_feature,
-};
+pub use features::{CephFeatures, SIGNIFICANT_FEATURES, has_significant_feature};
 
 // Encoding metadata helpers
 pub use encoding_metadata::{EncodingMetadata, HasEncodingMetadata};

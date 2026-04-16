@@ -131,23 +131,10 @@ pub const SIGNIFICANT_FEATURES: CephFeatures = CephFeatures::MASK_PGID64
     .union(CephFeatures::MASK_SERVER_SQUID)
     .union(CephFeatures::MASK_SERVER_TENTACLE);
 
-/// Returns `true` if `features` has the given feature bit set.
-///
-/// Equivalent to a non-zero bitwise AND check for a single-bit
-/// [`CephFeatures`] variant such as `CephFeatures::MSG_ADDR2`.
-pub fn has_feature(features: u64, flag: CephFeatures) -> bool {
-    (features & flag.bits()) != 0
-}
-
 /// Returns `true` if all bits in `mask` are present in `features`.
 ///
 /// Equivalent to C++'s `HAVE_FEATURE(x, name)` macro when called with a
 /// `MASK_*` [`CephFeatures`] variant such as `CephFeatures::MASK_SERVER_NAUTILUS`.
 pub fn has_significant_feature(features: u64, mask: CephFeatures) -> bool {
     (features & mask.bits()) == mask.bits()
-}
-
-/// Returns the significant subset of `features` as a typed [`CephFeatures`].
-pub fn get_significant_features(features: u64) -> CephFeatures {
-    CephFeatures::from_bits_retain(features) & SIGNIFICANT_FEATURES
 }
