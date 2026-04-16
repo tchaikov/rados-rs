@@ -489,7 +489,7 @@ impl FrameIO {
 
             // Compute payload size and allocate the resumable buffer.
             let payload_size = if has_encryption {
-                Self::compute_secure_payload_size(&preamble, total_segment_size)
+                Self::compute_secure_payload_size(&preamble)
             } else {
                 Self::compute_crc_payload_size(total_segment_size, preamble.num_segments > 1)
             };
@@ -561,28 +561,32 @@ impl FrameIO {
         Ok(frame)
     }
 
-    fn compute_secure_payload_size(preamble: &Preamble, total_segment_size: usize) -> usize {
+    /// Total plaintext payload size for a SECURE-mode frame.
+    ///
+    /// Single-segment: `align(sum_of_logical_len)`.
+    /// Multi-segment: `sum_of_per_segment_aligned + CRYPTO_BLOCK_SIZE` (for late-status).
+    fn total_secure_plaintext_size(preamble: &Preamble) -> usize {
+        let segs = &preamble.segments[..preamble.num_segments as usize];
         if preamble.num_segments == 1 {
-            let total = align_to_crypto_block(total_segment_size);
-            // Only the bytes BEYOND the 48-byte inline region need to be
-            // read off the wire; but when total <= INLINE_SIZE we still
-            // return 0 here, meaning no additional read is needed.
-            if total > Self::INLINE_SIZE {
-                total - Self::INLINE_SIZE + Self::GCM_TAG_SIZE
-            } else {
-                0
-            }
+            align_to_crypto_block(segs.iter().map(|s| s.logical_len as usize).sum())
         } else {
-            let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
+            let padded: usize = segs
                 .iter()
                 .map(|s| align_to_crypto_block(s.logical_len as usize))
                 .sum();
-            let total = padded_size + CRYPTO_BLOCK_SIZE;
-            if total > Self::INLINE_SIZE {
-                total - Self::INLINE_SIZE + Self::GCM_TAG_SIZE
-            } else {
-                0
-            }
+            padded + CRYPTO_BLOCK_SIZE
+        }
+    }
+
+    fn compute_secure_payload_size(preamble: &Preamble) -> usize {
+        let total = Self::total_secure_plaintext_size(preamble);
+        // Only the bytes BEYOND the 48-byte inline region need to be
+        // read off the wire; when total <= INLINE_SIZE no additional
+        // read is needed (returns 0).
+        if total > Self::INLINE_SIZE {
+            total - Self::INLINE_SIZE + Self::GCM_TAG_SIZE
+        } else {
+            0
         }
     }
 
@@ -611,20 +615,7 @@ impl FrameIO {
         remaining_buf: Vec<u8>,
         state_machine: &mut StateMachine,
     ) -> Result<Frame> {
-        let total_payload_size = if preamble.num_segments == 1 {
-            align_to_crypto_block(
-                preamble.segments[..preamble.num_segments as usize]
-                    .iter()
-                    .map(|s| s.logical_len as usize)
-                    .sum::<usize>(),
-            )
-        } else {
-            let padded_size: usize = preamble.segments[..preamble.num_segments as usize]
-                .iter()
-                .map(|s| align_to_crypto_block(s.logical_len as usize))
-                .sum();
-            padded_size + CRYPTO_BLOCK_SIZE
-        };
+        let total_payload_size = Self::total_secure_plaintext_size(&preamble);
 
         let full_payload = if !remaining_buf.is_empty() {
             let decrypted_remaining = state_machine.decrypt_frame_data(&remaining_buf)?;
