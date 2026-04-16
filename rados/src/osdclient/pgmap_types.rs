@@ -1816,7 +1816,8 @@ impl VersionedEncode for PgMapDigest {
         version: u8,
         _compat_version: u8,
     ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "PgMapDigest", "Quincy v17+");
+        // Quincy's PGMapDigest::decode asserts struct_v >= 4.
+        crate::denc::check_min_version!(version, 4, "PgMapDigest", "Quincy v17+");
 
         let num_pg = i64::decode(buf, features)?;
         let num_pg_active = i64::decode(buf, features)?;
