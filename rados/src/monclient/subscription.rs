@@ -107,9 +107,7 @@ impl MonSub {
         }
 
         // Move sub_new to sub_sent
-        for (what, item) in self.sub_new.drain() {
-            self.sub_sent.insert(what, item);
-        }
+        self.sub_sent.extend(self.sub_new.drain());
     }
 
     /// Handle subscription ack from monitor
