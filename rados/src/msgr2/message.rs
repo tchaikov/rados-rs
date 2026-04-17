@@ -180,25 +180,18 @@ impl Message {
         if src.remaining() < front_len {
             return Err(Error::protocol_error("Insufficient data for front segment"));
         }
-        let mut front = vec![0u8; front_len];
-        if front_len > 0 {
-            src.copy_to_slice(&mut front);
-        }
+        let front = src.copy_to_bytes(front_len);
 
         // Read remaining bytes as data segment
         // Note: Without explicit segment lengths, we cannot separate middle from data.
         // All remaining payload goes into data segment, middle is left empty.
-        let remaining_len = src.remaining();
-        let mut data = vec![0u8; remaining_len];
-        if remaining_len > 0 {
-            src.copy_to_slice(&mut data);
-        }
+        let data = src.copy_to_bytes(src.remaining());
 
         Ok(Self {
             header,
-            front: Bytes::from(front),
+            front,
             middle: Bytes::new(),
-            data: Bytes::from(data),
+            data,
             footer: None,
         })
     }
@@ -221,26 +214,15 @@ impl Message {
             ));
         }
 
-        let mut front = vec![0u8; front_len];
-        if front_len > 0 {
-            src.copy_to_slice(&mut front);
-        }
-
-        let mut middle = vec![0u8; middle_len];
-        if middle_len > 0 {
-            src.copy_to_slice(&mut middle);
-        }
-
-        let mut data = vec![0u8; data_len];
-        if data_len > 0 {
-            src.copy_to_slice(&mut data);
-        }
+        let front = src.copy_to_bytes(front_len);
+        let middle = src.copy_to_bytes(middle_len);
+        let data = src.copy_to_bytes(data_len);
 
         Ok(Self {
             header,
-            front: Bytes::from(front),
-            middle: Bytes::from(middle),
-            data: Bytes::from(data),
+            front,
+            middle,
+            data,
             footer: None,
         })
     }

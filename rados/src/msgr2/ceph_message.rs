@@ -263,14 +263,9 @@ impl CephMessage {
             return Err(Error::Deserialization("Incomplete message payload".into()));
         }
 
-        let mut front = vec![0u8; front_len as usize];
-        src.copy_to_slice(&mut front);
-
-        let mut middle = vec![0u8; middle_len as usize];
-        src.copy_to_slice(&mut middle);
-
-        let mut data = vec![0u8; data_len as usize];
-        src.copy_to_slice(&mut data);
+        let front = src.copy_to_bytes(front_len as usize);
+        let middle = src.copy_to_bytes(middle_len as usize);
+        let data = src.copy_to_bytes(data_len as usize);
 
         // Verify CRCs if not disabled
         if footer.flags & MsgFooterFlags::NOCRC.bits() == 0 {
@@ -291,9 +286,9 @@ impl CephMessage {
         Ok(Self {
             header,
             footer,
-            front: Bytes::from(front),
-            middle: Bytes::from(middle),
-            data: Bytes::from(data),
+            front,
+            middle,
+            data,
         })
     }
 
