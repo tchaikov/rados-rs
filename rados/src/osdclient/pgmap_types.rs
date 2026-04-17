@@ -582,7 +582,8 @@ crate::denc::impl_denc_for_versioned!(ObjectstorePerfStat);
 
 /// OSD heartbeat interface statistics
 /// C++ definition: osd_stat_t::Interfaces in osd/osd_types.h
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, crate::Denc)]
+#[denc(crate = "crate")]
 #[allow(dead_code)]
 pub(crate) struct OsdStatInterfaces {
     pub last_update: u32, // in seconds
@@ -594,48 +595,6 @@ pub(crate) struct OsdStatInterfaces {
     pub front_min: [u32; 3],
     pub front_max: [u32; 3],
     pub front_last: u32,
-}
-
-impl Denc for OsdStatInterfaces {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.last_update.encode(buf, features)?;
-        self.back_pingtime.encode(buf, features)?;
-        self.back_min.encode(buf, features)?;
-        self.back_max.encode(buf, features)?;
-        self.back_last.encode(buf, features)?;
-        self.front_pingtime.encode(buf, features)?;
-        self.front_min.encode(buf, features)?;
-        self.front_max.encode(buf, features)?;
-        self.front_last.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        let last_update = u32::decode(buf, features)?;
-        let back_pingtime = <[u32; 3]>::decode(buf, features)?;
-        let back_min = <[u32; 3]>::decode(buf, features)?;
-        let back_max = <[u32; 3]>::decode(buf, features)?;
-        let back_last = u32::decode(buf, features)?;
-        let front_pingtime = <[u32; 3]>::decode(buf, features)?;
-        let front_min = <[u32; 3]>::decode(buf, features)?;
-        let front_max = <[u32; 3]>::decode(buf, features)?;
-        let front_last = u32::decode(buf, features)?;
-        Ok(OsdStatInterfaces {
-            last_update,
-            back_pingtime,
-            back_min,
-            back_max,
-            back_last,
-            front_pingtime,
-            front_min,
-            front_max,
-            front_last,
-        })
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(OSD_STAT_INTERFACES_SIZE)
-    }
 }
 
 impl FixedSize for OsdStatInterfaces {
