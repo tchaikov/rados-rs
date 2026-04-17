@@ -21,8 +21,4 @@ impl CommandResult {
             outbl,
         }
     }
-
-    pub fn is_success(&self) -> bool {
-        self.retval == 0
-    }
 }
