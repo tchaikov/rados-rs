@@ -436,14 +436,12 @@ impl IoCtx {
     /// # }
     /// ```
     pub async fn ls(&self) -> Result<Vec<String>> {
-        use futures::StreamExt;
+        use futures::TryStreamExt;
         info!("Listing all objects in pool {}", self.pool_id);
-        let all_objects =
+        let all_objects: Vec<String> =
             crate::osdclient::list_objects_stream(self.clone(), MAX_ENTRIES_PER_REQUEST)
-                .collect::<Vec<_>>()
-                .await
-                .into_iter()
-                .collect::<Result<Vec<_>>>()?;
+                .try_collect()
+                .await?;
         info!(
             "Found {} total objects in pool {}",
             all_objects.len(),
