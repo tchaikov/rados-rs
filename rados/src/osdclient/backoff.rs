@@ -31,19 +31,6 @@ struct BackoffKey {
     begin: crate::HObject,
 }
 
-/// Create a minimal HObject suitable for use as the lower bound in BTreeMap range queries.
-fn min_hobject() -> crate::HObject {
-    crate::HObject {
-        key: String::new(),
-        oid: String::new(),
-        snapid: 0,
-        hash: 0,
-        max: false,
-        nspace: String::new(),
-        pool: 0,
-    }
-}
-
 /// A single backoff entry tracking a blocked object range
 #[derive(Debug, Clone)]
 pub struct BackoffEntry {
@@ -139,7 +126,7 @@ impl BackoffTracker {
         // Create range bounds for this PG
         let start_key = BackoffKey {
             pgid: *pgid,
-            begin: min_hobject(),
+            begin: crate::HObject::default(),
         };
 
         let end_key = BackoffKey {
