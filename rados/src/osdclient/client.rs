@@ -1644,24 +1644,12 @@ impl OSDClient {
         debug!("Deleting pool: {}", pool_name);
 
         // Look up pool ID and epoch from OSDMap
-        let (pool_id, version) = {
-            let osdmap = self
-                .osdmap_rx
-                .borrow()
-                .clone()
-                .ok_or_else(|| OSDClientError::Other("OSD map not available yet".into()))?;
-
-            let pool_id = osdmap
-                .pool_name
-                .iter()
-                .find(|(_, name)| name.as_str() == pool_name)
-                .map(|(id, _)| *id as u32)
-                .ok_or_else(|| OSDClientError::Other(format!("Pool '{pool_name}' not found")))?;
-
-            let version = osdmap.epoch.as_u32() as u64;
-
-            (pool_id, version)
-        };
+        let osdmap = self.get_osdmap().await?;
+        let pool_id = osdmap
+            .pool_id_by_name(pool_name)
+            .ok_or_else(|| OSDClientError::Other(format!("Pool '{pool_name}' not found")))?
+            as u32;
+        let version = osdmap.epoch.as_u32() as u64;
 
         debug!(
             "Deleting pool '{}' with ID {} (OSDMap epoch {})",
