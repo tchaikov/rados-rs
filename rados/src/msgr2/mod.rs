@@ -421,14 +421,6 @@ impl ConnectionConfig {
         }
     }
 
-    /// Set the authentication provider
-    pub fn set_auth_provider(&mut self, provider: Box<dyn crate::auth::AuthProvider>) {
-        self.auth_provider = Some(provider);
-        if !self.supported_auth_methods.contains(&AuthMethod::Cephx) {
-            self.supported_auth_methods.insert(0, AuthMethod::Cephx);
-        }
-    }
-
     /// Validate configuration for semantic correctness
     ///
     /// Checks that configuration values make sense and are internally consistent.
