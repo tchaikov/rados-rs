@@ -2141,7 +2141,7 @@ impl OSDClient {
             .borrow()
             .as_ref()
             .map(|m| m.epoch)
-            .unwrap_or(crate::Epoch::new(0));
+            .unwrap_or_default();
 
         if mosdmap.get_last() <= current_epoch.as_u32() {
             info!(
@@ -2193,10 +2193,7 @@ impl OSDClient {
         let mut updated = false;
 
         for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
-            let current_map_epoch = working_map
-                .as_ref()
-                .map(|m| m.epoch)
-                .unwrap_or(crate::Epoch::new(0));
+            let current_map_epoch = working_map.as_ref().map(|m| m.epoch).unwrap_or_default();
 
             if current_map_epoch == crate::Epoch::new(e - 1)
                 && mosdmap.incremental_maps.contains_key(&e)
