@@ -22,27 +22,9 @@ pub mod sockaddr {
     /// Size of sockaddr_storage structure
     pub const STORAGE_SIZE: usize = 128;
 
-    /// Size of legacy entity_addr_t (marker + nonce + sockaddr_storage)
-    pub const LEGACY_ENTITY_ADDR_SIZE: usize = 136;
-
     /// Address family: IPv4
     pub const AF_INET: u16 = 2;
 
     /// Address family: IPv6
     pub const AF_INET6: u16 = 10;
-}
-
-/// Pool type constants
-pub mod pool {
-    /// Replicated pool type
-    pub const TYPE_REPLICATED: u8 = 1;
-
-    /// Erasure-coded pool type
-    pub const TYPE_ERASURE: u8 = 3;
-}
-
-/// OSD-related constants
-pub mod osd {
-    /// Scale factor for laggy probability (0xffffffff = 100%)
-    pub const LAGGY_PROBABILITY_SCALE: u32 = 0xffffffff;
 }
