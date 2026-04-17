@@ -1648,7 +1648,7 @@ impl OSDClient {
         let osdmap = self.get_osdmap().await?;
         let pool_id = osdmap
             .pool_id_by_name(pool_name)
-            .ok_or_else(|| OSDClientError::Other(format!("Pool '{pool_name}' not found")))?
+            .ok_or_else(|| OSDClientError::PoolNameNotFound(pool_name.to_owned()))?
             as u32;
         let version = osdmap.epoch.as_u32() as u64;
 
