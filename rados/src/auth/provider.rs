@@ -319,7 +319,7 @@ impl AuthProvider for ServiceAuthProvider {
 
         debug!(
             "Returning session_key: {} bytes",
-            session_key_ref.map(|k| k.secret.len()).unwrap_or(0)
+            session_key_ref.map_or(0, |k| k.secret.len())
         );
 
         let connection_secret =
