@@ -45,10 +45,7 @@ fn keepalive_timed_out(
         return false;
     }
 
-    match last_keepalive_ack {
-        Some(ack_at) => ack_at < sent_at,
-        None => true,
-    }
+    last_keepalive_ack.is_none_or(|ack_at| ack_at < sent_at)
 }
 
 fn should_probe_io_fairness(
