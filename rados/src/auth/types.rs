@@ -157,9 +157,7 @@ impl Denc for CryptoKey {
             ));
         }
 
-        let mut secret_bytes = vec![0u8; secret_len];
-        buf.copy_to_slice(&mut secret_bytes);
-        let secret = Bytes::from(secret_bytes);
+        let secret = buf.copy_to_bytes(secret_len);
         Ok(Self {
             crypto_type,
             created,
