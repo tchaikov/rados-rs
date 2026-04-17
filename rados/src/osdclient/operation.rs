@@ -80,12 +80,18 @@ impl BuiltOp {
 ///     .read(0, 4096)
 ///     .build();
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct OpBuilder {
     ops: Vec<OSDOp>,
     flags: OsdOpFlags,
     priority: i32,
     timeout: Option<Duration>,
+}
+
+impl Default for OpBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl OpBuilder {
@@ -231,7 +237,7 @@ impl OpBuilder {
 
     /// Add a list_snaps operation (enumerate clones/snapshots of an object)
     pub fn list_snaps(mut self) -> Self {
-        self.ops.push(crate::osdclient::types::OSDOp::list_snaps());
+        self.ops.push(OSDOp::list_snaps());
         self.flags |= OsdOpFlags::READ;
         self
     }
@@ -241,8 +247,7 @@ impl OpBuilder {
     /// # Arguments
     /// * `snap_id` - Snapshot ID to roll back to
     pub fn rollback(mut self, snap_id: impl Into<crate::osdclient::snapshot::SnapId>) -> Self {
-        self.ops
-            .push(crate::osdclient::types::OSDOp::rollback(snap_id));
+        self.ops.push(OSDOp::rollback(snap_id));
         self.flags |= OsdOpFlags::WRITE;
         self
     }
