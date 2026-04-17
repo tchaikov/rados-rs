@@ -1225,7 +1225,10 @@ use crate::osdclient::osdmap::ShardId;
 
 /// PG shard identifier (pg_shard_t in C++)
 /// Identifies a specific shard of a PG on a specific OSD
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, crate::VersionedDenc,
+)]
+#[denc(crate = "crate", version = 1, compat = 1)]
 #[allow(dead_code)]
 pub(crate) struct PgShard {
     pub osd: i32,
@@ -1243,57 +1246,6 @@ impl PgShard {
 
     pub fn is_undefined(&self) -> bool {
         self.osd == -1
-    }
-}
-
-impl VersionedEncode for PgShard {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        self.osd.encode(buf, features)?;
-        self.shard.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "PgShard", "Quincy v17+");
-        let osd = i32::decode(buf, features)?;
-        let shard = ShardId::decode(buf, features)?;
-        Ok(PgShard { osd, shard })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        Some(5) // i32 + i8
-    }
-}
-
-impl Denc for PgShard {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(6 + 5) // 6 bytes for ENCODE_START header + 5 bytes for content (i32 + i8)
     }
 }
 
