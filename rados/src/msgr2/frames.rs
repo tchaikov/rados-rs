@@ -61,20 +61,6 @@ pub(crate) fn align_to_crypto_block(size: usize) -> usize {
 pub struct FrameFlags(u8);
 
 impl FrameFlags {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create from raw u8 value
-    pub fn from_raw(val: u8) -> Self {
-        Self(val)
-    }
-
-    /// Get the raw u8 value
-    pub fn raw(self) -> u8 {
-        self.0
-    }
-
     /// Check if compression flag is set
     pub fn is_compressed(self) -> bool {
         (self.0 & FRAME_EARLY_DATA_COMPRESSED) != 0
@@ -88,16 +74,6 @@ impl FrameFlags {
     /// Clear the compression flag
     pub fn clear_compressed(&mut self) {
         self.0 &= !FRAME_EARLY_DATA_COMPRESSED;
-    }
-
-    /// Set or clear the compression flag based on boolean
-    pub fn with_compressed(mut self, compressed: bool) -> Self {
-        if compressed {
-            self.set_compressed();
-        } else {
-            self.clear_compressed();
-        }
-        self
     }
 }
 
