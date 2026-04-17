@@ -324,8 +324,9 @@ impl OSDClient {
         self.osdmap_rx
             .borrow()
             .as_ref()
-            .map(|m| m.epoch.as_u32())
-            .unwrap_or(0)
+            .map(|m| m.epoch)
+            .unwrap_or_default()
+            .as_u32()
     }
 
     /// Wait for OSDMap to be received
