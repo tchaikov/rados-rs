@@ -432,16 +432,15 @@ impl OSDSession {
                 return true; // non-OSD-OP messages are always sent
             }
             let tid = msg.header.get_tid();
-            if pending_ops_for_filter.contains_key(&tid) {
-                true
-            } else {
+            if !pending_ops_for_filter.contains_key(&tid) {
                 debug!(
                     "dropping stale OSD_OP tid={} to OSD {} \
                      (pending_op already migrated to new primary)",
                     tid, osd_id
                 );
-                false
+                return false;
             }
+            true
         };
 
         run_io_loop(
