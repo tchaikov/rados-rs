@@ -1293,7 +1293,8 @@ impl crate::Denc for PgPool {
 }
 
 /// PG Merge Metadata (pg_merge_meta_t in C++)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, crate::VersionedDenc)]
+#[denc(crate = "crate", version = 1, compat = 1)]
 pub struct PgMergeMeta {
     pub source_pgid: PgId,
     pub ready_epoch: Epoch,
@@ -1336,58 +1337,6 @@ impl Serialize for PgMergeMeta {
         state.end()
     }
 }
-
-impl VersionedEncode for PgMergeMeta {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        self.source_pgid.encode(buf, features)?;
-        self.ready_epoch.encode(buf, features)?;
-        self.last_epoch_started.encode(buf, features)?;
-        self.last_epoch_clean.encode(buf, features)?;
-        self.source_version.encode(buf, features)?;
-        self.target_version.encode(buf, features)?;
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        let source_pgid = PgId::decode(buf, features)?;
-        let ready_epoch = Epoch::decode(buf, features)?;
-        let last_epoch_started = Epoch::decode(buf, features)?;
-        let last_epoch_clean = Epoch::decode(buf, features)?;
-        let source_version = EVersion::decode(buf, features)?;
-        let target_version = EVersion::decode(buf, features)?;
-        Ok(PgMergeMeta {
-            source_pgid,
-            ready_epoch,
-            last_epoch_started,
-            last_epoch_clean,
-            source_version,
-            target_version,
-        })
-    }
-
-    fn encoded_size_content(&self, _features: u64, _version: u8) -> Option<usize> {
-        None // Complex type - size computed by encoding
-    }
-}
-crate::denc::impl_denc_for_versioned!(PgMergeMeta);
 
 /// Snapshot interval set (snap_interval_set_t in C++)
 /// A set of snapshot intervals represented as a vector of SnapInterval
