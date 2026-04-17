@@ -203,10 +203,9 @@ impl AsyncSeek for RadosObject {
     }
 
     fn poll_complete(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        let target = match self.seek_target.take() {
-            Some(t) => t,
-            // No pending seek — return current offset.
-            None => return Poll::Ready(Ok(self.offset)),
+        // No pending seek — return current offset.
+        let Some(target) = self.seek_target.take() else {
+            return Poll::Ready(Ok(self.offset));
         };
 
         match target {
