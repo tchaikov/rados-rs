@@ -285,19 +285,7 @@ impl VersionedEncode for ObjectStatSum {
     }
 }
 
-impl Denc for ObjectStatSum {
-    fn encode<B: BufMut>(&self, buf: &mut B, features: u64) -> Result<(), RadosError> {
-        self.encode_versioned(buf, features)
-    }
-
-    fn decode<B: Buf>(buf: &mut B, features: u64) -> Result<Self, RadosError> {
-        Self::decode_versioned(buf, features)
-    }
-
-    fn encoded_size(&self, _features: u64) -> Option<usize> {
-        Some(6 + OBJECT_STAT_SUM_ENCODED_SIZE) // 6 bytes for ENCODE_START header + content
-    }
-}
+crate::denc::impl_denc_for_versioned!(ObjectStatSum);
 
 /// Collection of object statistics
 /// C++ definition: object_stat_collection_t in osd/osd_types.h
