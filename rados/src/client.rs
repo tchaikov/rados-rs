@@ -308,13 +308,10 @@ impl ClientBuilder {
         // don't need a keyring at all; attempting to read one would just fail.
         // When `ceph.conf` is available, honour its `auth_client_required` /
         // `auth_supported` setting; otherwise fall back to CephX (the common case).
-        let cephx_required = ceph_config
-            .as_ref()
-            .map(|c| {
-                c.get_auth_client_required()
-                    .contains(&crate::auth::protocol::CEPH_AUTH_CEPHX)
-            })
-            .unwrap_or(true);
+        let cephx_required = ceph_config.as_ref().is_none_or(|c| {
+            c.get_auth_client_required()
+                .contains(&crate::auth::protocol::CEPH_AUTH_CEPHX)
+        });
 
         let auth = if cephx_required {
             let keyring_path: PathBuf = self
