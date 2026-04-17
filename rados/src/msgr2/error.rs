@@ -42,14 +42,6 @@ impl Msgr2Error {
         Self::Protocol(msg.to_string())
     }
 
-    pub fn auth_error(msg: &str) -> Self {
-        Self::Auth(msg.to_string())
-    }
-
-    pub fn connection_error(msg: &str) -> Self {
-        Self::Connection(msg.to_string())
-    }
-
     pub fn invalid_data(msg: &str) -> Self {
         Self::InvalidData(msg.to_string())
     }
