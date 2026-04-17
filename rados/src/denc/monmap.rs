@@ -62,7 +62,17 @@ impl VersionedEncode for MonFeature {
 crate::denc::impl_denc_for_versioned!(MonFeature);
 
 /// Ceph release version for MonMap (ceph_release_t in C++)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    num_enum::FromPrimitive,
+    num_enum::IntoPrimitive,
+)]
 #[repr(u8)]
 pub enum MonCephRelease {
     #[default]
@@ -89,55 +99,26 @@ pub enum MonCephRelease {
     MAX = 20,
 }
 
-impl From<u8> for MonCephRelease {
-    fn from(v: u8) -> Self {
-        match v {
-            1 => MonCephRelease::Argonaut,
-            2 => MonCephRelease::Bobtail,
-            3 => MonCephRelease::Cuttlefish,
-            4 => MonCephRelease::Dumpling,
-            5 => MonCephRelease::Emperor,
-            6 => MonCephRelease::Firefly,
-            7 => MonCephRelease::Giant,
-            8 => MonCephRelease::Hammer,
-            9 => MonCephRelease::Infernalis,
-            10 => MonCephRelease::Jewel,
-            11 => MonCephRelease::Kraken,
-            12 => MonCephRelease::Luminous,
-            13 => MonCephRelease::Mimic,
-            14 => MonCephRelease::Nautilus,
-            15 => MonCephRelease::Octopus,
-            16 => MonCephRelease::Pacific,
-            17 => MonCephRelease::Quincy,
-            18 => MonCephRelease::Reef,
-            19 => MonCephRelease::Squid,
-            20 => MonCephRelease::MAX,
-            _ => MonCephRelease::Unknown,
-        }
-    }
-}
-
 crate::impl_denc_u8_enum!(MonCephRelease);
 
 /// Election strategy (election_strategy in C++)
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    Serialize,
+    num_enum::FromPrimitive,
+    num_enum::IntoPrimitive,
+)]
 #[repr(u8)]
 pub enum ElectionStrategy {
     #[default]
     Classic = 1,
     Disallow = 2,
     Connectivity = 3,
-}
-
-impl From<u8> for ElectionStrategy {
-    fn from(v: u8) -> Self {
-        match v {
-            1 => ElectionStrategy::Classic,
-            2 => ElectionStrategy::Disallow,
-            3 => ElectionStrategy::Connectivity,
-            _ => ElectionStrategy::Classic,
-        }
-    }
 }
 
 crate::impl_denc_u8_enum!(ElectionStrategy);
