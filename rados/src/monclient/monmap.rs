@@ -241,7 +241,7 @@ impl MonMapState {
 
     /// Get the weight of a monitor by rank
     pub fn get_weight(&self, rank: usize) -> u16 {
-        self.get_mon(rank).map(|m| m.weight).unwrap_or(0)
+        self.get_mon(rank).map_or(0, |m| m.weight)
     }
 
     /// Rebuild internal indices after deserialization

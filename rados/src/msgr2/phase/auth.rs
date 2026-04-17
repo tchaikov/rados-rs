@@ -198,7 +198,7 @@ impl AuthClient {
         // is bounded by `supported_methods.len()`, so no retry counter.
         let anchor_pos =
             rejected_method.and_then(|rm| self.supported_methods.iter().position(|&m| m == rm));
-        let search_start = anchor_pos.map(|pos| pos + 1).unwrap_or(0);
+        let search_start = anchor_pos.map_or(0, |pos| pos + 1);
 
         let new_method = self.supported_methods[search_start..]
             .iter()
