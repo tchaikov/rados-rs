@@ -2389,12 +2389,7 @@ impl OSDClient {
     async fn fail_all_pending_ops_blocklisted(&self) {
         let session_snapshot = self.collect_session_snapshot().await;
         for (_osd_id, session) in session_snapshot {
-            let tids: Vec<u64> = session
-                .get_pending_ops_metadata()
-                .into_iter()
-                .map(|(tid, _, _, _)| tid)
-                .collect();
-            for tid in tids {
+            for (tid, _, _, _) in session.get_pending_ops_metadata() {
                 if let Some(op) = session.remove_pending_op(tid) {
                     let _ = op.result_tx.send(Err(OSDClientError::Blocklisted));
                 }
