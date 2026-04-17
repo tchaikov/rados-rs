@@ -18,48 +18,15 @@ const MONMAP_COMPAT_VERSION: u8 = 3;
 const MONMAP_MIN_DECODE_VERSION: u8 = 6;
 
 /// Monitor feature flags (mon_feature_t in C++)
-/// Uses versioned encoding (ENCODE_START/DECODE_START)
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+/// Uses versioned encoding (ENCODE_START/DECODE_START).
+/// v1 is the only format Ceph has ever emitted; the previous manual
+/// `check_min_version!(version, 1, ...)` was a no-op and is dropped
+/// in favor of the derive.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, crate::VersionedDenc)]
+#[denc(crate = "crate", version = 1, compat = 1)]
 pub struct MonFeature {
     pub features: u64,
 }
-
-impl VersionedEncode for MonFeature {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        self.features.encode(buf, features)
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "MonFeature", "Quincy v17+");
-        Ok(MonFeature {
-            features: u64::decode(buf, features)?,
-        })
-    }
-
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        self.features.encoded_size(features)
-    }
-}
-
-crate::denc::impl_denc_for_versioned!(MonFeature);
 
 /// Ceph release version for MonMap (ceph_release_t in C++)
 #[derive(
