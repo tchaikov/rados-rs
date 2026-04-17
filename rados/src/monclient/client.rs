@@ -1029,12 +1029,9 @@ impl MonClient {
             return self.start_hunting().await;
         }
 
-        let active_con = match active_con_opt {
-            Some(con) => con,
-            None => {
-                debug!("No active connection in tick (not hunting)");
-                return Ok(());
-            }
+        let Some(active_con) = active_con_opt else {
+            debug!("No active connection in tick (not hunting)");
+            return Ok(());
         };
 
         // Detect unexpected I/O task death (connection died without explicit shutdown).
