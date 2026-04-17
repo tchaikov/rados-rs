@@ -5,8 +5,7 @@
 //! This is the response type for PGLS (PG List) operations.
 //! In C++, it's defined as pg_nls_response_template<librados::ListObjectImpl>
 
-use crate::denc::{Denc, HObject, RadosError, VersionedEncode};
-use bytes::{Buf, BufMut};
+use crate::denc::HObject;
 use serde::Serialize;
 
 /// ListObjectImpl - Object entry in a list response
@@ -43,7 +42,8 @@ impl ListObjectImpl {
 /// This type is used as the response for PGLS (PG List) operations.
 /// The handle is a cursor (hobject_t) for pagination, and entries contains
 /// the list of objects returned.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, crate::VersionedDenc)]
+#[denc(crate = "crate", version = 1, compat = 1)]
 pub struct PgNlsResponse {
     /// Cursor for next iteration (hobject_t)
     /// When handle.hash == u32::MAX, it indicates end of PG
@@ -64,49 +64,10 @@ impl PgNlsResponse {
     }
 }
 
-impl VersionedEncode for PgNlsResponse {
-    fn encoding_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn compat_version(&self, _features: u64) -> u8 {
-        1
-    }
-
-    fn encode_content<B: BufMut>(
-        &self,
-        buf: &mut B,
-        features: u64,
-        _version: u8,
-    ) -> Result<(), RadosError> {
-        Denc::encode(&self.handle, buf, features)?;
-        Denc::encode(&self.entries, buf, features)?;
-        Ok(())
-    }
-
-    fn decode_content<B: Buf>(
-        buf: &mut B,
-        features: u64,
-        version: u8,
-        _compat_version: u8,
-    ) -> Result<Self, RadosError> {
-        crate::denc::check_min_version!(version, 1, "PgNlsResponse", "Quincy v17+");
-        let handle = <HObject as Denc>::decode(buf, features)?;
-        let entries = <Vec<ListObjectImpl> as Denc>::decode(buf, features)?;
-        Ok(Self { handle, entries })
-    }
-
-    fn encoded_size_content(&self, features: u64, _version: u8) -> Option<usize> {
-        Some(self.handle.encoded_size(features)? + self.entries.encoded_size(features)?)
-    }
-}
-
-crate::denc::impl_denc_for_versioned!(PgNlsResponse);
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::denc::{HObject, SNAP_HEAD};
+    use crate::denc::{Denc, HObject, SNAP_HEAD};
     use bytes::BytesMut;
 
     #[test]
