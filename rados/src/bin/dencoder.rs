@@ -512,7 +512,6 @@ fn main() {
         // Determine how many arguments this command needs
         let arg_count = match cmd.as_str() {
             "type" | "import" | "export" | "set_features" => 1,
-            "decode" | "encode" | "dump_json" | "hexdump" | "get_features" | "list_types" => 0,
             _ => 0,
         };
 
