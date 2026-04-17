@@ -313,13 +313,10 @@ impl OSDClient {
 
     /// Get the current OSDMap
     pub async fn get_osdmap(&self) -> Result<Arc<crate::osdclient::osdmap::OSDMap>> {
-        let osdmap = self.osdmap_rx.borrow().clone();
-        match osdmap {
-            Some(map) => Ok(map),
-            None => Err(OSDClientError::Connection(
-                "OSDMap not available".to_string(),
-            )),
-        }
+        self.osdmap_rx
+            .borrow()
+            .clone()
+            .ok_or_else(|| OSDClientError::Connection("OSDMap not available".to_string()))
     }
 
     /// Return the current OSDMap epoch, or 0 if no map has been received yet.
