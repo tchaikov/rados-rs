@@ -71,12 +71,14 @@ impl Throttle {
         &self,
         bytes: usize,
     ) -> Result<ThrottlePermit<'_>, crate::osdclient::error::OSDClientError> {
-        // Acquire operation slot (blocks if at limit)
-        let op_permit = self.ops_sem.acquire().await.map_err(|_| {
+        fn closed() -> crate::osdclient::error::OSDClientError {
             crate::osdclient::error::OSDClientError::Internal(
                 "Throttle semaphore closed unexpectedly".into(),
             )
-        })?;
+        }
+
+        // Acquire operation slot (blocks if at limit)
+        let op_permit = self.ops_sem.acquire().await.map_err(|_| closed())?;
 
         // Acquire byte budget (blocks if at limit)
         let bytes_permit = if bytes > 0 {
@@ -84,11 +86,7 @@ impl Throttle {
                 self.bytes_sem
                     .acquire_many((bytes as u64).min(u32::MAX as u64) as u32)
                     .await
-                    .map_err(|_| {
-                        crate::osdclient::error::OSDClientError::Internal(
-                            "Throttle semaphore closed unexpectedly".into(),
-                        )
-                    })?,
+                    .map_err(|_| closed())?,
             )
         } else {
             None
