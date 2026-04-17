@@ -103,8 +103,6 @@ impl HObject {
 }
 
 impl VersionedEncode for HObject {
-    const FEATURE_DEPENDENT: bool = false;
-
     fn encoding_version(&self, _features: u64) -> u8 {
         4
     }

@@ -25,8 +25,6 @@ pub struct MonFeature {
 }
 
 impl VersionedEncode for MonFeature {
-    const FEATURE_DEPENDENT: bool = false;
-
     fn encoding_version(&self, _features: u64) -> u8 {
         1
     }
