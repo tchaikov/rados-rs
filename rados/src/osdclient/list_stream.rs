@@ -62,15 +62,9 @@ pub fn list_objects_stream(
                     Ok((names, next_cursor)) => {
                         buf.extend(names);
                         let done = next_cursor.is_none();
-                        match buf.pop_front() {
-                            Some(name) => {
-                                return Some((Ok(name), (ioctx, buf, next_cursor, done)));
-                            }
-                            None => {
-                                // Empty page with no next cursor — listing is complete.
-                                return None;
-                            }
-                        }
+                        // Empty page with no next cursor — listing is complete.
+                        let name = buf.pop_front()?;
+                        return Some((Ok(name), (ioctx, buf, next_cursor, done)));
                     }
                 }
             }
