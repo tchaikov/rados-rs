@@ -491,10 +491,12 @@ impl Denc for CephXAuthorizeReply {
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
         let base = 1 + 8; // struct_v + nonce_plus_one
-        match &self.connection_secret {
-            Some(secret) => Some(base + 4 + secret.len()), // + length prefix + data
-            None => Some(base),
-        }
+        // + length prefix + data when connection_secret is present
+        Some(
+            self.connection_secret
+                .as_ref()
+                .map_or(base, |s| base + 4 + s.len()),
+        )
     }
 }
 
