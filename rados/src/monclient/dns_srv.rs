@@ -112,10 +112,7 @@ pub async fn resolve_mon_addrs_via_dns_srv(srv_name: &str) -> Result<MonMapState
 /// - `"ceph-mon"` → `("ceph-mon", "")`
 /// - `"ceph-mon_example.com"` → `("ceph-mon", "example.com")`
 fn parse_srv_name(srv_name: &str) -> (&str, &str) {
-    match srv_name.find('_') {
-        Some(idx) => (&srv_name[..idx], &srv_name[idx + 1..]),
-        None => (srv_name, ""),
-    }
+    srv_name.split_once('_').unwrap_or((srv_name, ""))
 }
 
 #[cfg(test)]
