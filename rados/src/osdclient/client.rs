@@ -1237,7 +1237,7 @@ impl OSDClient {
             None => Ok(crate::HObject::empty_cursor(pool)),
             Some(s) => {
                 let hash: u32 = s.parse().map_err(|e| {
-                    OSDClientError::Other(format!("Invalid list cursor '{s}': {e}"))
+                    OSDClientError::InvalidOperation(format!("Invalid list cursor '{s}': {e}"))
                 })?;
                 Ok(crate::HObject::new(pool, String::new(), hash))
             }
