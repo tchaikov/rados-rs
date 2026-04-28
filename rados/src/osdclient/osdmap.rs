@@ -3177,10 +3177,9 @@ impl OSDMap {
 
     /// Returns the parsed `PoolFlags` for the given pool, or empty if unknown.
     fn pool_flags(&self, pool_id: u64) -> PoolFlags {
-        self.pools
-            .get(&pool_id)
-            .map(|p| PoolFlags::from_bits_truncate(p.flags))
-            .unwrap_or_else(PoolFlags::empty)
+        self.pools.get(&pool_id).map_or(PoolFlags::empty(), |p| {
+            PoolFlags::from_bits_truncate(p.flags)
+        })
     }
 
     /// True if the given pool is full (no writes accepted).
