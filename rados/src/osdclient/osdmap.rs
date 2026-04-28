@@ -3006,9 +3006,7 @@ impl OSDMap {
             if a < CEPH_OSD_DEFAULT_PRIMARY_AFFINITY
                 && (crate::crush::hash::crush_hash32_2(pps, o as u32) >> 16) >= a
             {
-                if fallback.is_none() {
-                    fallback = Some(i);
-                }
+                fallback.get_or_insert(i);
             } else {
                 return Some(i);
             }
