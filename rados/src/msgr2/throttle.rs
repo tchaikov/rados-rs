@@ -225,11 +225,9 @@ impl ThrottleState {
             None
         };
 
-        let rate_wait = match (message_rate_wait, byte_rate_wait) {
-            (Some(lhs), Some(rhs)) => Some(lhs.max(rhs)),
-            (Some(wait), None) | (None, Some(wait)) => Some(wait),
-            (None, None) => None,
-        };
+        // `Option`'s `Ord` treats `None < Some(_)`, so `a.max(b)` yields the larger of
+        // two `Some`s and falls back to whichever side is populated.
+        let rate_wait = message_rate_wait.max(byte_rate_wait);
 
         rate_wait.or_else(|| queue_depth_blocked.then_some(Duration::ZERO))
     }
