@@ -58,8 +58,7 @@ pub struct OSDClientConfig {
 pub fn default_client_inc() -> u32 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as u32)
-        .unwrap_or(1)
+        .map_or(1, |d| d.as_secs() as u32)
 }
 
 impl Default for OSDClientConfig {
