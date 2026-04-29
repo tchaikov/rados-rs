@@ -102,9 +102,7 @@ impl MonSub {
     /// Mark subscriptions as sent
     pub fn renewed(&mut self) {
         self.renew_after = None;
-        if self.renew_sent.is_none() {
-            self.renew_sent = Some(Instant::now());
-        }
+        self.renew_sent.get_or_insert_with(Instant::now);
 
         // Move sub_new to sub_sent
         self.sub_sent.extend(self.sub_new.drain());
