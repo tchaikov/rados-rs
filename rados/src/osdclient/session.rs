@@ -59,9 +59,13 @@ const DEFAULT_KEEPALIVE_INTERVAL_SECS: u64 = 10;
 ///
 /// Following Ceph pattern for explicit connection state tracking.
 /// Provides better observability and clearer semantics than implicit state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, num_enum::FromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u8)]
 pub(crate) enum ConnectionState {
     /// Initial state - not yet connected
+    #[default]
     Disconnected = 0,
     /// Attempting to establish connection
     Connecting = 1,
@@ -69,18 +73,6 @@ pub(crate) enum ConnectionState {
     Connected = 2,
     /// Connection closed (terminal state)
     Closed = 3,
-}
-
-impl ConnectionState {
-    fn from_u8(v: u8) -> Self {
-        match v {
-            0 => Self::Disconnected,
-            1 => Self::Connecting,
-            2 => Self::Connected,
-            3 => Self::Closed,
-            _ => Self::Disconnected,
-        }
-    }
 }
 
 /// Atomic wrapper around ConnectionState for lock-free reads on the hot path.
@@ -97,7 +89,7 @@ impl AtomicConnectionState {
     }
 
     fn load(&self) -> ConnectionState {
-        ConnectionState::from_u8(self.0.load(Ordering::Acquire))
+        ConnectionState::from(self.0.load(Ordering::Acquire))
     }
 
     fn store(&self, state: ConnectionState) {
