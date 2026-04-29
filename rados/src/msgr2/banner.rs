@@ -67,8 +67,7 @@ impl Banner {
             return Err(Error::invalid_data("Incomplete banner prefix"));
         }
 
-        let mut banner_bytes = vec![0u8; CEPH_BANNER_LEN];
-        src.copy_to_slice(&mut banner_bytes);
+        let banner_bytes = src.copy_to_bytes(CEPH_BANNER_LEN);
 
         // Check if banner starts with "ceph v"
         if !banner_bytes.starts_with(b"ceph v") {
@@ -108,7 +107,7 @@ impl Banner {
             src.advance(payload_size - 16);
         }
         Ok(Self {
-            banner: Bytes::from(banner_bytes),
+            banner: banner_bytes,
             supported_features,
             required_features,
         })
