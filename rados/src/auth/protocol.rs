@@ -175,7 +175,10 @@ pub struct ServiceTicketReply {
 
 /// Authentication mode for different Ceph services
 /// From src/auth/Auth.h
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u8)]
 pub enum AuthMode {
     /// No authentication
     None = 0,
@@ -183,21 +186,6 @@ pub enum AuthMode {
     Authorizer = 1,
     /// Monitor mode - used specifically for monitor connections
     Mon = 10,
-}
-
-impl AuthMode {
-    pub fn as_u8(self) -> u8 {
-        self as u8
-    }
-
-    pub fn from_u8(val: u8) -> Option<Self> {
-        match val {
-            0 => Some(AuthMode::None),
-            1 => Some(AuthMode::Authorizer),
-            10 => Some(AuthMode::Mon),
-            _ => None,
-        }
-    }
 }
 
 /// Magic value for encrypted CephX data
@@ -621,14 +609,14 @@ mod tests {
 
     #[test]
     fn test_auth_mode_conversions() {
-        assert_eq!(AuthMode::Mon.as_u8(), 10);
-        assert_eq!(AuthMode::Authorizer.as_u8(), 1);
-        assert_eq!(AuthMode::None.as_u8(), 0);
+        assert_eq!(u8::from(AuthMode::Mon), 10);
+        assert_eq!(u8::from(AuthMode::Authorizer), 1);
+        assert_eq!(u8::from(AuthMode::None), 0);
 
-        assert_eq!(AuthMode::from_u8(10), Some(AuthMode::Mon));
-        assert_eq!(AuthMode::from_u8(1), Some(AuthMode::Authorizer));
-        assert_eq!(AuthMode::from_u8(0), Some(AuthMode::None));
-        assert_eq!(AuthMode::from_u8(99), None);
+        assert_eq!(AuthMode::try_from(10).ok(), Some(AuthMode::Mon));
+        assert_eq!(AuthMode::try_from(1).ok(), Some(AuthMode::Authorizer));
+        assert_eq!(AuthMode::try_from(0).ok(), Some(AuthMode::None));
+        assert!(AuthMode::try_from(99u8).is_err());
     }
 
     #[test]

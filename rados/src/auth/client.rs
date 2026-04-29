@@ -108,7 +108,7 @@ impl CephXClientHandler {
         );
 
         let mut payload = BytesMut::with_capacity(1 + 16 + 8);
-        self.auth_mode.as_u8().encode(&mut payload, 0)?;
+        u8::from(self.auth_mode).encode(&mut payload, 0)?;
         self.entity_name.encode(&mut payload, 0)?;
         global_id.encode(&mut payload, 0)?;
 

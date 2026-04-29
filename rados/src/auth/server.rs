@@ -83,7 +83,7 @@ impl CephXServerHandler {
         let mut buf = Bytes::copy_from_slice(payload);
 
         let auth_mode_byte = u8::decode(&mut buf, 0)?;
-        let auth_mode = AuthMode::from_u8(auth_mode_byte).ok_or_else(|| {
+        let auth_mode = AuthMode::try_from(auth_mode_byte).map_err(|_| {
             CephXError::ProtocolError(format!("Invalid auth mode: {auth_mode_byte}"))
         })?;
 
