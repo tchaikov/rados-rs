@@ -184,9 +184,8 @@ fn validate_crush_map(map: &CrushMap) -> Result<()> {
     };
 
     for (i, slot) in map.buckets.iter().enumerate() {
-        let bucket = match slot {
-            Some(b) => b,
-            None => continue,
+        let Some(bucket) = slot else {
+            continue;
         };
 
         let expected_id = -1 - i as i32;

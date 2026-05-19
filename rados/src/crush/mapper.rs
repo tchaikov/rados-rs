@@ -285,12 +285,9 @@ fn crush_choose_firstn(
                     ftotal
                 );
 
-                let itemtype = match get_item_type(map, item) {
-                    Some(t) => t,
-                    None => {
-                        tracing::debug!("Invalid bucket {}", item);
-                        continue 'tries;
-                    }
+                let Some(itemtype) = get_item_type(map, item) else {
+                    tracing::debug!("Invalid bucket {}", item);
+                    continue 'tries;
                 };
 
                 tracing::debug!(
@@ -438,13 +435,10 @@ fn crush_choose_indep(
                     ftotal
                 );
 
-                let itemtype = match get_item_type(map, candidate) {
-                    Some(t) => t,
-                    None => {
-                        tracing::debug!("Invalid bucket {}", candidate);
-                        out[rep] = CRUSH_ITEM_NONE;
-                        break;
-                    }
+                let Some(itemtype) = get_item_type(map, candidate) else {
+                    tracing::debug!("Invalid bucket {}", candidate);
+                    out[rep] = CRUSH_ITEM_NONE;
+                    break;
                 };
 
                 tracing::debug!(
