@@ -499,7 +499,9 @@ macro_rules! osd_op {
 /// - Operation number - bits 0-7
 ///
 /// This matches the C++ __CEPH_OSD_OP macro from include/rados.h
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
 #[repr(u16)]
 pub enum OpCode {
     /// Read operation: __CEPH_OSD_OP(RD, DATA, 1)
@@ -546,36 +548,6 @@ pub enum OpCode {
 }
 
 impl OpCode {
-    pub fn as_u16(self) -> u16 {
-        self as u16
-    }
-
-    /// Try to convert a u16 to an OpCode
-    pub fn from_u16(value: u16) -> Option<Self> {
-        match value {
-            0x1201 => Some(OpCode::Read),        // RD | DATA | 1
-            0x1202 => Some(OpCode::Stat),        // RD | DATA | 2
-            0x1205 => Some(OpCode::SparseRead),  // RD | DATA | 5
-            0x2201 => Some(OpCode::Write),       // WR | DATA | 1
-            0x2202 => Some(OpCode::WriteFull),   // WR | DATA | 2
-            0x2203 => Some(OpCode::Truncate),    // WR | DATA | 3
-            0x2206 => Some(OpCode::Append),      // WR | DATA | 6
-            0x1208 => Some(OpCode::AssertVer),   // RD | DATA | 8
-            0x2205 => Some(OpCode::Delete),      // WR | DATA | 5
-            0x220D => Some(OpCode::Create),      // WR | DATA | 13
-            0x1301 => Some(OpCode::GetXattr),    // RD | ATTR | 1
-            0x2301 => Some(OpCode::SetXattr),    // WR | ATTR | 1
-            0x2302 => Some(OpCode::RemoveXattr), // WR | ATTR | 2
-            0x1303 => Some(OpCode::ListXattrs),  // RD | ATTR | 3
-            0x3501 => Some(OpCode::Call),        // RMW | CLS | 1
-            0x1501 => Some(OpCode::Pgls),        // RD | PG | 1
-            0x1505 => Some(OpCode::Pgnls),       // RD | PG | 5
-            0x120A => Some(OpCode::ListSnaps),   // RD | DATA | 10
-            0x220E => Some(OpCode::Rollback),    // WR | DATA | 14
-            _ => None,
-        }
-    }
-
     /// Check if this operation is a read operation
     pub fn is_read(self) -> bool {
         (self as u16) & CEPH_OSD_OP_MODE_RD != 0
@@ -1311,13 +1283,13 @@ mod tests {
     #[test]
     fn test_opcode_from_u16_sparse_read() {
         // Test conversion from u16 to OpCode for SparseRead
-        assert_eq!(OpCode::from_u16(0x1205), Some(OpCode::SparseRead));
+        assert_eq!(OpCode::try_from(0x1205u16), Ok(OpCode::SparseRead));
     }
 
     #[test]
     fn test_opcode_from_u16_write_full() {
         // Test conversion from u16 to OpCode for WriteFull
-        assert_eq!(OpCode::from_u16(0x2202), Some(OpCode::WriteFull));
+        assert_eq!(OpCode::try_from(0x2202u16), Ok(OpCode::WriteFull));
     }
 
     #[test]

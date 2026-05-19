@@ -153,7 +153,7 @@ const _: () = assert!(CEPH_OSD_OP_SIZE == 38);
 impl Denc for OSDOp {
     fn encode<B: BufMut>(&self, buf: &mut B, _features: u64) -> Result<(), RadosError> {
         // 1. op (u16)
-        buf.put_u16_le(self.op.as_u16());
+        buf.put_u16_le(u16::from(self.op));
 
         // 2. flags (u32)
         buf.put_u32_le(self.flags);
@@ -245,7 +245,7 @@ impl Denc for OSDOp {
     fn decode<B: Buf>(buf: &mut B, _features: u64) -> Result<Self, RadosError> {
         // 1. op (u16)
         let op_code = buf.get_u16_le();
-        let op = OpCode::from_u16(op_code).ok_or_else(|| {
+        let op = OpCode::try_from(op_code).map_err(|_| {
             RadosError::Protocol(format!("Unknown operation code: 0x{op_code:04x}"))
         })?;
 
@@ -570,7 +570,7 @@ mod tests {
         assert_eq!(buf.len(), 38);
 
         let decoded = OSDOp::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.op.as_u16(), OpCode::Read.as_u16());
+        assert_eq!(decoded.op, OpCode::Read);
         assert_eq!(decoded.flags, 0);
         match decoded.op_data {
             OpData::Extent {
@@ -607,7 +607,7 @@ mod tests {
         assert_eq!(buf.len(), 38);
 
         let decoded = OSDOp::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.op.as_u16(), OpCode::Pgls.as_u16());
+        assert_eq!(decoded.op, OpCode::Pgls);
         match decoded.op_data {
             OpData::Pgls {
                 max_entries,
@@ -641,7 +641,7 @@ mod tests {
         assert_eq!(buf.len(), 38);
 
         let decoded = OSDOp::decode(&mut buf, 0).unwrap();
-        assert_eq!(decoded.op.as_u16(), OpCode::GetXattr.as_u16());
+        assert_eq!(decoded.op, OpCode::GetXattr);
         match decoded.op_data {
             OpData::Xattr {
                 name_len,
