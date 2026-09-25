@@ -576,6 +576,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)?).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattr")?;
 
         Ok(result.first_outdata()?.clone())
     }
@@ -604,7 +605,8 @@ impl IoCtx {
             .op(OSDOp::set_xattr(name_str, value)?)
             .build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "set_xattr")?;
         Ok(())
     }
 
@@ -628,7 +630,8 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "remove_xattr")?;
         Ok(())
     }
 
@@ -651,6 +654,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::list_xattrs()).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattrs")?;
 
         // Parse outdata as list of strings
         let mut data = &result.first_outdata()?[..];
