@@ -90,7 +90,7 @@ jobs:
 
       - name: Run osdclient Integration Tests (CRC enabled)
         run: |
-          for test in osdclient_integration_test osdclient_object_io_test osdclient_pool_operations osdclient_rados_operations; do
+          for test in osdclient_integration_test osdclient_object_io_test osdclient_pool_operations osdclient_rados_operations osdclient_xattr_operations; do
             cargo test -p rados --test "$test" -- --ignored --nocapture
           done
         env:
@@ -100,7 +100,7 @@ jobs:
 
       - name: Run osdclient Integration Tests (CRC disabled)
         run: |
-          for test in osdclient_integration_test osdclient_object_io_test osdclient_rados_operations; do
+          for test in osdclient_integration_test osdclient_object_io_test osdclient_rados_operations osdclient_xattr_operations; do
             cargo test -p rados --test "$test" -- --ignored --nocapture
           done
         env:
