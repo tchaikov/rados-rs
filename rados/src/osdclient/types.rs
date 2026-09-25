@@ -457,7 +457,6 @@ impl JaegerSpanContext {
 // OSD operation modes (from Ceph's rados.h)
 const CEPH_OSD_OP_MODE_RD: u16 = 0x1000; // Read mode
 const CEPH_OSD_OP_MODE_WR: u16 = 0x2000; // Write mode
-const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode (used via osd_op! macro)
 
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
@@ -474,17 +473,14 @@ macro_rules! osd_op {
     (WR, DATA, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_DATA | $nr
     };
-    (RMW, DATA, $nr:expr) => {
-        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_DATA | $nr
-    };
     (RD, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_ATTR | $nr
     };
     (WR, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_ATTR | $nr
     };
-    (RMW, CLS, $nr:expr) => {
-        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_EXEC | $nr
+    (RD, EXEC, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_EXEC | $nr
     };
     (RD, PG, $nr:expr) => {
         CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_PG | $nr
@@ -532,8 +528,8 @@ pub enum OpCode {
     RemoveXattr = osd_op!(WR, ATTR, 2),
     /// List extended attributes: __CEPH_OSD_OP(RD, ATTR, 3)
     ListXattrs = osd_op!(RD, ATTR, 3),
-    /// Call object class method: __CEPH_OSD_OP(RMW, CLS, 1)
-    Call = osd_op!(RMW, CLS, 1),
+    /// Call object class method: CEPH_OSD_OP_CALL = __CEPH_OSD_OP(RD, EXEC, 1)
+    Call = osd_op!(RD, EXEC, 1),
     /// PG list operation (legacy): __CEPH_OSD_OP(RD, PG, 1) = PGLS
     /// Returns pg_ls_response_t (no namespace support). Kept for completeness.
     Pgls = osd_op!(RD, PG, 1),
@@ -777,17 +773,21 @@ impl OSDOp {
         method: impl Into<String>,
         indata: Bytes,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        use crate::Denc;
         use bytes::BytesMut;
 
         let class = class.into();
         let method = method.into();
 
-        // Encode class and method into indata buffer (prepended to actual indata)
-        // 4-byte len prefix + content for each string
-        let mut buf = BytesMut::with_capacity(4 + class.len() + 4 + method.len());
-        class.encode(&mut buf, 0)?;
-        method.encode(&mut buf, 0)?;
+        // The CALL payload is class name bytes + method name bytes + method
+        // indata, all unprefixed and unterminated — the OSD slices them back
+        // out using class_len/method_len from the op header (below), not a
+        // length embedded in the payload. Matches Objecter.h's `call()`
+        // helpers and objclass.cc's `cls_call()`, which both
+        // `bufferlist::append(cname, class_len)` rather than encode a
+        // denc-style length-prefixed string.
+        let mut buf = BytesMut::with_capacity(class.len() + method.len() + indata.len());
+        buf.extend_from_slice(class.as_bytes());
+        buf.extend_from_slice(method.as_bytes());
         buf.extend_from_slice(&indata);
 
         Ok(Self {
@@ -1261,6 +1261,60 @@ pub struct ListResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_opcode_encodings_against_rados_h() {
+        // Values computed from ceph/src/include/rados.h's __CEPH_FORALL_OSD_OPS
+        // table (CEPH_OSD_OP_MODE_* | CEPH_OSD_OP_TYPE_* | nr), so drift between
+        // this enum and upstream's opcode assignments is caught here rather than
+        // as an EOPNOTSUPP from a live OSD.
+        //
+        // RemoveXattr and ListXattrs are intentionally not asserted here: their
+        // current `nr` values (2 and 3) don't match rados.h's RMXATTR (nr 4) and
+        // GETXATTRS (nr 2), which looks like a separate, pre-existing bug outside
+        // this change's scope.
+        assert_eq!(OpCode::Read as u16, 0x1201); // __CEPH_OSD_OP(RD, DATA, 1)
+        assert_eq!(OpCode::Stat as u16, 0x1202); // __CEPH_OSD_OP(RD, DATA, 2)
+        assert_eq!(OpCode::Write as u16, 0x2201); // __CEPH_OSD_OP(WR, DATA, 1)
+        assert_eq!(OpCode::GetXattr as u16, 0x1301); // __CEPH_OSD_OP(RD, ATTR, 1)
+        assert_eq!(OpCode::SetXattr as u16, 0x2301); // __CEPH_OSD_OP(WR, ATTR, 1)
+        assert_eq!(OpCode::Pgnls as u16, 0x1505); // __CEPH_OSD_OP(RD, PG, 5)
+        assert_eq!(OpCode::Call as u16, 0x1401); // __CEPH_OSD_OP(RD, EXEC, 1)
+    }
+
+    #[test]
+    fn test_osdop_call_encodes_raw_class_and_method_bytes() {
+        // The OSD slices class/method back out of indata using class_len and
+        // method_len from the op header, not a length embedded in the
+        // payload, so the payload must be raw bytes with no length prefix.
+        let op = OSDOp::call("hello", "say_hello", Bytes::new()).expect("call");
+        assert_eq!(op.indata, Bytes::from_static(b"hellosay_hello"));
+
+        match op.op_data {
+            OpData::Call {
+                class_len,
+                method_len,
+                indata_len,
+            } => {
+                assert_eq!(class_len, 5);
+                assert_eq!(method_len, 9);
+                assert_eq!(indata_len, 0);
+            }
+            _ => panic!("Expected OpData::Call"),
+        }
+    }
+
+    #[test]
+    fn test_osdop_call_appends_method_indata_after_class_and_method() {
+        let payload = Bytes::from_static(b"payload");
+        let op = OSDOp::call("cls", "m", payload.clone()).expect("call");
+        assert_eq!(op.indata, Bytes::from_static(b"clsmpayload"));
+
+        match op.op_data {
+            OpData::Call { indata_len, .. } => assert_eq!(indata_len, payload.len() as u32),
+            _ => panic!("Expected OpData::Call"),
+        }
+    }
 
     #[test]
     fn test_opcode_sparse_read_encoding() {
