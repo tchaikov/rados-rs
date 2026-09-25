@@ -26,8 +26,11 @@
 //!     .build();
 //! ```
 
+use crate::osdclient::error::Result;
+use crate::osdclient::omap::{OmapAssertion, OmapKey, OmapKeySet, OmapMap};
 use crate::osdclient::types::{OSDOp, OsdOpFlags};
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// A built operation ready for execution
@@ -252,6 +255,99 @@ impl OpBuilder {
         self
     }
 
+    /// Add an omap_get_keys operation (list keys after `start_after`).
+    ///
+    /// See [`OSDOp::omap_get_keys`] for `max_return` semantics: 0 returns no
+    /// entries, so pass a positive limit.
+    pub fn omap_get_keys(mut self, start_after: &[u8], max_return: u64) -> Result<Self> {
+        self.ops
+            .push(OSDOp::omap_get_keys(start_after, max_return)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_vals operation (list entries after `start_after`
+    /// whose key starts with `filter_prefix`).
+    ///
+    /// See [`OSDOp::omap_get_vals`] for `max_return` semantics: 0 returns no
+    /// entries, so pass a positive limit.
+    pub fn omap_get_vals(
+        mut self,
+        start_after: &[u8],
+        max_return: u64,
+        filter_prefix: &[u8],
+    ) -> Result<Self> {
+        self.ops.push(OSDOp::omap_get_vals(
+            start_after,
+            max_return,
+            filter_prefix,
+        )?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_vals_by_keys operation (values for exactly the given
+    /// `keys`, with missing keys simply absent from the reply).
+    pub fn omap_get_vals_by_keys(mut self, keys: &OmapKeySet) -> Result<Self> {
+        self.ops.push(OSDOp::omap_get_vals_by_keys(keys)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_header operation (the object's omap header, separate
+    /// from its key/value entries).
+    pub fn omap_get_header(mut self) -> Self {
+        self.ops.push(OSDOp::omap_get_header());
+        self.flags |= OsdOpFlags::READ;
+        self
+    }
+
+    /// Add an omap_set operation (insert or overwrite the given `vals`).
+    pub fn omap_set(mut self, vals: &OmapMap) -> Result<Self> {
+        self.ops.push(OSDOp::omap_set(vals)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_set_header operation. The header is raw bytes, not
+    /// length-prefixed.
+    pub fn omap_set_header(mut self, header: Bytes) -> Self {
+        self.ops.push(OSDOp::omap_set_header(header));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add an omap_clear operation (remove all omap entries, but not the
+    /// header).
+    pub fn omap_clear(mut self) -> Self {
+        self.ops.push(OSDOp::omap_clear());
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add an omap_rm_keys operation (remove the given `keys`).
+    pub fn omap_rm_keys(mut self, keys: &OmapKeySet) -> Result<Self> {
+        self.ops.push(OSDOp::omap_rm_keys(keys)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_rm_range operation (remove keys in `[begin, end)`).
+    pub fn omap_rm_range(mut self, begin: &[u8], end: &[u8]) -> Result<Self> {
+        self.ops.push(OSDOp::omap_rm_range(begin, end)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_cmp operation (fail the whole transaction with
+    /// `ECANCELED` when any assertion fails). This is a read: a transaction
+    /// of only assertions makes no change.
+    pub fn omap_cmp(mut self, assertions: &BTreeMap<OmapKey, OmapAssertion>) -> Result<Self> {
+        self.ops.push(OSDOp::omap_cmp(assertions)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
     /// Add custom flags
     pub fn flags(mut self, flags: OsdOpFlags) -> Self {
         self.flags |= flags;
@@ -287,6 +383,7 @@ impl OpBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osdclient::types::OpCode;
 
     #[test]
     fn test_opbuilder_read() {
@@ -413,5 +510,21 @@ mod tests {
 
         assert_eq!(op.ops.len(), 1);
         assert!(op.is_read());
+    }
+
+    #[test]
+    fn omap_builder_sets_flags_and_keeps_order() {
+        let mut vals = crate::osdclient::omap::OmapMap::new();
+        vals.insert(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
+        let built = OpBuilder::new()
+            .omap_set(&vals)
+            .expect("set")
+            .omap_get_header()
+            .build();
+        assert!(built.is_write());
+        assert!(built.is_read());
+        let ops = built.into_ops();
+        assert_eq!(ops[0].op, OpCode::OmapSetVals);
+        assert_eq!(ops[1].op, OpCode::OmapGetHeader);
     }
 }

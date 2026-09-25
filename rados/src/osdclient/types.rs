@@ -528,10 +528,10 @@ pub enum OpCode {
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
-    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 2)
-    RemoveXattr = osd_op!(WR, ATTR, 2),
-    /// List extended attributes: __CEPH_OSD_OP(RD, ATTR, 3)
-    ListXattrs = osd_op!(RD, ATTR, 3),
+    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 4) = RMXATTR
+    RemoveXattr = osd_op!(WR, ATTR, 4),
+    /// Get all extended attributes: __CEPH_OSD_OP(RD, ATTR, 2) = GETXATTRS
+    ListXattrs = osd_op!(RD, ATTR, 2),
     /// Call object class method: __CEPH_OSD_OP(RMW, CLS, 1)
     Call = osd_op!(RMW, CLS, 1),
     /// PG list operation (legacy): __CEPH_OSD_OP(RD, PG, 1) = PGLS
@@ -545,6 +545,26 @@ pub enum OpCode {
     ListSnaps = osd_op!(RD, DATA, 10),
     /// Roll back object HEAD to a prior snapshot: __CEPH_OSD_OP(WR, DATA, 14)
     Rollback = osd_op!(WR, DATA, 14),
+    /// CEPH_OSD_OP_OMAPGETKEYS
+    OmapGetKeys = osd_op!(RD, DATA, 17),
+    /// CEPH_OSD_OP_OMAPGETVALS
+    OmapGetVals = osd_op!(RD, DATA, 18),
+    /// CEPH_OSD_OP_OMAPGETHEADER
+    OmapGetHeader = osd_op!(RD, DATA, 19),
+    /// CEPH_OSD_OP_OMAPGETVALSBYKEYS
+    OmapGetValsByKeys = osd_op!(RD, DATA, 20),
+    /// CEPH_OSD_OP_OMAPSETVALS
+    OmapSetVals = osd_op!(WR, DATA, 21),
+    /// CEPH_OSD_OP_OMAPSETHEADER
+    OmapSetHeader = osd_op!(WR, DATA, 22),
+    /// CEPH_OSD_OP_OMAPCLEAR
+    OmapClear = osd_op!(WR, DATA, 23),
+    /// CEPH_OSD_OP_OMAPRMKEYS
+    OmapRmKeys = osd_op!(WR, DATA, 24),
+    /// CEPH_OSD_OP_OMAP_CMP
+    OmapCmp = osd_op!(RD, DATA, 25),
+    /// CEPH_OSD_OP_OMAPRMKEYRANGE
+    OmapRmKeyRange = osd_op!(WR, DATA, 44),
 }
 
 impl OpCode {
@@ -915,18 +935,20 @@ impl OSDOp {
         Self::call("lock", "unlock", buf.freeze())
     }
 
-    /// Build an xattr operation with encoded name and optional value
+    /// Build an xattr operation with optional value.
+    ///
+    /// The OSD reads `name_len` raw bytes of name and then `value_len` raw
+    /// bytes of value from indata (Objecter's `add_xattr`); neither carries a
+    /// length prefix.
     fn xattr_op(
         op: OpCode,
         name: String,
         value: Option<Bytes>,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        use crate::Denc;
         use bytes::BytesMut;
 
-        let mut buf =
-            BytesMut::with_capacity(4 + name.len() + value.as_ref().map_or(0, |v| v.len()));
-        name.encode(&mut buf, 0)?;
+        let mut buf = BytesMut::with_capacity(name.len() + value.as_ref().map_or(0, |v| v.len()));
+        buf.extend_from_slice(name.as_bytes());
 
         let value_len = value.as_ref().map_or(0, |v| v.len() as u32);
 
@@ -1219,12 +1241,16 @@ pub struct OpResult {
 }
 
 impl OpResult {
-    /// Return the outdata of the first operation reply, or an error if the reply list is empty.
-    pub fn first_outdata(&self) -> crate::osdclient::error::Result<&Bytes> {
+    /// Return the first operation reply, or an error if the reply list is empty.
+    pub fn first_reply(&self) -> crate::osdclient::error::Result<&OpReply> {
         self.ops
             .first()
-            .map(|op| &op.outdata)
             .ok_or_else(|| crate::osdclient::error::OSDClientError::Other("No op result".into()))
+    }
+
+    /// Return the outdata of the first operation reply, or an error if the reply list is empty.
+    pub fn first_outdata(&self) -> crate::osdclient::error::Result<&Bytes> {
+        self.first_reply().map(|op| &op.outdata)
     }
 }
 
@@ -1515,5 +1541,22 @@ mod tests {
         assert_eq!(target.epoch, 200);
         assert_eq!(target.osd, 10);
         assert_eq!(target.acting, vec![10, 11]);
+    }
+
+    #[test]
+    fn set_xattr_indata_is_raw_name_then_value() {
+        let op = OSDOp::set_xattr("user.x", Bytes::from_static(b"1")).unwrap();
+        assert_eq!(&op.indata[..], b"user.x1");
+        match op.op_data {
+            OpData::Xattr {
+                name_len,
+                value_len,
+                ..
+            } => {
+                assert_eq!(name_len, 6);
+                assert_eq!(value_len, 1);
+            }
+            other => panic!("unexpected op_data {other:?}"),
+        }
     }
 }

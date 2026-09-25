@@ -19,6 +19,7 @@ pub mod list_stream;
 pub mod lock;
 pub(crate) mod messages;
 pub mod object_io;
+pub mod omap;
 pub mod operation;
 pub mod osdmap;
 pub mod pg_nls_response;
@@ -36,14 +37,15 @@ pub use ioctx::IoCtx;
 pub use list_stream::list_objects_stream;
 pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use object_io::RadosObject;
+pub use omap::{CmpOp, OmapAssertion, OmapKey, OmapKeySet, OmapKeys, OmapMap, OmapVals};
 pub use operation::{BuiltOp, OpBuilder};
 pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, PoolSnapInfo, UuidD};
 pub use pg_nls_response::{ListObjectImpl, PgNlsResponse};
 pub use pgmap_types::{ObjectstorePerfStat, PoolStat};
 pub use snapshot::SnapId;
 pub use types::{
-    OSDOp, ObjectId, ObjectLocator, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult,
-    SparseExtent, SparseReadResult, StatResult, StripedPgId, WriteResult,
+    OSDOp, ObjectId, ObjectLocator, OpCode, OpReply, OpResult, OpState, OpTarget, OsdOpFlags,
+    PoolInfo, ReadResult, SparseExtent, SparseReadResult, StatResult, StripedPgId, WriteResult,
 };
 
 pub use messages::MOSDOp;

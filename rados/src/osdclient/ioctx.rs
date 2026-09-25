@@ -4,16 +4,21 @@
 //! object operations (create, read, write, stat, delete) and object listing.
 
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::Denc;
 use crate::osdclient::client::OSDClient;
 use crate::osdclient::error::{OSDClientError, Result};
-use crate::osdclient::operation::OpBuilder;
+use crate::osdclient::omap::{
+    OmapKeySet, OmapKeys, OmapMap, OmapVals, decode_omap_keys, decode_omap_vals,
+    decode_omap_vals_by_keys,
+};
+use crate::osdclient::operation::{BuiltOp, OpBuilder};
 use crate::osdclient::snapshot::SnapId;
 use crate::osdclient::types::{
-    OSDOp, OsdOpFlags, ReadResult, SparseReadResult, StatResult, WriteResult,
+    OSDOp, OpResult, OsdOpFlags, ReadResult, SparseReadResult, StatResult, WriteResult,
 };
 
 /// Maximum entries per PGLS request for object listing pagination
@@ -576,6 +581,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)?).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattr")?;
 
         Ok(result.first_outdata()?.clone())
     }
@@ -604,7 +610,8 @@ impl IoCtx {
             .op(OSDOp::set_xattr(name_str, value)?)
             .build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "set_xattr")?;
         Ok(())
     }
 
@@ -628,11 +635,16 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "remove_xattr")?;
         Ok(())
     }
 
-    /// List all extended attribute names for an object
+    /// Get all extended attributes of an object, as `rados_getxattrs` does
+    ///
+    /// The OSD answers `CEPH_OSD_OP_GETXATTRS` with an encoded
+    /// `map<string, bufferlist>`: a u32 entry count, then per entry a
+    /// length-prefixed name and a length-prefixed value.
     ///
     /// # Arguments
     ///
@@ -640,21 +652,203 @@ impl IoCtx {
     ///
     /// # Returns
     ///
-    /// Vector of attribute names
-    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+    /// Map from attribute name to attribute value
+    pub async fn get_xattrs(&self, oid: impl Into<String>) -> Result<BTreeMap<String, Bytes>> {
         let oid_str = oid.into();
         debug!(
-            "Listing xattrs for object '{}' in pool {}",
+            "Getting xattrs for object '{}' in pool {}",
             oid_str, self.pool_id
         );
 
         let op = OpBuilder::new().op(OSDOp::list_xattrs()).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattrs")?;
 
-        // Parse outdata as list of strings
-        let mut data = &result.first_outdata()?[..];
-        Ok(Vec::<String>::decode(&mut data, 0)?)
+        decode_xattrs(result.first_outdata()?)
+    }
+
+    /// List all extended attribute names for an object
+    ///
+    /// Issues the same op as [`get_xattrs`](Self::get_xattrs) and discards the
+    /// values.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    ///
+    /// # Returns
+    ///
+    /// Attribute names in ascending order
+    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+        Ok(self.get_xattrs(oid).await?.into_keys().collect())
+    }
+
+    /// List omap keys after `start_after`.
+    ///
+    /// `max_return` of 0 returns no entries; pass a positive limit, which
+    /// the OSD caps at its configured maximum and reports through `more`.
+    /// See [`OSDOp::omap_get_keys`] for the full semantics.
+    pub async fn omap_get_keys(
+        &self,
+        oid: impl Into<String>,
+        start_after: &[u8],
+        max_return: u64,
+    ) -> Result<OmapKeys> {
+        let oid = oid.into();
+        debug!(
+            "Listing omap keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .omap_get_keys(start_after, max_return)?
+            .build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_keys")?;
+        decode_omap_keys(result.first_reply()?)
+    }
+
+    /// List omap entries after `start_after` whose key starts with `filter_prefix`.
+    ///
+    /// `max_return` of 0 returns no entries; pass a positive limit, which
+    /// the OSD caps at its configured maximum and reports through `more`.
+    /// See [`OSDOp::omap_get_vals`] for the full semantics.
+    pub async fn omap_get_vals(
+        &self,
+        oid: impl Into<String>,
+        start_after: &[u8],
+        max_return: u64,
+        filter_prefix: &[u8],
+    ) -> Result<OmapVals> {
+        let oid = oid.into();
+        debug!(
+            "Listing omap values for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .omap_get_vals(start_after, max_return, filter_prefix)?
+            .build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_vals")?;
+        decode_omap_vals(result.first_reply()?)
+    }
+
+    /// Get omap values for exactly the given `keys` (missing keys are simply absent).
+    pub async fn omap_get_vals_by_keys(
+        &self,
+        oid: impl Into<String>,
+        keys: &OmapKeySet,
+    ) -> Result<OmapMap> {
+        let oid = oid.into();
+        debug!(
+            "Getting omap values by keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_get_vals_by_keys(keys)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_vals_by_keys")?;
+        decode_omap_vals_by_keys(result.first_reply()?)
+    }
+
+    /// Get the object's omap header (separate from its key/value entries).
+    pub async fn omap_get_header(&self, oid: impl Into<String>) -> Result<Bytes> {
+        let oid = oid.into();
+        debug!(
+            "Getting omap header for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_get_header().build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_header")?;
+        Ok(result.first_outdata()?.clone())
+    }
+
+    /// Set (insert or overwrite) omap entries.
+    pub async fn omap_set(&self, oid: impl Into<String>, vals: &OmapMap) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Setting omap entries for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_set(vals)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_set")
+    }
+
+    /// Set the object's omap header. The header is raw bytes, not length-prefixed.
+    pub async fn omap_set_header(&self, oid: impl Into<String>, header: Bytes) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Setting omap header for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_set_header(header).build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_set_header")
+    }
+
+    /// Remove all omap entries (but not the header).
+    pub async fn omap_clear(&self, oid: impl Into<String>) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Clearing omap entries for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_clear().build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_clear")
+    }
+
+    /// Remove the given omap `keys`.
+    pub async fn omap_rm_keys(&self, oid: impl Into<String>, keys: &OmapKeySet) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Removing omap keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_rm_keys(keys)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_rm_keys")
+    }
+
+    /// Remove omap keys in `[begin, end)`.
+    pub async fn omap_rm_range(
+        &self,
+        oid: impl Into<String>,
+        begin: &[u8],
+        end: &[u8],
+    ) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Removing omap key range for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_rm_range(begin, end)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_rm_range")
+    }
+
+    /// Execute a built, possibly compound, operation on `oid`.
+    ///
+    /// Only checks the overall result and the first op's return code (via
+    /// `check_op_result`); return codes of later ops in a compound
+    /// operation are the caller's to inspect in the returned [`OpResult`].
+    pub async fn execute_op(&self, oid: impl Into<String>, op: BuiltOp) -> Result<OpResult> {
+        let oid = oid.into();
+        debug!("Executing op for object '{}' in pool {}", oid, self.pool_id);
+
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "execute_op")?;
+        Ok(result)
     }
 
     // ---- Pool-level snapshot operations ----
@@ -778,5 +972,27 @@ impl Clone for IoCtx {
             locator_key: self.locator_key.clone(),
             extra_op_flags: self.extra_op_flags,
         }
+    }
+}
+
+/// Decode a `CEPH_OSD_OP_GETXATTRS` reply, an encoded `map<string, bufferlist>`.
+fn decode_xattrs(mut data: &[u8]) -> Result<BTreeMap<String, Bytes>> {
+    Ok(BTreeMap::<String, Bytes>::decode(&mut data, 0)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_xattrs_reads_name_to_value_map() {
+        let outdata = [
+            1, 0, 0, 0, // entry count
+            6, 0, 0, 0, b'u', b's', b'e', b'r', b'.', b'x', // name
+            1, 0, 0, 0, b'1', // value
+        ];
+        let got = decode_xattrs(&outdata).unwrap();
+        let want = BTreeMap::from([("user.x".to_owned(), Bytes::from_static(b"1"))]);
+        assert_eq!(got, want);
     }
 }
