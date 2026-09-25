@@ -22,8 +22,29 @@ use bytes::Bytes;
 use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use rados::{
-    Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError,
-    UTime, UuidD, VersionedEncode,
+    Denc, EVersion, EntityAddr, HObject, ListWatchersReply, MonInfo, MonMap, PgNlsResponse,
+    PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode, WatchItem,
+};
+use rados_cls::refcount::{
+    GetOp as RefcountGetOp, ObjRefcount, PutOp as RefcountPutOp, ReadOp as RefcountReadOp,
+    ReadRet as RefcountReadRet, SetOp as RefcountSetOp,
+};
+use rados_cls::user::{
+    AccountHeader as UserAccountHeader, AccountResource as UserAccountResource,
+    AccountResourceAddOp as UserAccountResourceAddOp,
+    AccountResourceGetOp as UserAccountResourceGetOp,
+    AccountResourceGetRet as UserAccountResourceGetRet,
+    AccountResourceListOp as UserAccountResourceListOp,
+    AccountResourceListRet as UserAccountResourceListRet,
+    AccountResourceRmOp as UserAccountResourceRmOp, Bucket as UserBucket,
+    BucketEntry as UserBucketEntry, CompleteStatsSyncOp as UserCompleteStatsSyncOp,
+    GetHeaderOp as UserGetHeaderOp, GetHeaderRet as UserGetHeaderRet, Header as UserHeader,
+    ListBucketsOp as UserListBucketsOp, ListBucketsRet as UserListBucketsRet,
+    RemoveBucketOp as UserRemoveBucketOp, SetBucketsOp as UserSetBucketsOp, Stats as UserStats,
+};
+use rados_cls::version::{
+    CheckOp as VersionCheckOp, IncOp as VersionIncOp, ObjVersion, ReadRet as VersionReadRet,
+    SetOp as VersionSetOp,
 };
 use serde::Serialize;
 use std::any::Any;
@@ -142,6 +163,42 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         "hobject_t" => Some(type_info_denc::<HObject>()),
         "pg_nls_response_t" => Some(type_info_denc::<PgNlsResponse>()),
         "pg_pool_t" => Some(type_info_denc::<PgPool>()),
+        "watch_item_t" => Some(type_info_denc::<WatchItem>()),
+        "obj_list_watch_response_t" => Some(type_info_denc::<ListWatchersReply>()),
+
+        // Object classes (rados-cls)
+        "obj_version" => Some(type_info_denc::<ObjVersion>()),
+        "cls_version_set_op" => Some(type_info_denc::<VersionSetOp>()),
+        "cls_version_inc_op" => Some(type_info_denc::<VersionIncOp>()),
+        "cls_version_check_op" => Some(type_info_denc::<VersionCheckOp>()),
+        "cls_version_read_ret" => Some(type_info_denc::<VersionReadRet>()),
+        "cls_refcount_get_op" => Some(type_info_denc::<RefcountGetOp>()),
+        "cls_refcount_put_op" => Some(type_info_denc::<RefcountPutOp>()),
+        "cls_refcount_set_op" => Some(type_info_denc::<RefcountSetOp>()),
+        "cls_refcount_read_op" => Some(type_info_denc::<RefcountReadOp>()),
+        "cls_refcount_read_ret" => Some(type_info_denc::<RefcountReadRet>()),
+        "obj_refcount" => Some(type_info_denc::<ObjRefcount>()),
+        "cls_user_bucket" => Some(type_info_denc::<UserBucket>()),
+        "cls_user_bucket_entry" => Some(type_info_denc::<UserBucketEntry>()),
+        "cls_user_stats" => Some(type_info_denc::<UserStats>()),
+        "cls_user_header" => Some(type_info_denc::<UserHeader>()),
+        "cls_user_account_header" => Some(type_info_denc::<UserAccountHeader>()),
+        "cls_user_account_resource" => Some(type_info_denc::<UserAccountResource>()),
+        "cls_user_set_buckets_op" => Some(type_info_denc::<UserSetBucketsOp>()),
+        "cls_user_remove_bucket_op" => Some(type_info_denc::<UserRemoveBucketOp>()),
+        "cls_user_list_buckets_op" => Some(type_info_denc::<UserListBucketsOp>()),
+        "cls_user_list_buckets_ret" => Some(type_info_denc::<UserListBucketsRet>()),
+        "cls_user_get_header_op" => Some(type_info_denc::<UserGetHeaderOp>()),
+        "cls_user_get_header_ret" => Some(type_info_denc::<UserGetHeaderRet>()),
+        "cls_user_complete_stats_sync_op" => Some(type_info_denc::<UserCompleteStatsSyncOp>()),
+        "cls_user_account_resource_add_op" => Some(type_info_denc::<UserAccountResourceAddOp>()),
+        "cls_user_account_resource_get_op" => Some(type_info_denc::<UserAccountResourceGetOp>()),
+        "cls_user_account_resource_get_ret" => Some(type_info_denc::<UserAccountResourceGetRet>()),
+        "cls_user_account_resource_rm_op" => Some(type_info_denc::<UserAccountResourceRmOp>()),
+        "cls_user_account_resource_list_op" => Some(type_info_denc::<UserAccountResourceListOp>()),
+        "cls_user_account_resource_list_ret" => {
+            Some(type_info_denc::<UserAccountResourceListRet>())
+        }
 
         // Level 4: Top-level cluster structures
         "OSDMap" => Some(type_info_versioned::<OSDMap>()),
@@ -182,6 +239,28 @@ fn list_types() {
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
+    println!("  watch_item_t      - One watcher of an object [versioned]");
+    println!("  obj_list_watch_response_t - LIST_WATCHERS reply [versioned]");
+    println!();
+    println!("OBJECT CLASSES (rados-cls)");
+    println!("  obj_version       - The version class's (ver, tag) pair [versioned]");
+    println!(
+        "  cls_version_set_op / cls_version_inc_op / cls_version_check_op / cls_version_read_ret [versioned]"
+    );
+    println!(
+        "  cls_refcount_{{get,put,set,read}}_op / cls_refcount_read_ret / obj_refcount [versioned]"
+    );
+    println!(
+        "  cls_user_{{bucket,bucket_entry,stats,header,account_header,account_resource}} [versioned]"
+    );
+    println!(
+        "  cls_user_{{set_buckets,remove_bucket,list_buckets,get_header,complete_stats_sync}}_op \
+         / cls_user_{{list_buckets,get_header}}_ret [versioned]"
+    );
+    println!(
+        "  cls_user_account_resource_{{add,get,rm,list}}_op / \
+         cls_user_account_resource_{{get,list}}_ret [versioned]"
+    );
     println!();
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");
