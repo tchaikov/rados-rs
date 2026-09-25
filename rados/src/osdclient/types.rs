@@ -915,18 +915,20 @@ impl OSDOp {
         Self::call("lock", "unlock", buf.freeze())
     }
 
-    /// Build an xattr operation with encoded name and optional value
+    /// Build an xattr operation with optional value.
+    ///
+    /// The OSD reads `name_len` raw bytes of name and then `value_len` raw
+    /// bytes of value from indata (Objecter's `add_xattr`); neither carries a
+    /// length prefix.
     fn xattr_op(
         op: OpCode,
         name: String,
         value: Option<Bytes>,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        use crate::Denc;
         use bytes::BytesMut;
 
-        let mut buf =
-            BytesMut::with_capacity(4 + name.len() + value.as_ref().map_or(0, |v| v.len()));
-        name.encode(&mut buf, 0)?;
+        let mut buf = BytesMut::with_capacity(name.len() + value.as_ref().map_or(0, |v| v.len()));
+        buf.extend_from_slice(name.as_bytes());
 
         let value_len = value.as_ref().map_or(0, |v| v.len() as u32);
 
@@ -1515,5 +1517,22 @@ mod tests {
         assert_eq!(target.epoch, 200);
         assert_eq!(target.osd, 10);
         assert_eq!(target.acting, vec![10, 11]);
+    }
+
+    #[test]
+    fn set_xattr_indata_is_raw_name_then_value() {
+        let op = OSDOp::set_xattr("user.x", Bytes::from_static(b"1")).unwrap();
+        assert_eq!(&op.indata[..], b"user.x1");
+        match op.op_data {
+            OpData::Xattr {
+                name_len,
+                value_len,
+                ..
+            } => {
+                assert_eq!(name_len, 6);
+                assert_eq!(value_len, 1);
+            }
+            other => panic!("unexpected op_data {other:?}"),
+        }
     }
 }
