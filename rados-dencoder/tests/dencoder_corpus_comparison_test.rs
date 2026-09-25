@@ -99,8 +99,61 @@ const CORPUS_TYPES: &[TypeSpec] = &[
     // Level 3: Complex types
     TypeSpec::new("pg_merge_meta_t", None, false),
     TypeSpec::new("pg_pool_t", None, true), // ceph-dencoder adds computed fields
+    TypeSpec::new("watch_item_t", None, false),
+    TypeSpec::new("obj_list_watch_response_t", None, false),
+    // Object classes (rados-cls)
+    TypeSpec::new("obj_version", None, false),
+    TypeSpec::new("cls_version_set_op", None, false),
+    TypeSpec::new("cls_version_inc_op", None, false),
+    TypeSpec::new("cls_version_check_op", None, false),
+    TypeSpec::new("cls_version_read_ret", None, false),
+    TypeSpec::new("cls_refcount_get_op", None, false),
+    TypeSpec::new("cls_refcount_put_op", None, false),
+    TypeSpec::new("cls_refcount_set_op", None, false),
+    TypeSpec::new("cls_refcount_read_op", None, false),
+    TypeSpec::new("cls_refcount_read_ret", None, false),
+    TypeSpec::new("obj_refcount", None, false),
+    TypeSpec::new("cls_user_bucket", None, false),
+    TypeSpec::new("cls_user_bucket_entry", None, false),
+    TypeSpec::new("cls_user_stats", None, false),
+    TypeSpec::new("cls_user_header", None, false),
+    TypeSpec::new("cls_user_account_header", None, false),
+    TypeSpec::new("cls_user_account_resource", None, false),
+    TypeSpec::new("cls_user_set_buckets_op", None, false),
+    TypeSpec::new("cls_user_remove_bucket_op", None, false),
+    TypeSpec::new("cls_user_list_buckets_op", None, false),
+    TypeSpec::new("cls_user_list_buckets_ret", None, false),
+    TypeSpec::new("cls_user_get_header_op", None, false),
+    TypeSpec::new("cls_user_get_header_ret", None, false),
+    TypeSpec::new("cls_user_complete_stats_sync_op", None, false),
+    TypeSpec::new("cls_user_account_resource_add_op", None, false),
+    TypeSpec::new("cls_user_account_resource_get_op", None, false),
+    TypeSpec::new("cls_user_account_resource_get_ret", None, false),
+    TypeSpec::new("cls_user_account_resource_rm_op", None, false),
+    TypeSpec::new("cls_user_account_resource_list_op", None, false),
+    TypeSpec::new("cls_user_account_resource_list_ret", None, false),
+    TypeSpec::new("cls_queue_entry", None, false),
+    TypeSpec::new("cls_queue_marker", None, false),
+    TypeSpec::new("cls_queue_head", None, false),
+    TypeSpec::new("cls_queue_init_op", None, false),
+    TypeSpec::new("cls_queue_enqueue_op", None, false),
+    TypeSpec::new("cls_queue_list_op", None, false),
+    TypeSpec::new("cls_queue_list_ret", None, false),
+    TypeSpec::new("cls_queue_remove_op", None, false),
+    TypeSpec::new("cls_queue_get_capacity_ret", None, false),
+    TypeSpec::new("cls_rgw_obj_key", None, false),
+    TypeSpec::new("cls_rgw_obj", None, false),
+    TypeSpec::new("cls_rgw_obj_chain", None, false),
+    TypeSpec::new("cls_rgw_gc_obj_info", None, false),
+    TypeSpec::new("cls_rgw_gc_set_entry_op", None, false),
+    TypeSpec::new("cls_rgw_gc_defer_entry_op", None, false),
+    TypeSpec::new("cls_rgw_gc_list_op", None, false),
+    TypeSpec::new("cls_rgw_gc_list_ret", None, false),
+    TypeSpec::new("cls_rgw_gc_remove_op", None, false),
+    TypeSpec::new("cls_rgw_gc_urgent_data", None, false),
+    TypeSpec::new("cls_rgw_gc_queue_init_op", None, false),
     TypeSpec::new("mon_info_t", Some(u64::MAX), true), // different JSON format
-    TypeSpec::new("MonMap", Some(u64::MAX), true), // different JSON format
+    TypeSpec::new("MonMap", Some(u64::MAX), true),     // different JSON format
 ];
 
 /// Get the corpus root directory from environment or default location
@@ -217,7 +270,7 @@ fn check_ceph_dencoder() -> Result<PathBuf, String> {
 fn get_rust_dencoder() -> Result<PathBuf, String> {
     // Try to find the dencoder binary
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // manifest_dir is the package root (rados/); one level up is the workspace root.
+    // manifest_dir is the package root (rados-dencoder/); one level up is the workspace root.
     let workspace_root = manifest_dir.parent().unwrap();
     let debug_path = workspace_root.join("target/debug/dencoder");
 

@@ -18,10 +18,6 @@ default = []
 # `cargo test`, and `cargo clippy` stay hermetic for downstream users.
 bench-librados = []
 
-[[bin]]
-name = "dencoder"
-path = "src/bin/dencoder.rs"
-
 [[bench]]
 name = "crush_mapping"
 harness = false
