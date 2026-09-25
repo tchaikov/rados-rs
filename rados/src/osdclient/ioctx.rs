@@ -4,6 +4,7 @@
 //! object operations (create, read, write, stat, delete) and object listing.
 
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -635,7 +636,11 @@ impl IoCtx {
         Ok(())
     }
 
-    /// List all extended attribute names for an object
+    /// Get all extended attributes of an object, as `rados_getxattrs` does
+    ///
+    /// The OSD answers `CEPH_OSD_OP_GETXATTRS` with an encoded
+    /// `map<string, bufferlist>`: a u32 entry count, then per entry a
+    /// length-prefixed name and a length-prefixed value.
     ///
     /// # Arguments
     ///
@@ -643,11 +648,11 @@ impl IoCtx {
     ///
     /// # Returns
     ///
-    /// Vector of attribute names
-    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+    /// Map from attribute name to attribute value
+    pub async fn get_xattrs(&self, oid: impl Into<String>) -> Result<BTreeMap<String, Bytes>> {
         let oid_str = oid.into();
         debug!(
-            "Listing xattrs for object '{}' in pool {}",
+            "Getting xattrs for object '{}' in pool {}",
             oid_str, self.pool_id
         );
 
@@ -656,9 +661,23 @@ impl IoCtx {
         let result = self.execute(&oid_str, op).await?;
         OSDClient::check_op_result(&result, "get_xattrs")?;
 
-        // Parse outdata as list of strings
-        let mut data = &result.first_outdata()?[..];
-        Ok(Vec::<String>::decode(&mut data, 0)?)
+        decode_xattrs(result.first_outdata()?)
+    }
+
+    /// List all extended attribute names for an object
+    ///
+    /// Issues the same op as [`get_xattrs`](Self::get_xattrs) and discards the
+    /// values.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    ///
+    /// # Returns
+    ///
+    /// Attribute names in ascending order
+    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+        Ok(self.get_xattrs(oid).await?.into_keys().collect())
     }
 
     // ---- Pool-level snapshot operations ----
@@ -782,5 +801,27 @@ impl Clone for IoCtx {
             locator_key: self.locator_key.clone(),
             extra_op_flags: self.extra_op_flags,
         }
+    }
+}
+
+/// Decode a `CEPH_OSD_OP_GETXATTRS` reply, an encoded `map<string, bufferlist>`.
+fn decode_xattrs(mut data: &[u8]) -> Result<BTreeMap<String, Bytes>> {
+    Ok(BTreeMap::<String, Bytes>::decode(&mut data, 0)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_xattrs_reads_name_to_value_map() {
+        let outdata = [
+            1, 0, 0, 0, // entry count
+            6, 0, 0, 0, b'u', b's', b'e', b'r', b'.', b'x', // name
+            1, 0, 0, 0, b'1', // value
+        ];
+        let got = decode_xattrs(&outdata).unwrap();
+        let want = BTreeMap::from([("user.x".to_owned(), Bytes::from_static(b"1"))]);
+        assert_eq!(got, want);
     }
 }
