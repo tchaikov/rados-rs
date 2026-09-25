@@ -57,6 +57,16 @@ jobs:
           -D warnings
           -D clippy::uninlined_format_args
 
+      - name: Run clippy on each rados-cls class alone
+        # A client that calls only some classes turns the defaults off and
+        # names the ones it uses, so every single-class build (and the
+        # empty one) must be warning-free too. The lib only: the cluster
+        # tests need every class.
+        run: |
+          for features in "" version refcount; do
+            cargo clippy -p rados-cls --no-default-features --features "$features" -- -D warnings -D clippy::uninlined_format_args
+          done
+
   test:
     name: Unit Tests
     runs-on: ubuntu-latest
@@ -117,10 +127,10 @@ jobs:
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build dencoder
-        run: cargo build -p rados --bin dencoder
+        run: cargo build -p rados-dencoder --bin dencoder
 
       - name: Run corpus comparison test
         env:
           CORPUS_ROOT: /tmp/ceph-object-corpus
           CORPUS_VERSION: ${{ matrix.corpus_version }}
-        run: cargo test -p rados --test dencoder_corpus_comparison_test -- --ignored --nocapture
+        run: cargo test -p rados-dencoder --test dencoder_corpus_comparison_test -- --ignored --nocapture

@@ -22,8 +22,16 @@ use bytes::Bytes;
 use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use rados::{
-    Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError,
-    UTime, UuidD, VersionedEncode,
+    Denc, EVersion, EntityAddr, HObject, ListWatchersReply, MonInfo, MonMap, PgNlsResponse,
+    PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode, WatchItem,
+};
+use rados_cls::refcount::{
+    GetOp as RefcountGetOp, ObjRefcount, PutOp as RefcountPutOp, ReadOp as RefcountReadOp,
+    ReadRet as RefcountReadRet, SetOp as RefcountSetOp,
+};
+use rados_cls::version::{
+    CheckOp as VersionCheckOp, IncOp as VersionIncOp, ObjVersion, ReadRet as VersionReadRet,
+    SetOp as VersionSetOp,
 };
 use serde::Serialize;
 use std::any::Any;
@@ -142,6 +150,21 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         "hobject_t" => Some(type_info_denc::<HObject>()),
         "pg_nls_response_t" => Some(type_info_denc::<PgNlsResponse>()),
         "pg_pool_t" => Some(type_info_denc::<PgPool>()),
+        "watch_item_t" => Some(type_info_denc::<WatchItem>()),
+        "obj_list_watch_response_t" => Some(type_info_denc::<ListWatchersReply>()),
+
+        // Object classes (rados-cls)
+        "obj_version" => Some(type_info_denc::<ObjVersion>()),
+        "cls_version_set_op" => Some(type_info_denc::<VersionSetOp>()),
+        "cls_version_inc_op" => Some(type_info_denc::<VersionIncOp>()),
+        "cls_version_check_op" => Some(type_info_denc::<VersionCheckOp>()),
+        "cls_version_read_ret" => Some(type_info_denc::<VersionReadRet>()),
+        "cls_refcount_get_op" => Some(type_info_denc::<RefcountGetOp>()),
+        "cls_refcount_put_op" => Some(type_info_denc::<RefcountPutOp>()),
+        "cls_refcount_set_op" => Some(type_info_denc::<RefcountSetOp>()),
+        "cls_refcount_read_op" => Some(type_info_denc::<RefcountReadOp>()),
+        "cls_refcount_read_ret" => Some(type_info_denc::<RefcountReadRet>()),
+        "obj_refcount" => Some(type_info_denc::<ObjRefcount>()),
 
         // Level 4: Top-level cluster structures
         "OSDMap" => Some(type_info_versioned::<OSDMap>()),
@@ -182,6 +205,17 @@ fn list_types() {
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
+    println!("  watch_item_t      - One watcher of an object [versioned]");
+    println!("  obj_list_watch_response_t - LIST_WATCHERS reply [versioned]");
+    println!();
+    println!("OBJECT CLASSES (rados-cls)");
+    println!("  obj_version       - The version class's (ver, tag) pair [versioned]");
+    println!(
+        "  cls_version_set_op / cls_version_inc_op / cls_version_check_op / cls_version_read_ret [versioned]"
+    );
+    println!(
+        "  cls_refcount_{{get,put,set,read}}_op / cls_refcount_read_ret / obj_refcount [versioned]"
+    );
     println!();
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");

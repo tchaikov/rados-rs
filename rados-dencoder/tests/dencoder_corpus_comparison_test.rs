@@ -99,8 +99,22 @@ const CORPUS_TYPES: &[TypeSpec] = &[
     // Level 3: Complex types
     TypeSpec::new("pg_merge_meta_t", None, false),
     TypeSpec::new("pg_pool_t", None, true), // ceph-dencoder adds computed fields
+    TypeSpec::new("watch_item_t", None, false),
+    TypeSpec::new("obj_list_watch_response_t", None, false),
+    // Object classes (rados-cls)
+    TypeSpec::new("obj_version", None, false),
+    TypeSpec::new("cls_version_set_op", None, false),
+    TypeSpec::new("cls_version_inc_op", None, false),
+    TypeSpec::new("cls_version_check_op", None, false),
+    TypeSpec::new("cls_version_read_ret", None, false),
+    TypeSpec::new("cls_refcount_get_op", None, false),
+    TypeSpec::new("cls_refcount_put_op", None, false),
+    TypeSpec::new("cls_refcount_set_op", None, false),
+    TypeSpec::new("cls_refcount_read_op", None, false),
+    TypeSpec::new("cls_refcount_read_ret", None, false),
+    TypeSpec::new("obj_refcount", None, false),
     TypeSpec::new("mon_info_t", Some(u64::MAX), true), // different JSON format
-    TypeSpec::new("MonMap", Some(u64::MAX), true), // different JSON format
+    TypeSpec::new("MonMap", Some(u64::MAX), true),     // different JSON format
 ];
 
 /// Get the corpus root directory from environment or default location
@@ -217,7 +231,7 @@ fn check_ceph_dencoder() -> Result<PathBuf, String> {
 fn get_rust_dencoder() -> Result<PathBuf, String> {
     // Try to find the dencoder binary
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // manifest_dir is the package root (rados/); one level up is the workspace root.
+    // manifest_dir is the package root (rados-dencoder/); one level up is the workspace root.
     let workspace_root = manifest_dir.parent().unwrap();
     let debug_path = workspace_root.join("target/debug/dencoder");
 

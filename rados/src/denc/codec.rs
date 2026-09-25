@@ -1323,4 +1323,20 @@ mod tests {
         let next = u8::decode(&mut read_buf, 0).unwrap();
         assert_eq!(next, 9);
     }
+
+    #[test]
+    fn btreemap_encodes_as_count_then_pairs() {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, Bytes> = BTreeMap::new();
+        map.insert("a".to_owned(), Bytes::from_static(b"x"));
+        let mut buf = BytesMut::new();
+        map.encode(&mut buf, 0).expect("encode");
+        assert_eq!(
+            buf.as_ref(),
+            &[1, 0, 0, 0, 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'x'][..]
+        );
+        let back: BTreeMap<String, Bytes> = Denc::decode(&mut buf.freeze(), 0).expect("decode");
+        assert_eq!(back, map);
+        assert_eq!(map.encoded_size(0), Some(14));
+    }
 }

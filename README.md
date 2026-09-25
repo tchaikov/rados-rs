@@ -13,12 +13,14 @@ A native Rust implementation of the RADOS (Reliable Autonomic Distributed Object
 
 ## Workspace layout
 
-The workspace contains two published crates plus a root examples package:
+The workspace contains three published crates plus two non-published packages:
 
 | Package | Description |
 |---|---|
-| `rados` | Main library crate (`denc`, `auth`, `cephconfig`, `crush`, `msgr2`, `monclient`, `osdclient` modules, plus the `dencoder` binary). |
+| `rados` | Main library crate (`denc`, `auth`, `cephconfig`, `crush`, `msgr2`, `monclient`, `osdclient` modules). |
 | `rados-denc-macros` | Proc-macro crate providing DENC derive macros. |
+| `rados-cls` | Client-side encodings for Ceph object classes (`version`, `refcount`), one module per class behind a feature of the same name. |
+| `rados-dencoder` | Non-published `ceph-dencoder` work-alike: the `dencoder` binary the corpus comparison test drives. |
 | `examples` | Non-published root examples package, including the `rados` CLI example. |
 
 Within `rados`, the main internal modules are:
@@ -67,14 +69,14 @@ By default the example reads `CEPH_CONF` (or `/etc/ceph/ceph.conf`). Pass `-c /p
 
 ### `dencoder` internal tool
 
-A Rust reimplementation of `ceph-dencoder` now lives inside the `rados` package:
+A Rust reimplementation of `ceph-dencoder` lives in the `rados-dencoder` package:
 
 ```bash
 # Decode a binary corpus file and print as JSON
-cargo run -p rados --bin dencoder -- type OSDMap import /path/to/corpus/file decode dump_json
+cargo run -p rados-dencoder --bin dencoder -- type OSDMap import /path/to/corpus/file decode dump_json
 
 # List all supported types
-cargo run -p rados --bin dencoder -- list_types
+cargo run -p rados-dencoder --bin dencoder -- list_types
 ```
 
 ## Integration tests
