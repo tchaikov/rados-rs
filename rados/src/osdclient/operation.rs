@@ -26,8 +26,11 @@
 //!     .build();
 //! ```
 
-use crate::osdclient::types::{OSDOp, OsdOpFlags};
+use crate::osdclient::error::Result;
+use crate::osdclient::omap::{CmpOp, OmapAssertion, OmapKey, OmapKeySet, OmapMap};
+use crate::osdclient::types::{AllocHintFlags, OSDOp, OsdOpFlags};
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 /// A built operation ready for execution
@@ -166,6 +169,14 @@ impl OpBuilder {
         self
     }
 
+    /// Assert that the object exists, as `ObjectOperation::assert_exists`
+    /// does: a `STAT` whose `ENOENT` fails the whole request before any
+    /// write in it applies. RGW uses it to guard bucket-index shard and OLH
+    /// updates that must target an existing object.
+    pub fn assert_exists(self) -> Self {
+        self.stat()
+    }
+
     /// Add a delete operation
     pub fn delete(mut self) -> Self {
         self.ops.push(OSDOp::delete());
@@ -180,6 +191,29 @@ impl OpBuilder {
     /// succeeds silently if it already exists.
     pub fn create(mut self, exclusive: bool) -> Self {
         self.ops.push(OSDOp::create(exclusive));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add a zero operation (clear `length` bytes from `offset`).
+    pub fn zero(mut self, offset: u64, length: u64) -> Self {
+        self.ops.push(OSDOp::zero(offset, length));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add a set_alloc_hint operation; see [`OSDOp::set_alloc_hint`].
+    pub fn set_alloc_hint(
+        mut self,
+        expected_object_size: u64,
+        expected_write_size: u64,
+        flags: AllocHintFlags,
+    ) -> Self {
+        self.ops.push(OSDOp::set_alloc_hint(
+            expected_object_size,
+            expected_write_size,
+            flags,
+        ));
         self.flags |= OsdOpFlags::WRITE;
         self
     }
@@ -242,6 +276,14 @@ impl OpBuilder {
         self
     }
 
+    /// Add a list_watchers operation; decode its reply with
+    /// [`crate::osdclient::watchers::decode_list_watchers`].
+    pub fn list_watchers(mut self) -> Self {
+        self.ops.push(OSDOp::list_watchers());
+        self.flags |= OsdOpFlags::READ;
+        self
+    }
+
     /// Add a rollback operation (roll object HEAD back to a prior snapshot)
     ///
     /// # Arguments
@@ -250,6 +292,116 @@ impl OpBuilder {
         self.ops.push(OSDOp::rollback(snap_id));
         self.flags |= OsdOpFlags::WRITE;
         self
+    }
+
+    /// Add an omap_get_keys operation (list keys after `start_after`).
+    ///
+    /// See [`OSDOp::omap_get_keys`] for `max_return` semantics: 0 returns no
+    /// entries, so pass a positive limit.
+    pub fn omap_get_keys(mut self, start_after: &[u8], max_return: u64) -> Result<Self> {
+        self.ops
+            .push(OSDOp::omap_get_keys(start_after, max_return)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_vals operation (list entries after `start_after`
+    /// whose key starts with `filter_prefix`).
+    ///
+    /// See [`OSDOp::omap_get_vals`] for `max_return` semantics: 0 returns no
+    /// entries, so pass a positive limit.
+    pub fn omap_get_vals(
+        mut self,
+        start_after: &[u8],
+        max_return: u64,
+        filter_prefix: &[u8],
+    ) -> Result<Self> {
+        self.ops.push(OSDOp::omap_get_vals(
+            start_after,
+            max_return,
+            filter_prefix,
+        )?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_vals_by_keys operation (values for exactly the given
+    /// `keys`, with missing keys simply absent from the reply).
+    pub fn omap_get_vals_by_keys(mut self, keys: &OmapKeySet) -> Result<Self> {
+        self.ops.push(OSDOp::omap_get_vals_by_keys(keys)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add an omap_get_header operation (the object's omap header, separate
+    /// from its key/value entries).
+    pub fn omap_get_header(mut self) -> Self {
+        self.ops.push(OSDOp::omap_get_header());
+        self.flags |= OsdOpFlags::READ;
+        self
+    }
+
+    /// Add an omap_set operation (insert or overwrite the given `vals`).
+    pub fn omap_set(mut self, vals: &OmapMap) -> Result<Self> {
+        self.ops.push(OSDOp::omap_set(vals)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_set_header operation. The header is raw bytes, not
+    /// length-prefixed.
+    pub fn omap_set_header(mut self, header: Bytes) -> Self {
+        self.ops.push(OSDOp::omap_set_header(header));
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add an omap_clear operation (remove all omap entries, but not the
+    /// header).
+    pub fn omap_clear(mut self) -> Self {
+        self.ops.push(OSDOp::omap_clear());
+        self.flags |= OsdOpFlags::WRITE;
+        self
+    }
+
+    /// Add an omap_rm_keys operation (remove the given `keys`).
+    pub fn omap_rm_keys(mut self, keys: &OmapKeySet) -> Result<Self> {
+        self.ops.push(OSDOp::omap_rm_keys(keys)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_rm_range operation (remove keys in `[begin, end)`).
+    pub fn omap_rm_range(mut self, begin: &[u8], end: &[u8]) -> Result<Self> {
+        self.ops.push(OSDOp::omap_rm_range(begin, end)?);
+        self.flags |= OsdOpFlags::WRITE;
+        Ok(self)
+    }
+
+    /// Add an omap_cmp operation (fail the whole transaction with
+    /// `ECANCELED` when any assertion fails). This is a read: a transaction
+    /// of only assertions makes no change.
+    pub fn omap_cmp(mut self, assertions: &BTreeMap<OmapKey, OmapAssertion>) -> Result<Self> {
+        self.ops.push(OSDOp::omap_cmp(assertions)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add a cmpxattr assertion on a byte-string attribute; the request
+    /// fails with `ECANCELED` when it does not hold. RGW guards every
+    /// overwrite with one on the object's id tag.
+    pub fn cmpxattr(mut self, name: impl Into<String>, op: CmpOp, value: Bytes) -> Result<Self> {
+        self.ops.push(OSDOp::cmpxattr(name, op, value)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
+    }
+
+    /// Add a cmpxattr assertion on an integer attribute; see
+    /// [`OSDOp::cmpxattr_u64`] for how the OSD reads each side.
+    pub fn cmpxattr_u64(mut self, name: impl Into<String>, op: CmpOp, value: u64) -> Result<Self> {
+        self.ops.push(OSDOp::cmpxattr_u64(name, op, value)?);
+        self.flags |= OsdOpFlags::READ;
+        Ok(self)
     }
 
     /// Add custom flags
@@ -287,6 +439,7 @@ impl OpBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::osdclient::types::OpCode;
 
     #[test]
     fn test_opbuilder_read() {
@@ -413,5 +566,77 @@ mod tests {
 
         assert_eq!(op.ops.len(), 1);
         assert!(op.is_read());
+    }
+
+    #[test]
+    fn omap_builder_sets_flags_and_keeps_order() {
+        let mut vals = crate::osdclient::omap::OmapMap::new();
+        vals.insert(Bytes::from_static(b"k"), Bytes::from_static(b"v"));
+        let built = OpBuilder::new()
+            .omap_set(&vals)
+            .expect("set")
+            .omap_get_header()
+            .build();
+        assert!(built.is_write());
+        assert!(built.is_read());
+        let ops = built.into_ops();
+        assert_eq!(ops[0].op, OpCode::OmapSetVals);
+        assert_eq!(ops[1].op, OpCode::OmapGetHeader);
+    }
+
+    #[test]
+    fn cmpxattr_builder_is_a_read() {
+        let built = OpBuilder::new()
+            .cmpxattr("user.tag", CmpOp::Eq, Bytes::from_static(b"t"))
+            .expect("cmp")
+            .write_full(Bytes::from_static(b"x"))
+            .build();
+        assert!(built.is_read());
+        assert!(built.is_write());
+        let ops = built.into_ops();
+        assert_eq!(ops[0].op, OpCode::CmpXattr);
+        assert_eq!(ops[1].op, OpCode::WriteFull);
+    }
+
+    #[test]
+    fn zero_builder_is_a_write() {
+        let built = OpBuilder::new().zero(0, 4096).build();
+        assert!(built.is_write());
+        assert!(!built.is_read());
+        assert_eq!(built.into_ops()[0].op, OpCode::Zero);
+    }
+
+    #[test]
+    fn set_alloc_hint_builder_is_a_write() {
+        let built = OpBuilder::new()
+            .set_alloc_hint(0, 0, AllocHintFlags::INCOMPRESSIBLE)
+            .write_full(Bytes::from_static(b"x"))
+            .build();
+        assert!(built.is_write());
+        assert!(!built.is_read());
+        let ops = built.into_ops();
+        assert_eq!(ops[0].op, OpCode::SetAllocHint);
+        assert_eq!(ops[1].op, OpCode::WriteFull);
+    }
+
+    #[test]
+    fn list_watchers_builder_is_a_read() {
+        let built = OpBuilder::new().list_watchers().build();
+        assert!(built.is_read());
+        assert!(!built.is_write());
+        assert_eq!(built.into_ops()[0].op, OpCode::ListWatchers);
+    }
+
+    #[test]
+    fn assert_exists_is_a_stat() {
+        let built = OpBuilder::new()
+            .assert_exists()
+            .write_full(Bytes::from_static(b"x"))
+            .build();
+        assert!(built.is_write());
+        assert!(built.is_read());
+        let ops = built.into_ops();
+        assert_eq!(ops[0].op, OpCode::Stat);
+        assert_eq!(ops[1].op, OpCode::WriteFull);
     }
 }

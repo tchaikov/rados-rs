@@ -22,8 +22,8 @@ use bytes::Bytes;
 use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use rados::{
-    Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError,
-    UTime, UuidD, VersionedEncode,
+    Denc, EVersion, EntityAddr, HObject, ListWatchersReply, MonInfo, MonMap, PgNlsResponse,
+    PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode, WatchItem,
 };
 use serde::Serialize;
 use std::any::Any;
@@ -142,6 +142,8 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         "hobject_t" => Some(type_info_denc::<HObject>()),
         "pg_nls_response_t" => Some(type_info_denc::<PgNlsResponse>()),
         "pg_pool_t" => Some(type_info_denc::<PgPool>()),
+        "watch_item_t" => Some(type_info_denc::<WatchItem>()),
+        "obj_list_watch_response_t" => Some(type_info_denc::<ListWatchersReply>()),
 
         // Level 4: Top-level cluster structures
         "OSDMap" => Some(type_info_versioned::<OSDMap>()),
@@ -182,6 +184,8 @@ fn list_types() {
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
+    println!("  watch_item_t      - One watcher of an object [versioned]");
+    println!("  obj_list_watch_response_t - LIST_WATCHERS reply [versioned]");
     println!();
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");
