@@ -528,10 +528,10 @@ pub enum OpCode {
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
-    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 2)
-    RemoveXattr = osd_op!(WR, ATTR, 2),
-    /// List extended attributes: __CEPH_OSD_OP(RD, ATTR, 3)
-    ListXattrs = osd_op!(RD, ATTR, 3),
+    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 4) = RMXATTR
+    RemoveXattr = osd_op!(WR, ATTR, 4),
+    /// Get all extended attributes: __CEPH_OSD_OP(RD, ATTR, 2) = GETXATTRS
+    ListXattrs = osd_op!(RD, ATTR, 2),
     /// Call object class method: __CEPH_OSD_OP(RMW, CLS, 1)
     Call = osd_op!(RMW, CLS, 1),
     /// PG list operation (legacy): __CEPH_OSD_OP(RD, PG, 1) = PGLS
