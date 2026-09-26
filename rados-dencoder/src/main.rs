@@ -22,8 +22,56 @@ use bytes::Bytes;
 use rados::osdclient::osdmap::{OsdInfo, OsdXInfo, PgId};
 use rados::osdclient::{OSDMap, ObjectLocator, ObjectstorePerfStat, PgMergeMeta, PgPool, PoolStat};
 use rados::{
-    Denc, EVersion, EntityAddr, HObject, MonInfo, MonMap, PgNlsResponse, PoolSnapInfo, RadosError,
-    UTime, UuidD, VersionedEncode,
+    Denc, EVersion, EntityAddr, HObject, ListWatchersReply, MonInfo, MonMap, PgNlsResponse,
+    PoolSnapInfo, RadosError, UTime, UuidD, VersionedEncode, WatchItem,
+};
+use rados_cls::queue::{
+    EnqueueOp as QueueEnqueueOp, Entry as QueueEntry, GetCapacityRet as QueueGetCapacityRet,
+    Head as QueueHead, InitOp as QueueInitOp, ListOp as QueueListOp, ListRet as QueueListRet,
+    Marker as QueueMarker, RemoveOp as QueueRemoveOp,
+};
+use rados_cls::refcount::{
+    GetOp as RefcountGetOp, ObjRefcount, PutOp as RefcountPutOp, ReadOp as RefcountReadOp,
+    ReadRet as RefcountReadRet, SetOp as RefcountSetOp,
+};
+use rados_cls::rgw::gc::{
+    DeferEntryOp as RgwGcDeferEntryOp, ListOp as RgwGcListOp, ListRet as RgwGcListRet,
+    RemoveOp as RgwGcRemoveOp, SetEntryOp as RgwGcSetEntryOp,
+};
+use rados_cls::rgw::index::{
+    BiEntry as RgwBiEntry, BiLogEntry as RgwBiLogEntry,
+    BucketInstanceEntry as RgwBucketInstanceEntry, Dir as RgwDir, DirEntry as RgwDirEntry,
+    DirEntryMeta as RgwDirEntryMeta, DirHeader as RgwDirHeader, ReshardEntry as RgwReshardEntry,
+};
+use rados_cls::rgw::lc::{LcEntry as RgwLcEntry, LcObjHead as RgwLcObjHead};
+use rados_cls::rgw::olh::{OlhEntry as RgwOlhEntry, OlhLogEntry as RgwOlhLogEntry};
+use rados_cls::rgw::types::{
+    CategoryStats as RgwCategoryStats, EntryVer as RgwEntryVer, GcObjInfo, Obj as RgwObj,
+    ObjChain as RgwObjChain, ObjKey as RgwObjKey, PendingInfo as RgwPendingInfo,
+    ZoneSet as RgwZoneSet,
+};
+use rados_cls::rgw::usage::{
+    S3selectUsageData as RgwS3selectUsageData, UsageData as RgwUsageData,
+    UsageLogEntry as RgwUsageLogEntry, UsageLogInfo as RgwUsageLogInfo,
+    UserBucket as RgwUserBucket,
+};
+use rados_cls::rgw_gc::{InitOp as RgwGcQueueInitOp, UrgentData as RgwGcUrgentData};
+use rados_cls::user::{
+    AccountHeader as UserAccountHeader, AccountResource as UserAccountResource,
+    AccountResourceAddOp as UserAccountResourceAddOp,
+    AccountResourceGetOp as UserAccountResourceGetOp,
+    AccountResourceGetRet as UserAccountResourceGetRet,
+    AccountResourceListOp as UserAccountResourceListOp,
+    AccountResourceListRet as UserAccountResourceListRet,
+    AccountResourceRmOp as UserAccountResourceRmOp, Bucket as UserBucket,
+    BucketEntry as UserBucketEntry, CompleteStatsSyncOp as UserCompleteStatsSyncOp,
+    GetHeaderOp as UserGetHeaderOp, GetHeaderRet as UserGetHeaderRet, Header as UserHeader,
+    ListBucketsOp as UserListBucketsOp, ListBucketsRet as UserListBucketsRet,
+    RemoveBucketOp as UserRemoveBucketOp, SetBucketsOp as UserSetBucketsOp, Stats as UserStats,
+};
+use rados_cls::version::{
+    CheckOp as VersionCheckOp, IncOp as VersionIncOp, ObjVersion, ReadRet as VersionReadRet,
+    SetOp as VersionSetOp,
 };
 use serde::Serialize;
 use std::any::Any;
@@ -142,6 +190,83 @@ fn get_type_info(name: &str) -> Option<TypeInfo> {
         "hobject_t" => Some(type_info_denc::<HObject>()),
         "pg_nls_response_t" => Some(type_info_denc::<PgNlsResponse>()),
         "pg_pool_t" => Some(type_info_denc::<PgPool>()),
+        "watch_item_t" => Some(type_info_denc::<WatchItem>()),
+        "obj_list_watch_response_t" => Some(type_info_denc::<ListWatchersReply>()),
+
+        // Object classes (rados-cls)
+        "obj_version" => Some(type_info_denc::<ObjVersion>()),
+        "cls_version_set_op" => Some(type_info_denc::<VersionSetOp>()),
+        "cls_version_inc_op" => Some(type_info_denc::<VersionIncOp>()),
+        "cls_version_check_op" => Some(type_info_denc::<VersionCheckOp>()),
+        "cls_version_read_ret" => Some(type_info_denc::<VersionReadRet>()),
+        "cls_refcount_get_op" => Some(type_info_denc::<RefcountGetOp>()),
+        "cls_refcount_put_op" => Some(type_info_denc::<RefcountPutOp>()),
+        "cls_refcount_set_op" => Some(type_info_denc::<RefcountSetOp>()),
+        "cls_refcount_read_op" => Some(type_info_denc::<RefcountReadOp>()),
+        "cls_refcount_read_ret" => Some(type_info_denc::<RefcountReadRet>()),
+        "obj_refcount" => Some(type_info_denc::<ObjRefcount>()),
+        "cls_user_bucket" => Some(type_info_denc::<UserBucket>()),
+        "cls_user_bucket_entry" => Some(type_info_denc::<UserBucketEntry>()),
+        "cls_user_stats" => Some(type_info_denc::<UserStats>()),
+        "cls_user_header" => Some(type_info_denc::<UserHeader>()),
+        "cls_user_account_header" => Some(type_info_denc::<UserAccountHeader>()),
+        "cls_user_account_resource" => Some(type_info_denc::<UserAccountResource>()),
+        "cls_user_set_buckets_op" => Some(type_info_denc::<UserSetBucketsOp>()),
+        "cls_user_remove_bucket_op" => Some(type_info_denc::<UserRemoveBucketOp>()),
+        "cls_user_list_buckets_op" => Some(type_info_denc::<UserListBucketsOp>()),
+        "cls_user_list_buckets_ret" => Some(type_info_denc::<UserListBucketsRet>()),
+        "cls_user_get_header_op" => Some(type_info_denc::<UserGetHeaderOp>()),
+        "cls_user_get_header_ret" => Some(type_info_denc::<UserGetHeaderRet>()),
+        "cls_user_complete_stats_sync_op" => Some(type_info_denc::<UserCompleteStatsSyncOp>()),
+        "cls_user_account_resource_add_op" => Some(type_info_denc::<UserAccountResourceAddOp>()),
+        "cls_user_account_resource_get_op" => Some(type_info_denc::<UserAccountResourceGetOp>()),
+        "cls_user_account_resource_get_ret" => Some(type_info_denc::<UserAccountResourceGetRet>()),
+        "cls_user_account_resource_rm_op" => Some(type_info_denc::<UserAccountResourceRmOp>()),
+        "cls_user_account_resource_list_op" => Some(type_info_denc::<UserAccountResourceListOp>()),
+        "cls_user_account_resource_list_ret" => {
+            Some(type_info_denc::<UserAccountResourceListRet>())
+        }
+        "cls_queue_entry" => Some(type_info_denc::<QueueEntry>()),
+        "cls_queue_marker" => Some(type_info_denc::<QueueMarker>()),
+        "cls_queue_head" => Some(type_info_denc::<QueueHead>()),
+        "cls_queue_init_op" => Some(type_info_denc::<QueueInitOp>()),
+        "cls_queue_enqueue_op" => Some(type_info_denc::<QueueEnqueueOp>()),
+        "cls_queue_list_op" => Some(type_info_denc::<QueueListOp>()),
+        "cls_queue_list_ret" => Some(type_info_denc::<QueueListRet>()),
+        "cls_queue_remove_op" => Some(type_info_denc::<QueueRemoveOp>()),
+        "cls_queue_get_capacity_ret" => Some(type_info_denc::<QueueGetCapacityRet>()),
+        "cls_rgw_obj_key" => Some(type_info_denc::<RgwObjKey>()),
+        "cls_rgw_obj" => Some(type_info_denc::<RgwObj>()),
+        "cls_rgw_obj_chain" => Some(type_info_denc::<RgwObjChain>()),
+        "cls_rgw_gc_obj_info" => Some(type_info_denc::<GcObjInfo>()),
+        "rgw_bucket_entry_ver" => Some(type_info_denc::<RgwEntryVer>()),
+        "rgw_bucket_pending_info" => Some(type_info_denc::<RgwPendingInfo>()),
+        "rgw_bucket_category_stats" => Some(type_info_denc::<RgwCategoryStats>()),
+        "rgw_zone_set" => Some(type_info_denc::<RgwZoneSet>()),
+        "rgw_bucket_dir_entry_meta" => Some(type_info_denc::<RgwDirEntryMeta>()),
+        "rgw_bucket_dir_entry" => Some(type_info_denc::<RgwDirEntry>()),
+        "rgw_bucket_dir_header" => Some(type_info_denc::<RgwDirHeader>()),
+        "rgw_bucket_dir" => Some(type_info_denc::<RgwDir>()),
+        "rgw_bi_log_entry" => Some(type_info_denc::<RgwBiLogEntry>()),
+        "cls_rgw_bucket_instance_entry" => Some(type_info_denc::<RgwBucketInstanceEntry>()),
+        "cls_rgw_reshard_entry" => Some(type_info_denc::<RgwReshardEntry>()),
+        "rgw_bucket_olh_log_entry" => Some(type_info_denc::<RgwOlhLogEntry>()),
+        "rgw_bucket_olh_entry" => Some(type_info_denc::<RgwOlhEntry>()),
+        "rgw_cls_bi_entry" => Some(type_info_denc::<RgwBiEntry>()),
+        "rgw_usage_data" => Some(type_info_denc::<RgwUsageData>()),
+        "rgw_s3select_usage_data" => Some(type_info_denc::<RgwS3selectUsageData>()),
+        "rgw_usage_log_entry" => Some(type_info_denc::<RgwUsageLogEntry>()),
+        "rgw_usage_log_info" => Some(type_info_denc::<RgwUsageLogInfo>()),
+        "rgw_user_bucket" => Some(type_info_denc::<RgwUserBucket>()),
+        "cls_rgw_lc_entry" => Some(type_info_denc::<RgwLcEntry>()),
+        "cls_rgw_lc_obj_head" => Some(type_info_denc::<RgwLcObjHead>()),
+        "cls_rgw_gc_set_entry_op" => Some(type_info_denc::<RgwGcSetEntryOp>()),
+        "cls_rgw_gc_defer_entry_op" => Some(type_info_denc::<RgwGcDeferEntryOp>()),
+        "cls_rgw_gc_list_op" => Some(type_info_denc::<RgwGcListOp>()),
+        "cls_rgw_gc_list_ret" => Some(type_info_denc::<RgwGcListRet>()),
+        "cls_rgw_gc_remove_op" => Some(type_info_denc::<RgwGcRemoveOp>()),
+        "cls_rgw_gc_urgent_data" => Some(type_info_denc::<RgwGcUrgentData>()),
+        "cls_rgw_gc_queue_init_op" => Some(type_info_denc::<RgwGcQueueInitOp>()),
 
         // Level 4: Top-level cluster structures
         "OSDMap" => Some(type_info_versioned::<OSDMap>()),
@@ -182,6 +307,50 @@ fn list_types() {
     println!("  hobject_t         - Hashed object identifier [versioned]");
     println!("  pg_nls_response_t - PG namespace list response [versioned]");
     println!("  pg_pool_t         - Pool configuration [versioned, feature-dependent: multiple]");
+    println!("  watch_item_t      - One watcher of an object [versioned]");
+    println!("  obj_list_watch_response_t - LIST_WATCHERS reply [versioned]");
+    println!();
+    println!("OBJECT CLASSES (rados-cls)");
+    println!("  obj_version       - The version class's (ver, tag) pair [versioned]");
+    println!(
+        "  cls_version_set_op / cls_version_inc_op / cls_version_check_op / cls_version_read_ret [versioned]"
+    );
+    println!(
+        "  cls_refcount_{{get,put,set,read}}_op / cls_refcount_read_ret / obj_refcount [versioned]"
+    );
+    println!(
+        "  cls_user_{{bucket,bucket_entry,stats,header,account_header,account_resource}} [versioned]"
+    );
+    println!(
+        "  cls_user_{{set_buckets,remove_bucket,list_buckets,get_header,complete_stats_sync}}_op \
+         / cls_user_{{list_buckets,get_header}}_ret [versioned]"
+    );
+    println!(
+        "  cls_user_account_resource_{{add,get,rm,list}}_op / \
+         cls_user_account_resource_{{get,list}}_ret [versioned]"
+    );
+    println!("  cls_queue_{{entry,marker,head}} [versioned]");
+    println!(
+        "  cls_queue_{{init,enqueue,list,remove}}_op / cls_queue_list_ret / \
+         cls_queue_get_capacity_ret [versioned]"
+    );
+    println!("  cls_rgw_{{obj_key,obj,obj_chain,gc_obj_info}} [versioned]");
+    println!("  rgw_bucket_{{entry_ver,pending_info,category_stats}} / rgw_zone_set [versioned]");
+    println!(
+        "  rgw_bucket_dir_{{entry_meta,entry,header}} / rgw_bucket_dir / rgw_bi_log_entry \
+         [versioned]"
+    );
+    println!("  cls_rgw_{{bucket_instance_entry,reshard_entry}} [versioned]");
+    println!("  rgw_bucket_olh_{{log_entry,entry}} / rgw_cls_bi_entry [versioned]");
+    println!(
+        "  rgw_usage_{{data,log_entry,log_info}} / rgw_s3select_usage_data / \
+         rgw_user_bucket [versioned]"
+    );
+    println!("  cls_rgw_lc_{{entry,obj_head}} [versioned]");
+    println!(
+        "  cls_rgw_gc_{{set_entry,defer_entry,list,remove}}_op / cls_rgw_gc_list_ret [versioned]"
+    );
+    println!("  cls_rgw_gc_urgent_data / cls_rgw_gc_queue_init_op [versioned]");
     println!();
     println!("LEVEL 4: Top-level cluster structures");
     println!("  Test these ONLY after all lower levels are validated");

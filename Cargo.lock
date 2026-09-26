@@ -1407,12 +1407,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "rados-cls"
+version = "0.1.4"
+dependencies = [
+ "bytes",
+ "rados",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "rados-denc-macros"
 version = "0.1.4"
 dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "rados-dencoder"
+version = "0.1.4"
+dependencies = [
+ "bytes",
+ "rados",
+ "rados-cls",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
