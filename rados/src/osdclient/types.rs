@@ -3,6 +3,8 @@
 use bytes::Bytes;
 use std::time::SystemTime;
 
+use crate::osdclient::omap::CmpOp;
+
 // ============= Operation State Machine =============
 
 /// Operation state machine matching Ceph Objecter's implicit states
@@ -162,6 +164,31 @@ bitflags::bitflags! {
         /// Force op even if cluster is full.
         /// Mirrors `CEPH_OSD_FLAG_FULL_FORCE`.
         const FULL_FORCE = 0x1000000;
+        /// Return each op's result and output data on a successful write,
+        /// which the OSD otherwise clears; an op's data past
+        /// `osd_max_write_op_reply_len` (64 bytes by default) fails the
+        /// request with `EOVERFLOW`. Mirrors `CEPH_OSD_FLAG_RETURNVEC`
+        /// (`librados::OPERATION_RETURNVEC`).
+        const RETURNVEC = 0x4000000;
+    }
+}
+
+bitflags::bitflags! {
+    /// `CEPH_OSD_ALLOC_HINT_FLAG_*` from `rados.h`: what the writer expects
+    /// of an object's access pattern, sent with `set_alloc_hint`.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+    pub struct AllocHintFlags: u32 {
+        const SEQUENTIAL_WRITE = 1;
+        const RANDOM_WRITE = 2;
+        const SEQUENTIAL_READ = 4;
+        const RANDOM_READ = 8;
+        const APPEND_ONLY = 16;
+        const IMMUTABLE = 32;
+        const SHORTLIVED = 64;
+        const LONGLIVED = 128;
+        const COMPRESSIBLE = 256;
+        const INCOMPRESSIBLE = 512;
+        const LOG = 1024;
     }
 }
 
@@ -280,6 +307,7 @@ impl StripedPgId {
     Clone,
     PartialEq,
     Eq,
+    Hash,
     crate::ZeroCopyDencode,
     zerocopy::FromBytes,
     zerocopy::IntoBytes,
@@ -303,6 +331,44 @@ impl PackedEntityName {
         Self {
             entity_type,
             num: crate::denc::zerocopy::little_endian::U64::new(num),
+        }
+    }
+}
+
+impl Default for PackedEntityName {
+    fn default() -> Self {
+        Self::new(0, 0)
+    }
+}
+
+/// As C++ `entity_name_t`'s `operator<`: the type, then the number as an
+/// `int64_t`, so `client.?` (`-1`) sorts before `client.0`.
+impl Ord for PackedEntityName {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.entity_type, self.num.get() as i64).cmp(&(other.entity_type, other.num.get() as i64))
+    }
+}
+
+impl PartialOrd for PackedEntityName {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// As C++ `entity_name_t`'s `operator<<`: `client.4242`, `unknown.<n>`
+/// for a type that is not exactly one known bit, and `<type>.?` when the
+/// number is negative as an `int64_t`.
+impl std::fmt::Display for PackedEntityName {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let entity_type = match EntityType::from_bits(u32::from(self.entity_type)) {
+            Some(t) => t.to_string(),
+            None => "unknown".to_owned(),
+        };
+        let num = self.num.get() as i64;
+        if num < 0 {
+            write!(f, "{entity_type}.?")
+        } else {
+            write!(f, "{entity_type}.{num}")
         }
     }
 }
@@ -457,13 +523,23 @@ impl JaegerSpanContext {
 // OSD operation modes (from Ceph's rados.h)
 const CEPH_OSD_OP_MODE_RD: u16 = 0x1000; // Read mode
 const CEPH_OSD_OP_MODE_WR: u16 = 0x2000; // Write mode
-const CEPH_OSD_OP_MODE_RMW: u16 = 0x3000; // Read-modify-write mode (used via osd_op! macro)
 
 // OSD operation types (from Ceph's rados.h)
 const CEPH_OSD_OP_TYPE_DATA: u16 = 0x0200; // Data operations
 const CEPH_OSD_OP_TYPE_ATTR: u16 = 0x0300; // Attribute operations
 const CEPH_OSD_OP_TYPE_EXEC: u16 = 0x0400; // Exec/CLS operations (object class methods)
 const CEPH_OSD_OP_TYPE_PG: u16 = 0x0500; // PG operations
+
+/// `CEPH_OSD_CMPXATTR_MODE_STRING`: the OSD compares the stored attribute
+/// and the supplied value as byte strings.
+const CEPH_OSD_CMPXATTR_MODE_STRING: u8 = 1;
+/// `CEPH_OSD_CMPXATTR_MODE_U64`: the OSD parses the stored attribute as
+/// decimal text and reads the supplied value as a little-endian u64.
+const CEPH_OSD_CMPXATTR_MODE_U64: u8 = 2;
+
+/// `CEPH_OSD_OP_FLAG_FAILOK`, a per-op flag: the OSD carries on past this
+/// op's failure instead of failing the request.
+const CEPH_OSD_OP_FLAG_FAILOK: u32 = 0x2;
 
 /// Helper macro to construct operation codes using Ceph's encoding scheme
 /// Matches __CEPH_OSD_OP(mode, type, nr) macro from rados.h
@@ -474,17 +550,14 @@ macro_rules! osd_op {
     (WR, DATA, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_DATA | $nr
     };
-    (RMW, DATA, $nr:expr) => {
-        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_DATA | $nr
-    };
     (RD, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_ATTR | $nr
     };
     (WR, ATTR, $nr:expr) => {
         CEPH_OSD_OP_MODE_WR | CEPH_OSD_OP_TYPE_ATTR | $nr
     };
-    (RMW, CLS, $nr:expr) => {
-        CEPH_OSD_OP_MODE_RMW | CEPH_OSD_OP_TYPE_EXEC | $nr
+    (RD, EXEC, $nr:expr) => {
+        CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_EXEC | $nr
     };
     (RD, PG, $nr:expr) => {
         CEPH_OSD_OP_MODE_RD | CEPH_OSD_OP_TYPE_PG | $nr
@@ -514,6 +587,8 @@ pub enum OpCode {
     WriteFull = osd_op!(WR, DATA, 2),
     /// Truncate operation: __CEPH_OSD_OP(WR, DATA, 3)
     Truncate = osd_op!(WR, DATA, 3),
+    /// Zero a byte range: __CEPH_OSD_OP(WR, DATA, 4)
+    Zero = osd_op!(WR, DATA, 4),
     /// Append data to the end of an object: __CEPH_OSD_OP(WR, DATA, 6)
     Append = osd_op!(WR, DATA, 6),
     /// Assert object version matches before executing other ops: __CEPH_OSD_OP(RD, DATA, 8)
@@ -524,16 +599,20 @@ pub enum OpCode {
     Delete = osd_op!(WR, DATA, 5),
     /// Create object: __CEPH_OSD_OP(WR, DATA, 13)
     Create = osd_op!(WR, DATA, 13),
+    /// Allocation hint: __CEPH_OSD_OP(WR, DATA, 35) = SETALLOCHINT
+    SetAllocHint = osd_op!(WR, DATA, 35),
     /// Get extended attribute: __CEPH_OSD_OP(RD, ATTR, 1)
     GetXattr = osd_op!(RD, ATTR, 1),
     /// Set extended attribute: __CEPH_OSD_OP(WR, ATTR, 1)
     SetXattr = osd_op!(WR, ATTR, 1),
-    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 2)
-    RemoveXattr = osd_op!(WR, ATTR, 2),
-    /// List extended attributes: __CEPH_OSD_OP(RD, ATTR, 3)
-    ListXattrs = osd_op!(RD, ATTR, 3),
-    /// Call object class method: __CEPH_OSD_OP(RMW, CLS, 1)
-    Call = osd_op!(RMW, CLS, 1),
+    /// Remove extended attribute: __CEPH_OSD_OP(WR, ATTR, 4) = RMXATTR
+    RemoveXattr = osd_op!(WR, ATTR, 4),
+    /// Get all extended attributes: __CEPH_OSD_OP(RD, ATTR, 2) = GETXATTRS
+    ListXattrs = osd_op!(RD, ATTR, 2),
+    /// Compare an extended attribute: __CEPH_OSD_OP(RD, ATTR, 3) = CMPXATTR
+    CmpXattr = osd_op!(RD, ATTR, 3),
+    /// Call object class method: CEPH_OSD_OP_CALL = __CEPH_OSD_OP(RD, EXEC, 1)
+    Call = osd_op!(RD, EXEC, 1),
     /// PG list operation (legacy): __CEPH_OSD_OP(RD, PG, 1) = PGLS
     /// Returns pg_ls_response_t (no namespace support). Kept for completeness.
     Pgls = osd_op!(RD, PG, 1),
@@ -543,8 +622,36 @@ pub enum OpCode {
     Pgnls = osd_op!(RD, PG, 5),
     /// List object snapshots/clones: __CEPH_OSD_OP(RD, DATA, 10)
     ListSnaps = osd_op!(RD, DATA, 10),
+    /// List the object's watchers: __CEPH_OSD_OP(RD, DATA, 9) = LIST_WATCHERS
+    ListWatchers = osd_op!(RD, DATA, 9),
+    /// Register, reconnect, ping or remove a watch: __CEPH_OSD_OP(WR, DATA, 15)
+    Watch = osd_op!(WR, DATA, 15),
+    /// Notify an object's watchers: __CEPH_OSD_OP(RD, DATA, 6)
+    Notify = osd_op!(RD, DATA, 6),
+    /// Acknowledge a notify as a watcher: __CEPH_OSD_OP(RD, DATA, 7)
+    NotifyAck = osd_op!(RD, DATA, 7),
     /// Roll back object HEAD to a prior snapshot: __CEPH_OSD_OP(WR, DATA, 14)
     Rollback = osd_op!(WR, DATA, 14),
+    /// CEPH_OSD_OP_OMAPGETKEYS
+    OmapGetKeys = osd_op!(RD, DATA, 17),
+    /// CEPH_OSD_OP_OMAPGETVALS
+    OmapGetVals = osd_op!(RD, DATA, 18),
+    /// CEPH_OSD_OP_OMAPGETHEADER
+    OmapGetHeader = osd_op!(RD, DATA, 19),
+    /// CEPH_OSD_OP_OMAPGETVALSBYKEYS
+    OmapGetValsByKeys = osd_op!(RD, DATA, 20),
+    /// CEPH_OSD_OP_OMAPSETVALS
+    OmapSetVals = osd_op!(WR, DATA, 21),
+    /// CEPH_OSD_OP_OMAPSETHEADER
+    OmapSetHeader = osd_op!(WR, DATA, 22),
+    /// CEPH_OSD_OP_OMAPCLEAR
+    OmapClear = osd_op!(WR, DATA, 23),
+    /// CEPH_OSD_OP_OMAPRMKEYS
+    OmapRmKeys = osd_op!(WR, DATA, 24),
+    /// CEPH_OSD_OP_OMAP_CMP
+    OmapCmp = osd_op!(RD, DATA, 25),
+    /// CEPH_OSD_OP_OMAPRMKEYRANGE
+    OmapRmKeyRange = osd_op!(WR, DATA, 44),
 }
 
 impl OpCode {
@@ -597,8 +704,43 @@ pub enum OpData {
     Snap { snapid: u64 },
     /// Version assertion (`ceph_osd_op.assert_ver.ver`)
     AssertVer { ver: u64 },
+    /// Allocation hint (`ceph_osd_op.alloc_hint`)
+    AllocHint {
+        expected_object_size: u64,
+        expected_write_size: u64,
+        flags: u32,
+    },
+    /// Watch sub-operation (`ceph_osd_op.watch`); `ver` is unused by the OSD
+    Watch {
+        cookie: u64,
+        ver: u64,
+        op: u8,
+        generation: u32,
+        timeout: u32,
+    },
+    /// Notify (`ceph_osd_op.notify`): the notifier's own linger cookie
+    Notify { cookie: u64 },
     /// Operations with no specific data
     None,
+}
+
+/// `CEPH_OSD_WATCH_OP_*`: the sub-operation a `WATCH` op carries.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, num_enum::TryFromPrimitive, num_enum::IntoPrimitive,
+)]
+#[repr(u8)]
+pub enum WatchOp {
+    /// Remove the watch.
+    Unwatch = 0,
+    /// librados v1 watch; this crate does not send it.
+    LegacyWatch = 1,
+    /// Register the watch.
+    Watch = 3,
+    /// Re-establish a registered watch on a new session or PG interval.
+    Reconnect = 5,
+    /// Keep the watch alive; the OSD answers `-ETIMEDOUT` when it wants a
+    /// reconnect and `-ENOTCONN` when the watch is gone.
+    Ping = 7,
 }
 
 /// Single OSD operation
@@ -722,6 +864,23 @@ impl OSDOp {
         }
     }
 
+    /// Zero the bytes `[offset, offset + length)`, as `ObjectOperation::zero`
+    /// does: an extent union and no data. The OSD treats a missing object
+    /// as a no-op, not as an error, and does not create it.
+    pub fn zero(offset: u64, length: u64) -> Self {
+        Self {
+            op: OpCode::Zero,
+            flags: 0,
+            op_data: OpData::Extent {
+                offset,
+                length,
+                truncate_size: 0,
+                truncate_seq: 0,
+            },
+            indata: Bytes::new(),
+        }
+    }
+
     /// Create a create operation.
     ///
     /// When `exclusive` is true the OSD sets `CEPH_OSD_OP_FLAG_EXCL` (0x1)
@@ -777,17 +936,21 @@ impl OSDOp {
         method: impl Into<String>,
         indata: Bytes,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        use crate::Denc;
         use bytes::BytesMut;
 
         let class = class.into();
         let method = method.into();
 
-        // Encode class and method into indata buffer (prepended to actual indata)
-        // 4-byte len prefix + content for each string
-        let mut buf = BytesMut::with_capacity(4 + class.len() + 4 + method.len());
-        class.encode(&mut buf, 0)?;
-        method.encode(&mut buf, 0)?;
+        // The CALL payload is class name bytes + method name bytes + method
+        // indata, all unprefixed and unterminated — the OSD slices them back
+        // out using class_len/method_len from the op header (below), not a
+        // length embedded in the payload. Matches Objecter.h's `call()`
+        // helpers and objclass.cc's `cls_call()`, which both
+        // `bufferlist::append(cname, class_len)` rather than encode a
+        // denc-style length-prefixed string.
+        let mut buf = BytesMut::with_capacity(class.len() + method.len() + indata.len());
+        buf.extend_from_slice(class.as_bytes());
+        buf.extend_from_slice(method.as_bytes());
         buf.extend_from_slice(&indata);
 
         Ok(Self {
@@ -814,6 +977,30 @@ impl OSDOp {
             op: OpCode::AssertVer,
             flags: 0,
             op_data: OpData::AssertVer { ver },
+            indata: Bytes::new(),
+        }
+    }
+
+    /// Hint the OSD about the object's expected size and access pattern, as
+    /// `ObjectOperation::set_alloc_hint` does.
+    ///
+    /// The op carries `CEPH_OSD_OP_FLAG_FAILOK`, as Objecter sets it: an
+    /// OSD that rejects the hint does not fail the request. The OSD creates
+    /// the object if it does not exist. `0` for either size means no
+    /// expectation.
+    pub fn set_alloc_hint(
+        expected_object_size: u64,
+        expected_write_size: u64,
+        flags: AllocHintFlags,
+    ) -> Self {
+        Self {
+            op: OpCode::SetAllocHint,
+            flags: CEPH_OSD_OP_FLAG_FAILOK,
+            op_data: OpData::AllocHint {
+                expected_object_size,
+                expected_write_size,
+                flags: flags.bits(),
+            },
             indata: Bytes::new(),
         }
     }
@@ -915,18 +1102,22 @@ impl OSDOp {
         Self::call("lock", "unlock", buf.freeze())
     }
 
-    /// Build an xattr operation with encoded name and optional value
+    /// Build an xattr operation with optional value.
+    ///
+    /// The OSD reads `name_len` raw bytes of name and then `value_len` raw
+    /// bytes of value from indata (Objecter's `add_xattr`); neither carries a
+    /// length prefix.
     fn xattr_op(
         op: OpCode,
         name: String,
         value: Option<Bytes>,
+        cmp_op: u8,
+        cmp_mode: u8,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        use crate::Denc;
         use bytes::BytesMut;
 
-        let mut buf =
-            BytesMut::with_capacity(4 + name.len() + value.as_ref().map_or(0, |v| v.len()));
-        name.encode(&mut buf, 0)?;
+        let mut buf = BytesMut::with_capacity(name.len() + value.as_ref().map_or(0, |v| v.len()));
+        buf.extend_from_slice(name.as_bytes());
 
         let value_len = value.as_ref().map_or(0, |v| v.len() as u32);
 
@@ -940,8 +1131,8 @@ impl OSDOp {
             op_data: OpData::Xattr {
                 name_len: name.len() as u32,
                 value_len,
-                cmp_op: 0,
-                cmp_mode: 0,
+                cmp_op,
+                cmp_mode,
             },
             indata: buf.freeze(),
         })
@@ -954,7 +1145,7 @@ impl OSDOp {
     pub fn get_xattr(
         name: impl Into<String>,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        Self::xattr_op(OpCode::GetXattr, name.into(), None)
+        Self::xattr_op(OpCode::GetXattr, name.into(), None, 0, 0)
     }
 
     /// Set an extended attribute
@@ -966,7 +1157,7 @@ impl OSDOp {
         name: impl Into<String>,
         value: Bytes,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        Self::xattr_op(OpCode::SetXattr, name.into(), Some(value))
+        Self::xattr_op(OpCode::SetXattr, name.into(), Some(value), 0, 0)
     }
 
     /// Remove an extended attribute
@@ -976,7 +1167,54 @@ impl OSDOp {
     pub fn remove_xattr(
         name: impl Into<String>,
     ) -> Result<Self, crate::osdclient::error::OSDClientError> {
-        Self::xattr_op(OpCode::RemoveXattr, name.into(), None)
+        Self::xattr_op(OpCode::RemoveXattr, name.into(), None, 0, 0)
+    }
+
+    /// Compare an extended attribute with `value` as byte strings, as
+    /// `ObjectOperation::cmpxattr(name, op, bufferlist)` does.
+    ///
+    /// The OSD evaluates `value <op> current`: the supplied operand is the
+    /// left-hand side, so `CmpOp::Gt` holds when `value` exceeds the stored
+    /// attribute (`do_cmp_xattr` in `PrimaryLogPG.cc`). A missing attribute
+    /// compares as the empty string, so `CmpOp::Eq` with an empty `value`
+    /// asserts that the attribute is absent or empty. When the comparison
+    /// holds the op's return code is 1; when it does not, the whole request
+    /// fails with `ECANCELED` and none of its writes apply.
+    pub fn cmpxattr(
+        name: impl Into<String>,
+        op: CmpOp,
+        value: Bytes,
+    ) -> Result<Self, crate::osdclient::error::OSDClientError> {
+        Self::xattr_op(
+            OpCode::CmpXattr,
+            name.into(),
+            Some(value),
+            op as u8,
+            CEPH_OSD_CMPXATTR_MODE_STRING,
+        )
+    }
+
+    /// Compare an extended attribute with `value` as unsigned integers, as
+    /// `ObjectOperation::cmpxattr(name, op, uint64_t)` does.
+    ///
+    /// The OSD parses the stored attribute as decimal text (missing or
+    /// empty is 0; text that does not start with a decimal number, or that
+    /// overflows u64, fails the request with `EINVAL`) and receives `value`
+    /// as a little-endian u64. Operand order and result codes are those of
+    /// [`Self::cmpxattr`].
+    pub fn cmpxattr_u64(
+        name: impl Into<String>,
+        op: CmpOp,
+        value: u64,
+    ) -> Result<Self, crate::osdclient::error::OSDClientError> {
+        let value = crate::encode_with_capacity(&value, 0)?;
+        Self::xattr_op(
+            OpCode::CmpXattr,
+            name.into(),
+            Some(value),
+            op as u8,
+            CEPH_OSD_CMPXATTR_MODE_U64,
+        )
     }
 
     /// List all extended attributes
@@ -1001,6 +1239,87 @@ impl OSDOp {
             flags: 0,
             op_data: OpData::None,
             indata: Bytes::new(),
+        }
+    }
+
+    /// List the clients watching an object (LIST_WATCHERS): a bare op, as
+    /// Objecter's `add_op` builds it. Decode the reply with
+    /// [`crate::osdclient::watchers::decode_list_watchers`].
+    pub fn list_watchers() -> Self {
+        Self {
+            op: OpCode::ListWatchers,
+            flags: 0,
+            op_data: OpData::None,
+            indata: Bytes::new(),
+        }
+    }
+
+    /// A `WATCH` op with sub-op `op` and generation 0, as
+    /// `ObjectOperation::watch` builds it. `timeout` is the watch timeout
+    /// in seconds, 0 for the OSD's `osd_client_watch_timeout`.
+    pub fn watch(cookie: u64, op: WatchOp, timeout: u32) -> Self {
+        Self::watch_op(cookie, op, 0, timeout)
+    }
+
+    /// A `WATCH{PING}` tagged with the registration generation it pings.
+    pub fn watch_ping(cookie: u64, generation: u32) -> Self {
+        Self::watch_op(cookie, WatchOp::Ping, generation, 0)
+    }
+
+    /// A `WATCH{RECONNECT}` carrying the new registration generation.
+    pub fn watch_reconnect(cookie: u64, generation: u32) -> Self {
+        Self::watch_op(cookie, WatchOp::Reconnect, generation, 0)
+    }
+
+    fn watch_op(cookie: u64, op: WatchOp, generation: u32, timeout: u32) -> Self {
+        Self {
+            op: OpCode::Watch,
+            flags: 0,
+            op_data: OpData::Watch {
+                cookie,
+                ver: 0,
+                op: op.into(),
+                generation,
+                timeout,
+            },
+            indata: Bytes::new(),
+        }
+    }
+
+    /// A `NOTIFY` op, as `ObjectOperation::notify` builds it: the union
+    /// holds the notifier's linger cookie, and the indata is protocol
+    /// version 1, the timeout in seconds (0 lets the OSD apply its own
+    /// default) and the length-prefixed payload. The reply's outdata is the
+    /// `u64` notify id.
+    pub fn notify(cookie: u64, timeout_secs: u32, payload: Bytes) -> Self {
+        use bytes::BufMut;
+        let mut indata = bytes::BytesMut::with_capacity(12 + payload.len());
+        indata.put_u32_le(1);
+        indata.put_u32_le(timeout_secs);
+        indata.put_u32_le(payload.len() as u32);
+        indata.extend_from_slice(&payload);
+        Self {
+            op: OpCode::Notify,
+            flags: 0,
+            op_data: OpData::Notify { cookie },
+            indata: indata.freeze(),
+        }
+    }
+
+    /// A `NOTIFY_ACK` op: the notify id, the acking watch's cookie and the
+    /// length-prefixed reply, all in the indata; the union is unused.
+    pub fn notify_ack(notify_id: u64, cookie: u64, reply: Bytes) -> Self {
+        use bytes::BufMut;
+        let mut indata = bytes::BytesMut::with_capacity(20 + reply.len());
+        indata.put_u64_le(notify_id);
+        indata.put_u64_le(cookie);
+        indata.put_u32_le(reply.len() as u32);
+        indata.extend_from_slice(&reply);
+        Self {
+            op: OpCode::NotifyAck,
+            flags: 0,
+            op_data: OpData::None,
+            indata: indata.freeze(),
         }
     }
 
@@ -1219,12 +1538,16 @@ pub struct OpResult {
 }
 
 impl OpResult {
-    /// Return the outdata of the first operation reply, or an error if the reply list is empty.
-    pub fn first_outdata(&self) -> crate::osdclient::error::Result<&Bytes> {
+    /// Return the first operation reply, or an error if the reply list is empty.
+    pub fn first_reply(&self) -> crate::osdclient::error::Result<&OpReply> {
         self.ops
             .first()
-            .map(|op| &op.outdata)
             .ok_or_else(|| crate::osdclient::error::OSDClientError::Other("No op result".into()))
+    }
+
+    /// Return the outdata of the first operation reply, or an error if the reply list is empty.
+    pub fn first_outdata(&self) -> crate::osdclient::error::Result<&Bytes> {
+        self.first_reply().map(|op| &op.outdata)
     }
 }
 
@@ -1261,6 +1584,95 @@ pub struct ListResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_opcode_encodings_against_rados_h() {
+        // Values computed from ceph/src/include/rados.h's __CEPH_FORALL_OSD_OPS
+        // table (CEPH_OSD_OP_MODE_* | CEPH_OSD_OP_TYPE_* | nr), so drift between
+        // this enum and upstream's opcode assignments is caught here rather than
+        // as an EOPNOTSUPP from a live OSD.
+        assert_eq!(OpCode::Read as u16, 0x1201); // __CEPH_OSD_OP(RD, DATA, 1)
+        assert_eq!(OpCode::Stat as u16, 0x1202); // __CEPH_OSD_OP(RD, DATA, 2)
+        assert_eq!(OpCode::Write as u16, 0x2201); // __CEPH_OSD_OP(WR, DATA, 1)
+        assert_eq!(OpCode::GetXattr as u16, 0x1301); // __CEPH_OSD_OP(RD, ATTR, 1)
+        assert_eq!(OpCode::SetXattr as u16, 0x2301); // __CEPH_OSD_OP(WR, ATTR, 1)
+        assert_eq!(OpCode::RemoveXattr as u16, 0x2304); // __CEPH_OSD_OP(WR, ATTR, 4)
+        assert_eq!(OpCode::ListXattrs as u16, 0x1302); // __CEPH_OSD_OP(RD, ATTR, 2)
+        assert_eq!(OpCode::Pgnls as u16, 0x1505); // __CEPH_OSD_OP(RD, PG, 5)
+        assert_eq!(OpCode::Call as u16, 0x1401); // __CEPH_OSD_OP(RD, EXEC, 1)
+    }
+
+    #[test]
+    fn watch_notify_opcodes_match_rados_h() {
+        assert_eq!(OpCode::Watch as u16, 0x220f); // __CEPH_OSD_OP(WR, DATA, 15)
+        assert_eq!(OpCode::Notify as u16, 0x1206); // __CEPH_OSD_OP(RD, DATA, 6)
+        assert_eq!(OpCode::NotifyAck as u16, 0x1207); // __CEPH_OSD_OP(RD, DATA, 7)
+        assert!(OpCode::Watch.is_write() && !OpCode::Watch.is_read());
+        assert!(OpCode::Notify.is_read() && !OpCode::Notify.is_write());
+        assert!(OpCode::NotifyAck.is_read() && !OpCode::NotifyAck.is_write());
+    }
+
+    #[test]
+    fn notify_indata_is_version_timeout_and_payload() {
+        let op = OSDOp::notify(1, 10, Bytes::from_static(b"hi"));
+        assert_eq!(
+            op.indata.as_ref(),
+            &[1, 0, 0, 0, 0x0a, 0, 0, 0, 2, 0, 0, 0, 0x68, 0x69]
+        );
+    }
+
+    #[test]
+    fn notify_ack_indata_is_id_cookie_and_reply() {
+        let op = OSDOp::notify_ack(5, 6, Bytes::from_static(b"r"));
+        let mut want = 5u64.to_le_bytes().to_vec();
+        want.extend_from_slice(&6u64.to_le_bytes());
+        want.extend_from_slice(&[1, 0, 0, 0, 0x72]);
+        assert_eq!(op.indata.as_ref(), want.as_slice());
+        assert!(matches!(op.op_data, OpData::None));
+    }
+
+    #[test]
+    fn watch_op_values_match_rados_h() {
+        assert_eq!(u8::from(WatchOp::Unwatch), 0);
+        assert_eq!(u8::from(WatchOp::LegacyWatch), 1);
+        assert_eq!(u8::from(WatchOp::Watch), 3);
+        assert_eq!(u8::from(WatchOp::Reconnect), 5);
+        assert_eq!(u8::from(WatchOp::Ping), 7);
+    }
+
+    #[test]
+    fn test_osdop_call_encodes_raw_class_and_method_bytes() {
+        // The OSD slices class/method back out of indata using class_len and
+        // method_len from the op header, not a length embedded in the
+        // payload, so the payload must be raw bytes with no length prefix.
+        let op = OSDOp::call("hello", "say_hello", Bytes::new()).expect("call");
+        assert_eq!(op.indata, Bytes::from_static(b"hellosay_hello"));
+
+        match op.op_data {
+            OpData::Call {
+                class_len,
+                method_len,
+                indata_len,
+            } => {
+                assert_eq!(class_len, 5);
+                assert_eq!(method_len, 9);
+                assert_eq!(indata_len, 0);
+            }
+            _ => panic!("Expected OpData::Call"),
+        }
+    }
+
+    #[test]
+    fn test_osdop_call_appends_method_indata_after_class_and_method() {
+        let payload = Bytes::from_static(b"payload");
+        let op = OSDOp::call("cls", "m", payload.clone()).expect("call");
+        assert_eq!(op.indata, Bytes::from_static(b"clsmpayload"));
+
+        match op.op_data {
+            OpData::Call { indata_len, .. } => assert_eq!(indata_len, payload.len() as u32),
+            _ => panic!("Expected OpData::Call"),
+        }
+    }
 
     #[test]
     fn test_opcode_sparse_read_encoding() {
@@ -1515,5 +1927,115 @@ mod tests {
         assert_eq!(target.epoch, 200);
         assert_eq!(target.osd, 10);
         assert_eq!(target.acting, vec![10, 11]);
+    }
+
+    #[test]
+    fn set_xattr_indata_is_raw_name_then_value() {
+        let op = OSDOp::set_xattr("user.x", Bytes::from_static(b"1")).unwrap();
+        assert_eq!(&op.indata[..], b"user.x1");
+        match op.op_data {
+            OpData::Xattr {
+                name_len,
+                value_len,
+                ..
+            } => {
+                assert_eq!(name_len, 6);
+                assert_eq!(value_len, 1);
+            }
+            other => panic!("unexpected op_data {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cmpxattr_sets_cmp_fields_and_raw_indata() {
+        let op = OSDOp::cmpxattr("user.tag", CmpOp::Eq, Bytes::from_static(b"t1")).unwrap();
+        assert_eq!(op.op, OpCode::CmpXattr);
+        assert_eq!(&op.indata[..], b"user.tagt1");
+        assert!(matches!(
+            op.op_data,
+            OpData::Xattr {
+                name_len: 8,
+                value_len: 2,
+                cmp_op: 1,
+                cmp_mode: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn cmpxattr_u64_sends_a_little_endian_value() {
+        let op = OSDOp::cmpxattr_u64("user.ver", CmpOp::Gte, 5).unwrap();
+        assert_eq!(&op.indata[..], b"user.ver\x05\0\0\0\0\0\0\0");
+        assert!(matches!(
+            op.op_data,
+            OpData::Xattr {
+                name_len: 8,
+                value_len: 8,
+                cmp_op: 4,
+                cmp_mode: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn zero_carries_an_extent_and_no_indata() {
+        let op = OSDOp::zero(2, 3);
+        assert_eq!(op.op, OpCode::Zero);
+        assert!(op.indata.is_empty());
+        assert!(matches!(
+            op.op_data,
+            OpData::Extent {
+                offset: 2,
+                length: 3,
+                truncate_size: 0,
+                truncate_seq: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn set_alloc_hint_carries_failok_and_the_hint() {
+        let op = OSDOp::set_alloc_hint(4096, 512, AllocHintFlags::INCOMPRESSIBLE);
+        assert_eq!(op.op, OpCode::SetAllocHint);
+        assert_eq!(op.flags, 0x2); // CEPH_OSD_OP_FLAG_FAILOK, as Objecter sets it
+        assert!(op.indata.is_empty());
+        assert!(matches!(
+            op.op_data,
+            OpData::AllocHint {
+                expected_object_size: 4096,
+                expected_write_size: 512,
+                flags: 512
+            }
+        ));
+    }
+
+    #[test]
+    fn small_op_opcodes_match_rados_h() {
+        // __CEPH_OSD_OP(mode, type, nr) from ceph/src/include/rados.h:
+        // mode RD 0x1000 / WR 0x2000, type DATA 0x0200 / ATTR 0x0300.
+        assert_eq!(OpCode::CmpXattr as u16, 0x1303); // (RD, ATTR, 3)
+        assert_eq!(OpCode::Zero as u16, 0x2204); // (WR, DATA, 4)
+        assert_eq!(OpCode::SetAllocHint as u16, 0x2223); // (WR, DATA, 35)
+        assert_eq!(OpCode::ListWatchers as u16, 0x1209); // (RD, DATA, 9)
+    }
+
+    #[test]
+    fn packed_entity_name_prints_as_entity_name_t() {
+        assert_eq!(PackedEntityName::new(0x08, 1).to_string(), "client.1");
+        assert_eq!(PackedEntityName::default().to_string(), "unknown.0");
+        assert_eq!(PackedEntityName::new(0x04, 3).to_string(), "osd.3");
+        assert_eq!(
+            PackedEntityName::new(0x08, u64::MAX).to_string(),
+            "client.?"
+        );
+        assert_eq!(PackedEntityName::new(0x03, 1).to_string(), "unknown.1");
+        assert_eq!(PackedEntityName::new(0x48, 1).to_string(), "unknown.1");
+    }
+
+    #[test]
+    fn packed_entity_name_orders_as_entity_name_t() {
+        assert!(PackedEntityName::new(0x08, 1) < PackedEntityName::new(0x08, 2));
+        assert!(PackedEntityName::new(0x01, 9) < PackedEntityName::new(0x08, 0));
+        assert!(PackedEntityName::new(0x08, u64::MAX) < PackedEntityName::new(0x08, 0));
     }
 }

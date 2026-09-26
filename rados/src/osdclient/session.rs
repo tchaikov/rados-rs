@@ -97,6 +97,21 @@ impl AtomicConnectionState {
     }
 }
 
+/// Tell the client that the session to `osd_id` ended, if it was ever
+/// published. Returns whether the client took the report.
+pub(crate) fn report_reset(
+    published: &AtomicBool,
+    client: &std::sync::Weak<crate::osdclient::client::OSDClient>,
+    osd_id: i32,
+) -> bool {
+    if !published.load(Ordering::Acquire) {
+        return false;
+    }
+    client
+        .upgrade()
+        .is_some_and(|client| client.on_session_reset(osd_id))
+}
+
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
@@ -107,6 +122,8 @@ struct IoTaskContext {
     conn_state: Arc<AtomicConnectionState>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
+    /// Set once the session is in `OSDClient::sessions`.
+    published: Arc<AtomicBool>,
 }
 
 /// Per-OSD connection and request tracking
@@ -179,6 +196,11 @@ pub struct OSDSession {
     /// Initialized to a fresh (uncancelled) token in `new()` and replaced
     /// with a proper child token in `connect()`.
     io_loop_token: tokio_util::sync::CancellationToken,
+    /// Set by `mark_published` when the client inserts this session into
+    /// its map. Only a published session's end is reported as a reset: a
+    /// session that lost a `get_or_create_session` race and is closed
+    /// unused carries nothing to re-send.
+    published: Arc<AtomicBool>,
 }
 
 /// Tracking information for a pending operation
@@ -250,6 +272,7 @@ impl OSDSession {
             io_task_handle: Mutex::new(None),
             // Placeholder; replaced with a proper child token in connect().
             io_loop_token: tokio_util::sync::CancellationToken::new(),
+            published: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -365,6 +388,7 @@ impl OSDSession {
             client: self.client.clone(),
             conn_state: Arc::clone(&self.conn_state),
             shutdown_token: self.io_loop_token.clone(),
+            published: Arc::clone(&self.published),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -455,7 +479,8 @@ impl OSDSession {
                             }
                         }
                         crate::osdclient::messages::CEPH_MSG_OSD_OPREPLY
-                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF => {
+                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF
+                        | crate::osdclient::messages::CEPH_MSG_WATCH_NOTIFY => {
                             if let Some(client_arc) = client.upgrade() {
                                 if let Err(e) = client_arc.dispatch_from_osd(osd_id, msg).await {
                                     error!(
@@ -532,6 +557,15 @@ impl OSDSession {
                 ctx.osd_id, reason, n
             );
         }
+
+        // Every end of a session, a deliberate close included, passes here
+        // exactly once, so this is the one place that reports the reset.
+        report_reset(&ctx.published, &ctx.client, osd_id);
+    }
+
+    /// Record that the client published this session in its map.
+    pub(crate) fn mark_published(&self) {
+        self.published.store(true, Ordering::Release);
     }
 
     // ===========================================================================

@@ -2450,6 +2450,15 @@ impl OSDMapIncremental {
     }
 }
 
+/// A PG's up and acting sets: see [`OSDMap::pg_to_up_acting`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpActing {
+    pub up: Vec<i32>,
+    pub up_primary: i32,
+    pub acting: Vec<i32>,
+    pub acting_primary: i32,
+}
+
 /// OSDMap - the main OSD cluster map structure
 /// This is a simplified version that focuses on decoding the essential fields
 #[derive(Debug, Serialize)]
@@ -2788,6 +2797,90 @@ impl OSDMap {
         Ok(osds)
     }
 
+    /// Map a PG to its up and acting sets and their primaries, as C++
+    /// `pg_to_up_acting_osds` reports them separately.
+    ///
+    /// `up` is CRUSH plus `pg_upmap`, `pg_upmap_items`, primary selection
+    /// and `pg_upmap_primaries`, with down and nonexistent OSDs removed
+    /// (replicated) or replaced by `CRUSH_ITEM_NONE` (EC) as
+    /// `_raw_to_up_osds` does, primary first; the order of the others is
+    /// this client's placement order. `up_primary` is its first valid OSD,
+    /// -1 when every OSD is down. `acting` is `pg_temp` filtered the same
+    /// way as `_get_temp_osds` does, else `up` when that leaves nothing;
+    /// `acting_primary` is `primary_temp`, else `pg_temp`'s first valid
+    /// OSD, else `up_primary`. The first element of
+    /// [`pg_to_acting_osds`](Self::pg_to_acting_osds) is `acting_primary`.
+    /// Uncached: callers compare it across maps, not per op.
+    pub fn pg_to_up_acting(&self, pg: &PgId) -> Result<UpActing, RadosError> {
+        let pool = self
+            .pools
+            .get(&pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+        let crush_map = self
+            .crush
+            .as_ref()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+        let raw = crate::crush::placement::pg_to_osds(
+            crush_map,
+            *pg,
+            pool.pgp_num,
+            pool.crush_rule as u32,
+            &self.osd_weight,
+            pool.size as usize,
+            hashpspool,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
+        let pps = crate::crush::placement::pg_to_pps(*pg, pool.pgp_num, hashpspool);
+        Ok(self.up_acting_from_raw(pg, pps, raw, !pool.is_erasure()))
+    }
+
+    /// `can_shift` is `pg_pool_t::can_shift_osds()`: a replicated pool
+    /// drops down OSDs from its sets, an EC pool keeps their positions as
+    /// `CRUSH_ITEM_NONE`.
+    fn up_acting_from_raw(
+        &self,
+        pg: &PgId,
+        pps: u32,
+        mut raw: Vec<i32>,
+        can_shift: bool,
+    ) -> UpActing {
+        self.apply_up_overrides(pg, pps, &mut raw);
+        let valid = |o: &i32| *o >= 0 && *o != CRUSH_ITEM_NONE;
+        // `_raw_to_up_osds` for up, `_get_temp_osds` for pg_temp.
+        let only_up = |osds: &[i32]| -> Vec<i32> {
+            if can_shift {
+                osds.iter().copied().filter(|&o| self.is_up(o)).collect()
+            } else {
+                osds.iter()
+                    .map(|&o| if self.is_up(o) { o } else { CRUSH_ITEM_NONE })
+                    .collect()
+            }
+        };
+        let up = only_up(&raw);
+        let up_primary = up.iter().copied().find(valid).unwrap_or(-1);
+
+        let temp = self.pg_temp.get(pg).map(|t| only_up(t)).unwrap_or_default();
+        let mut acting_primary = match self.primary_temp.get(pg) {
+            Some(&p) if p >= 0 => p,
+            _ => temp.iter().copied().find(valid).unwrap_or(-1),
+        };
+        let acting = if temp.is_empty() {
+            if acting_primary == -1 {
+                acting_primary = up_primary;
+            }
+            up.clone()
+        } else {
+            temp
+        };
+        UpActing {
+            up,
+            up_primary,
+            acting,
+            acting_primary,
+        }
+    }
+
     /// Compute the `spg_t` shard for a PG.
     ///
     /// Returns `ShardId::NO_SHARD` (-1) for replicated pools — there is
@@ -3029,6 +3122,12 @@ impl OSDMap {
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
+        self.apply_up_overrides(pg, pps, osds);
+        self.apply_acting_overrides(pg, osds);
+    }
+
+    /// Steps 1-4 of [`Self::apply_pg_overrides`]: the up set, primary first.
+    fn apply_up_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
         // pg_upmap (complete acting-set replacement).  Reject the
         // upmap if any target OSD is marked OUT.  Mirrors the
         // OUT-target check at the top of `OSDMap::_apply_upmap` —
@@ -3085,7 +3184,11 @@ impl OSDMap {
             let pos = rel_pos + 1;
             osds.swap(0, pos);
         }
+    }
 
+    /// Steps 5-6 of [`Self::apply_pg_overrides`], then the removal of
+    /// `CRUSH_ITEM_NONE`: turns the up set into the flat acting set.
+    fn apply_acting_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
         if let Some(temp_osds) = self.pg_temp.get(pg)
             && !temp_osds.is_empty()
         {
@@ -3710,6 +3813,118 @@ mod tests {
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
         );
+    }
+
+    /// `pg_to_acting_osds`'s first element is `pg_to_up_acting`'s
+    /// acting primary, whatever overrides apply.
+    fn assert_flat_primary_is_acting_primary(map: &OSDMap, pg: &PgId, raw: Vec<i32>) {
+        let mut flat = raw.clone();
+        map.apply_pg_overrides(pg, 0, &mut flat);
+        let ua = map.up_acting_from_raw(pg, 0, raw, true);
+        assert_eq!(flat.first().copied(), Some(ua.acting_primary), "{ua:?}");
+    }
+
+    #[test]
+    fn up_acting_keeps_the_flat_primary_across_the_placement_fixtures() {
+        let pg = PgId::new(1, 42);
+
+        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let mut map = make_osdmap_with_states(vec![0x1, 0x3]);
+        map.primary_temp.insert(pg, 0);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1]);
+
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        map.primary_temp.insert(pg, 4);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        map.pg_upmap_items.insert(pg, vec![(0, 4)]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn up_acting_ignores_another_pools_temps() {
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        let pg = PgId::new(1, 42);
+        let before = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        map.pg_temp.insert(PgId::new(2, 42), vec![3, 4]);
+        map.primary_temp.insert(PgId::new(2, 42), 4);
+        assert_eq!(map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true), before);
+
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let after = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(after.up, before.up);
+        assert_ne!(after.acting, before.acting);
+    }
+
+    #[test]
+    fn up_acting_drops_down_osds_as_the_osd_does() {
+        let pg = PgId::new(1, 42);
+        let map = make_osdmap_with_states(vec![0x1, 0x1, 0x1]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!((ua.up.clone(), ua.up_primary), (vec![], -1), "all down");
+        assert_eq!((ua.acting, ua.acting_primary), (vec![], -1));
+
+        let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x1, 0x3]);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            (ua.acting, ua.acting_primary),
+            (vec![4], 4),
+            "down 3 dropped"
+        );
+
+        map.pg_temp.insert(pg, vec![3]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            (ua.acting, ua.acting_primary),
+            (vec![0, 1, 2], 0),
+            "an all-down pg_temp falls back to up"
+        );
+
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 3, 2], false);
+        assert_eq!(ua.up, vec![0, CRUSH_ITEM_NONE, 2], "EC keeps positions");
+        assert_eq!(ua.acting, vec![CRUSH_ITEM_NONE], "EC pg_temp too");
+        assert_eq!(ua.acting_primary, -1);
+    }
+
+    #[test]
+    fn up_acting_without_temps_has_acting_equal_to_up() {
+        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
+        let pg = PgId::new(1, 42);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(ua.up_primary, 1);
+        assert_eq!(ua.up, vec![1, 2], "a down OSD is not up");
+        assert_eq!(ua.acting, ua.up);
+        assert_eq!(ua.acting_primary, 1);
+    }
+
+    #[test]
+    fn up_acting_separates_pg_temp_and_primary_temp_from_up() {
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        let pg = PgId::new(1, 42);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!((ua.up.clone(), ua.up_primary), (vec![0, 1, 2], 0));
+        assert_eq!((ua.acting.clone(), ua.acting_primary), (vec![3, 4], 3));
+
+        map.primary_temp.insert(pg, 4);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            ua.acting,
+            vec![3, 4],
+            "primary_temp does not reorder acting"
+        );
+        assert_eq!(ua.acting_primary, 4);
+        assert_eq!(ua.up_primary, 0);
     }
 
     /// Compute the C++ `pgtemp_primaryfirst` for a single shard id —

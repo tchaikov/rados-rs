@@ -32,6 +32,9 @@ impl<T: MapMessage> MapSender<T> {
     /// Send a message through the channel.
     ///
     /// Returns Ok(()) if sent, Err(message) if the receiver was dropped.
+    // The Err variant returns the unsent Message by design, mirroring
+    // mpsc::error::SendError<T>, so the caller can inspect or reclaim it.
+    #[allow(clippy::result_large_err)]
     pub async fn send(&self, msg: Message) -> Result<(), Message> {
         self.tx.send(msg).await.map_err(|e| e.0)
     }
