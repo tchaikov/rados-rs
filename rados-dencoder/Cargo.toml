@@ -1,0 +1,21 @@
+[package]
+name = "rados-dencoder"
+version.workspace = true
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+description = "ceph-dencoder work-alike for the Rust encodings, used by the corpus comparison test"
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "dencoder"
+path = "src/main.rs"
+
+[dependencies]
+rados = { path = "../rados", version = "0.1.4" }
+rados-cls = { path = "../rados-cls", version = "0.1.4" }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

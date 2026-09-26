@@ -993,19 +993,25 @@ impl OSDClient {
 
     /// Check an OpResult for errors.
     ///
-    /// Validates both the overall result code and the per-op return code.
+    /// Ceph's result codes are errno-shaped: a negative code is a failure,
+    /// zero or positive is success. Some ops report success with a positive
+    /// code (`CMPXATTR` returns 1 when the comparison holds), so this tests
+    /// `< 0`, not `!= 0`, on the overall result and on the first op's
+    /// return code. The per-op `FAILOK` flag is not honoured here: if the
+    /// first op carries it and fails, its negative code is reported even
+    /// though the OSD let the request succeed.
     pub(crate) fn check_op_result(
         result: &crate::osdclient::types::OpResult,
         op_name: &str,
     ) -> Result<()> {
-        if result.result != 0 {
+        if result.result < 0 {
             return Err(OSDClientError::OSDError {
                 code: result.result,
                 message: format!("{op_name} failed"),
             });
         }
         if let Some(op) = result.ops.first()
-            && op.return_code != 0
+            && op.return_code < 0
         {
             return Err(OSDClientError::OSDError {
                 code: op.return_code,
@@ -2611,5 +2617,42 @@ impl OSDClient {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OSDClient;
+    use crate::osdclient::error::OSDClientError;
+    use crate::osdclient::types::{OpReply, OpResult};
+    use bytes::Bytes;
+
+    fn result(overall: i32, first: i32) -> OpResult {
+        OpResult {
+            result: overall,
+            version: 0,
+            ops: vec![OpReply {
+                return_code: first,
+                outdata: Bytes::new(),
+            }],
+            redirect: None,
+        }
+    }
+
+    #[test]
+    fn check_op_result_treats_positive_codes_as_success() {
+        // Ceph is errno-shaped: only a negative code is a failure. A
+        // holding CMPXATTR returns 1.
+        assert!(OSDClient::check_op_result(&result(0, 0), "t").is_ok());
+        assert!(OSDClient::check_op_result(&result(1, 1), "t").is_ok());
+        assert!(OSDClient::check_op_result(&result(0, 1), "t").is_ok());
+    }
+
+    #[test]
+    fn check_op_result_reports_negative_codes() {
+        let err = OSDClient::check_op_result(&result(-2, 0), "t").expect_err("overall");
+        assert!(matches!(err, OSDClientError::OSDError { code: -2, .. }));
+        let err = OSDClient::check_op_result(&result(0, -125), "t").expect_err("per-op");
+        assert!(matches!(err, OSDClientError::OSDError { code: -125, .. }));
     }
 }
