@@ -20,8 +20,5 @@ At the crate root it re-exports the high-level client surface, including:
 - `list_objects_stream`
 - object operation builders and result types
 
-The `dencoder` binary also lives in this package as an internal tool:
-
-```bash
-cargo run -p rados --bin dencoder -- list_types
-```
+The `dencoder` binary, a `ceph-dencoder` work-alike over these encodings,
+lives in the workspace's `rados-dencoder` package.
