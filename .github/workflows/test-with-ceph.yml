@@ -90,8 +90,18 @@ jobs:
 
       - name: Run osdclient Integration Tests (CRC enabled)
         run: |
-          for test in osdclient_integration_test osdclient_object_io_test osdclient_pool_operations osdclient_rados_operations; do
+          for test in osdclient_integration_test osdclient_object_io_test osdclient_pool_operations osdclient_rados_operations osdclient_xattr_operations osdclient_omap_operations osdclient_exec_operations osdclient_small_operations; do
             cargo test -p rados --test "$test" -- --ignored --nocapture
+          done
+        env:
+          RADOS_MS_CRC_DATA: "true"
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Run rados-cls Integration Tests (CRC enabled)
+        run: |
+          for test in cls_version_refcount cls_user cls_queue_gc cls_rgw_index cls_rgw_gc cls_rgw_usage cls_rgw_lc; do
+            cargo test -p rados-cls --test "$test" -- --ignored --nocapture
           done
         env:
           RADOS_MS_CRC_DATA: "true"
@@ -100,8 +110,18 @@ jobs:
 
       - name: Run osdclient Integration Tests (CRC disabled)
         run: |
-          for test in osdclient_integration_test osdclient_object_io_test osdclient_rados_operations; do
+          for test in osdclient_integration_test osdclient_object_io_test osdclient_rados_operations osdclient_xattr_operations osdclient_omap_operations osdclient_exec_operations osdclient_small_operations; do
             cargo test -p rados --test "$test" -- --ignored --nocapture
+          done
+        env:
+          RADOS_MS_CRC_DATA: "false"
+          RUST_BACKTRACE: full
+          RUST_LOG: info
+
+      - name: Run rados-cls Integration Tests (CRC disabled)
+        run: |
+          for test in cls_version_refcount cls_user cls_queue_gc cls_rgw_index cls_rgw_gc cls_rgw_usage cls_rgw_lc; do
+            cargo test -p rados-cls --test "$test" -- --ignored --nocapture
           done
         env:
           RADOS_MS_CRC_DATA: "false"
