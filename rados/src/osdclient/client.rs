@@ -14,15 +14,26 @@ use tracing::{debug, error, info, warn};
 use crate::denc::{Denc, VersionedEncode};
 
 use crate::osdclient::backoff::BackoffEntry;
-use crate::osdclient::error::{OSDClientError, Result};
+use crate::osdclient::error::{ETIMEDOUT, OSDClientError, Result};
 use crate::osdclient::messages::MOSDOp;
 use crate::osdclient::session::OSDSession;
 use crate::osdclient::throttle::Throttle;
 use crate::osdclient::tracker::{Tracker, TrackerConfig};
 use crate::osdclient::types::{
     ListObjectEntry, ListResult, OSDOp, ObjectId, ObjectLocator, OsdOpFlags, ReadResult,
-    RequestRedirect, StatResult, StripedPgId, WriteResult, calc_op_budget,
+    RequestRedirect, StatResult, StripedPgId, WatchOp, WriteResult, calc_op_budget,
 };
+use crate::osdclient::watch::{
+    Linger, LingerKind, NotifyResult, PgInterval, WatchEvent, decode_notify_reply, is_no_answer,
+    lingers_to_resend, notify_error_code, scan_lingers, watch_error_code, watches_to_ping,
+};
+use bytes::Bytes;
+
+/// How often a registered watch is pinged (Objecter's `objecter_tick_interval`).
+const WATCH_PING_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// librados's `client_notify_timeout`, sent when the caller passes 0.
+const CLIENT_NOTIFY_TIMEOUT_SECS: u32 = 10;
 
 /// Configuration for OSD client
 #[derive(Debug, Clone)]
@@ -116,6 +127,171 @@ pub struct OSDClient {
     /// the new session's tid to fall below the highest tid the OSD had
     /// already seen for the same object.  Mirrors `Objecter::last_tid`.
     next_tid: Arc<AtomicU64>,
+    /// Watches and in-flight notifies, keyed by cookie: Objecter's
+    /// `linger_ops`. Every `MWatchNotify` is routed through it.
+    lingers: dashmap::DashMap<u64, Arc<Linger>>,
+    /// Linger cookie source. Starts above 1000, as librados's cookies do
+    /// (its tests assert `cookie > 1000`), and never reuses a value, since
+    /// the OSD keys a watch by `(cookie, client gid)`.
+    next_cookie: AtomicU64,
+    /// Cleared by `set_watch_pings_enabled(false)`.
+    watch_pings_enabled: AtomicBool,
+}
+
+/// Where an object lives: the hobject hash its MOSDOp carries, and the
+/// pool's PG that contains that hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Placement {
+    hash: u32,
+    pg: crate::crush::placement::PgId,
+}
+
+/// Where an op goes: its hobject hash, its PG's `spg_t`, and that PG's
+/// acting OSDs.
+type OpRoute = (u32, StripedPgId, Vec<i32>);
+
+/// An `MOSDOp` built by `prepare_op`, carried across `route_and_submit`
+/// calls with the map it was last routed against.
+struct PreparedOp {
+    msg: Arc<MOSDOp>,
+    osdmap: Arc<crate::osdclient::osdmap::OSDMap>,
+    class: OpClass,
+}
+
+/// What decides which pause and full flags hold an op back.
+#[derive(Clone, Copy)]
+struct OpClass {
+    is_write: bool,
+    is_read: bool,
+    respects_full: bool,
+    /// A watch ping: held by nothing, not even the epoch barrier, as
+    /// Objecter's `_send_linger_ping` skips `_calc_target` (the ping round
+    /// itself is skipped under PAUSERD). Registrations, reconnects and
+    /// notifies go through the ordinary classification with the linger's
+    /// target, so a watch (WRITE) waits out PAUSEWR and a full pool and a
+    /// notify (READ) waits out PAUSERD.
+    ping: bool,
+}
+
+impl OpClass {
+    /// Which of `osdmap`'s pause and full flags hold an op on `pool` back:
+    /// `(pauserd, pausewr, pool_full)`.
+    fn held_by(self, osdmap: &crate::osdclient::osdmap::OSDMap, pool: u64) -> (bool, bool, bool) {
+        if self.ping {
+            return (false, false, false);
+        }
+        let pauserd = self.is_read && osdmap.is_pauserd();
+        let pausewr = self.is_write && osdmap.is_pausewr();
+        let pool_full = self.is_write && self.respects_full && osdmap.is_pool_full(pool);
+        (pauserd, pausewr, pool_full)
+    }
+}
+
+/// How `submit_once_in_map` treats an op.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SubmitKind {
+    /// An ordinary op: throttled, and held by every pause flag.
+    Op,
+    /// A linger send (registration, reconnect, notify): unthrottled, as
+    /// Objecter pre-budgets linger sends, and held by the pause flags as
+    /// an ordinary op is.
+    Linger,
+    /// A watch ping: unthrottled and held by nothing ([`OpClass::ping`]).
+    Ping,
+}
+
+/// One send by `route_and_submit`.
+struct Submitted {
+    osd: i32,
+    /// The map the op was routed in; its epoch is the op's.
+    osdmap: Arc<crate::osdclient::osdmap::OSDMap>,
+    rx: Result<tokio::sync::oneshot::Receiver<Result<crate::osdclient::types::OpResult>>>,
+}
+
+/// The maps one `MOSDMap` advanced this client through, oldest first.
+#[derive(Default)]
+struct MapBatch {
+    maps: Vec<Arc<crate::osdclient::osdmap::OSDMap>>,
+    /// Some epochs in between were never seen (a gap, or a full map that
+    /// jumps), so an interval change may have gone unnoticed.
+    skipped: bool,
+}
+
+/// The OSD's `osd_default_notify_timeout`, which it applies to a wire
+/// timeout of 0.
+const OSD_DEFAULT_NOTIFY_TIMEOUT_SECS: u32 = 30;
+
+/// How long a notify waits for its completion after each send: the
+/// OSD's own timeout for it, plus 30 s. The OSD completes it by then;
+/// the bound only covers an OSD that dies with no re-send to follow.
+fn notify_outer_bound(timeout_secs: u32) -> std::time::Duration {
+    let wire = if timeout_secs == 0 {
+        OSD_DEFAULT_NOTIFY_TIMEOUT_SECS
+    } else {
+        timeout_secs
+    };
+    std::time::Duration::from_secs(u64::from(wire) + 30)
+}
+
+/// Wait for a notify's completion, restarting `bound` each time a send of
+/// it reaches a session.
+async fn await_notify(
+    linger: &Linger,
+    mut done_rx: tokio::sync::oneshot::Receiver<(i32, Bytes)>,
+    bound: std::time::Duration,
+) -> Result<NotifyResult> {
+    let (code, data) = loop {
+        tokio::select! {
+            done = &mut done_rx => {
+                break done
+                    .map_err(|_| OSDClientError::Internal("notify completion dropped".into()))?;
+            }
+            () = linger.resent.notified() => {}
+            () = tokio::time::sleep(bound) => return Err(OSDClientError::Timeout(bound)),
+        }
+    };
+    // A completion with no reply map is a failed send, not the OSD's.
+    if code < 0 && (code != ETIMEDOUT || data.is_empty()) {
+        return Err(OSDClientError::OSDError {
+            code,
+            message: "notify failed".into(),
+        });
+    }
+    let (acks, missed) = decode_notify_reply(&data)?;
+    Ok(NotifyResult {
+        acks,
+        missed,
+        timed_out: code == ETIMEDOUT,
+    })
+}
+
+/// Removes a linger from the registry when dropped, so a failed or
+/// cancelled registration or notify leaves nothing behind.
+struct LingerGuard<'a> {
+    client: &'a OSDClient,
+    cookie: Option<u64>,
+}
+
+impl<'a> LingerGuard<'a> {
+    fn new(client: &'a OSDClient, cookie: u64) -> Self {
+        Self {
+            client,
+            cookie: Some(cookie),
+        }
+    }
+
+    /// The registration succeeded: keep the linger.
+    fn keep(mut self) {
+        self.cookie = None;
+    }
+}
+
+impl Drop for LingerGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(cookie) = self.cookie {
+            self.client.forget_linger(cookie);
+        }
+    }
 }
 
 /// Await an OSD operation result with a timeout, mapping all error layers to `OSDClientError`.
@@ -126,7 +302,7 @@ async fn await_op_result(
     tokio::time::timeout(timeout, rx)
         .await
         .map_err(|_| OSDClientError::Timeout(timeout))?
-        .map_err(|_| OSDClientError::Internal("Operation cancelled".into()))?
+        .map_err(|_| OSDClientError::Cancelled)?
 }
 
 /// Return the time left until `deadline`, or `Err(Timeout(effective))` if the
@@ -238,6 +414,9 @@ impl OSDClient {
                 blocklisted: AtomicBool::new(false),
                 epoch_barrier: AtomicU32::new(0),
                 next_tid: Arc::new(AtomicU64::new(1)),
+                lingers: dashmap::DashMap::new(),
+                next_cookie: AtomicU64::new(1001),
+                watch_pings_enabled: AtomicBool::new(true),
             }
         });
 
@@ -276,6 +455,26 @@ impl OSDClient {
             info!("OSDClient OSDMap drain task terminated");
         });
 
+        // The watch ping task, stopped like the drain task above.
+        let ping_weak = Arc::downgrade(&client);
+        let ping_token = client.shutdown_token.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + WATCH_PING_INTERVAL,
+                WATCH_PING_INTERVAL,
+            );
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    _ = ping_token.cancelled() => break,
+                    _ = ticker.tick() => {
+                        let Some(client) = ping_weak.upgrade() else { break };
+                        client.tick_lingers();
+                    }
+                }
+            }
+        });
+
         Ok(client)
     }
 
@@ -300,12 +499,597 @@ impl OSDClient {
             crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF => {
                 self.handle_backoff_from_osd(osd_id, msg).await
             }
+            crate::osdclient::messages::CEPH_MSG_WATCH_NOTIFY => {
+                self.handle_watch_notify(osd_id, msg)
+            }
             _ => {
                 warn!(
                     "Unexpected session-specific message type 0x{:04x} from OSD {}",
                     msg_type, osd_id
                 );
                 Ok(())
+            }
+        }
+    }
+
+    /// Decode an `MWatchNotify` and route it to its linger by cookie.
+    /// Synchronous: it runs inside the session's I/O loop.
+    fn handle_watch_notify(&self, osd_id: i32, msg: crate::msgr2::message::Message) -> Result<()> {
+        let event =
+            crate::osdclient::messages::MWatchNotify::decode(msg.header.version.get(), &msg.front)?;
+        debug!(
+            "watch-notify from OSD {}: opcode {} cookie {} notify_id {} rc {}",
+            osd_id, event.opcode, event.cookie, event.notify_id, event.return_code
+        );
+        crate::osdclient::watch::route_watch_notify(&self.lingers, event, msg.data);
+        Ok(())
+    }
+
+    /// The session to `osd_id` ended: its I/O task exited, whether the
+    /// connection dropped or the session was closed on purpose. Returns
+    /// at once; the lingers on that OSD are re-sent from a spawned task,
+    /// since the caller is the dying I/O task and `OSDSession::close()`
+    /// awaits it.
+    /// Returns whether it spawned the re-send.
+    pub(crate) fn on_session_reset(self: &Arc<Self>, osd_id: i32) -> bool {
+        // Client shutdown ends every I/O task through the same path.
+        if self.shutdown_token.is_cancelled() {
+            return false;
+        }
+        tokio::spawn(Arc::clone(self).relinger_after_reset(osd_id));
+        true
+    }
+
+    async fn relinger_after_reset(self: Arc<Self>, osd_id: i32) {
+        let affected: Vec<Arc<Linger>> = self
+            .lingers
+            .iter()
+            .filter(|l| l.lock_state().osd == Some(osd_id))
+            .map(|l| Arc::clone(l.value()))
+            .collect();
+        if !affected.is_empty() {
+            info!(
+                "session to OSD {} reset; re-sending {} linger(s)",
+                osd_id,
+                affected.len()
+            );
+        }
+        for linger in affected {
+            self.spawn_relinger(linger);
+        }
+    }
+
+    // ========================================================================
+    // Watch/notify: the linger machinery (Objecter's LingerOp)
+    // ========================================================================
+
+    /// The client's global id: the `client.<gid>` the OSD names this
+    /// client's watches and notifies by (librados's `get_instance_id`).
+    pub fn global_id(&self) -> u64 {
+        self.global_id
+    }
+
+    /// Stop or resume the five-second watch pings, as Objecter's
+    /// `objecter_inject_no_watch_ping` does. A test aid: without pings
+    /// the OSD times a watch out.
+    pub fn set_watch_pings_enabled(&self, enabled: bool) {
+        self.watch_pings_enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Close the session to `osd` the way a reset ends it, through
+    /// `OSDSession::close()` and so through the I/O task's reset hook. A
+    /// test aid for the reconnect path.
+    pub async fn close_session_for_test(&self, osd: i32) {
+        let session = self.sessions.write().await.remove(&osd);
+        if let Some(session) = session {
+            session.close().await;
+        }
+    }
+
+    /// The current primary OSD of `object`.
+    pub(crate) async fn primary_osd(&self, object: &ObjectId) -> Result<i32> {
+        let osdmap = self.get_osdmap().await?;
+        let (_, _, osds) = Self::object_to_osds_in_map(&osdmap, object)?;
+        Ok(osds[0])
+    }
+
+    /// `object`'s PG interval in `osdmap`, placed by the same
+    /// `object_pg_in_map` that routes its ops.
+    fn linger_interval(
+        &self,
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        object: &ObjectId,
+    ) -> Result<PgInterval> {
+        let pool = osdmap
+            .pools
+            .get(&object.pool)
+            .ok_or(OSDClientError::PoolNotFound(object.pool))?;
+        let pg = Self::object_pg_in_map(osdmap, object)?.pg;
+        let ua = osdmap
+            .pg_to_up_acting(&pg)
+            .map_err(|e| OSDClientError::Crush(format!("PG->OSD mapping failed: {e}")))?;
+        Ok(PgInterval {
+            up: ua.up,
+            up_primary: ua.up_primary,
+            acting: ua.acting,
+            acting_primary: ua.acting_primary,
+            size: pool.size,
+            min_size: pool.min_size,
+            pg_num: pool.pg_num,
+            pgp_num: pool.pgp_num,
+            pg_num_pending: pool.pg_num_pending,
+            epoch: osdmap.epoch.as_u32(),
+        })
+    }
+
+    /// Record where `linger` is going as the send goes out, before any
+    /// reply: its PG interval in `osdmap` and the OSD (`osd`, else the
+    /// acting primary). A reset of that session or a new interval then
+    /// re-sends it even when this send gets no answer.
+    fn record_target(
+        &self,
+        linger: &Linger,
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        osd: Option<i32>,
+    ) {
+        let Ok(interval) = self.linger_interval(osdmap, &linger.object) else {
+            return;
+        };
+        let osd = osd.unwrap_or(interval.acting_primary);
+        let mut state = linger.lock_state();
+        if osd >= 0 {
+            state.osd = Some(osd);
+        }
+        state.interval = Some(interval);
+    }
+
+    /// Send one linger op once, WRITE|READ for a watch as Objecter sends
+    /// them, recording its target as it goes out, then await and check the
+    /// reply. `seq` is the send's number from [`Linger::begin_send`].
+    async fn send_linger_op(
+        &self,
+        linger: &Linger,
+        op: OSDOp,
+        name: &str,
+        seq: u64,
+    ) -> Result<crate::osdclient::types::OpResult> {
+        if let Ok(osdmap) = self.get_osdmap().await {
+            self.record_target(linger, &osdmap, None);
+        }
+        let outcome = async {
+            let (osd, osdmap, rx, _permit) = self
+                .submit_once_in_map(
+                    &linger.object,
+                    vec![op],
+                    crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                    OsdOpFlags::READ,
+                    SubmitKind::Linger,
+                )
+                .await
+                .map_err(|e| match e {
+                    // Held by a pause until the deadline: never sent.
+                    OSDClientError::Timeout(_) => {
+                        OSDClientError::Connection(format!("not sent: {e}"))
+                    }
+                    e => e,
+                })?;
+            self.record_target(linger, &osdmap, Some(osd));
+            if matches!(linger.kind, LingerKind::Notify { .. }) {
+                // Only a send a session took restarts the notify's bound;
+                // a re-send that never got out must not extend it.
+                linger.resent.notify_one();
+            }
+            let result = await_op_result(rx, self.tracker.operation_timeout()).await?;
+            Self::check_op_result(&result, name)?;
+            Ok(result)
+        }
+        .await;
+        {
+            let mut state = linger.lock_state();
+            if state.send_seq == seq {
+                state.sending = false;
+                state.resend_pending = outcome.as_ref().is_err_and(is_no_answer);
+            }
+        }
+        outcome
+    }
+
+    /// Register a watch on `object` (`timeout` in seconds, 0 for the OSD's
+    /// default). An OSD's rejection is returned (`ENOENT` for a missing
+    /// object). A send that gets no answer (a lost session, no reachable
+    /// OSD) is not an error: the registration stays pending and is sent
+    /// again by the next five-second linger tick, session reset or map
+    /// change, as Objecter keeps a linger op queued on its session; if
+    /// none succeeds within the Tracker's operation timeout, the watch
+    /// fails with `OSDClientError::Timeout`.
+    pub(crate) async fn linger_watch(
+        self: &Arc<Self>,
+        object: ObjectId,
+        timeout: u32,
+    ) -> Result<(
+        Arc<Linger>,
+        tokio::sync::mpsc::UnboundedReceiver<WatchEvent>,
+    )> {
+        let cookie = self.next_cookie.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            cookie,
+            object,
+            LingerKind::Watch { timeout },
+            tx,
+        ));
+        let (reg_tx, reg_rx) = tokio::sync::oneshot::channel();
+        linger.lock_state().registration = Some(reg_tx);
+        self.lingers.insert(cookie, Arc::clone(&linger));
+        let registration = LingerGuard::new(self, cookie);
+        self.refuse_after_shutdown()?;
+
+        // The deadline covers the first send too, which a pause can hold
+        // for its own full timeout.
+        let bound = self.tracker.operation_timeout();
+        let deadline = tokio::time::Instant::now() + bound;
+        self.send_register(&linger).await;
+        tokio::time::timeout_at(deadline, reg_rx)
+            .await
+            .map_err(|_| OSDClientError::Timeout(bound))?
+            .map_err(|_| OSDClientError::Internal("watch registration dropped".into()))??;
+        registration.keep();
+        debug!("watch {} registered on {:?}", cookie, linger.object);
+        Ok((linger, rx))
+    }
+
+    /// Send a watch's registration, `WATCH{WATCH}`, once. Success marks it
+    /// registered and answers `linger_watch`; an OSD's rejection answers
+    /// it with the error; no answer leaves it pending for a re-send.
+    async fn send_register(&self, linger: &Linger) {
+        let LingerKind::Watch { timeout } = linger.kind else {
+            return;
+        };
+        if !self.lingers.contains_key(&linger.cookie) {
+            return;
+        }
+        let sent = std::time::Instant::now();
+        let op = OSDOp::watch(linger.cookie, WatchOp::Watch, timeout);
+        let seq = linger.begin_send();
+        match self.send_linger_op(linger, op, "watch", seq).await {
+            Ok(_) => {
+                {
+                    let mut state = linger.lock_state();
+                    state.registered = true;
+                    state.last_error = None;
+                    state.watch_valid_thru = Some(sent);
+                }
+                linger.finish_registration(Ok(()));
+            }
+            Err(e) if is_no_answer(&e) => {
+                debug!(
+                    "watch {} registration got no answer ({}); the next tick re-sends it",
+                    linger.cookie, e
+                );
+            }
+            Err(e) => linger.finish_registration(Err(e)),
+        }
+    }
+
+    /// Re-register a watch with a single `WATCH{RECONNECT}` under a new
+    /// generation. An OSD's rejection becomes the watch's one
+    /// `Disconnect`; no answer leaves the watch as it is for the next
+    /// reset or map change to re-send.
+    async fn send_reconnect(self: Arc<Self>, linger: Arc<Linger>) {
+        if !self.lingers.contains_key(&linger.cookie) {
+            return;
+        }
+        let generation = {
+            let mut state = linger.lock_state();
+            state.register_gen += 1;
+            state.register_gen
+        };
+        let op = OSDOp::watch_reconnect(linger.cookie, generation);
+        let seq = linger.begin_send();
+        let outcome = self
+            .send_linger_op(&linger, op, "watch reconnect", seq)
+            .await;
+        let mut state = linger.lock_state();
+        if state.register_gen != generation {
+            return;
+        }
+        match outcome {
+            Ok(_) => {
+                info!("watch {} reconnected", linger.cookie);
+                state.last_error = None;
+            }
+            Err(e) if is_no_answer(&e) => {
+                debug!(
+                    "watch {} reconnect got no answer ({}); the next tick re-sends it",
+                    linger.cookie, e
+                );
+            }
+            Err(e) => {
+                drop(state);
+                warn!("watch {} reconnect failed: {}", linger.cookie, e);
+                linger.reconnect_failed(watch_error_code(&e));
+            }
+        }
+    }
+
+    /// Send a notify linger's NOTIFY, whole, unless it already completed,
+    /// and record the notify id its reply carries unless a later send or
+    /// the completion superseded it. An OSD's rejection completes the
+    /// notify with the error, as Objecter's `_linger_commit` does; no
+    /// answer leaves it for the next reset or map change to re-send.
+    async fn send_notify(&self, linger: &Linger) {
+        let LingerKind::Notify {
+            completion,
+            notify_id,
+            timeout_secs,
+            payload,
+        } = &linger.kind
+        else {
+            return;
+        };
+        let completed = || {
+            completion
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        };
+        if completed() {
+            return;
+        }
+        let seq = {
+            let mut state = linger.lock_state();
+            // The new primary allocates a new id; zeroed with the send's
+            // number taken, so a reply to an older send cannot restore it.
+            notify_id.store(0, Ordering::Release);
+            Linger::begin_send_locked(&mut state)
+        };
+        let op = OSDOp::notify(linger.cookie, *timeout_secs, payload.clone());
+        match self.send_linger_op(linger, op, "notify", seq).await {
+            Ok(result) => {
+                let id = result
+                    .ops
+                    .first()
+                    .and_then(|r| r.outdata.get(..8))
+                    .map(|b| u64::from_le_bytes(b.try_into().expect("8 bytes")));
+                let state = linger.lock_state();
+                if state.send_seq == seq
+                    && !completed()
+                    && let Some(id) = id
+                {
+                    notify_id.store(id, Ordering::Release);
+                }
+            }
+            Err(e) if is_no_answer(&e) => {
+                debug!(
+                    "notify {} got no answer ({}); the next tick re-sends it",
+                    linger.cookie, e
+                );
+            }
+            Err(e) => {
+                warn!("notify {} failed: {}", linger.cookie, e);
+                linger.complete_notify(notify_error_code(&e));
+            }
+        }
+    }
+
+    /// Re-send a notify after a reset or an interval change.
+    async fn resend_notify(self: Arc<Self>, linger: Arc<Linger>) {
+        if self.lingers.contains_key(&linger.cookie) {
+            self.send_notify(&linger).await;
+        }
+    }
+
+    /// Notify `object`'s watchers with `payload` and wait for them all to
+    /// ack or for the OSD's timeout. `timeout_ms` of 0 sends librados's
+    /// `client_notify_timeout`.
+    pub(crate) async fn notify(
+        self: &Arc<Self>,
+        object: ObjectId,
+        payload: Bytes,
+        timeout_ms: u64,
+    ) -> Result<NotifyResult> {
+        let timeout_secs = if timeout_ms == 0 {
+            CLIENT_NOTIFY_TIMEOUT_SECS
+        } else {
+            u32::try_from(timeout_ms / 1000).unwrap_or(u32::MAX)
+        };
+        let cookie = self.next_cookie.fetch_add(1, Ordering::Relaxed);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (events, _) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            cookie,
+            object,
+            LingerKind::Notify {
+                completion: std::sync::Mutex::new(Some(done_tx)),
+                notify_id: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs,
+                payload,
+            },
+            events,
+        ));
+        self.lingers.insert(cookie, Arc::clone(&linger));
+        let _registration = LingerGuard::new(self, cookie);
+        self.refuse_after_shutdown()?;
+        self.send_notify(&linger).await;
+        await_notify(&linger, done_rx, notify_outer_bound(timeout_secs)).await
+    }
+
+    /// Acknowledge notify `notify_id` for watch `cookie` on `object`.
+    pub(crate) async fn notify_ack(
+        &self,
+        object: &ObjectId,
+        notify_id: u64,
+        cookie: u64,
+        reply: Bytes,
+    ) -> Result<()> {
+        let (_, _, rx, _permit) = self
+            .submit_once(
+                object,
+                vec![OSDOp::notify_ack(notify_id, cookie, reply)],
+                crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                OsdOpFlags::READ,
+            )
+            .await?;
+        let result = await_op_result(rx, self.tracker.operation_timeout()).await?;
+        Self::check_op_result(&result, "notify_ack")
+    }
+
+    /// Remove a watch from its object: forgotten here first, so no ping or
+    /// reconnect follows, then `WATCH{UNWATCH}` as an ordinary write.
+    pub(crate) async fn unwatch(&self, linger: &Linger) -> Result<()> {
+        self.forget_linger(linger.cookie);
+        let result = self
+            .execute_op(
+                linger.object.clone(),
+                vec![OSDOp::watch(linger.cookie, WatchOp::Unwatch, 0)],
+                None,
+                crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                OsdOpFlags::empty(),
+            )
+            .await?;
+        Self::check_op_result(&result, "unwatch")
+    }
+
+    /// Fail a linger just inserted if shutdown has begun: shutdown cancels
+    /// the token before it drains `lingers`, so a linger inserted after
+    /// the drain is caught here and one inserted before it is drained.
+    fn refuse_after_shutdown(&self) -> Result<()> {
+        if self.shutdown_token.is_cancelled() {
+            return Err(OSDClientError::Connection("OSDClient shut down".into()));
+        }
+        Ok(())
+    }
+
+    /// Drop a linger from the registry; nothing is sent.
+    pub(crate) fn forget_linger(&self, cookie: u64) {
+        if let Some((_, linger)) = self.lingers.remove(&cookie) {
+            linger.close_events();
+        }
+    }
+
+    /// Shutdown's end for every linger: a watch gets its `Disconnect` and
+    /// its event channel closed, a notify completes with `ECANCELED`.
+    fn drain_lingers(&self) {
+        let cookies: Vec<u64> = self.lingers.iter().map(|l| *l.key()).collect();
+        for cookie in cookies {
+            let Some((_, linger)) = self.lingers.remove(&cookie) else {
+                continue;
+            };
+            match linger.kind {
+                LingerKind::Watch { .. } => {
+                    linger.finish_registration(Err(OSDClientError::Connection(
+                        "OSDClient shut down".into(),
+                    )));
+                    linger.fail(crate::osdclient::error::ENOTCONN);
+                }
+                LingerKind::Notify { .. } => {
+                    linger.complete_notify(crate::osdclient::error::ECANCELED);
+                }
+            }
+            linger.close_events();
+        }
+    }
+
+    /// One linger tick, every five seconds: re-send the lingers whose
+    /// last send got no answer and reconnect watches in error, then ping
+    /// every healthy watch with its generation. The pings are skipped
+    /// while reads are paused, as Objecter skips them, and while pings are
+    /// disabled; the re-sends are not.
+    fn tick_lingers(self: &Arc<Self>) {
+        for linger in lingers_to_resend(&self.lingers) {
+            self.spawn_relinger(linger);
+        }
+        if !self.watch_pings_enabled.load(Ordering::Relaxed) {
+            return;
+        }
+        if self
+            .osdmap_rx
+            .borrow()
+            .as_ref()
+            .is_none_or(|m| m.is_pauserd())
+        {
+            return;
+        }
+        for (linger, generation) in watches_to_ping(&self.lingers) {
+            tokio::spawn(Arc::clone(self).ping_watch(linger, generation));
+        }
+    }
+
+    async fn ping_watch(self: Arc<Self>, linger: Arc<Linger>, generation: u32) {
+        let sent = std::time::Instant::now();
+        let outcome = self.send_ping(&linger, generation).await;
+        if self.lingers.contains_key(&linger.cookie) {
+            linger.ping_finished(generation, sent, outcome);
+        }
+    }
+
+    async fn send_ping(&self, linger: &Linger, generation: u32) -> Result<()> {
+        let (_, _, rx, _) = self
+            .submit_once_in_map(
+                &linger.object,
+                vec![OSDOp::watch_ping(linger.cookie, generation)],
+                crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+                OsdOpFlags::READ,
+                SubmitKind::Ping,
+            )
+            .await?;
+        let result = await_op_result(rx, self.tracker.operation_timeout()).await?;
+        Self::check_op_result(&result, "watch ping")
+    }
+
+    /// After a batch of maps is published: re-send every linger whose PG
+    /// entered a new interval in any of `maps` (each applied epoch, in
+    /// order), or every linger when epochs were skipped, and fail those
+    /// whose pool is gone. Nothing here is awaited; the re-sends are
+    /// spawned.
+    fn scan_lingers_on_map_change(
+        self: &Arc<Self>,
+        maps: &[Arc<crate::osdclient::osdmap::OSDMap>],
+        skipped: bool,
+    ) {
+        let scan = scan_lingers(&self.lingers, maps, skipped, |osdmap, object| {
+            self.linger_interval(osdmap, object)
+        });
+        // A deleted pool unregisters the linger: a watch gets the
+        // `ENOTCONN` every lost watch carries, a notify `ENOENT`.
+        for linger in scan.pool_gone {
+            info!(
+                "pool {} of linger {} is gone",
+                linger.object.pool, linger.cookie
+            );
+            match linger.kind {
+                LingerKind::Watch { .. } => {
+                    // A registration still pending fails with the pool, as
+                    // `_check_linger_pool_dne` completes `on_reg_commit`.
+                    linger
+                        .finish_registration(Err(OSDClientError::PoolNotFound(linger.object.pool)));
+                    linger.fail(crate::osdclient::error::ENOTCONN);
+                }
+                LingerKind::Notify { .. } => {
+                    linger.complete_notify(crate::osdclient::error::ENOENT);
+                }
+            }
+            self.forget_linger(linger.cookie);
+        }
+        for linger in scan.resend {
+            self.spawn_relinger(linger);
+        }
+    }
+
+    /// Re-send `linger` from a spawned task: a watch as `RECONNECT`, a
+    /// notify whole.
+    fn spawn_relinger(self: &Arc<Self>, linger: Arc<Linger>) {
+        let client = Arc::clone(self);
+        match linger.kind {
+            LingerKind::Watch { .. } => {
+                if linger.lock_state().registered {
+                    tokio::spawn(client.send_reconnect(linger));
+                } else {
+                    tokio::spawn(async move { client.send_register(&linger).await });
+                }
+            }
+            LingerKind::Notify { .. } => {
+                tokio::spawn(client.resend_notify(linger));
             }
         }
     }
@@ -486,6 +1270,7 @@ impl OSDClient {
 
             // Insert the new session, replacing any disconnected session.
             // insert() returns the old value so we can kick its pending ops.
+            session.mark_published();
             sessions.insert(osd_id, Arc::clone(&session))
         };
 
@@ -525,30 +1310,49 @@ impl OSDClient {
             })
     }
 
-    fn object_to_osds_in_map(
-        &self,
+    /// Where `object` lives in `osdmap`, as Ceph's `Objecter::_calc_target`
+    /// computes it (`src/osdc/Objecter.cc:2842-2863`): the raw PG from
+    /// `object_locator_to_pg`, reduced by the pool's `raw_pg_to_pg`.
+    ///
+    /// This is the only way the client places an object: every op, every
+    /// re-placement and every linger's interval comes through here.
+    fn object_pg_in_map(
         osdmap: &crate::osdclient::osdmap::OSDMap,
-        pool: u64,
-        oid: &str,
-    ) -> Result<(StripedPgId, Vec<i32>)> {
+        object: &ObjectId,
+    ) -> Result<Placement> {
         let pool_info = osdmap
             .pools
-            .get(&pool)
-            .ok_or(OSDClientError::PoolNotFound(pool))?;
-
-        let locator = ObjectLocator::new(pool);
-
-        debug!(
-            "OSD weights from map (max_osd={}): {:?}",
-            osdmap.max_osd, osdmap.osd_weight
-        );
-
-        // Map object name to PG seed
-        let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
+            .get(&object.pool)
+            .ok_or(OSDClientError::PoolNotFound(object.pool))?;
+        let raw = osdmap
+            .object_locator_to_pg(&object.oid, &ObjectLocator::from(object))
             .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {e}")))?;
+        Ok(Placement {
+            hash: raw.seed,
+            pg: pool_info.raw_pg_to_pg(raw),
+        })
+    }
 
+    /// `object`'s hobject hash, its PG and the PG's acting OSDs.
+    fn object_to_osds_in_map(
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        object: &ObjectId,
+    ) -> Result<OpRoute> {
+        let placement = Self::object_pg_in_map(osdmap, object)?;
+        let (spg, osds) = Self::pg_to_spg_in_map(osdmap, placement.pg)?;
+        debug!(
+            "Mapped {}/{}/{} (key {:?}) to PG {spg:?}, OSDs: {osds:?}",
+            object.pool, object.namespace, object.oid, object.key
+        );
+        Ok((placement.hash, spg, osds))
+    }
+
+    /// A PG's wire `spg_t` and its acting OSDs.
+    fn pg_to_spg_in_map(
+        osdmap: &crate::osdclient::osdmap::OSDMap,
+        pg: crate::crush::placement::PgId,
+    ) -> Result<(StripedPgId, Vec<i32>)> {
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
-
         // For EC pools the wire spg_t carries a per-PG shard index.  For
         // replicated pools `pg_to_spg_shard` returns NO_SHARD (-1), so
         // this is correct in both cases.  Optimized EC pools currently
@@ -556,36 +1360,75 @@ impl OSDClient {
         let shard = osdmap
             .pg_to_spg_shard(&pg)
             .map_err(|e| OSDClientError::Crush(format!("EC shard lookup: {e}")))?;
-        let spg = StripedPgId::new(pg.pool, pg.seed, shard.0);
-        debug!(
-            "Mapped {}/{} to PG {:?}, OSDs: {:?}, shard: {}",
-            pool, oid, pg, osds, shard.0
-        );
+        Ok((StripedPgId::new(pg.pool, pg.seed, shard.0), osds))
+    }
 
-        Ok((spg, osds))
+    /// Re-place an op already in flight in `osdmap`: its hobject hash,
+    /// PG and acting OSDs.
+    ///
+    /// A PG op (PGNLS) is placed by the listing cursor's hash it carries,
+    /// which is kept as is and never re-derived from the op's empty name;
+    /// any other op is placed by its object's locator.
+    fn replace_pending(osdmap: &crate::osdclient::osdmap::OSDMap, msg: &MOSDOp) -> Result<OpRoute> {
+        if !Self::is_pg_op(msg) {
+            return Self::object_to_osds_in_map(osdmap, &msg.object);
+        }
+        let pool = msg.object.pool;
+        let pool_info = osdmap
+            .pools
+            .get(&pool)
+            .ok_or(OSDClientError::PoolNotFound(pool))?;
+        let pg = Self::cursor_pg(pool_info, pool, msg.object.hash);
+        let (spg, osds) = Self::pg_to_spg_in_map(osdmap, pg)?;
+        Ok((msg.object.hash, spg, osds))
+    }
+
+    /// The PG a PG op whose hobject hash is `hash` goes to in the map
+    /// `pool_info` comes from: each map re-reduces the same cursor hash
+    /// with `ceph_stable_mod`.
+    fn cursor_pg(
+        pool_info: &crate::osdclient::PgPool,
+        pool: u64,
+        hash: u32,
+    ) -> crate::crush::placement::PgId {
+        pool_info.raw_pg_to_pg(crate::crush::placement::PgId::new(pool, hash))
+    }
+
+    fn is_pg_op(msg: &MOSDOp) -> bool {
+        OsdOpFlags::from_bits_truncate(msg.flags).contains(OsdOpFlags::PGOP)
+    }
+
+    /// The input `object`'s hash is computed from: pool, namespace, and
+    /// the locator key, or the name when the key is empty.
+    fn placement_key(object: &ObjectId) -> (u64, String, String) {
+        let key = if object.key.is_empty() {
+            &object.oid
+        } else {
+            &object.key
+        };
+        (object.pool, object.namespace.clone(), key.clone())
     }
 
     fn cached_rescan_osds(
-        &self,
-        cache: &mut HashMap<(u64, String), (StripedPgId, Vec<i32>)>,
+        cache: &mut HashMap<(u64, String, String), OpRoute>,
         osdmap: &crate::osdclient::osdmap::OSDMap,
-        pool_id: u64,
-        object_id: &str,
-    ) -> Result<(StripedPgId, Vec<i32>)> {
-        let key = (pool_id, object_id.to_owned());
+        msg: &MOSDOp,
+    ) -> Result<OpRoute> {
+        if Self::is_pg_op(msg) {
+            return Self::replace_pending(osdmap, msg);
+        }
+        let key = Self::placement_key(&msg.object);
         if let Some(entry) = cache.get(&key) {
             return Ok(entry.clone());
         }
 
-        let entry = self.object_to_osds_in_map(osdmap, pool_id, object_id)?;
+        let entry = Self::replace_pending(osdmap, msg)?;
         cache.insert(key, entry.clone());
         Ok(entry)
     }
 
     /// Map a PG to its acting OSD set, applying CRUSH placement and all overrides.
     /// Returns `NoOSDs` if the acting set is empty.
-    ///
-    /// Shared helper used by both `object_to_osds_in_map` and `query_pg_objects`.
     fn pg_to_osds_in_map(
         osdmap: &crate::osdclient::osdmap::OSDMap,
         pg: crate::crush::placement::PgId,
@@ -696,7 +1539,7 @@ impl OSDClient {
     /// Returns the OpResult after handling all redirects
     async fn execute_op(
         &self,
-        mut object: ObjectId,
+        object: ObjectId,
         ops: Vec<OSDOp>,
         timeout: Option<std::time::Duration>,
         priority: i32,
@@ -706,8 +1549,6 @@ impl OSDClient {
         if self.blocklisted.load(Ordering::Relaxed) {
             return Err(OSDClientError::Blocklisted);
         }
-
-        object.calculate_hash();
 
         // Calculate operation budget and acquire throttle permit
         let budget = calc_op_budget(&ops);
@@ -724,55 +1565,7 @@ impl OSDClient {
         let effective_timeout = timeout.unwrap_or_else(|| self.tracker.operation_timeout());
         let deadline = std::time::Instant::now() + effective_timeout;
 
-        // Get OSDMap epoch from OSDClient's own osdmap (not from MonClient)
-        let mut osdmap = self.get_osdmap().await?;
-
-        // Build initial message
-        // OR in caller-supplied extra flags (e.g. BALANCE_READS, FULL_TRY, FULL_FORCE).
-        let flags = MOSDOp::calculate_flags(&ops) | extra_flags.bits();
-        let pool = object.pool;
-        let mut msg = MOSDOp::new(
-            self.config.client_inc,
-            osdmap.epoch.as_u32(),
-            flags,
-            object,
-            StripedPgId::from_pg(pool, 0), // Will be set in loop
-            ops,
-            crate::osdclient::types::RequestId::new(
-                &self.entity_name,
-                0,
-                self.config.client_inc as i32,
-            ),
-            self.global_id,
-        );
-
-        // Initialise snap context from pool (Objecter::_calc_target snapc setup).
-        // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
-        (msg.snap_seq, msg.snaps) = osdmap.pool_snap_context(msg.object.pool);
-        // Mirror C++ Objecter `_op_submit_with_budget` calling
-        // `_prune_snapc` right after building the snapc: catches the
-        // narrow window where a snap was just removed by the latest
-        // OSDMap delta but is still listed in `pool.snaps`.
-        osdmap.prune_snap_context(msg.object.pool, &mut msg.snaps);
-
-        // Pre-compute flag-derived booleans that are constant across iterations.
-        use crate::osdclient::types::OsdOpFlags;
-        let is_write = flags & OsdOpFlags::WRITE.bits() != 0;
-        let is_read = !is_write;
-        let respects_full = flags & (OsdOpFlags::FULL_TRY | OsdOpFlags::FULL_FORCE).bits() == 0;
-
-        // Set mtime for write ops — mirrors librados setting real_clock::now() when
-        // the caller provides no explicit mtime. Reads carry UTime::zero().
-        if is_write {
-            msg.mtime = crate::UTime::now();
-        }
-        // retry_attempt 0 = first send; set here so submit_op receives it via Arc.
-        msg.retry_attempt = 0;
-
-        // Wrap in Arc so submit_op can take ownership without cloning the payload.
-        // Arc::make_mut in the loop is O(1) (refcount == 1 between iterations) and
-        // only copies on redirect, which is an EC-pool corner case.
-        let mut msg = Arc::new(msg);
+        let mut op = self.prepare_op(object, ops, extra_flags).await?;
 
         // Cap connection-error retries so a persistently broken OSD can't spin
         // the caller forever.  Mirrors librados Objecter's reopen-on-reset
@@ -783,121 +1576,11 @@ impl OSDClient {
 
         // Redirect/pause retry loop
         loop {
-            // Refresh the epoch in the message to reflect the current OSDMap.
-            // C++ _prepare_osd_op reads osdmap->get_epoch() at send time; after a
-            // pause-wait that loads a newer map we must do the same.
-            Arc::make_mut(&mut msg).osdmap_epoch = osdmap.epoch.as_u32();
-
-            // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
-            if osdmap.is_pool_eio(msg.object.pool) {
-                return Err(OSDClientError::OSDError {
-                    code: -libc::EIO,
-                    message: format!("pool {} has EIO flag set", msg.object.pool),
-                });
-            }
-
-            // Check epoch barrier — block until osdmap.epoch >= barrier.
-            // Mirrors Objecter::_calc_target RECALC_OP_TARGET_BARRIER_NEWER path.
-            let barrier = self.epoch_barrier.load(Ordering::Relaxed);
-            let behind_barrier = barrier != 0 && osdmap.epoch.as_u32() < barrier;
-
-            // Check pool-pause and pool-full state before sending.
-            // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
-            let pauserd = osdmap.is_pauserd();
-            let pausewr = osdmap.is_pausewr();
-            let pool_full = respects_full && osdmap.is_pool_full(msg.object.pool);
-            let paused =
-                behind_barrier || (is_read && pauserd) || (is_write && (pausewr || pool_full));
-            if paused {
-                let remaining = deadline_remaining(deadline, effective_timeout)?;
-                info!(
-                    "Op on pool {} is paused (barrier={}, behind_barrier={}, pauserd={}, \
-                     pausewr={}, pool_full={}); waiting for OSDMap update",
-                    msg.object.pool, barrier, behind_barrier, pauserd, pausewr, pool_full,
-                );
-                osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
-                // Prune snap context: remove any snap IDs that were purged in
-                // the new OSDMap — mirrors Objecter::_prune_snapc().
-                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
-                continue;
-            }
-
-            // Map to OSDs based on current object (using the osdmap we already have)
-            let (spg, osds) =
-                self.object_to_osds_in_map(&osdmap, msg.object.pool, &msg.object.oid)?;
-            let primary_osd = osds[0];
-            tracing::trace!(
-                target: "rados::osdclient::routing",
-                "routing epoch={} pool={} oid={} spg={:?} osds={:?} hash=0x{:08x}",
-                osdmap.epoch.as_u32(),
-                msg.object.pool,
-                msg.object.oid,
-                spg,
-                osds,
-                msg.object.hash,
-            );
-
-            // Get session
-            let session = self.get_or_create_session(primary_osd).await?;
-
-            // Re-check epoch: get_or_create_session can block for TCP connect +
-            // auth handshake (hundreds of milliseconds), during which the OSDMap
-            // may have advanced.  If so our routing is stale — retry before
-            // allocating a TID so the continue costs nothing.
-            if self.current_epoch_u32() != osdmap.epoch.as_u32() {
-                // Bail out early if we've run out of time; we only need the
-                // pass/fail result here (the fresh map is fetched below).
-                deadline_remaining(deadline, effective_timeout)?;
-                osdmap = self.get_osdmap().await?;
-                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
-                continue;
-            }
-
-            // Final pgid re-derivation: between the post-session re-check above
-            // and submit_op below, the OSDMap can still advance (e.g. autoscaler
-            // growing pg_num), which invalidates the seed we just computed.
-            // Re-read the live map once more and recompute spg if the epoch has
-            // moved. If the primary also changed, restart the outer loop so we
-            // pick up the correct session; otherwise just refresh the pgid
-            // before stamping it. Mirrors librados Objecter's rwlock-guarded
-            // "compute target + enqueue" ordering without needing a real lock.
-            let (final_spg, final_epoch) = {
-                let live = self.get_osdmap().await?;
-                if live.epoch != osdmap.epoch {
-                    // OSDMap moved between the routing decision above
-                    // and now — re-prune the snapc against any new
-                    // removals before we encode the wire op.
-                    live.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
-                    let (new_spg, new_osds) =
-                        self.object_to_osds_in_map(&live, msg.object.pool, &msg.object.oid)?;
-                    if new_osds.first().copied() != Some(primary_osd) {
-                        osdmap = live;
-                        continue;
-                    }
-                    (new_spg, live.epoch.as_u32())
-                } else {
-                    (spg, osdmap.epoch.as_u32())
-                }
-            };
-
-            // Build request ID with fresh TID and stamp pgid
-            let tid = session.next_tid();
-            {
-                let m = Arc::make_mut(&mut msg);
-                m.pgid = final_spg;
-                m.osdmap_epoch = final_epoch;
-                m.reqid = crate::osdclient::types::RequestId::new(
-                    &self.entity_name,
-                    tid,
-                    self.config.client_inc as i32,
-                );
-            }
-
-            // Submit operation (priority is set in message header).
-            // Arc::clone is a cheap refcount bump; submit_op stores the Arc in
-            // pending_ops and drops it when the reply arrives, so by the time
-            // we reach the next iteration the refcount is back to 1.
-            let result_rx = match session.submit_op(Arc::clone(&msg), priority).await {
+            let submitted = self
+                .route_and_submit(&mut op, priority, deadline, effective_timeout)
+                .await?;
+            let primary_osd = submitted.osd;
+            let result_rx = match submitted.rx {
                 Ok(rx) => rx,
                 Err(OSDClientError::Connection(msg_str)) => {
                     // Session died between get_or_create_session and submit_op
@@ -943,7 +1626,7 @@ impl OSDClient {
                     // PendingOp with attempts=1, so the OSD's echoed
                     // retry_attempt must stay at 0 to satisfy
                     // validate_reply_freshness.
-                    Arc::make_mut(&mut msg).retry_attempt = 0;
+                    Arc::make_mut(&mut op.msg).retry_attempt = 0;
                     continue;
                 }
                 Err(e) => return Err(e),
@@ -962,9 +1645,10 @@ impl OSDClient {
                      fetching newer OSDMap and retrying",
                     primary_osd
                 );
-                Arc::make_mut(&mut msg).retry_attempt += 1;
-                osdmap = self.wait_for_newer_osdmap(&osdmap, remaining).await?;
-                osdmap.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
+                Arc::make_mut(&mut op.msg).retry_attempt += 1;
+                op.osdmap = self.wait_for_newer_osdmap(&op.osdmap, remaining).await?;
+                op.osdmap
+                    .prune_snap_context(op.msg.object.pool, &mut Arc::make_mut(&mut op.msg).snaps);
                 continue;
             }
 
@@ -974,15 +1658,14 @@ impl OSDClient {
                     "Received redirect to pool={}, object={}, retrying",
                     redirect.redirect_locator.pool_id,
                     if redirect.redirect_object.is_empty() {
-                        msg.object.oid.as_str()
+                        op.msg.object.oid.as_str()
                     } else {
                         redirect.redirect_object.as_str()
                     }
                 );
                 // pending_op was dropped when the reply arrived, so refcount is 1 here.
-                let m = Arc::make_mut(&mut msg);
+                let m = Arc::make_mut(&mut op.msg);
                 Self::apply_redirect(m, &redirect);
-                m.object.calculate_hash();
                 continue;
             }
 
@@ -991,21 +1674,300 @@ impl OSDClient {
         }
     }
 
+    /// Build the `MOSDOp` for `ops` against the current map, as every send
+    /// starts: flags, snap context, and mtime for writes.
+    async fn prepare_op(
+        &self,
+        object: ObjectId,
+        ops: Vec<OSDOp>,
+        extra_flags: OsdOpFlags,
+    ) -> Result<PreparedOp> {
+        // Get OSDMap epoch from OSDClient's own osdmap (not from MonClient)
+        let osdmap = self.get_osdmap().await?;
+
+        // Build initial message
+        // OR in caller-supplied extra flags (e.g. BALANCE_READS, FULL_TRY, FULL_FORCE).
+        let flags = MOSDOp::calculate_flags(&ops) | extra_flags.bits();
+        let pool = object.pool;
+        let mut msg = MOSDOp::new(
+            self.config.client_inc,
+            osdmap.epoch.as_u32(),
+            flags,
+            object,
+            StripedPgId::from_pg(pool, 0), // Will be set in loop
+            ops,
+            crate::osdclient::types::RequestId::new(
+                &self.entity_name,
+                0,
+                self.config.client_inc as i32,
+            ),
+            self.global_id,
+        );
+
+        // Initialise snap context from pool (Objecter::_calc_target snapc setup).
+        // For pools without snaps this is a no-op (snap_seq=0, snaps=[]).
+        (msg.snap_seq, msg.snaps) = osdmap.pool_snap_context(msg.object.pool);
+        // Mirror C++ Objecter `_op_submit_with_budget` calling
+        // `_prune_snapc` right after building the snapc: catches the
+        // narrow window where a snap was just removed by the latest
+        // OSDMap delta but is still listed in `pool.snaps`.
+        osdmap.prune_snap_context(msg.object.pool, &mut msg.snaps);
+
+        // Pre-compute flag-derived booleans that are constant across iterations.
+        let is_write = flags & OsdOpFlags::WRITE.bits() != 0;
+        let is_read = !is_write;
+        let respects_full = flags & (OsdOpFlags::FULL_TRY | OsdOpFlags::FULL_FORCE).bits() == 0;
+
+        // Set mtime for write ops — mirrors librados setting real_clock::now() when
+        // the caller provides no explicit mtime. Reads carry UTime::zero().
+        if is_write {
+            msg.mtime = crate::UTime::now();
+        }
+        // retry_attempt 0 = first send; set here so submit_op receives it via Arc.
+        msg.retry_attempt = 0;
+
+        // Wrap in Arc so submit_op can take ownership without cloning the payload.
+        // Arc::make_mut in the loop is O(1) (refcount == 1 between iterations) and
+        // only copies on redirect, which is an EC-pool corner case.
+        Ok(PreparedOp {
+            msg: Arc::new(msg),
+            osdmap,
+            class: OpClass {
+                is_write,
+                is_read,
+                respects_full,
+                ping: false,
+            },
+        })
+    }
+
+    /// Route `op` against the current map and hand it to its primary's
+    /// session once, waiting out pauses, barriers and map changes that
+    /// happen while routing. An error in the outer `Result` ends the op;
+    /// `Submitted::rx` carries `submit_op`'s own result, whose connection
+    /// errors a caller may retry.
+    async fn route_and_submit(
+        &self,
+        op: &mut PreparedOp,
+        priority: i32,
+        deadline: std::time::Instant,
+        effective_timeout: std::time::Duration,
+    ) -> Result<Submitted> {
+        loop {
+            let msg = &mut op.msg;
+            // Refresh the epoch in the message to reflect the current OSDMap.
+            // C++ _prepare_osd_op reads osdmap->get_epoch() at send time; after a
+            // pause-wait that loads a newer map we must do the same.
+            Arc::make_mut(msg).osdmap_epoch = op.osdmap.epoch.as_u32();
+
+            // Check pool EIO flag — hard fail, mirrors RECALC_OP_TARGET_POOL_EIO.
+            if op.osdmap.is_pool_eio(msg.object.pool) {
+                return Err(OSDClientError::OSDError {
+                    code: -libc::EIO,
+                    message: format!("pool {} has EIO flag set", msg.object.pool),
+                });
+            }
+
+            // Check epoch barrier — block until osdmap.epoch >= barrier.
+            // Mirrors Objecter::_calc_target RECALC_OP_TARGET_BARRIER_NEWER path.
+            let barrier = self.epoch_barrier.load(Ordering::Relaxed);
+            let behind_barrier =
+                !op.class.ping && barrier != 0 && op.osdmap.epoch.as_u32() < barrier;
+
+            // Check pool-pause and pool-full state before sending.
+            // Mirrors Objecter::_calc_target() pauserd/pausewr checks.
+            let (pauserd, pausewr, pool_full) = op.class.held_by(&op.osdmap, msg.object.pool);
+            let paused = behind_barrier || pauserd || pausewr || pool_full;
+            if paused {
+                let remaining = deadline_remaining(deadline, effective_timeout)?;
+                info!(
+                    "Op on pool {} is paused (barrier={}, behind_barrier={}, pauserd={}, \
+                     pausewr={}, pool_full={}); waiting for OSDMap update",
+                    msg.object.pool, barrier, behind_barrier, pauserd, pausewr, pool_full,
+                );
+                op.osdmap = self.wait_for_newer_osdmap(&op.osdmap, remaining).await?;
+                // Prune snap context: remove any snap IDs that were purged in
+                // the new OSDMap — mirrors Objecter::_prune_snapc().
+                op.osdmap
+                    .prune_snap_context(msg.object.pool, &mut Arc::make_mut(msg).snaps);
+                continue;
+            }
+
+            // Map to OSDs based on current object (using the osdmap we already have)
+            let (hash, spg, osds) = Self::object_to_osds_in_map(&op.osdmap, &msg.object)?;
+            let primary_osd = osds[0];
+            tracing::trace!(
+                target: "rados::osdclient::routing",
+                "routing epoch={} pool={} oid={} spg={:?} osds={:?} hash=0x{:08x}",
+                op.osdmap.epoch.as_u32(),
+                msg.object.pool,
+                msg.object.oid,
+                spg,
+                osds,
+                hash,
+            );
+
+            // Get session
+            let session = self.get_or_create_session(primary_osd).await?;
+
+            // Re-check epoch: get_or_create_session can block for TCP connect +
+            // auth handshake (hundreds of milliseconds), during which the OSDMap
+            // may have advanced.  If so our routing is stale — retry before
+            // allocating a TID so the continue costs nothing.
+            if self.current_epoch_u32() != op.osdmap.epoch.as_u32() {
+                // Bail out early if we've run out of time; we only need the
+                // pass/fail result here (the fresh map is fetched below).
+                deadline_remaining(deadline, effective_timeout)?;
+                op.osdmap = self.get_osdmap().await?;
+                op.osdmap
+                    .prune_snap_context(msg.object.pool, &mut Arc::make_mut(msg).snaps);
+                continue;
+            }
+
+            // Final pgid re-derivation: between the post-session re-check above
+            // and submit_op below, the OSDMap can still advance (e.g. autoscaler
+            // growing pg_num), which invalidates the seed we just computed.
+            // Re-read the live map once more and recompute spg if the epoch has
+            // moved. If the primary also changed, restart the outer loop so we
+            // pick up the correct session; otherwise just refresh the pgid
+            // before stamping it. Mirrors librados Objecter's rwlock-guarded
+            // "compute target + enqueue" ordering without needing a real lock.
+            let (final_hash, final_spg, final_map) = {
+                let live = self.get_osdmap().await?;
+                if live.epoch != op.osdmap.epoch {
+                    // OSDMap moved between the routing decision above
+                    // and now — re-prune the snapc against any new
+                    // removals before we encode the wire op.
+                    live.prune_snap_context(msg.object.pool, &mut Arc::make_mut(msg).snaps);
+                    let (new_hash, new_spg, new_osds) =
+                        Self::object_to_osds_in_map(&live, &msg.object)?;
+                    if new_osds.first().copied() != Some(primary_osd) {
+                        op.osdmap = live;
+                        continue;
+                    }
+                    (new_hash, new_spg, live)
+                } else {
+                    (hash, spg, Arc::clone(&op.osdmap))
+                }
+            };
+            let final_epoch = final_map.epoch.as_u32();
+
+            // Build request ID with fresh TID and stamp pgid
+            let tid = session.next_tid();
+            {
+                let m = Arc::make_mut(msg);
+                m.object.hash = final_hash;
+                m.pgid = final_spg;
+                m.osdmap_epoch = final_epoch;
+                m.reqid = crate::osdclient::types::RequestId::new(
+                    &self.entity_name,
+                    tid,
+                    self.config.client_inc as i32,
+                );
+            }
+
+            // Submit operation (priority is set in message header).
+            // Arc::clone is a cheap refcount bump; submit_op stores the Arc in
+            // pending_ops and drops it when the reply arrives, so by the time
+            // we reach the next iteration the refcount is back to 1.
+            let rx = session.submit_op(Arc::clone(msg), priority).await;
+            return Ok(Submitted {
+                osd: primary_osd,
+                osdmap: final_map,
+                rx,
+            });
+        }
+    }
+
+    /// Build and send `ops` once, as `execute_op` does before it awaits
+    /// the reply, with no retry: the linger ops (register, reconnect,
+    /// ping, ack, notify) each decide for themselves what a failure means.
+    /// Returns the primary it went to, the map epoch it was sent in, the
+    /// reply channel and the throttle permit, which the caller holds until
+    /// the reply arrives. The Tracker bounds the reply at its
+    /// `operation_timeout`, delivered as `OSDClientError::Timeout`.
+    pub(crate) async fn submit_once(
+        &self,
+        object: &ObjectId,
+        ops: Vec<OSDOp>,
+        priority: i32,
+        extra_flags: OsdOpFlags,
+    ) -> Result<(
+        i32,
+        u32,
+        tokio::sync::oneshot::Receiver<Result<crate::osdclient::types::OpResult>>,
+        crate::osdclient::throttle::ThrottlePermit<'_>,
+    )> {
+        let (osd, osdmap, rx, permit) = self
+            .submit_once_in_map(object, ops, priority, extra_flags, SubmitKind::Op)
+            .await?;
+        let permit = permit.ok_or_else(|| OSDClientError::Internal("op not budgeted".into()))?;
+        Ok((osd, osdmap.epoch.as_u32(), rx, permit))
+    }
+
+    /// [`Self::submit_once`], returning the map the op was routed in; a
+    /// [`SubmitKind::Linger`] or [`SubmitKind::Ping`] op takes no throttle
+    /// permit.
+    async fn submit_once_in_map(
+        &self,
+        object: &ObjectId,
+        ops: Vec<OSDOp>,
+        priority: i32,
+        extra_flags: OsdOpFlags,
+        kind: SubmitKind,
+    ) -> Result<(
+        i32,
+        Arc<crate::osdclient::osdmap::OSDMap>,
+        tokio::sync::oneshot::Receiver<Result<crate::osdclient::types::OpResult>>,
+        Option<crate::osdclient::throttle::ThrottlePermit<'_>>,
+    )> {
+        if self.blocklisted.load(Ordering::Relaxed) {
+            return Err(OSDClientError::Blocklisted);
+        }
+        let permit = self.acquire_budget(&ops, kind).await?;
+        let effective_timeout = self.tracker.operation_timeout();
+        let deadline = std::time::Instant::now() + effective_timeout;
+        let mut op = self.prepare_op(object.clone(), ops, extra_flags).await?;
+        op.class.ping = kind == SubmitKind::Ping;
+        let submitted = self
+            .route_and_submit(&mut op, priority, deadline, effective_timeout)
+            .await?;
+        Ok((submitted.osd, submitted.osdmap, submitted.rx?, permit))
+    }
+
+    /// The throttle permit `ops` need, or none for a linger op.
+    async fn acquire_budget(
+        &self,
+        ops: &[OSDOp],
+        kind: SubmitKind,
+    ) -> Result<Option<crate::osdclient::throttle::ThrottlePermit<'_>>> {
+        match kind {
+            SubmitKind::Op => Ok(Some(self.throttle.acquire(calc_op_budget(ops)).await?)),
+            SubmitKind::Linger | SubmitKind::Ping => Ok(None),
+        }
+    }
+
     /// Check an OpResult for errors.
     ///
-    /// Validates both the overall result code and the per-op return code.
+    /// Ceph's result codes are errno-shaped: a negative code is a failure,
+    /// zero or positive is success. Some ops report success with a positive
+    /// code (`CMPXATTR` returns 1 when the comparison holds), so this tests
+    /// `< 0`, not `!= 0`, on the overall result and on the first op's
+    /// return code. The per-op `FAILOK` flag is not honoured here: if the
+    /// first op carries it and fails, its negative code is reported even
+    /// though the OSD let the request succeed.
     pub(crate) fn check_op_result(
         result: &crate::osdclient::types::OpResult,
         op_name: &str,
     ) -> Result<()> {
-        if result.result != 0 {
+        if result.result < 0 {
             return Err(OSDClientError::OSDError {
                 code: result.result,
                 message: format!("{op_name} failed"),
             });
         }
         if let Some(op) = result.ops.first()
-            && op.return_code != 0
+            && op.return_code < 0
         {
             return Err(OSDClientError::OSDError {
                 code: op.return_code,
@@ -1202,31 +2164,6 @@ impl OSDClient {
         Ok(())
     }
 
-    /// Compute the PG id that an object hash belongs to.
-    ///
-    /// This mirrors Ceph's `ceph_stable_mod(hash, pg_num, pg_num_mask)`:
-    /// - If `(hash & mask) < pg_num`  →  `hash & mask`
-    /// - Otherwise                    →  `hash & (mask >> 1)`
-    ///
-    /// `pg_num_mask = (1 << ceil_log2(pg_num)) - 1`; for power-of-2 pg_num it equals
-    /// `pg_num - 1`.
-    fn hash_to_pg(hash: u32, pg_num: u32) -> u32 {
-        if pg_num == 0 {
-            return 0;
-        }
-        // pg_num_mask = (1 << cbits(pg_num - 1)) - 1
-        let mask: u32 = if pg_num <= 1 {
-            0
-        } else {
-            (1u32 << (32 - (pg_num - 1).leading_zeros())) - 1
-        };
-        if (hash & mask) < pg_num {
-            hash & mask
-        } else {
-            hash & (mask >> 1)
-        }
-    }
-
     /// Parse a list cursor string into an `HObject` starting position.
     ///
     /// Cursor format: decimal representation of the hobject raw hash.
@@ -1243,6 +2180,16 @@ impl OSDClient {
         }
     }
 
+    /// The object a PGNLS request addresses: no name or key, the listed
+    /// namespace, and the cursor hash as its hobject hash, as Ceph's
+    /// `Objecter::list_nobjects` builds `object_locator_t oloc(pool_id,
+    /// list_context->nspace)` (`src/osdc/Objecter.cc:3854`).
+    fn pgnls_target(pool: u64, cursor_hash: u32, nspace: &str) -> ObjectId {
+        let mut object = ObjectId::with_namespace(pool, "", nspace);
+        object.hash = cursor_hash;
+        object
+    }
+
     /// Query objects from the PG that contains `hobject_cursor`.
     ///
     /// The target PG is derived from `hobject_cursor.hash` using `ceph_stable_mod`, matching
@@ -1253,17 +2200,15 @@ impl OSDClient {
     async fn query_pg_objects(
         &self,
         pool: u64,
+        nspace: &str,
         hobject_cursor: &crate::HObject,
         max_entries: u64,
         pool_info: &crate::osdclient::PgPool,
         osdmap: &Arc<crate::osdclient::osdmap::OSDMap>,
     ) -> Result<(crate::osdclient::PgNlsResponse, i32)> {
         // Derive the target PG from the cursor hash — mirrors Objecter::pg_read(current_pg,…)
-        let current_pg = Self::hash_to_pg(hobject_cursor.hash, pool_info.pg_num);
-        let pg = crate::crush::placement::PgId {
-            pool,
-            seed: current_pg,
-        };
+        let pg = Self::cursor_pg(pool_info, pool, hobject_cursor.hash);
+        let current_pg = pg.seed;
 
         let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
         let primary_osd = osds[0];
@@ -1282,11 +2227,9 @@ impl OSDClient {
         // Get session
         let session = self.get_or_create_session(primary_osd).await?;
 
-        // Create object ID (empty for PGNLS).
         // The hash must match the cursor's hash so the OSD's pgid.contains(head)
         // check passes — hash=0 only belongs to PG 0.
-        let mut object = ObjectId::new(pool, "");
-        object.hash = hobject_cursor.hash;
+        let object = Self::pgnls_target(pool, hobject_cursor.hash, nspace);
 
         // Create pgls operation
         let ops = vec![OSDOp::pgls(
@@ -1380,7 +2323,7 @@ impl OSDClient {
         ListResult { entries, cursor }
     }
 
-    /// List objects in a pool
+    /// List objects in a pool's default namespace
     ///
     /// Lists objects in the specified pool using PGNLS, following the cursor returned
     /// by each OSD reply (bitwise-sorted order).  The cursor is the raw hobject hash
@@ -1396,10 +2339,22 @@ impl OSDClient {
         cursor: Option<String>,
         max_entries: u64,
     ) -> Result<ListResult> {
-        debug!(
-            "list pool={} cursor={:?} max_entries={}",
-            pool, cursor, max_entries
-        );
+        self.list_in_namespace(pool, "", cursor, max_entries).await
+    }
+
+    /// List objects in one namespace of a pool, or in every namespace
+    /// when `nspace` is [`ALL_NSPACES`](crate::osdclient::ALL_NSPACES).
+    ///
+    /// As [`OSDClient::list`], whose cursors it shares; each entry carries
+    /// its namespace and locator key.
+    pub async fn list_in_namespace(
+        &self,
+        pool: u64,
+        nspace: &str,
+        cursor: Option<String>,
+        max_entries: u64,
+    ) -> Result<ListResult> {
+        debug!("list pool={pool} nspace={nspace:?} cursor={cursor:?} max_entries={max_entries}");
 
         // Fail immediately if the client has been fenced by the cluster.
         if self.blocklisted.load(Ordering::Relaxed) {
@@ -1454,7 +2409,7 @@ impl OSDClient {
                 });
             }
 
-            let current_pg = Self::hash_to_pg(hobject_cursor.hash, pool_info.pg_num);
+            let current_pg = Self::cursor_pg(pool_info, pool, hobject_cursor.hash).seed;
             debug!(
                 "Querying PG {} (hash={:#x}), collected {} entries so far",
                 current_pg,
@@ -1464,7 +2419,7 @@ impl OSDClient {
 
             let remaining = max_entries.saturating_sub(all_entries.len() as u64);
             let (response, _result_code) = match self
-                .query_pg_objects(pool, &hobject_cursor, remaining, pool_info, &osdmap)
+                .query_pg_objects(pool, nspace, &hobject_cursor, remaining, pool_info, &osdmap)
                 .await
             {
                 Ok(result) => result,
@@ -1501,16 +2456,30 @@ impl OSDClient {
         }
     }
 
-    /// Compute the end-of-PG hobject handle for a given PG, matching `pg_t::get_hobj_end`.
+    /// How many low hash bits PG `pg_seed` of a pool with `pg_num` PGs
+    /// owns, as `pg_t::get_split_bits` (`src/osd/osd_types.cc:830-843`):
+    /// with `pg_num` in `[2^(p-1), 2^p)`, a PG that has split owns `p`
+    /// bits and one that has not owns `p - 1`.
+    fn pg_split_bits(pg_seed: u32, pg_num: u32) -> u32 {
+        if pg_num <= 1 {
+            return 0;
+        }
+        let p = 32 - pg_num.leading_zeros();
+        let half = 1u32 << (p - 1);
+        if pg_seed % half < pg_num % half {
+            p
+        } else {
+            p - 1
+        }
+    }
+
+    /// Compute the end-of-PG hobject handle for a given PG, matching
+    /// `pg_t::get_hobj_end` (`src/osd/osd_types.cc:879-894`).
     ///
     /// This is used to skip over a PG that has no OSDs so we can advance to the
     /// next PG in bitwise-sorted order without issuing an OSD request.
     fn pg_hobj_end(pool: u64, pg_seed: u32, pg_num: u32) -> crate::HObject {
-        let bits = if pg_num <= 1 {
-            0u32
-        } else {
-            32 - (pg_num - 1).leading_zeros()
-        };
+        let bits = Self::pg_split_bits(pg_seed, pg_num);
         let rev_start = pg_seed.reverse_bits();
         let rev_end: u64 = (rev_start as u64) | (0xffff_ffffu64 >> bits);
         let rev_end = rev_end + 1;
@@ -1781,13 +2750,14 @@ impl OSDClient {
         let mut placement_cache = HashMap::new();
         let mut any_migrated = false;
 
-        for (tid, pool_id, object_id, op_osdmap_epoch) in metadata {
+        for (tid, msg, op_osdmap_epoch) in metadata {
+            let pool_id = msg.object.pool;
             if Self::fail_if_pool_deleted(session, tid, pool_id, osdmap).await {
                 continue;
             }
 
-            let (new_spg, new_osds) =
-                self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
+            let (new_hash, new_spg, new_osds) =
+                Self::cached_rescan_osds(&mut placement_cache, osdmap, &msg)?;
             let new_primary = new_osds.first().copied().unwrap_or(-1);
 
             // Scan path: only resend if primary changed or pool forced a resend.
@@ -1822,6 +2792,7 @@ impl OSDClient {
                 // target OSD (ENXIO in prod, assertion with debug_misdirected).
                 {
                     let msg = Arc::make_mut(&mut op.op);
+                    msg.object.hash = new_hash;
                     msg.pgid = new_spg;
                     msg.osdmap_epoch = new_epoch;
                 }
@@ -1912,11 +2883,8 @@ impl OSDClient {
             // when the primary OSD is unchanged, so keeping the old pgid would
             // send a stale seed to the fresh session.
             let new_osdmap = self.get_osdmap().await?;
-            let (new_spg, osds) = match self.object_to_osds_in_map(
-                &new_osdmap,
-                pending_op.op.object.pool,
-                &pending_op.op.object.oid,
-            ) {
+            let placed = Self::replace_pending(&new_osdmap, &pending_op.op);
+            let (new_hash, new_spg, osds) = match placed {
                 Ok(v) => v,
                 Err(e) => {
                     warn!(
@@ -1936,6 +2904,7 @@ impl OSDClient {
             epoch_for_op = new_osdmap.epoch.as_u32();
             {
                 let msg = Arc::make_mut(&mut pending_op.op);
+                msg.object.hash = new_hash;
                 msg.pgid = new_spg;
                 msg.osdmap_epoch = epoch_for_op;
             }
@@ -2043,7 +3012,8 @@ impl OSDClient {
 
         let new_epoch = osdmap.epoch.as_u32();
 
-        for (tid, pool_id, _, _) in metadata {
+        for (tid, msg, _) in metadata {
+            let pool_id = msg.object.pool;
             let Some(mut pending_op) = old_session.remove_pending_op(tid) else {
                 continue;
             };
@@ -2076,6 +3046,10 @@ impl OSDClient {
 
         // Cancel all I/O tasks (child tokens are cancelled automatically)
         self.shutdown_token.cancel();
+
+        // Nothing re-sends a linger from here on, so end them all now
+        // rather than leave a watcher's `recv` or a `notify` waiting.
+        self.drain_lingers();
 
         // Await all I/O tasks to ensure they have stopped
         // Clone sessions before releasing lock to avoid holding lock across await
@@ -2158,7 +3132,7 @@ impl OSDClient {
         &self,
         mosdmap: &crate::monclient::messages::MOSDMap,
         current_epoch: crate::Epoch,
-    ) -> Option<Arc<crate::osdclient::osdmap::OSDMap>> {
+    ) -> Option<MapBatch> {
         let current_map = self.osdmap_rx.borrow().clone();
 
         if current_epoch.as_u32() > 0 {
@@ -2170,39 +3144,43 @@ impl OSDClient {
         }
     }
 
-    /// Apply sequential updates to existing map
+    /// Apply sequential updates to existing map, keeping every applied
+    /// epoch's map so the lingers can be checked against each.
     fn apply_sequential_updates(
         &self,
         mosdmap: &crate::monclient::messages::MOSDMap,
         current_epoch: crate::Epoch,
         current_map: Option<Arc<crate::osdclient::osdmap::OSDMap>>,
-    ) -> Option<Arc<crate::osdclient::osdmap::OSDMap>> {
+    ) -> Option<MapBatch> {
         let mut working_map = current_map;
-        let mut updated = false;
+        let mut batch = MapBatch::default();
 
         for e in (current_epoch.as_u32() + 1)..=mosdmap.get_last() {
             let current_map_epoch = working_map.as_ref().map(|m| m.epoch).unwrap_or_default();
+            let contiguous = current_map_epoch == crate::Epoch::new(e - 1);
 
-            if current_map_epoch == crate::Epoch::new(e - 1)
-                && mosdmap.incremental_maps.contains_key(&e)
-            {
+            if contiguous && mosdmap.incremental_maps.contains_key(&e) {
                 // Apply incremental
                 if let Some(new_map) = self.apply_incremental_map(mosdmap, e, &working_map) {
-                    working_map = Some(new_map);
-                    updated = true;
+                    working_map = Some(Arc::clone(&new_map));
+                    batch.maps.push(new_map);
                 }
             } else if mosdmap.maps.contains_key(&e) {
                 // Use full map
                 if let Some(new_map) = self.apply_full_map(mosdmap, e) {
-                    working_map = Some(new_map);
-                    updated = true;
+                    // A full map that does not follow the previous epoch
+                    // jumps over maps nobody here has seen.
+                    batch.skipped |= !contiguous;
+                    working_map = Some(Arc::clone(&new_map));
+                    batch.maps.push(new_map);
                 }
             } else {
                 warn!("Missing epoch {} (incremental and full)", e);
+                batch.skipped = true;
             }
         }
 
-        if updated { working_map } else { None }
+        (!batch.maps.is_empty()).then_some(batch)
     }
 
     /// Apply incremental map update
@@ -2272,10 +3250,7 @@ impl OSDClient {
     /// bundles a base full map plus trailing incrementals in a single MOSDMap
     /// message; without this second step, pg_temp entries (and other incremental
     /// changes) set during PG peering are silently discarded.
-    fn load_initial_map(
-        &self,
-        mosdmap: &crate::monclient::messages::MOSDMap,
-    ) -> Option<Arc<crate::osdclient::osdmap::OSDMap>> {
+    fn load_initial_map(&self, mosdmap: &crate::monclient::messages::MOSDMap) -> Option<MapBatch> {
         let (&base_epoch, full_bl) = mosdmap.maps.iter().max_by_key(|(e, _)| **e)?;
 
         debug!("Using latest full OSDMap (epoch {})", base_epoch);
@@ -2302,18 +3277,24 @@ impl OSDClient {
                 base_epoch,
                 mosdmap.get_last(),
             );
-            self.apply_sequential_updates(mosdmap, full_epoch, Some(full_map.clone()))
-                .or(Some(full_map))
+            let mut batch = self
+                .apply_sequential_updates(mosdmap, full_epoch, Some(full_map.clone()))
+                .unwrap_or_default();
+            batch.maps.insert(0, full_map);
+            Some(batch)
         } else {
-            Some(full_map)
+            Some(MapBatch {
+                maps: vec![full_map],
+                skipped: false,
+            })
         }
     }
 
     /// Update OSDMap state and notify subscribers
-    async fn update_osdmap_state(
-        &self,
-        new_map: Arc<crate::osdclient::osdmap::OSDMap>,
-    ) -> Result<()> {
+    async fn update_osdmap_state(self: &Arc<Self>, batch: MapBatch) -> Result<()> {
+        let Some(new_map) = batch.maps.last().cloned() else {
+            return Ok(());
+        };
         let final_epoch = new_map.epoch;
 
         // Check blocklist before publishing the new map so that
@@ -2331,7 +3312,11 @@ impl OSDClient {
             self.fail_all_pending_ops_blocklisted().await;
         }
 
-        self.osdmap_tx.send(Some(new_map)).ok();
+        self.osdmap_tx.send(Some(Arc::clone(&new_map))).ok();
+
+        if !self.blocklisted.load(Ordering::Relaxed) {
+            self.scan_lingers_on_map_change(&batch.maps, batch.skipped);
+        }
 
         info!(
             "OSDMap updated to epoch {}, rescanning pending operations",
@@ -2371,7 +3356,7 @@ impl OSDClient {
     async fn fail_all_pending_ops_blocklisted(&self) {
         let session_snapshot = self.collect_session_snapshot().await;
         for (_osd_id, session) in session_snapshot {
-            for (tid, _, _, _) in session.get_pending_ops_metadata() {
+            for (tid, _, _) in session.get_pending_ops_metadata() {
                 if let Some(op) = session.remove_pending_op(tid) {
                     let _ = op.result_tx.send(Err(OSDClientError::Blocklisted));
                 }
@@ -2380,7 +3365,7 @@ impl OSDClient {
     }
 
     /// Handle OSDMap message (moved from MonClient)
-    async fn handle_osdmap(&self, msg: crate::msgr2::message::Message) -> Result<()> {
+    async fn handle_osdmap(self: &Arc<Self>, msg: crate::msgr2::message::Message) -> Result<()> {
         // Decode and validate
         let (mosdmap, current_epoch) = match self.decode_and_validate_osdmap(&msg) {
             Ok(result) => result,
@@ -2388,11 +3373,11 @@ impl OSDClient {
         };
 
         // Process map updates
-        let new_map = self.process_osdmap_updates(&mosdmap, current_epoch);
+        let new_maps = self.process_osdmap_updates(&mosdmap, current_epoch);
 
         // Update state if we got a new map
-        if let Some(map) = new_map {
-            self.update_osdmap_state(map).await?;
+        if let Some(batch) = new_maps {
+            self.update_osdmap_state(batch).await?;
         }
 
         Ok(())
@@ -2611,5 +3596,857 @@ impl OSDClient {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MOSDOp, OSDClient, OSDClientConfig, ObjectLocator};
+    use crate::osdclient::error::OSDClientError;
+    use crate::osdclient::types::ObjectId;
+    use crate::osdclient::types::{OpReply, OpResult};
+    use bytes::Bytes;
+    use std::sync::Arc;
+
+    fn result(overall: i32, first: i32) -> OpResult {
+        OpResult {
+            result: overall,
+            version: 0,
+            ops: vec![OpReply {
+                return_code: first,
+                outdata: Bytes::new(),
+            }],
+            redirect: None,
+        }
+    }
+
+    #[test]
+    fn check_op_result_treats_positive_codes_as_success() {
+        // Ceph is errno-shaped: only a negative code is a failure. A
+        // holding CMPXATTR returns 1.
+        assert!(OSDClient::check_op_result(&result(0, 0), "t").is_ok());
+        assert!(OSDClient::check_op_result(&result(1, 1), "t").is_ok());
+        assert!(OSDClient::check_op_result(&result(0, 1), "t").is_ok());
+    }
+
+    #[test]
+    fn check_op_result_reports_negative_codes() {
+        let err = OSDClient::check_op_result(&result(-2, 0), "t").expect_err("overall");
+        assert!(matches!(err, OSDClientError::OSDError { code: -2, .. }));
+        let err = OSDClient::check_op_result(&result(0, -125), "t").expect_err("per-op");
+        assert!(matches!(err, OSDClientError::OSDError { code: -125, .. }));
+    }
+
+    fn map_with_pool(id: u64, pg_num: u32) -> crate::osdclient::osdmap::OSDMap {
+        let mut map = crate::osdclient::osdmap::OSDMap::new();
+        map.pools.insert(
+            id,
+            crate::osdclient::PgPool {
+                object_hash: crate::crush::hash::CEPH_STR_HASH_RJENKINS,
+                pg_num,
+                pgp_num: pg_num,
+                size: 1,
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    /// `map_with_pool` plus a one-host CRUSH map over two OSDs, so its
+    /// PGs map to OSDs.
+    fn map_with_crush(id: u64, pg_num: u32) -> crate::osdclient::osdmap::OSDMap {
+        use crate::crush::{
+            BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, RuleOp,
+            RuleType,
+        };
+        let mut crush = CrushMap::new();
+        crush.max_devices = 2;
+        crush.max_buckets = 1;
+        crush.buckets = vec![Some(CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 0x20000,
+            size: 2,
+            items: vec![0, 1],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x10000; 2],
+            },
+        })];
+        crush.rules = vec![Some(CrushRule {
+            rule_id: 0,
+            rule_type: RuleType::Replicated,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseLeafFirstN,
+                    arg1: 1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        })];
+        let mut map = map_with_pool(id, pg_num);
+        map.max_osd = 2;
+        map.osd_weight = vec![0x10000; 2];
+        map.crush = Some(crush);
+        map
+    }
+
+    fn keyed(pool: u64, oid: &str, key: &str, ns: &str) -> ObjectId {
+        let mut object = ObjectId::with_namespace(pool, oid, ns);
+        object.key = key.to_string();
+        object
+    }
+
+    fn mosdop(object: ObjectId, ops: Vec<crate::osdclient::types::OSDOp>) -> MOSDOp {
+        let flags = MOSDOp::calculate_flags(&ops);
+        MOSDOp::new(
+            1,
+            1,
+            flags,
+            object,
+            crate::osdclient::types::StripedPgId::from_pg(0, 0),
+            ops,
+            crate::osdclient::types::RequestId::new(&"client.test".into(), 1, 0),
+            0,
+        )
+    }
+
+    #[test]
+    fn object_pg_in_map_uses_namespace_and_key() {
+        use crate::crush::PgId;
+        let map = map_with_pool(2, 32);
+        let place = |object: &ObjectId| {
+            let p = OSDClient::object_pg_in_map(&map, object).unwrap();
+            (p.hash, p.pg)
+        };
+        assert_eq!(
+            place(&ObjectId::with_namespace(2, "foo", "ns1")),
+            (0xf4569544, PgId::new(2, 4))
+        );
+        assert_eq!(
+            place(&ObjectId::new(2, "foo")),
+            (0x7fc1f406, PgId::new(2, 6))
+        );
+        assert_eq!(
+            place(&keyed(2, "_multipart_obj.2~abc.1", "obj", "")),
+            (0xaabc5e21, PgId::new(2, 1))
+        );
+        assert!(matches!(
+            OSDClient::object_pg_in_map(&map, &ObjectId::new(3, "foo")),
+            Err(OSDClientError::PoolNotFound(3))
+        ));
+    }
+
+    #[test]
+    fn object_to_osds_in_map_places_by_the_locator() {
+        let map = map_with_crush(2, 32);
+        let route = |object: &ObjectId| {
+            let (hash, spg, osds) = OSDClient::object_to_osds_in_map(&map, object).unwrap();
+            (hash, spg.seed, osds)
+        };
+        // Each pair lands on a different OSD, so a client placing by the
+        // name alone would send the op to the wrong one.
+        let namespaced = route(&ObjectId::with_namespace(2, "bar", "ns1"));
+        let name_only = route(&ObjectId::new(2, "bar"));
+        assert_eq!(namespaced, (0x73a75142, 2, vec![1]));
+        assert_eq!(name_only, (0xefe6384b, 11, vec![0]));
+
+        let with_key = route(&keyed(2, "_multipart_foo.1", "foo", ""));
+        let name_only = route(&ObjectId::new(2, "_multipart_foo.1"));
+        assert_eq!(with_key, (0x7fc1f406, 6, vec![1]));
+        assert_eq!(name_only, (0xfa7582cc, 12, vec![0]));
+        assert_eq!(with_key, route(&ObjectId::new(2, "foo")));
+    }
+
+    #[test]
+    fn placement_key_separates_namespaces() {
+        assert_ne!(
+            OSDClient::placement_key(&ObjectId::new(2, "foo")),
+            OSDClient::placement_key(&ObjectId::with_namespace(2, "foo", "ns1"))
+        );
+        assert_eq!(
+            OSDClient::placement_key(&keyed(2, "a", "obj", "ns1")),
+            OSDClient::placement_key(&keyed(2, "b", "obj", "ns1"))
+        );
+    }
+
+    /// The end hash of every PG of a `pg_num`-PG pool, or `None` for
+    /// the pool's end.
+    fn pg_end_hashes(pg_num: u32) -> Vec<Option<u32>> {
+        (0..pg_num)
+            .map(|seed| {
+                let end = OSDClient::pg_hobj_end(2, seed, pg_num);
+                (!end.max).then_some(end.hash)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn pg_split_bits_for_twelve_pgs() {
+        let bits: Vec<u32> = (0..12).map(|s| OSDClient::pg_split_bits(s, 12)).collect();
+        assert_eq!(bits, [4, 4, 4, 4, 3, 3, 3, 3, 4, 4, 4, 4]);
+        assert_eq!(OSDClient::pg_split_bits(0, 1), 0);
+        assert!((0..8).all(|s| OSDClient::pg_split_bits(s, 8) == 3));
+    }
+
+    #[test]
+    fn pg_hobj_end_twelve_pgs() {
+        // PGs 4-7 have not split, so each ends where its 3-bit range does;
+        // PG 7's range runs to the end of the hash space.
+        assert_eq!(
+            pg_end_hashes(12),
+            [
+                Some(0x8),
+                Some(0x9),
+                Some(0xa),
+                Some(0xb),
+                Some(0x2),
+                Some(0x3),
+                Some(0x1),
+                None,
+                Some(0x4),
+                Some(0x5),
+                Some(0x6),
+                Some(0x7),
+            ]
+        );
+    }
+
+    #[test]
+    fn pg_hobj_end_eight_pgs() {
+        assert_eq!(
+            pg_end_hashes(8),
+            [
+                Some(0x4),
+                Some(0x5),
+                Some(0x6),
+                Some(0x7),
+                Some(0x2),
+                Some(0x3),
+                Some(0x1),
+                None,
+            ]
+        );
+    }
+
+    #[test]
+    fn pg_hobj_end_walks_every_pg_once() {
+        let map = map_with_pool(2, 12);
+        let pool = &map.pools[&2];
+        let mut cursor = crate::HObject::new(2, String::new(), 0);
+        let mut visited = Vec::new();
+        while !cursor.max {
+            let pg = OSDClient::cursor_pg(pool, 2, cursor.hash).seed;
+            assert!(visited.len() < 12, "revisited PGs: {visited:?} then {pg}");
+            visited.push(pg);
+            cursor = OSDClient::pg_hobj_end(2, pg, 12);
+        }
+        assert_eq!(visited, [0, 8, 4, 2, 10, 6, 1, 9, 5, 3, 11, 7]);
+    }
+
+    #[test]
+    fn pgls_reduction_is_stable_mod() {
+        let map = map_with_pool(2, 12);
+        let pool = &map.pools[&2];
+        assert_eq!(OSDClient::cursor_pg(pool, 2, 0xef61efce).seed, 6);
+    }
+
+    #[test]
+    fn replace_pending_keeps_a_pgnls_cursor() {
+        let map = map_with_crush(2, 12);
+        let mut object = ObjectId::new(2, "");
+        object.hash = 0xef61efce;
+        let cursor = crate::HObject::new(2, String::new(), 0xef61efce);
+        let op = mosdop(
+            object,
+            vec![crate::osdclient::types::OSDOp::pgls(8, cursor, 1).unwrap()],
+        );
+        assert!(OSDClient::is_pg_op(&op));
+        let (hash, spg, _) = OSDClient::replace_pending(&map, &op).unwrap();
+        assert_eq!(hash, 0xef61efce);
+        assert_eq!((spg.pool, spg.seed), (2, 6));
+    }
+
+    #[test]
+    fn replace_pending_uses_the_locator() {
+        let map = map_with_crush(2, 32);
+        let cases = [
+            (ObjectId::with_namespace(2, "foo", "ns1"), 0xf4569544, 4),
+            (keyed(2, "_multipart_obj.2~abc.1", "obj", ""), 0xaabc5e21, 1),
+        ];
+        for (mut object, want_hash, want_seed) in cases {
+            object.hash = 0x12345678;
+            let op = mosdop(object, vec![crate::osdclient::types::OSDOp::stat()]);
+            assert!(!OSDClient::is_pg_op(&op));
+            let (hash, spg, _) = OSDClient::replace_pending(&map, &op).unwrap();
+            assert_eq!(hash, want_hash);
+            assert_eq!((spg.pool, spg.seed), (2, want_seed));
+        }
+    }
+
+    /// The front of a PGNLS request in `nspace` at cursor hash `hash`.
+    fn pgnls_front(nspace: &str, hash: u32) -> bytes::Bytes {
+        use crate::msgr2::ceph_message::{CephMessage, CrcFlags};
+        let object = OSDClient::pgnls_target(2, hash, nspace);
+        let cursor = crate::HObject::new(2, String::new(), hash);
+        let op = mosdop(
+            object,
+            vec![crate::osdclient::types::OSDOp::pgls(8, cursor, 1).unwrap()],
+        );
+        CephMessage::from_payload(&op, 0, CrcFlags::ALL)
+            .unwrap()
+            .front
+    }
+
+    fn encoded_locator(nspace: &str) -> Vec<u8> {
+        use crate::Denc;
+        let loc = ObjectLocator {
+            pool_id: 2,
+            key: String::new(),
+            namespace: nspace.to_string(),
+            hash: -1,
+        };
+        let mut buf = bytes::BytesMut::new();
+        loc.encode(&mut buf, 0).unwrap();
+        buf.to_vec()
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[test]
+    fn pgnls_target_carries_the_namespace() {
+        let target = OSDClient::pgnls_target(2, 0xef61efce, "ns1");
+        assert_eq!(target.namespace, "ns1");
+        assert_eq!(target.oid, "");
+        assert_eq!(target.key, "");
+        assert_eq!(target.hash, 0xef61efce);
+        assert_eq!(
+            ObjectLocator::from(&target),
+            ObjectLocator {
+                pool_id: 2,
+                key: String::new(),
+                namespace: "ns1".to_string(),
+                hash: -1,
+            }
+        );
+    }
+
+    #[test]
+    fn pgnls_request_encodes_the_namespace() {
+        let with_ns = pgnls_front("ns1", 0xef61efce);
+        let without = pgnls_front("", 0xef61efce);
+        assert!(contains(&with_ns, &encoded_locator("ns1")));
+        assert!(contains(&without, &encoded_locator("")));
+        assert_eq!(with_ns.len(), without.len() + "ns1".len());
+    }
+
+    #[test]
+    fn pgnls_request_all_namespaces() {
+        let front = pgnls_front(crate::osdclient::ALL_NSPACES, 0xef61efce);
+        let locator = encoded_locator(crate::osdclient::ALL_NSPACES);
+        // The namespace is the locator's last string before its i64 hash.
+        let tail = [&[1u8, 0, 0, 0, 0x01][..], &(-1i64).to_le_bytes()].concat();
+        assert!(locator.ends_with(&tail));
+        assert!(contains(&front, &locator));
+    }
+
+    #[test]
+    fn pgnls_target_default_namespace_is_unnamespaced() {
+        let mut unnamespaced = ObjectId::new(2, "");
+        unnamespaced.hash = 0xef61efce;
+        assert_eq!(OSDClient::pgnls_target(2, 0xef61efce, ""), unnamespaced);
+    }
+
+    /// An `OSDClient` whose MonClient never connects: enough for the
+    /// paths that need no cluster.
+    pub(crate) async fn offline_client() -> Arc<OSDClient> {
+        offline_client_with(OSDClientConfig::default()).await
+    }
+
+    async fn offline_client_with(config: OSDClientConfig) -> Arc<OSDClient> {
+        let auth = crate::monclient::auth_config::AuthConfig::no_auth("client.test".to_string());
+        let mon_config = crate::monclient::MonClientConfig {
+            mon_addrs: vec!["v2:127.0.0.1:3300".to_string()],
+            auth: Some(auth),
+            ..Default::default()
+        };
+        let mon = crate::monclient::MonClient::new(mon_config, None)
+            .await
+            .expect("monclient");
+        let (tx, rx) = crate::msgr2::map_channel(8);
+        OSDClient::new(config, crate::UuidD::default(), mon, tx, rx)
+            .await
+            .expect("osdclient")
+    }
+
+    #[tokio::test]
+    async fn watch_notify_messages_are_routed_by_cookie() {
+        use crate::osdclient::messages::{CEPH_MSG_WATCH_NOTIFY, CEPH_WATCH_EVENT_NOTIFY};
+        use crate::osdclient::watch::{Linger, LingerKind, WatchEvent};
+
+        let client = offline_client().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client.lingers.insert(
+            1001,
+            Arc::new(Linger::new(
+                1001,
+                ObjectId::new(1, "o"),
+                LingerKind::Watch { timeout: 0 },
+                tx,
+            )),
+        );
+
+        let mut front = vec![1, CEPH_WATCH_EVENT_NOTIFY];
+        front.extend_from_slice(&1001u64.to_le_bytes());
+        front.extend_from_slice(&0u64.to_le_bytes());
+        front.extend_from_slice(&55u64.to_le_bytes());
+        front.extend_from_slice(&[2, 0, 0, 0, b'h', b'i']);
+        front.extend_from_slice(&0i32.to_le_bytes());
+        front.extend_from_slice(&4242u64.to_le_bytes());
+        let mut msg = crate::msgr2::message::Message::new(CEPH_MSG_WATCH_NOTIFY, front.into());
+        msg.header.version = crate::denc::zerocopy::little_endian::U16::new(3);
+
+        client.dispatch_from_osd(0, msg).await.expect("dispatch");
+        assert_eq!(
+            rx.try_recv(),
+            Ok(WatchEvent::Notify {
+                notify_id: 55,
+                notifier_gid: 4242,
+                payload: Bytes::from_static(b"hi"),
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn a_vanished_pool_disconnects_its_watch_once() {
+        use crate::osdclient::error::ENOTCONN;
+        use crate::osdclient::watch::{Linger, LingerKind, PgInterval, WatchEvent};
+
+        let client = offline_client().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            1001,
+            ObjectId::new(7, "o"),
+            LingerKind::Watch { timeout: 0 },
+            tx,
+        ));
+        {
+            let mut state = linger.lock_state();
+            state.registered = true;
+            state.osd = Some(0);
+            state.interval = Some(PgInterval {
+                up: vec![0],
+                up_primary: 0,
+                acting: vec![0],
+                acting_primary: 0,
+                size: 1,
+                min_size: 1,
+                pg_num: 1,
+                pgp_num: 1,
+                pg_num_pending: 1,
+                epoch: 1,
+            });
+        }
+        client.lingers.insert(1001, linger);
+
+        let empty = Arc::new(crate::osdclient::osdmap::OSDMap::new());
+        client.scan_lingers_on_map_change(std::slice::from_ref(&empty), false);
+        client.scan_lingers_on_map_change(std::slice::from_ref(&empty), false);
+        assert_eq!(rx.try_recv(), Ok(WatchEvent::Disconnect { code: ENOTCONN }));
+        assert!(client.lingers.is_empty(), "the linger is unregistered");
+        assert_eq!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        );
+    }
+
+    #[tokio::test]
+    async fn the_reset_hook_does_nothing_after_shutdown() {
+        let client = offline_client().await;
+        assert!(client.on_session_reset(3));
+        client.shutdown().await;
+        assert!(!client.on_session_reset(3));
+    }
+
+    #[tokio::test]
+    async fn only_a_published_session_reports_its_reset() {
+        use crate::osdclient::session::report_reset;
+        use std::sync::atomic::AtomicBool;
+
+        let client = offline_client().await;
+        let weak = Arc::downgrade(&client);
+        assert!(!report_reset(&AtomicBool::new(false), &weak, 3));
+        assert!(report_reset(&AtomicBool::new(true), &weak, 3));
+    }
+
+    #[tokio::test]
+    async fn shutdown_ends_every_watch_and_notify() {
+        use crate::osdclient::error::{ECANCELED, ENOTCONN};
+        use crate::osdclient::watch::{Linger, LingerKind, WatchEvent, Watcher};
+
+        let client = offline_client().await;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let watch = Arc::new(Linger::new(
+            1001,
+            ObjectId::new(1, "o"),
+            LingerKind::Watch { timeout: 0 },
+            tx,
+        ));
+        client.lingers.insert(1001, Arc::clone(&watch));
+        let mut watcher = Watcher::new(Arc::clone(&client), watch, rx);
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        client.lingers.insert(
+            1002,
+            Arc::new(Linger::new(
+                1002,
+                ObjectId::new(1, "o"),
+                LingerKind::Notify {
+                    completion: std::sync::Mutex::new(Some(done_tx)),
+                    notify_id: std::sync::atomic::AtomicU64::new(0),
+                    timeout_secs: 10,
+                    payload: Bytes::new(),
+                },
+                tx,
+            )),
+        );
+
+        client.shutdown().await;
+        assert!(client.lingers.is_empty());
+        assert_eq!(
+            watcher.recv().await,
+            Some(WatchEvent::Disconnect { code: ENOTCONN })
+        );
+        assert_eq!(watcher.recv().await, None);
+        assert_eq!(done_rx.await, Ok((ECANCELED, Bytes::new())));
+    }
+
+    #[tokio::test]
+    async fn a_forgotten_watch_ends_its_receiver() {
+        use crate::osdclient::watch::{Linger, LingerKind};
+
+        let client = offline_client().await;
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        client.lingers.insert(
+            1001,
+            Arc::new(Linger::new(
+                1001,
+                ObjectId::new(1, "o"),
+                LingerKind::Watch { timeout: 0 },
+                tx,
+            )),
+        );
+        client.forget_linger(1001);
+        assert_eq!(rx.recv().await, None);
+    }
+
+    fn test_watch(
+        client: &Arc<OSDClient>,
+        cookie: u64,
+        registered: bool,
+    ) -> (
+        Arc<crate::osdclient::watch::Linger>,
+        tokio::sync::mpsc::UnboundedReceiver<crate::osdclient::watch::WatchEvent>,
+    ) {
+        use crate::osdclient::watch::{Linger, LingerKind};
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            cookie,
+            ObjectId::new(1, "o"),
+            LingerKind::Watch { timeout: 0 },
+            tx,
+        ));
+        {
+            let mut state = linger.lock_state();
+            state.registered = registered;
+            state.osd = Some(0);
+        }
+        client.lingers.insert(cookie, Arc::clone(&linger));
+        (linger, rx)
+    }
+
+    #[tokio::test]
+    async fn a_linger_send_without_an_answer_fails_nothing() {
+        use crate::osdclient::watch::{Linger, LingerKind};
+
+        // No OSDMap: every send fails as a connection error, before an OSD.
+        let client = offline_client().await;
+
+        let (watch, mut rx) = test_watch(&client, 1001, true);
+        Arc::clone(&client).send_reconnect(Arc::clone(&watch)).await;
+        assert_eq!(watch.lock_state().register_gen, 1, "the reconnect was sent");
+        assert_eq!(watch.lock_state().last_error, None);
+        assert!(rx.try_recv().is_err());
+
+        let (pending, _rx) = test_watch(&client, 1002, false);
+        let (reg_tx, mut reg_rx) = tokio::sync::oneshot::channel();
+        pending.lock_state().registration = Some(reg_tx);
+        client.send_register(&pending).await;
+        assert!(reg_rx.try_recv().is_err(), "the registration stays pending");
+
+        let (done_tx, mut done_rx) = tokio::sync::oneshot::channel();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let notify = Arc::new(Linger::new(
+            1003,
+            ObjectId::new(1, "o"),
+            LingerKind::Notify {
+                completion: std::sync::Mutex::new(Some(done_tx)),
+                notify_id: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: 10,
+                payload: Bytes::new(),
+            },
+            tx,
+        ));
+        client.lingers.insert(1003, Arc::clone(&notify));
+        client.send_notify(&notify).await;
+        assert!(done_rx.try_recv().is_err(), "the notify stays pending");
+    }
+
+    #[test]
+    fn the_notify_bound_follows_the_osd_timeout() {
+        use super::notify_outer_bound;
+        use std::time::Duration;
+        assert_eq!(notify_outer_bound(0), Duration::from_secs(60));
+        assert_eq!(notify_outer_bound(10), Duration::from_secs(40));
+    }
+
+    #[tokio::test]
+    async fn a_resend_restarts_the_notify_bound() {
+        use super::await_notify;
+        use crate::osdclient::watch::{Linger, LingerKind};
+        use std::time::Duration;
+
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            1001,
+            ObjectId::new(1, "o"),
+            LingerKind::Notify {
+                completion: std::sync::Mutex::new(None),
+                notify_id: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: 1,
+                payload: Bytes::new(),
+            },
+            tx,
+        ));
+        let resender = Arc::clone(&linger);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            resender.resent.notify_one();
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = done_tx.send((0, Bytes::from_static(&[0; 8])));
+        });
+        let result = await_notify(&linger, done_rx, Duration::from_millis(200))
+            .await
+            .expect("the re-send restarted the bound");
+        assert!(result.acks.is_empty() && !result.timed_out);
+    }
+
+    #[tokio::test]
+    async fn linger_ops_bypass_the_throttle() {
+        use super::SubmitKind;
+        use crate::osdclient::types::OSDOp;
+        use std::time::Duration;
+
+        let client = offline_client_with(OSDClientConfig {
+            max_inflight_ops: 1,
+            ..OSDClientConfig::default()
+        })
+        .await;
+        let ops = [OSDOp::watch_ping(1001, 0)];
+        let held = client
+            .acquire_budget(&ops, SubmitKind::Op)
+            .await
+            .expect("the one slot");
+        assert!(held.is_some());
+        let blocked = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.acquire_budget(&ops, SubmitKind::Op),
+        )
+        .await;
+        assert!(blocked.is_err(), "an ordinary op waits for the slot");
+        let linger = tokio::time::timeout(
+            Duration::from_millis(100),
+            client.acquire_budget(&ops, SubmitKind::Linger),
+        )
+        .await
+        .expect("a linger op does not wait")
+        .expect("no error");
+        assert!(linger.is_none());
+    }
+
+    #[test]
+    fn a_ping_ignores_every_pause_and_a_registration_does_not() {
+        use super::OpClass;
+
+        let mut map = crate::osdclient::osdmap::OSDMap::new();
+        map.flags = 1 << 3; // CEPH_OSDMAP_PAUSEWR
+        // A registration or reconnect: WATCH is a write.
+        let register = OpClass {
+            is_write: true,
+            is_read: false,
+            respects_full: true,
+            ping: false,
+        };
+        assert_eq!(register.held_by(&map, 1), (false, true, false));
+        let ping = OpClass {
+            ping: true,
+            ..register
+        };
+        assert_eq!(ping.held_by(&map, 1), (false, false, false));
+
+        map.flags = 1 << 2; // CEPH_OSDMAP_PAUSERD
+        let notify = OpClass {
+            is_write: false,
+            is_read: true,
+            respects_full: true,
+            ping: false,
+        };
+        assert_eq!(notify.held_by(&map, 1), (true, false, false));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_op_is_cancelled_not_internal() {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(tx);
+        let err = super::await_op_result(rx, std::time::Duration::from_secs(1))
+            .await
+            .expect_err("dropped");
+        assert!(matches!(err, OSDClientError::Cancelled), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn an_unanswered_send_is_resent_on_the_next_tick() {
+        // No OSDMap: every send fails as a connection error, before an OSD.
+        let client = offline_client().await;
+        let (pending, _rx) = test_watch(&client, 1002, false);
+        let (reg_tx, _reg_rx) = tokio::sync::oneshot::channel();
+        pending.lock_state().registration = Some(reg_tx);
+        client.send_register(&pending).await;
+        {
+            let state = pending.lock_state();
+            assert_eq!(state.send_seq, 1);
+            assert!(state.resend_pending && !state.sending);
+        }
+
+        client.tick_lingers();
+        for _ in 0..100 {
+            if pending.lock_state().send_seq == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let state = pending.lock_state();
+        assert_eq!(state.send_seq, 2, "the tick re-sent the registration");
+        assert!(state.resend_pending, "still no answer, still pending");
+    }
+
+    #[tokio::test]
+    async fn a_deleted_pool_fails_a_pending_registration() {
+        let client = offline_client().await;
+        let (pending, _rx) = test_watch(&client, 1002, false);
+        let (reg_tx, reg_rx) = tokio::sync::oneshot::channel();
+        {
+            let mut state = pending.lock_state();
+            state.registration = Some(reg_tx);
+            state.interval = Some(crate::osdclient::watch::PgInterval {
+                up: vec![0],
+                up_primary: 0,
+                acting: vec![0],
+                acting_primary: 0,
+                size: 1,
+                min_size: 1,
+                pg_num: 1,
+                pgp_num: 1,
+                pg_num_pending: 1,
+                epoch: 1,
+            });
+        }
+        let empty = Arc::new(crate::osdclient::osdmap::OSDMap::new());
+        client.scan_lingers_on_map_change(std::slice::from_ref(&empty), false);
+        let outcome = reg_rx.await.expect("answered");
+        assert!(
+            matches!(outcome, Err(OSDClientError::PoolNotFound(1))),
+            "{outcome:?}"
+        );
+        assert!(client.lingers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn no_linger_starts_after_shutdown() {
+        let client = offline_client().await;
+        client.shutdown().await;
+        let refused = client.linger_watch(ObjectId::new(1, "o"), 0).await;
+        assert!(
+            matches!(refused, Err(OSDClientError::Connection(_))),
+            "{:?}",
+            refused.err()
+        );
+        let err = client
+            .notify(ObjectId::new(1, "o"), Bytes::new(), 0)
+            .await
+            .expect_err("shut down");
+        assert!(matches!(err, OSDClientError::Connection(_)), "{err:?}");
+        assert!(client.lingers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_notify_times_out_at_its_bound() {
+        use super::await_notify;
+        use crate::osdclient::watch::{Linger, LingerKind};
+        use std::time::{Duration, Instant};
+
+        // No OSDMap: every send fails before reaching a session.
+        let client = offline_client().await;
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let (tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let linger = Arc::new(Linger::new(
+            1001,
+            ObjectId::new(1, "o"),
+            LingerKind::Notify {
+                completion: std::sync::Mutex::new(Some(done_tx)),
+                notify_id: std::sync::atomic::AtomicU64::new(0),
+                timeout_secs: 1,
+                payload: Bytes::new(),
+            },
+            tx,
+        ));
+        client.lingers.insert(1001, Arc::clone(&linger));
+        // Re-send far faster than the bound, as ticks would.
+        let resender = Arc::clone(&client);
+        let resent = Arc::clone(&linger);
+        let resends = tokio::spawn(async move {
+            loop {
+                resender.send_notify(&resent).await;
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        let started = Instant::now();
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(5),
+            await_notify(&linger, done_rx, Duration::from_millis(300)),
+        )
+        .await
+        .expect("the bound expired despite the re-sends");
+        resends.abort();
+        assert!(
+            matches!(outcome, Err(OSDClientError::Timeout(_))),
+            "{outcome:?}"
+        );
+        eprintln!("unreachable notify timed out after {:?}", started.elapsed());
     }
 }

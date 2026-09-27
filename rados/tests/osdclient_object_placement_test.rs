@@ -1,9 +1,13 @@
 use bytes::Bytes;
-use rados::crush::PgId;
+use rados::crush::{ObjectLocator, PgId};
 use rados::denc::VersionedEncode;
 use rados::osdclient::OSDMap;
 use std::fs;
 use std::path::PathBuf;
+
+fn object_pg(osdmap: &OSDMap, pool: u64, name: &str) -> Result<PgId, rados::RadosError> {
+    osdmap.raw_pg_to_pg(osdmap.object_locator_to_pg(name, &ObjectLocator::new(pool))?)
+}
 
 /// Test complete object placement pipeline
 #[test]
@@ -67,7 +71,7 @@ fn test_object_placement_pipeline() {
                 let test_objects = vec!["test_object", "foo", "bar", "object.1"];
 
                 for obj_name in &test_objects {
-                    match osdmap.object_to_pg(*pool_id, obj_name) {
+                    match object_pg(&osdmap, *pool_id, obj_name) {
                         Ok(pg) => {
                             println!("    {} -> PG {}.{:x}", obj_name, pg.pool, pg.seed);
 
@@ -99,7 +103,9 @@ fn test_object_placement_pipeline() {
                             }
 
                             // Test complete object_to_osds pipeline
-                            match osdmap.object_to_osds(*pool_id, obj_name) {
+                            match object_pg(&osdmap, *pool_id, obj_name)
+                                .and_then(|pg| osdmap.pg_to_osds(&pg))
+                            {
                                 Ok(osds) => {
                                     println!("      Full pipeline -> OSDs: {osds:?}");
                                 }
@@ -146,7 +152,7 @@ fn test_object_to_pg_without_pool() {
     let osdmap = OSDMap::new();
 
     // Should fail because pool doesn't exist
-    let result = osdmap.object_to_pg(1, "test_object");
+    let result = osdmap.object_locator_to_pg("test_object", &ObjectLocator::new(1));
     assert!(result.is_err(), "Should fail when pool doesn't exist");
 }
 
@@ -195,9 +201,9 @@ fn test_object_to_pg_deterministic() {
                 let obj_name = "deterministic_test_object";
 
                 // Map the same object multiple times
-                let pg1 = osdmap.object_to_pg(*pool_id, obj_name);
-                let pg2 = osdmap.object_to_pg(*pool_id, obj_name);
-                let pg3 = osdmap.object_to_pg(*pool_id, obj_name);
+                let pg1 = object_pg(&osdmap, *pool_id, obj_name);
+                let pg2 = object_pg(&osdmap, *pool_id, obj_name);
+                let pg3 = object_pg(&osdmap, *pool_id, obj_name);
 
                 // All should succeed or all should fail
                 match (pg1, pg2, pg3) {

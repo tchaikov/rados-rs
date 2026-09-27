@@ -19,6 +19,7 @@ pub mod list_stream;
 pub mod lock;
 pub(crate) mod messages;
 pub mod object_io;
+pub mod omap;
 pub mod operation;
 pub mod osdmap;
 pub mod pg_nls_response;
@@ -28,6 +29,8 @@ pub mod snapshot;
 pub(crate) mod throttle;
 pub(crate) mod tracker;
 pub mod types;
+pub mod watch;
+pub mod watchers;
 
 // Re-export commonly used types
 pub use client::{OSDClient, OSDClientConfig, default_client_inc};
@@ -36,15 +39,19 @@ pub use ioctx::IoCtx;
 pub use list_stream::list_objects_stream;
 pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use object_io::RadosObject;
+pub use omap::{CmpOp, OmapAssertion, OmapKey, OmapKeySet, OmapKeys, OmapMap, OmapVals};
 pub use operation::{BuiltOp, OpBuilder};
 pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, PoolSnapInfo, UuidD};
 pub use pg_nls_response::{ListObjectImpl, PgNlsResponse};
 pub use pgmap_types::{ObjectstorePerfStat, PoolStat};
 pub use snapshot::SnapId;
 pub use types::{
-    OSDOp, ObjectId, ObjectLocator, OpCode, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult,
-    SparseExtent, SparseReadResult, StatResult, StripedPgId, WriteResult,
+    ALL_NSPACES, AllocHintFlags, ListObjectEntry, ListResult, OSDOp, ObjectId, ObjectLocator,
+    OpCode, OpReply, OpResult, OpState, OpTarget, OsdOpFlags, PoolInfo, ReadResult, SparseExtent,
+    SparseReadResult, StatResult, StripedPgId, WatchOp, WriteResult,
 };
+pub use watch::{NotifyAck, NotifyResult, NotifyTimeout, WatchEvent, Watcher, decode_notify_reply};
+pub use watchers::{ListWatchersReply, WatchItem};
 
 pub use messages::MOSDOp;
 

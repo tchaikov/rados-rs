@@ -24,6 +24,17 @@ pub const CEPH_MSG_OSD_OPREPLY: u16 = 43;
 /// Message type for MOSDBackoff (OSD to Client)
 pub const CEPH_MSG_OSD_BACKOFF: u16 = 61;
 
+/// Message type for MWatchNotify (OSD to Client)
+pub const CEPH_MSG_WATCH_NOTIFY: u16 = 44;
+
+/// `CEPH_WATCH_EVENT_*` (`include/ceph_fs.h`): an `MWatchNotify`'s opcode.
+/// A notify to a watcher: its watch cookie, the notify id and the payload.
+pub const CEPH_WATCH_EVENT_NOTIFY: u8 = 1;
+/// A notify's completion to its notifier: the reply map is the data segment.
+pub const CEPH_WATCH_EVENT_NOTIFY_COMPLETE: u8 = 2;
+/// The OSD dropped a watch while the session was up.
+pub const CEPH_WATCH_EVENT_DISCONNECT: u8 = 3;
+
 /// Backoff operation codes
 pub const CEPH_OSD_BACKOFF_OP_BLOCK: u8 = 1;
 pub const CEPH_OSD_BACKOFF_OP_ACK_BLOCK: u8 = 2;
@@ -228,6 +239,70 @@ impl MOSDBackoff {
             begin,
             end,
         }
+    }
+}
+
+/// MWatchNotify message - OSD to Client (message type 44)
+///
+/// The front has no `ENCODE_START` envelope: a leading `msg_ver` byte
+/// gates `bl`, and the messenger header version gates `return_code` (v2)
+/// and `notifier_gid` (v3); Squid sends v3.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MWatchNotify {
+    /// `CEPH_WATCH_EVENT_*`
+    pub opcode: u8,
+    /// The watch cookie (NOTIFY, DISCONNECT) or the notifier's linger
+    /// cookie (NOTIFY_COMPLETE).
+    pub cookie: u64,
+    /// Unused by the OSD.
+    pub ver: u64,
+    pub notify_id: u64,
+    /// The notify payload; empty for the other events.
+    pub bl: Bytes,
+    /// `0` or `-ETIMEDOUT` on a NOTIFY_COMPLETE.
+    pub return_code: i32,
+    pub notifier_gid: u64,
+}
+
+impl MWatchNotify {
+    /// Decode the front segment; `header_version` is the messenger
+    /// header's version, which gates the last two fields.
+    pub fn decode(
+        header_version: u16,
+        front: &[u8],
+    ) -> std::result::Result<Self, crate::RadosError> {
+        use crate::Denc;
+
+        let mut cursor = front;
+        let msg_ver = u8::decode(&mut cursor, 0)?;
+        let opcode = u8::decode(&mut cursor, 0)?;
+        let cookie = u64::decode(&mut cursor, 0)?;
+        let ver = u64::decode(&mut cursor, 0)?;
+        let notify_id = u64::decode(&mut cursor, 0)?;
+        let bl = if msg_ver >= 1 {
+            Bytes::decode(&mut cursor, 0)?
+        } else {
+            Bytes::new()
+        };
+        let return_code = if header_version >= 2 {
+            i32::decode(&mut cursor, 0)?
+        } else {
+            0
+        };
+        let notifier_gid = if header_version >= 3 {
+            u64::decode(&mut cursor, 0)?
+        } else {
+            0
+        };
+        Ok(Self {
+            opcode,
+            cookie,
+            ver,
+            notify_id,
+            bl,
+            return_code,
+            notifier_gid,
+        })
     }
 }
 
@@ -755,5 +830,65 @@ mod tests {
             39,
             "Data section should contain 39-byte HObject cursor"
         );
+    }
+
+    fn watch_notify_front(opcode: u8, with_rc_gid: bool) -> Vec<u8> {
+        let mut v = vec![1, opcode];
+        v.extend_from_slice(&0x1111u64.to_le_bytes()); // cookie
+        v.extend_from_slice(&0x2222u64.to_le_bytes()); // ver
+        v.extend_from_slice(&0x3333u64.to_le_bytes()); // notify_id
+        v.extend_from_slice(&[2, 0, 0, 0, b'h', b'i']); // bl
+        if with_rc_gid {
+            v.extend_from_slice(&(-110i32).to_le_bytes());
+            v.extend_from_slice(&0x4444u64.to_le_bytes());
+        }
+        v
+    }
+
+    #[test]
+    fn watch_notify_decodes_a_v3_notify() {
+        let m = MWatchNotify::decode(3, &watch_notify_front(CEPH_WATCH_EVENT_NOTIFY, true))
+            .expect("decode");
+        assert_eq!(
+            m,
+            MWatchNotify {
+                opcode: CEPH_WATCH_EVENT_NOTIFY,
+                cookie: 0x1111,
+                ver: 0x2222,
+                notify_id: 0x3333,
+                bl: Bytes::from_static(b"hi"),
+                return_code: -110,
+                notifier_gid: 0x4444,
+            }
+        );
+    }
+
+    #[test]
+    fn watch_notify_v1_header_has_no_rc_or_gid() {
+        let m = MWatchNotify::decode(1, &watch_notify_front(CEPH_WATCH_EVENT_NOTIFY, false))
+            .expect("decode");
+        assert_eq!(m.bl, Bytes::from_static(b"hi"));
+        assert_eq!(m.return_code, 0);
+        assert_eq!(m.notifier_gid, 0);
+    }
+
+    #[test]
+    fn watch_notify_decodes_a_disconnect() {
+        let mut front = vec![1, CEPH_WATCH_EVENT_DISCONNECT];
+        front.extend_from_slice(&7u64.to_le_bytes());
+        front.extend_from_slice(&[0; 16]); // ver, notify_id
+        front.extend_from_slice(&[0; 4]); // empty bl
+        front.extend_from_slice(&[0; 4]); // return_code
+        front.extend_from_slice(&[0; 8]); // notifier_gid
+        let m = MWatchNotify::decode(3, &front).expect("decode");
+        assert_eq!(m.opcode, CEPH_WATCH_EVENT_DISCONNECT);
+        assert_eq!(m.cookie, 7);
+        assert!(m.bl.is_empty());
+    }
+
+    #[test]
+    fn watch_notify_rejects_a_short_front() {
+        let front = watch_notify_front(CEPH_WATCH_EVENT_NOTIFY, false);
+        assert!(MWatchNotify::decode(3, &front).is_err());
     }
 }
