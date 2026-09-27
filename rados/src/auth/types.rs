@@ -17,33 +17,145 @@ pub use crate::EntityType;
 /// Corresponds to C++ `CryptoKey` class in `/src/auth/Crypto.h`
 ///
 /// C++ encoding format:
-/// - `__u16 type` - Crypto type (CEPH_CRYPTO_NONE=0x0, CEPH_CRYPTO_AES=0x1)
+/// - `__u16 type` - Key type (see [`KeyType`])
 /// - `utime_t created` - Creation timestamp
 /// - `__u16 len` - Secret length
 /// - `buffer::ptr secret` - The actual secret key data
-#[derive(Debug, Clone)]
+///
+/// `secret` holds the raw secret, without the encoding header.
+#[derive(Clone)]
 pub struct CryptoKey {
     pub crypto_type: u16,
     pub created: SystemTime,
     pub secret: Bytes,
 }
 
-pub const CEPH_CRYPTO_AES: u16 = 0x1;
+impl std::fmt::Debug for CryptoKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CryptoKey")
+            .field("crypto_type", &self.crypto_type)
+            .field("created", &self.created)
+            .field("secret", &Redacted(&self.secret))
+            .finish()
+    }
+}
 
-impl CryptoKey {
-    pub fn new(secret: Bytes) -> Self {
-        Self {
-            crypto_type: CEPH_CRYPTO_AES,
-            created: SystemTime::now(),
-            secret,
+/// Debug-formats secret bytes as their length only, so a key never reaches
+/// a log.
+pub(crate) struct Redacted<'a>(pub(crate) &'a [u8]);
+
+impl std::fmt::Debug for Redacted<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "<{} bytes redacted>", self.0.len())
+    }
+}
+
+pub const CEPH_CRYPTO_NONE: u16 = 0x0;
+pub const CEPH_CRYPTO_AES: u16 = 0x1;
+pub const CEPH_CRYPTO_AES256KRB5: u16 = 0x2;
+
+/// A cephx key type (`CEPH_CRYPTO_*` in `ceph_fs.h`). The variants are in
+/// numeric order, so `min` picks the weaker type as the monitor does when it
+/// issues a service ticket.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum KeyType {
+    None,
+    Aes,
+    /// `aes256k`: AES256-CTS-HMAC-SHA384-192 (RFC 8009), Ceph v19.2.6+.
+    Aes256Krb5,
+}
+
+impl KeyType {
+    pub const fn as_u16(self) -> u16 {
+        match self {
+            KeyType::None => CEPH_CRYPTO_NONE,
+            KeyType::Aes => CEPH_CRYPTO_AES,
+            KeyType::Aes256Krb5 => CEPH_CRYPTO_AES256KRB5,
         }
     }
 
+    /// The per-type secret check of C++ `CryptoHandler::validate_secret`.
+    fn validate_secret(self, secret: &[u8]) -> Result<()> {
+        use crate::auth::protocol::AES_KEY_LEN;
+        match self {
+            KeyType::None => Ok(()),
+            KeyType::Aes if secret.len() < AES_KEY_LEN => Err(CephXError::InvalidKey(format!(
+                "aes secret shorter than {AES_KEY_LEN} bytes ({} bytes)",
+                secret.len()
+            ))),
+            KeyType::Aes => Ok(()),
+            KeyType::Aes256Krb5 => crate::auth::aes256krb5::validate_secret(secret),
+        }
+    }
+}
+
+impl TryFrom<u16> for KeyType {
+    type Error = CephXError;
+
+    fn try_from(value: u16) -> Result<Self> {
+        match value {
+            CEPH_CRYPTO_NONE => Ok(KeyType::None),
+            CEPH_CRYPTO_AES => Ok(KeyType::Aes),
+            CEPH_CRYPTO_AES256KRB5 => Ok(KeyType::Aes256Krb5),
+            other => Err(CephXError::UnsupportedKeyType(other)),
+        }
+    }
+}
+
+impl CryptoKey {
+    /// A key of `key_type` holding `secret`, validated as C++
+    /// `CryptoKey::_set_secret` does: an empty secret is accepted with any
+    /// type, otherwise the type must be known and the secret long enough.
+    pub fn new(key_type: KeyType, secret: Bytes) -> Result<Self> {
+        Self::from_parts(key_type.as_u16(), SystemTime::now(), secret)
+    }
+
+    /// The empty key of a default-constructed C++ `CryptoKey`.
+    pub fn empty() -> Self {
+        Self {
+            crypto_type: CEPH_CRYPTO_NONE,
+            created: UNIX_EPOCH,
+            secret: Bytes::new(),
+        }
+    }
+
+    fn from_parts(crypto_type: u16, created: SystemTime, secret: Bytes) -> Result<Self> {
+        if !secret.is_empty() {
+            KeyType::try_from(crypto_type)?.validate_secret(&secret)?;
+        }
+        Ok(Self {
+            crypto_type,
+            created,
+            secret,
+        })
+    }
+
+    /// Parse a keyring `key = ...` value: the base64 of an encoded key.
+    /// Bytes after the encoded key are ignored, as in C++
+    /// `CryptoKey::decode_base64`.
     pub fn from_base64(base64_str: &str) -> Result<Self> {
-        let secret_data = STANDARD
+        let data = STANDARD
             .decode(base64_str)
             .map_err(|e| CephXError::InvalidKey(format!("Invalid base64 key: {e}")))?;
-        Ok(Self::new(Bytes::from(secret_data)))
+        Self::decode_checked(&mut data.as_slice(), 0)
+    }
+
+    fn decode_checked<B: Buf>(buf: &mut B, features: u64) -> Result<Self> {
+        let crypto_type = u16::decode(buf, 0)?;
+        let created = SystemTime::decode(buf, features)?;
+        let secret_len = u16::decode(buf, 0)? as usize;
+        if buf.remaining() < secret_len {
+            return Err(CephXError::InvalidKey(format!(
+                "secret length {secret_len} exceeds the {} bytes left",
+                buf.remaining()
+            )));
+        }
+        let secret = buf.copy_to_bytes(secret_len);
+        Self::from_parts(crypto_type, created, secret)
+    }
+
+    pub fn key_type(&self) -> Result<KeyType> {
+        KeyType::try_from(self.crypto_type)
     }
 
     pub fn len(&self) -> usize {
@@ -54,44 +166,79 @@ impl CryptoKey {
         self.secret.is_empty()
     }
 
-    fn require_aes(&self) -> Result<()> {
-        if self.crypto_type != CEPH_CRYPTO_AES {
+    fn cipher_type(&self) -> Result<KeyType> {
+        if self.secret.is_empty() {
             return Err(CephXError::CryptographicError(format!(
-                "Unsupported crypto type: {}",
+                "empty key of type {}",
                 self.crypto_type
             )));
         }
-        Ok(())
-    }
-
-    /// Extract the raw 16-byte AES key from the secret.
-    ///
-    /// Session keys are raw 16-byte keys. Client keys from keyring files
-    /// contain a 12-byte header (u16 type + u32 sec + u32 nsec + u16 len)
-    /// followed by the 16-byte key.
-    pub fn aes_key_bytes(&self) -> Result<&[u8]> {
-        use crate::auth::protocol::{AES_KEY_LEN, CRYPTO_KEY_HEADER_SIZE};
-
-        let secret_bytes = &self.secret;
-        if secret_bytes.len() == AES_KEY_LEN {
-            Ok(secret_bytes)
-        } else if secret_bytes.len() >= CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN {
-            Ok(&secret_bytes[CRYPTO_KEY_HEADER_SIZE..CRYPTO_KEY_HEADER_SIZE + AES_KEY_LEN])
-        } else {
-            Err(CephXError::CryptographicError(format!(
-                "Secret key has invalid length: {} bytes (expected 16 or >= 28)",
-                secret_bytes.len()
-            )))
+        match self.key_type()? {
+            KeyType::None => Err(CephXError::CryptographicError(format!(
+                "key type none={CEPH_CRYPTO_NONE} cannot encrypt or decrypt"
+            ))),
+            t => Ok(t),
         }
     }
 
-    /// Decrypt data using AES-128-CBC (corresponds to C++ `CryptoKey::decrypt`)
-    pub fn decrypt(&self, ciphertext: &[u8]) -> Result<Bytes> {
+    /// AES-128 uses the first 16 bytes of the secret.
+    fn aes_key_bytes(&self) -> Result<&[u8]> {
+        use crate::auth::protocol::AES_KEY_LEN;
+        self.secret.get(..AES_KEY_LEN).ok_or_else(|| {
+            CephXError::CryptographicError(format!(
+                "aes secret shorter than {AES_KEY_LEN} bytes ({} bytes)",
+                self.secret.len()
+            ))
+        })
+    }
+
+    /// Decrypt `ciphertext` under cephx key usage `usage` (a
+    /// `CEPHX_KEY_USAGE_*` value, or 0 for C++'s plain `decrypt`). AES keys
+    /// ignore the usage.
+    pub fn decrypt(&self, usage: u32, ciphertext: &[u8]) -> Result<Bytes> {
+        match self.cipher_type()? {
+            KeyType::Aes256Krb5 => {
+                crate::auth::aes256krb5::decrypt(&self.secret, usage, ciphertext).map(Bytes::from)
+            }
+            _ => self.aes_decrypt(ciphertext),
+        }
+    }
+
+    /// Encrypt `plaintext` under cephx key usage `usage` (a
+    /// `CEPHX_KEY_USAGE_*` value, or 0 for C++'s plain `encrypt`). AES keys
+    /// ignore the usage.
+    pub fn encrypt(&self, usage: u32, plaintext: &[u8]) -> Result<Bytes> {
+        match self.cipher_type()? {
+            KeyType::Aes256Krb5 => {
+                crate::auth::aes256krb5::encrypt(&self.secret, usage, plaintext).map(Bytes::from)
+            }
+            _ => self.aes_encrypt(plaintext),
+        }
+    }
+
+    /// HMAC-SHA256 keyed with the whole raw secret, whatever the key's type
+    /// (C++ `CryptoKey::hmac_sha256`).
+    pub fn hmac_sha256(&self, data: &[u8]) -> Result<[u8; 32]> {
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        if self.secret.is_empty() {
+            return Err(CephXError::CryptographicError(format!(
+                "empty key of type {}",
+                self.crypto_type
+            )));
+        }
+        let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&self.secret)
+            .map_err(|e| CephXError::CryptographicError(format!("invalid HMAC key: {e}")))?;
+        mac.update(data);
+        Ok(mac.finalize().into_bytes().into())
+    }
+
+    fn aes_decrypt(&self, ciphertext: &[u8]) -> Result<Bytes> {
         use aes::Aes128;
         use cbc::Decryptor;
         use cbc::cipher::{BlockDecryptMut, KeyIvInit};
 
-        self.require_aes()?;
         let key_bytes = self.aes_key_bytes()?;
 
         use crate::auth::protocol::CEPH_AES_IV;
@@ -108,13 +255,11 @@ impl CryptoKey {
         Ok(Bytes::from(buffer))
     }
 
-    /// Encrypt data using AES-128-CBC (corresponds to C++ `CryptoKey::encrypt`)
-    pub fn encrypt(&self, plaintext: &[u8]) -> Result<Bytes> {
+    fn aes_encrypt(&self, plaintext: &[u8]) -> Result<Bytes> {
         use aes::Aes128;
         use cbc::Encryptor;
         use cbc::cipher::{BlockEncryptMut, KeyIvInit};
 
-        self.require_aes()?;
         let key_bytes = self.aes_key_bytes()?;
 
         use crate::auth::protocol::{AES_BLOCK_LEN, CEPH_AES_IV};
@@ -147,22 +292,8 @@ impl Denc for CryptoKey {
     }
 
     fn decode<B: Buf>(buf: &mut B, features: u64) -> std::result::Result<Self, RadosError> {
-        let crypto_type = u16::decode(buf, 0)?;
-        let created = SystemTime::decode(buf, features)?;
-
-        let secret_len = u16::decode(buf, 0)? as usize;
-        if buf.remaining() < secret_len {
-            return Err(RadosError::Protocol(
-                "Insufficient bytes for secret".to_string(),
-            ));
-        }
-
-        let secret = buf.copy_to_bytes(secret_len);
-        Ok(Self {
-            crypto_type,
-            created,
-            secret,
-        })
+        Self::decode_checked(buf, features)
+            .map_err(|e| RadosError::Protocol(format!("CryptoKey: {e}")))
     }
 
     fn encoded_size(&self, _features: u64) -> Option<usize> {
@@ -337,7 +468,7 @@ impl TicketHandler {
     pub fn new(service: EntityType) -> Self {
         Self {
             service,
-            session_key: CryptoKey::new(Bytes::new()),
+            session_key: CryptoKey::empty(),
             ticket_blob: None,
             renew_after: None,
             expires: None,
@@ -401,10 +532,184 @@ impl CephXSession {
     }
 }
 
+/// Encoded keys shared by the auth unit tests.
+#[cfg(test)]
+pub(crate) mod test_keys {
+    /// AES, secret `00 01 .. 0f`.
+    pub(crate) const AES_TEST_KEY: &str = "AQAAAAAAAAAAABAAAAECAwQFBgcICQoLDA0ODw==";
+    /// aes256k, secret the RFC 8009 test key `6D404D37 .. 82460C52`.
+    pub(crate) const AES256K_TEST_KEY: &str =
+        "AgAAAAAAAAAAACAAbUBNN/r3n53w0zVo0yBmmADrSDZHLqigJtFrcYJGDFI=";
+    /// Type 3, which Ceph does not define, with a 32-byte zero secret.
+    pub(crate) const TYPE3_TEST_KEY: &str =
+        "AwAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    /// aes256k with a 31-byte secret, one byte short.
+    pub(crate) const AES256K_31_BYTE_TEST_KEY: &str =
+        "AgAAAAAAAAAAAB8AEREREREREREREREREREREREREREREREREREREREREQ==";
+    /// The RFC 8009 test key's raw secret.
+    pub(crate) const RFC8009_SECRET: &str =
+        "6d404d37faf79f9df0d33568d320669800eb4836472ea8a026d16b7182460c52";
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_keys::*;
     use super::*;
     use serde_json::json;
+
+    fn hx(s: &str) -> Vec<u8> {
+        hex::decode(s).unwrap()
+    }
+
+    #[test]
+    fn parse_aes_key() {
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
+        assert_eq!(key.crypto_type, CEPH_CRYPTO_AES);
+        assert_eq!(key.key_type().unwrap(), KeyType::Aes);
+        assert_eq!(key.secret.as_ref(), hx("000102030405060708090a0b0c0d0e0f"));
+    }
+
+    #[test]
+    fn parse_aes256k_key() {
+        let key = CryptoKey::from_base64(AES256K_TEST_KEY).unwrap();
+        assert_eq!(key.crypto_type, CEPH_CRYPTO_AES256KRB5);
+        assert_eq!(key.key_type().unwrap(), KeyType::Aes256Krb5);
+        assert_eq!(key.secret.as_ref(), hx(RFC8009_SECRET));
+    }
+
+    #[test]
+    fn parse_unknown_type_names_it() {
+        let err = CryptoKey::from_base64(TYPE3_TEST_KEY).unwrap_err();
+        assert!(matches!(err, CephXError::UnsupportedKeyType(3)), "{err:?}");
+        assert!(err.to_string().contains('3'), "{err}");
+    }
+
+    #[test]
+    fn parse_rejects_short_aes256k_secret() {
+        let err = CryptoKey::from_base64(AES256K_31_BYTE_TEST_KEY).unwrap_err();
+        assert!(err.to_string().contains("shorter than 32 bytes"), "{err}");
+    }
+
+    #[test]
+    fn parse_accepts_33_byte_aes256k_secret() {
+        let key =
+            CryptoKey::from_base64("AgAAAAAAAAAAACEAbUBNN/r3n53w0zVo0yBmmADrSDZHLqigJtFrcYJGDFIB")
+                .unwrap();
+        assert_eq!(key.key_type().unwrap(), KeyType::Aes256Krb5);
+        assert_eq!(key.len(), 33);
+    }
+
+    #[test]
+    fn parse_empty_secret_is_an_empty_key() {
+        let key = CryptoKey::from_base64("AgAAAAAAAAAAAAAA").unwrap();
+        assert!(key.is_empty());
+        assert_eq!(key.crypto_type, CEPH_CRYPTO_AES256KRB5);
+    }
+
+    #[test]
+    fn parse_ignores_trailing_bytes() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let mut data = STANDARD.decode(AES_TEST_KEY).unwrap();
+        data.extend_from_slice(b"trailing");
+        let key = CryptoKey::from_base64(&STANDARD.encode(data)).unwrap();
+        assert_eq!(key.secret.as_ref(), hx("000102030405060708090a0b0c0d0e0f"));
+    }
+
+    #[test]
+    fn denc_decode_validates_the_secret() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let data = STANDARD.decode(AES256K_31_BYTE_TEST_KEY).unwrap();
+        assert!(CryptoKey::decode(&mut data.as_slice(), 0).is_err());
+
+        let data = STANDARD.decode(AES256K_TEST_KEY).unwrap();
+        let key = CryptoKey::decode(&mut data.as_slice(), 0).unwrap();
+        let mut encoded = Vec::new();
+        key.encode(&mut encoded, 0).unwrap();
+        assert_eq!(encoded, data);
+    }
+
+    #[test]
+    fn new_validates_the_secret() {
+        assert!(CryptoKey::new(KeyType::Aes, Bytes::from(vec![0u8; 15])).is_err());
+        assert!(CryptoKey::new(KeyType::Aes, Bytes::from(vec![0u8; 16])).is_ok());
+        assert!(CryptoKey::new(KeyType::Aes256Krb5, Bytes::from(vec![0u8; 31])).is_err());
+        assert!(CryptoKey::new(KeyType::Aes256Krb5, Bytes::from(vec![0u8; 32])).is_ok());
+        assert!(CryptoKey::new(KeyType::None, Bytes::from(vec![0u8; 3])).is_ok());
+        assert!(CryptoKey::new(KeyType::Aes256Krb5, Bytes::new()).is_ok());
+    }
+
+    #[test]
+    fn key_type_round_trips() {
+        for t in [KeyType::None, KeyType::Aes, KeyType::Aes256Krb5] {
+            assert_eq!(KeyType::try_from(t.as_u16()).unwrap(), t);
+        }
+        assert!(KeyType::Aes < KeyType::Aes256Krb5);
+    }
+
+    #[test]
+    fn empty_and_none_keys_cannot_encrypt() {
+        assert!(CryptoKey::empty().encrypt(0, b"x").is_err());
+        let none = CryptoKey::new(KeyType::None, Bytes::from(vec![1u8; 16])).unwrap();
+        let err = none.encrypt(0, b"x").unwrap_err().to_string();
+        assert!(err.contains("none=0"), "{err}");
+    }
+
+    // src/test/crypto.cc:42-80@v19.2.6.
+    #[test]
+    fn aes_is_byte_identical_for_every_usage() {
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
+        let plaintext = hx("00112233445566778899aabbccddeeff");
+        let expected = hx("b38f5bc9354cf8c61315666f37d7793a11907be9d83c3570587b979b03d2a501");
+        for usage in [0, 0x04, 0x10, 0x30] {
+            let ct = key.encrypt(usage, &plaintext).unwrap();
+            assert_eq!(ct.as_ref(), expected, "usage 0x{usage:02x}");
+            assert_eq!(key.decrypt(usage, &ct).unwrap().as_ref(), plaintext);
+        }
+    }
+
+    // RFC 8009 vector 2 from src/test/crypto.cc@v19.2.6, usage 2.
+    #[test]
+    fn aes256k_dispatch() {
+        let key = CryptoKey::from_base64(AES256K_TEST_KEY).unwrap();
+        let ct = hx(
+            "4ED7B37C2BCAC8F74F23C1CF07E62BC7B75FB3F637B9F559C7F664F69EAB7B6092237526EA0D1F61CB20D69D10F2",
+        );
+        assert_eq!(key.decrypt(2, &ct).unwrap().as_ref(), hx("000102030405"));
+
+        let ct = key.encrypt(0x04, b"round trip").unwrap();
+        assert_eq!(ct.len(), 16 + 10 + 24);
+        assert_eq!(key.decrypt(0x04, &ct).unwrap().as_ref(), b"round trip");
+        assert!(key.decrypt(0x03, &ct).is_err());
+    }
+
+    // src/test/crypto.cc:668-718@v19.2.6.
+    #[test]
+    fn hmac_sha256_ceph_vectors() {
+        let key = CryptoKey::new(
+            KeyType::Aes,
+            Bytes::from(hx("00112233445566778899aabbccddeeff")),
+        )
+        .unwrap();
+        assert_eq!(
+            hex::encode(key.hmac_sha256(b"blablabla").unwrap()),
+            "42c7027e8be06dca2c0b444373fefdbeac5b4034eca44a69de3a291634ed8df9"
+        );
+        assert_eq!(
+            hex::encode(key.hmac_sha256(b"testing1234blablabla").unwrap()),
+            "4bd3ac394acc9706dd09e65c68add4cf092ccda1e799e35c527385bd7973c698"
+        );
+    }
+
+    // Computed with Python's hmac module.
+    #[test]
+    fn hmac_sha256_uses_the_whole_aes256k_secret() {
+        let key = CryptoKey::from_base64(AES256K_TEST_KEY).unwrap();
+        assert_eq!(
+            hex::encode(key.hmac_sha256(&[0u8; 16]).unwrap()),
+            "480e73b4fe5f14c60d407394f7ca4fa4107aa6ca79de56579e888e622ba72ac2"
+        );
+        assert!(CryptoKey::empty().hmac_sha256(b"x").is_err());
+    }
 
     #[test]
     fn test_cephx_ticket_blob_json_omits_struct_v() {
@@ -435,5 +740,25 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn crypto_key_debug_redacts_the_secret() {
+        let secret: Vec<u8> = (0xa0..0xc0).collect();
+        let key = CryptoKey::new(KeyType::Aes256Krb5, Bytes::from(secret.clone())).unwrap();
+        let out = format!("{key:?}");
+        let pretty = format!("{key:#?}");
+        assert!(out.contains("crypto_type: 2"), "{out}");
+        assert!(out.contains("created"), "{out}");
+        assert!(out.contains("<32 bytes redacted>"), "{out}");
+        let hex: String = secret.iter().map(|b| format!("{b:02x}")).collect();
+        for text in [&out, &pretty] {
+            let lower = text.to_lowercase();
+            // Hex, `Bytes`' escaped form, the byte list, and base64.
+            assert!(!lower.contains(&hex[..8]), "{text}");
+            assert!(!lower.contains("\\xa0\\xa1"), "{text}");
+            assert!(!text.contains("160, 161"), "{text}");
+            assert!(!text.contains(&STANDARD.encode(&secret)[..8]), "{text}");
+        }
     }
 }

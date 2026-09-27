@@ -8,7 +8,7 @@ use crate::monclient::connection::{KeepalivePolicy, MonConnection, MonConnection
 use crate::monclient::defaults;
 use crate::monclient::error::{MonClientError, Result};
 use crate::monclient::messages::*;
-use crate::monclient::monmap::MonMapState;
+use crate::monclient::monmap::{MonMapState, auth_epoch_rose};
 use crate::monclient::subscription::{MonService, MonSub};
 use crate::monclient::types::CommandResult;
 use crate::monclient::wait_helper::wait_for_condition;
@@ -1076,26 +1076,15 @@ impl MonClient {
         // Check which tickets need renewal and build the request in a single lock.
         let auth_payload = {
             let mut handler = handler_arc.lock().map_err(lock_err)?;
-            let Some(session) = handler.get_session() else {
+            let Some(global_id) = handler.get_session().map(|session| session.global_id) else {
                 return Ok(());
             };
 
-            let mut needed_keys = crate::auth::EntityType::empty();
-            for (service_type, ticket_handler) in &session.ticket_handlers {
-                if ticket_handler.need_key() {
-                    debug!(
-                        "Service ticket for {:?} needs renewal (renew_after reached)",
-                        *service_type
-                    );
-                    needed_keys |= *service_type;
-                }
-            }
-
+            let needed_keys = handler.service_keys_due();
             if needed_keys.is_empty() {
                 return Ok(());
             }
 
-            let global_id = session.global_id;
             debug!(
                 "Building ticket renewal request for services: {:?}",
                 needed_keys
@@ -1190,6 +1179,10 @@ impl MonClient {
                 debug!("Received CEPH_MSG_OSD_MAP");
                 self.handle_osdmap(msg).await?;
             }
+            crate::msgr2::message::CEPH_MSG_AUTH_REPLY => {
+                debug!("Received CEPH_MSG_AUTH_REPLY");
+                self.handle_auth_reply(msg).await?;
+            }
             _ => {
                 return Err(MonClientError::Other(format!(
                     "Received unknown message type 0x{msg_type:04x} - this is a bug! MonClient should only receive messages it subscribed for"
@@ -1222,11 +1215,13 @@ impl MonClient {
         }
 
         // Update monmap state (moves monmap, so must be after epoch/subscription extraction)
-        {
+        let auth_epoch_raised = {
             let mut monmap_state = self.monmap_state.write().await;
+            let rose = auth_epoch_rose(monmap_state.monmap.auth_epoch, monmap.auth_epoch);
             monmap_state.monmap = monmap;
             monmap_state.want_monmap = false;
-        }
+            rose
+        };
 
         // Broadcast MonMap update event
         let _ = self.map_events.send(MapEvent::MonMapUpdated { epoch });
@@ -1234,7 +1229,82 @@ impl MonClient {
         // Notify waiters that MonMap has arrived
         self.monmap_notify.notify_waiters();
 
+        if auth_epoch_raised {
+            info!("MonMap auth epoch rose: invalidating service tickets");
+            if let Err(e) = self.refresh_service_tickets().await {
+                warn!("Service ticket refresh failed: {:?}", e);
+            }
+        }
+
         info!("MonMap updated successfully");
+        Ok(())
+    }
+
+    /// Mark every service ticket due and request new ones at once, as C++
+    /// `MonClient::_wipe_secrets_and_tickets` does. The tickets are
+    /// invalidated even while no monitor session is up; the request waits for
+    /// one.
+    async fn refresh_service_tickets(&self) -> Result<()> {
+        let active_con = {
+            let conn_state = self.connection_state.read().await;
+            conn_state.active_con.clone()
+        };
+        // Without a session, the configured provider's handler is the one
+        // every connection and OSD session shares (its clones share the Arc).
+        let handler = match &active_con {
+            Some(con) => con.get_auth_handler(),
+            None => self
+                .config
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.clone_provider())
+                .map(|provider| Arc::clone(provider.handler())),
+        };
+        if let Some(handler) = handler {
+            handler
+                .lock()
+                .map_err(|e| MonClientError::Other(format!("Failed to lock auth handler: {e}")))?
+                .invalidate_service_tickets();
+        }
+        match active_con {
+            Some(con) => self.check_auth_tickets(&con).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Handle a monitor's reply to a ticket renewal request
+    async fn handle_auth_reply(&self, msg: crate::msgr2::message::Message) -> Result<()> {
+        let reply: MAuthReply = decode_message(&msg)?;
+        if reply.result != 0 {
+            warn!(
+                "Ticket renewal failed: errno {} {:?}; keeping the old tickets",
+                reply.result, reply.result_msg
+            );
+            return Ok(());
+        }
+
+        let active_con = {
+            let conn_state = self.connection_state.read().await;
+            conn_state.active_con.clone()
+        };
+        let Some(handler) = active_con.and_then(|con| con.get_auth_handler()) else {
+            return Ok(());
+        };
+        let (stored, missing) = {
+            let mut handler = handler
+                .lock()
+                .map_err(|e| MonClientError::Other(format!("Failed to lock auth handler: {e}")))?;
+            let stored = handler
+                .handle_principal_reply(reply.result_bl)
+                .map_err(|e| MonClientError::Other(format!("Ticket renewal reply: {e}")))?;
+            // Every requested service was due, so any still due was not renewed.
+            (stored, handler.service_keys_due())
+        };
+        if stored.is_empty() || !missing.is_empty() {
+            warn!("Ticket renewal stored tickets for {stored:?}; still due: {missing:?}");
+        } else {
+            info!("Stored renewed service tickets for {stored:?}");
+        }
         Ok(())
     }
 

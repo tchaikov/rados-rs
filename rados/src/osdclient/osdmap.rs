@@ -922,6 +922,37 @@ impl PgPool {
     /// has to reverse the transform to compute the right `spg_t` shard.
     pub const FLAG_EC_OPTIMIZATIONS: u64 = 1 << 19;
 
+    /// Hash an object's placement key with this pool's `object_hash`, as
+    /// Ceph's `pg_pool_t::hash_key`: `key` alone in the default
+    /// namespace, otherwise `ns + 0x1f + key`.
+    ///
+    /// An unknown hash type is an error, where Ceph hashes to `-1` and
+    /// places the object anyway.
+    pub fn hash_key(&self, key: &str, ns: &str) -> Result<u32, RadosError> {
+        crate::crush::hash::hash_key(self.object_hash, key, ns).ok_or_else(|| {
+            RadosError::Protocol(format!(
+                "pool object_hash {} is not a known string hash",
+                self.object_hash
+            ))
+        })
+    }
+
+    /// `pg_pool_t::pg_num_mask`: the smallest all-ones mask covering
+    /// `pg_num - 1`.
+    pub fn pg_num_mask(&self) -> u32 {
+        crate::crush::placement::pg_num_mask(self.pg_num)
+    }
+
+    /// Reduce a raw PG to one of this pool's PGs, as Ceph's
+    /// `pg_pool_t::raw_pg_to_pg`, with `ceph_stable_mod`.
+    pub fn raw_pg_to_pg(&self, pg: PgId) -> PgId {
+        let mask = self.pg_num_mask();
+        PgId::new(
+            pg.pool,
+            crate::crush::placement::ceph_stable_mod(pg.seed, self.pg_num, mask),
+        )
+    }
+
     pub fn is_replicated(&self) -> bool {
         self.pool_type == Self::TYPE_REPLICATED
     }
@@ -1346,8 +1377,93 @@ pub struct SnapIntervalSet {
     pub intervals: Vec<SnapInterval>,
 }
 
-/// Ceph release type (ceph_release_t in C++)
-pub type CephRelease = u8;
+/// `ceph_release_t`: a Ceph release as the OSD map carries it, one
+/// lossless byte. Values past the named ones (a release newer than
+/// this crate) are kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct CephRelease(pub u8);
+
+impl CephRelease {
+    pub const UNKNOWN: Self = Self(0);
+    pub const REEF: Self = Self(18);
+    pub const SQUID: Self = Self(19);
+    pub const TENTACLE: Self = Self(20);
+    pub const UMBRELLA: Self = Self(21);
+    /// An incremental's "no change" (`ceph_release_t{0xff}`).
+    pub const NONE: Self = Self(0xff);
+
+    /// Not negative as `i8`; C++ treats a negative byte as "no release".
+    pub fn is_set(self) -> bool {
+        (self.0 as i8) >= 0
+    }
+
+    /// `operator<<(ceph_release_t)` (`src/common/ceph_releases.cc:7-10@main`):
+    /// `ceph_release_name` of the byte as an `int`, so 1..=21 give their
+    /// names and every other value (0, 22 and up, 0x80 and up) gives
+    /// "unknown" (`src/common/ceph_strings.cc:77-127@main`).
+    pub fn name(self) -> &'static str {
+        const NAMES: [&str; 21] = [
+            "argonaut",
+            "bobtail",
+            "cuttlefish",
+            "dumpling",
+            "emperor",
+            "firefly",
+            "giant",
+            "hammer",
+            "infernalis",
+            "jewel",
+            "kraken",
+            "luminous",
+            "mimic",
+            "nautilus",
+            "octopus",
+            "pacific",
+            "quincy",
+            "reef",
+            "squid",
+            "tentacle",
+            "umbrella",
+        ];
+        match self.0 {
+            1..=21 => NAMES[usize::from(self.0) - 1],
+            _ => "unknown",
+        }
+    }
+}
+
+/// C++'s `operator<` (`src/common/ceph_releases.h:56-78@main`) puts a
+/// byte that is negative as `i8` below every release. Two unset values
+/// compare by byte here, so the order stays consistent with `Eq`.
+impl Ord for CephRelease {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (self.is_set(), self.0).cmp(&(other.is_set(), other.0))
+    }
+}
+
+impl PartialOrd for CephRelease {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl std::fmt::Display for CephRelease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl From<u8> for CephRelease {
+    fn from(byte: u8) -> Self {
+        Self(byte)
+    }
+}
+
+impl From<CephRelease> for u8 {
+    fn from(release: CephRelease) -> Self {
+        release.0
+    }
+}
 
 /// Incremental OSDMap update (OSDMap::Incremental in C++)
 /// Represents a diff from epoch-1 to epoch
@@ -1424,8 +1540,8 @@ pub struct OSDMapIncremental {
     pub new_full_ratio: f32,
     pub new_backfillfull_ratio: f32,
 
-    pub new_require_min_compat_client: CephRelease,
-    pub new_require_osd_release: CephRelease,
+    pub new_require_min_compat_client: u8,
+    pub new_require_osd_release: u8,
 
     pub new_crush_node_flags: BTreeMap<i32, u32>,
     pub new_device_class_flags: BTreeMap<i32, u32>,
@@ -1583,8 +1699,8 @@ struct OSDMapIncrementalOsdSection {
     new_nearfull_ratio: f32,
     new_full_ratio: f32,
     new_backfillfull_ratio: f32,
-    new_require_min_compat_client: CephRelease,
-    new_require_osd_release: CephRelease,
+    new_require_min_compat_client: u8,
+    new_require_osd_release: u8,
     new_crush_node_flags: BTreeMap<i32, u32>,
     new_device_class_flags: BTreeMap<i32, u32>,
     change_stretch_mode: bool,
@@ -1802,8 +1918,8 @@ struct OSDMapOsdSection {
     nearfull_ratio: f32,
     full_ratio: f32,
     backfillfull_ratio: f32,
-    require_min_compat_client: CephRelease,
-    require_osd_release: CephRelease,
+    require_min_compat_client: u8,
+    require_osd_release: u8,
     removed_snaps_queue: Vec<(i64, SnapIntervalSet)>,
     crush_node_flags: BTreeMap<i32, u32>,
     device_class_flags: BTreeMap<i32, u32>,
@@ -1859,8 +1975,8 @@ impl VersionedEncode for OSDMapOsdSection {
             nearfull_ratio: f32::decode(buf, features)?,
             full_ratio: f32::decode(buf, features)?,
             backfillfull_ratio: f32::decode(buf, features)?,
-            require_min_compat_client: CephRelease::decode(buf, features)?,
-            require_osd_release: CephRelease::decode(buf, features)?,
+            require_min_compat_client: u8::decode(buf, features)?,
+            require_osd_release: u8::decode(buf, features)?,
             removed_snaps_queue: Vec::decode(buf, features)?,
             crush_node_flags: BTreeMap::decode(buf, features)?,
             device_class_flags: BTreeMap::decode(buf, features)?,
@@ -2133,25 +2249,25 @@ impl OSDMapIncremental {
             new_nearfull_ratio: _,
             new_full_ratio: _,
             new_backfillfull_ratio: _,
+            new_require_min_compat_client: _,
+            new_require_osd_release: _,
 
             // -------- Intentionally not applied --------
-            encode_features: _,               // wire-decode metadata
-            fsid: _,                          // invariant within a session
-            fullmap: _,                       // TODO: handle full-map replacement
-            new_hb_back_up: _,                // server-side heartbeat addrs
-            new_up_thru: _,                   // server-side OSD epoch history
-            new_last_clean_interval: _,       // server-side OSD history
-            new_lost: _,                      // admin OSD lost flag
-            new_up_cluster: _,                // cluster-facing addrs (OSD-to-OSD)
-            cluster_snapshot: _,              // cephfs snapshot name
-            new_uuid: _,                      // per-OSD fsid (admin repair)
-            new_xinfo: _,                     // extended OSD info (server-side)
-            new_hb_front_up: _,               // server-side heartbeat addrs
-            new_require_min_compat_client: _, // mon-enforced feature gate
-            new_require_osd_release: _,       // mon-enforced feature gate
-            new_crush_node_flags: _,          // carried in the CRUSH map bytes
-            new_device_class_flags: _,        // carried in the CRUSH map bytes
-            change_stretch_mode: _,           // stretch mode (rare deployment)
+            encode_features: _,         // wire-decode metadata
+            fsid: _,                    // invariant within a session
+            fullmap: _,                 // TODO: handle full-map replacement
+            new_hb_back_up: _,          // server-side heartbeat addrs
+            new_up_thru: _,             // server-side OSD epoch history
+            new_last_clean_interval: _, // server-side OSD history
+            new_lost: _,                // admin OSD lost flag
+            new_up_cluster: _,          // cluster-facing addrs (OSD-to-OSD)
+            cluster_snapshot: _,        // cephfs snapshot name
+            new_uuid: _,                // per-OSD fsid (admin repair)
+            new_xinfo: _,               // extended OSD info (server-side)
+            new_hb_front_up: _,         // server-side heartbeat addrs
+            new_crush_node_flags: _,    // carried in the CRUSH map bytes
+            new_device_class_flags: _,  // carried in the CRUSH map bytes
+            change_stretch_mode: _,     // stretch mode (rare deployment)
             new_stretch_bucket_count: _,
             new_degraded_stretch_mode: _,
             new_recovering_stretch_mode: _,
@@ -2446,8 +2562,27 @@ impl OSDMapIncremental {
             base.backfillfull_ratio = self.new_backfillfull_ratio;
         }
 
+        // `OSDMap.cc:2646-2662@main`: 0xff (negative as `i8`) is an
+        // incremental's "no change"; a minimum client release of unknown
+        // is never applied. The C++ flag side effects are not mirrored.
+        if (self.new_require_osd_release as i8) >= 0 {
+            base.require_osd_release = self.new_require_osd_release;
+        }
+        if (self.new_require_min_compat_client as i8) > 0 {
+            base.require_min_compat_client = self.new_require_min_compat_client;
+        }
+
         Ok(())
     }
+}
+
+/// A PG's up and acting sets: see [`OSDMap::pg_to_up_acting`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UpActing {
+    pub up: Vec<i32>,
+    pub up_primary: i32,
+    pub acting: Vec<i32>,
+    pub acting_primary: i32,
 }
 
 /// OSDMap - the main OSD cluster map structure
@@ -2526,8 +2661,8 @@ pub struct OSDMap {
     pub backfillfull_ratio: f32,
 
     // Version 5+ fields
-    pub require_min_compat_client: CephRelease,
-    pub require_osd_release: CephRelease,
+    pub require_min_compat_client: u8,
+    pub require_osd_release: u8,
 
     // Version 6+ fields (osd-only section)
     pub removed_snaps_queue: Vec<(i64, SnapIntervalSet)>,
@@ -2788,6 +2923,90 @@ impl OSDMap {
         Ok(osds)
     }
 
+    /// Map a PG to its up and acting sets and their primaries, as C++
+    /// `pg_to_up_acting_osds` reports them separately.
+    ///
+    /// `up` is CRUSH plus `pg_upmap`, `pg_upmap_items`, primary selection
+    /// and `pg_upmap_primaries`, with down and nonexistent OSDs removed
+    /// (replicated) or replaced by `CRUSH_ITEM_NONE` (EC) as
+    /// `_raw_to_up_osds` does, primary first; the order of the others is
+    /// this client's placement order. `up_primary` is its first valid OSD,
+    /// -1 when every OSD is down. `acting` is `pg_temp` filtered the same
+    /// way as `_get_temp_osds` does, else `up` when that leaves nothing;
+    /// `acting_primary` is `primary_temp`, else `pg_temp`'s first valid
+    /// OSD, else `up_primary`. The first element of
+    /// [`pg_to_acting_osds`](Self::pg_to_acting_osds) is `acting_primary`.
+    /// Uncached: callers compare it across maps, not per op.
+    pub fn pg_to_up_acting(&self, pg: &PgId) -> Result<UpActing, RadosError> {
+        let pool = self
+            .pools
+            .get(&pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+        let crush_map = self
+            .crush
+            .as_ref()
+            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+        let raw = crate::crush::placement::pg_to_osds(
+            crush_map,
+            *pg,
+            pool.pgp_num,
+            pool.crush_rule as u32,
+            &self.osd_weight,
+            pool.size as usize,
+            hashpspool,
+        )
+        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
+        let pps = crate::crush::placement::pg_to_pps(*pg, pool.pgp_num, hashpspool);
+        Ok(self.up_acting_from_raw(pg, pps, raw, !pool.is_erasure()))
+    }
+
+    /// `can_shift` is `pg_pool_t::can_shift_osds()`: a replicated pool
+    /// drops down OSDs from its sets, an EC pool keeps their positions as
+    /// `CRUSH_ITEM_NONE`.
+    fn up_acting_from_raw(
+        &self,
+        pg: &PgId,
+        pps: u32,
+        mut raw: Vec<i32>,
+        can_shift: bool,
+    ) -> UpActing {
+        self.apply_up_overrides(pg, pps, &mut raw);
+        let valid = |o: &i32| *o >= 0 && *o != CRUSH_ITEM_NONE;
+        // `_raw_to_up_osds` for up, `_get_temp_osds` for pg_temp.
+        let only_up = |osds: &[i32]| -> Vec<i32> {
+            if can_shift {
+                osds.iter().copied().filter(|&o| self.is_up(o)).collect()
+            } else {
+                osds.iter()
+                    .map(|&o| if self.is_up(o) { o } else { CRUSH_ITEM_NONE })
+                    .collect()
+            }
+        };
+        let up = only_up(&raw);
+        let up_primary = up.iter().copied().find(valid).unwrap_or(-1);
+
+        let temp = self.pg_temp.get(pg).map(|t| only_up(t)).unwrap_or_default();
+        let mut acting_primary = match self.primary_temp.get(pg) {
+            Some(&p) if p >= 0 => p,
+            _ => temp.iter().copied().find(valid).unwrap_or(-1),
+        };
+        let acting = if temp.is_empty() {
+            if acting_primary == -1 {
+                acting_primary = up_primary;
+            }
+            up.clone()
+        } else {
+            temp
+        };
+        UpActing {
+            up,
+            up_primary,
+            acting,
+            acting_primary,
+        }
+    }
+
     /// Compute the `spg_t` shard for a PG.
     ///
     /// Returns `ShardId::NO_SHARD` (-1) for replicated pools — there is
@@ -3029,6 +3248,12 @@ impl OSDMap {
     ///    model); in C++ this is a separate `acting_primary` int that does
     ///    not modify the acting vector
     fn apply_pg_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
+        self.apply_up_overrides(pg, pps, osds);
+        self.apply_acting_overrides(pg, osds);
+    }
+
+    /// Steps 1-4 of [`Self::apply_pg_overrides`]: the up set, primary first.
+    fn apply_up_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
         // pg_upmap (complete acting-set replacement).  Reject the
         // upmap if any target OSD is marked OUT.  Mirrors the
         // OUT-target check at the top of `OSDMap::_apply_upmap` —
@@ -3085,7 +3310,11 @@ impl OSDMap {
             let pos = rel_pos + 1;
             osds.swap(0, pos);
         }
+    }
 
+    /// Steps 5-6 of [`Self::apply_pg_overrides`], then the removal of
+    /// `CRUSH_ITEM_NONE`: turns the up set into the flat acting set.
+    fn apply_acting_overrides(&self, pg: &PgId, osds: &mut Vec<i32>) {
         if let Some(temp_osds) = self.pg_temp.get(pg)
             && !temp_osds.is_empty()
         {
@@ -3306,39 +3535,63 @@ impl OSDMap {
         self.pools.get(&pool_id).map(|p| p.crush_rule)
     }
 
-    /// Simplified object → PG mapping (no namespace, no locator key).
+    /// Map an object to its raw PG, as Ceph's
+    /// `OSDMap::object_locator_to_pg` and `OSDMap::map_to_pg`.
     ///
-    /// **Not for production I/O.** Use `OSDClient::execute_op` which handles
-    /// namespace hashing, hashpspool, upmap, and pg_temp overrides.
-    pub fn object_to_pg(&self, pool_id: u64, object_name: &str) -> Result<PgId, RadosError> {
-        // Get the pool
+    /// A locator hash of zero or more is the PG seed as given; otherwise
+    /// the pool hashes the locator's key, or `oid` when the key is empty,
+    /// in the locator's namespace. The pool must exist either way.
+    ///
+    /// The seed is the full 32-bit hash the MOSDOp carries as its
+    /// hobject hash. It is not yet one of the pool's PGs: pass the result
+    /// through [`OSDMap::raw_pg_to_pg`] before CRUSH.
+    pub fn object_locator_to_pg(
+        &self,
+        oid: &str,
+        loc: &crate::crush::ObjectLocator,
+    ) -> Result<PgId, RadosError> {
         let pool = self
-            .get_pool(pool_id)
-            .ok_or_else(|| RadosError::Protocol(format!("Pool {pool_id} not found")))?;
-
-        // Create a simple object locator
-        let locator = crate::crush::ObjectLocator::new(pool_id);
-
-        // Calculate the PG using the CRUSH placement function
-        let pg = crate::crush::object_to_pg(object_name, &locator, pool.pg_num)
-            .map_err(|e| RadosError::Protocol(format!("PG calculation failed: {e}")))?;
-
-        Ok(PgId {
-            pool: pg.pool as u64,
-            seed: pg.seed,
-        })
+            .get_pool(loc.pool_id)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", loc.pool_id)))?;
+        if loc.hash >= 0 {
+            return Ok(PgId::new(loc.pool_id, loc.hash as u32));
+        }
+        let key = if loc.key.is_empty() { oid } else { &loc.key };
+        Ok(PgId::new(loc.pool_id, pool.hash_key(key, &loc.namespace)?))
     }
 
-    /// Simplified object → OSD mapping (CRUSH only, no overrides).
-    ///
-    /// **Not for production I/O.** Skips upmap, pg_temp, and
-    /// pg_upmap_primaries overrides. Use `OSDClient::execute_op` instead.
-    pub fn object_to_osds(&self, pool_id: u64, object_name: &str) -> Result<Vec<i32>, RadosError> {
-        // First, map object to PG
-        let pg = self.object_to_pg(pool_id, object_name)?;
+    /// Reduce a raw PG to one of its pool's PGs, as Ceph's
+    /// `OSDMap::raw_pg_to_pg`.
+    pub fn raw_pg_to_pg(&self, pg: PgId) -> Result<PgId, RadosError> {
+        let pool = self
+            .get_pool(pg.pool)
+            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
+        Ok(pool.raw_pg_to_pg(pg))
+    }
 
-        // Then, map PG to OSDs using CRUSH
-        self.pg_to_osds(&pg)
+    /// Map a default-namespace, unkeyed object name to its PG.
+    ///
+    /// A name alone cannot place a namespaced or keyed object; use
+    /// [`OSDMap::object_locator_to_pg`] and [`OSDMap::raw_pg_to_pg`].
+    #[deprecated(
+        note = "places default-namespace, unkeyed objects only; use OSDMap::object_locator_to_pg and raw_pg_to_pg"
+    )]
+    pub fn object_to_pg(&self, pool_id: u64, object_name: &str) -> Result<PgId, RadosError> {
+        let loc = crate::crush::ObjectLocator::new(pool_id);
+        self.raw_pg_to_pg(self.object_locator_to_pg(object_name, &loc)?)
+    }
+
+    /// Map a default-namespace, unkeyed object name to its OSDs by CRUSH
+    /// alone, without upmap, pg_temp or primary overrides.
+    ///
+    /// A name alone cannot place a namespaced or keyed object; use
+    /// [`OSDMap::object_locator_to_pg`] and [`OSDMap::raw_pg_to_pg`].
+    #[deprecated(
+        note = "places default-namespace, unkeyed objects only; use OSDMap::object_locator_to_pg and raw_pg_to_pg"
+    )]
+    pub fn object_to_osds(&self, pool_id: u64, object_name: &str) -> Result<Vec<i32>, RadosError> {
+        let loc = crate::crush::ObjectLocator::new(pool_id);
+        self.pg_to_osds(&self.raw_pg_to_pg(self.object_locator_to_pg(object_name, &loc)?)?)
     }
 
     /// Raw CRUSH PG → OSD mapping (no upmap / pg_temp overrides).
@@ -3510,6 +3763,151 @@ mod tests {
     use super::*;
     use bytes::Bytes;
     use serde_json::json;
+
+    fn map_with_pool(id: u64, pg_num: u32, object_hash: u8) -> OSDMap {
+        let mut map = OSDMap::new();
+        map.pools.insert(
+            id,
+            PgPool {
+                object_hash,
+                pg_num,
+                pgp_num: pg_num,
+                ..Default::default()
+            },
+        );
+        map
+    }
+
+    fn locator(pool: u64, key: &str, ns: &str) -> crate::crush::ObjectLocator {
+        crate::crush::ObjectLocator {
+            pool_id: pool,
+            key: key.to_string(),
+            namespace: ns.to_string(),
+            hash: -1,
+        }
+    }
+
+    // `ceph osd map test-pool <object> [<nspace>]` on a v19.2.2 cluster
+    // (rjenkins, pg_num 32): (nspace, object, raw ps, pg).
+    const MON_VECTORS: [(&str, &str, u32, u32); 15] = [
+        ("", "foo", 0x7fc1f406, 0x6),
+        ("ns1", "foo", 0xf4569544, 0x4),
+        ("", "bar", 0xefe6384b, 0xb),
+        ("ns1", "bar", 0x73a75142, 0x2),
+        ("users.uid", "testuser", 0xa13aa4c1, 0x1),
+        ("gc", "gc.0", 0x031bb659, 0x19),
+        ("", "gc.0", 0x990e66d8, 0x18),
+        ("control", "notify.0", 0x4eeacd0a, 0xa),
+        ("rgw", "foo", 0x0ecb73a9, 0x9),
+        ("", "obj", 0xaabc5e21, 0x1),
+        ("ns1", "obj", 0x37eda02a, 0xa),
+        ("", "_shadow_obj.1", 0xe5f42c1a, 0x1a),
+        ("", "e", 0xef61efce, 0xe),
+        ("", "c", 0x4fa4bedb, 0x1b),
+        ("", "a", 0x29eec818, 0x18),
+    ];
+
+    #[test]
+    fn object_locator_to_pg_matches_ceph() {
+        let map = map_with_pool(2, 32, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        for (ns, name, raw, pg) in MON_VECTORS {
+            let got = map.object_locator_to_pg(name, &locator(2, "", ns)).unwrap();
+            assert_eq!(got, PgId::new(2, raw), "{ns}/{name}");
+            assert_eq!(
+                map.raw_pg_to_pg(got).unwrap(),
+                PgId::new(2, pg),
+                "{ns}/{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_pg_to_pg_is_stable_mod() {
+        // `osdmaptool --createsimple 3 --pg-bits 2 --pgp-bits 2` (pool 1,
+        // pg_num 12) on v19.2.2.
+        let map = map_with_pool(1, 12, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        let vectors = [
+            ("foo", 0x6),
+            ("bar", 0xb),
+            ("gc.0", 0x8),
+            ("obj", 0x1),
+            ("_shadow_obj.1", 0xa),
+            ("e", 0x6),
+            ("c", 0xb),
+            ("a", 0x8),
+        ];
+        for (name, pg) in vectors {
+            let raw = map.object_locator_to_pg(name, &locator(1, "", "")).unwrap();
+            assert_eq!(map.raw_pg_to_pg(raw).unwrap(), PgId::new(1, pg), "{name}");
+        }
+    }
+
+    #[test]
+    fn locator_key_replaces_the_name() {
+        let map = map_with_pool(2, 32, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        let multipart = map
+            .object_locator_to_pg("_multipart_obj.2~abc.1", &locator(2, "obj", ""))
+            .unwrap();
+        assert_eq!(multipart, PgId::new(2, 0xaabc5e21));
+        let namespaced = map
+            .object_locator_to_pg("x", &locator(2, "obj", "ns1"))
+            .unwrap();
+        assert_eq!(namespaced, PgId::new(2, 0x37eda02a));
+        assert_eq!(
+            map.object_locator_to_pg("foo", &locator(2, "foo", "ns1"))
+                .unwrap(),
+            map.object_locator_to_pg("foo", &locator(2, "", "ns1"))
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn hash_override_skips_hashing() {
+        let map = map_with_pool(2, 32, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        let loc = crate::crush::ObjectLocator::with_hash(2, 0x7fc1f406);
+        let raw = map.object_locator_to_pg("anything", &loc).unwrap();
+        assert_eq!(raw, PgId::new(2, 0x7fc1f406));
+        assert_eq!(map.raw_pg_to_pg(raw).unwrap(), PgId::new(2, 6));
+    }
+
+    #[test]
+    fn missing_pool_is_an_error() {
+        let map = map_with_pool(2, 32, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        assert!(
+            map.object_locator_to_pg("foo", &locator(3, "", ""))
+                .is_err()
+        );
+        let loc = crate::crush::ObjectLocator::with_hash(3, 0x7fc1f406);
+        assert!(map.object_locator_to_pg("foo", &loc).is_err());
+        assert!(map.raw_pg_to_pg(PgId::new(3, 0)).is_err());
+    }
+
+    #[test]
+    fn linux_hash_pool() {
+        let map = map_with_pool(2, 32, crate::crush::hash::CEPH_STR_HASH_LINUX);
+        let raw = map
+            .object_locator_to_pg("foo", &locator(2, "", ""))
+            .unwrap();
+        assert_eq!(raw, PgId::new(2, 0x0024db2a));
+        let unknown = map_with_pool(2, 32, 9);
+        assert!(
+            unknown
+                .object_locator_to_pg("foo", &locator(2, "", ""))
+                .is_err()
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn object_to_pg_uses_stable_mod() {
+        let map = map_with_pool(1, 12, crate::crush::hash::CEPH_STR_HASH_RJENKINS);
+        assert_eq!(map.object_to_pg(1, "e").unwrap(), PgId::new(1, 6));
+        let linux = map_with_pool(1, 32, crate::crush::hash::CEPH_STR_HASH_LINUX);
+        assert_eq!(
+            linux.object_to_pg(1, "foo").unwrap(),
+            PgId::new(1, 0x0024db2a & 31)
+        );
+    }
 
     fn make_osdmap_with_states(states: Vec<u32>) -> OSDMap {
         let max_osd = states.len() as i32;
@@ -3710,6 +4108,118 @@ mod tests {
             osds[0], 0,
             "primary_temp should override the down-filter promotion"
         );
+    }
+
+    /// `pg_to_acting_osds`'s first element is `pg_to_up_acting`'s
+    /// acting primary, whatever overrides apply.
+    fn assert_flat_primary_is_acting_primary(map: &OSDMap, pg: &PgId, raw: Vec<i32>) {
+        let mut flat = raw.clone();
+        map.apply_pg_overrides(pg, 0, &mut flat);
+        let ua = map.up_acting_from_raw(pg, 0, raw, true);
+        assert_eq!(flat.first().copied(), Some(ua.acting_primary), "{ua:?}");
+    }
+
+    #[test]
+    fn up_acting_keeps_the_flat_primary_across_the_placement_fixtures() {
+        let pg = PgId::new(1, 42);
+
+        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let mut map = make_osdmap_with_states(vec![0x1, 0x3]);
+        map.primary_temp.insert(pg, 0);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1]);
+
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        map.primary_temp.insert(pg, 4);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        map.pg_upmap_items.insert(pg, vec![(0, 4)]);
+        assert_flat_primary_is_acting_primary(&map, &pg, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn up_acting_ignores_another_pools_temps() {
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        let pg = PgId::new(1, 42);
+        let before = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        map.pg_temp.insert(PgId::new(2, 42), vec![3, 4]);
+        map.primary_temp.insert(PgId::new(2, 42), 4);
+        assert_eq!(map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true), before);
+
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let after = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(after.up, before.up);
+        assert_ne!(after.acting, before.acting);
+    }
+
+    #[test]
+    fn up_acting_drops_down_osds_as_the_osd_does() {
+        let pg = PgId::new(1, 42);
+        let map = make_osdmap_with_states(vec![0x1, 0x1, 0x1]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!((ua.up.clone(), ua.up_primary), (vec![], -1), "all down");
+        assert_eq!((ua.acting, ua.acting_primary), (vec![], -1));
+
+        let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x1, 0x3]);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            (ua.acting, ua.acting_primary),
+            (vec![4], 4),
+            "down 3 dropped"
+        );
+
+        map.pg_temp.insert(pg, vec![3]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            (ua.acting, ua.acting_primary),
+            (vec![0, 1, 2], 0),
+            "an all-down pg_temp falls back to up"
+        );
+
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 3, 2], false);
+        assert_eq!(ua.up, vec![0, CRUSH_ITEM_NONE, 2], "EC keeps positions");
+        assert_eq!(ua.acting, vec![CRUSH_ITEM_NONE], "EC pg_temp too");
+        assert_eq!(ua.acting_primary, -1);
+    }
+
+    #[test]
+    fn up_acting_without_temps_has_acting_equal_to_up() {
+        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
+        let pg = PgId::new(1, 42);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(ua.up_primary, 1);
+        assert_eq!(ua.up, vec![1, 2], "a down OSD is not up");
+        assert_eq!(ua.acting, ua.up);
+        assert_eq!(ua.acting_primary, 1);
+    }
+
+    #[test]
+    fn up_acting_separates_pg_temp_and_primary_temp_from_up() {
+        let mut map = make_osdmap_with_states(vec![0x3; 5]);
+        let pg = PgId::new(1, 42);
+        map.pg_temp.insert(pg, vec![3, 4]);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!((ua.up.clone(), ua.up_primary), (vec![0, 1, 2], 0));
+        assert_eq!((ua.acting.clone(), ua.acting_primary), (vec![3, 4], 3));
+
+        map.primary_temp.insert(pg, 4);
+        let ua = map.up_acting_from_raw(&pg, 0, vec![0, 1, 2], true);
+        assert_eq!(
+            ua.acting,
+            vec![3, 4],
+            "primary_temp does not reorder acting"
+        );
+        assert_eq!(ua.acting_primary, 4);
+        assert_eq!(ua.up_primary, 0);
     }
 
     /// Compute the C++ `pgtemp_primaryfirst` for a single shard id —
@@ -4029,6 +4539,72 @@ mod tests {
         inc.fsid = UuidD::from_bytes([0xBB; 16]);
         inc.apply_to(&mut base).expect("first apply should succeed");
         assert_eq!(base.fsid, UuidD::from_bytes([0xBB; 16]));
+    }
+
+    #[test]
+    fn test_apply_to_follows_require_osd_release() {
+        for (byte, expected) in [(0xff, 19), (0x80, 19), (20, 20), (0, 0)] {
+            let mut base = OSDMap::new();
+            base.require_osd_release = 19;
+            let mut inc = OSDMapIncremental::new(Epoch::new(1));
+            assert_eq!(
+                inc.new_require_osd_release, 0xff,
+                "the default is no change"
+            );
+            inc.new_require_osd_release = byte;
+            inc.apply_to(&mut base).expect("apply_to");
+            assert_eq!(base.require_osd_release, expected, "byte {byte:#x}");
+        }
+    }
+
+    #[test]
+    fn test_apply_to_follows_require_min_compat_client() {
+        for (byte, expected) in [(0xff, 12), (0, 12), (18, 18)] {
+            let mut base = OSDMap::new();
+            base.require_min_compat_client = 12;
+            let mut inc = OSDMapIncremental::new(Epoch::new(1));
+            assert_eq!(
+                inc.new_require_min_compat_client, 0xff,
+                "the default is no change"
+            );
+            inc.new_require_min_compat_client = byte;
+            inc.apply_to(&mut base).expect("apply_to");
+            assert_eq!(base.require_min_compat_client, expected, "byte {byte:#x}");
+        }
+    }
+
+    #[test]
+    fn ceph_release_names_and_order() {
+        assert_eq!(CephRelease::UNKNOWN.0, 0);
+        assert_eq!(CephRelease::REEF.0, 18);
+        assert_eq!(CephRelease::SQUID.0, 19);
+        assert_eq!(CephRelease::TENTACLE.0, 20);
+        assert_eq!(CephRelease::UMBRELLA.0, 21);
+        assert_eq!(CephRelease::NONE.0, 0xff);
+        assert_eq!(CephRelease::SQUID.to_string(), "squid");
+        assert_eq!(CephRelease::TENTACLE.to_string(), "tentacle");
+        assert_eq!(CephRelease::UMBRELLA.to_string(), "umbrella");
+        assert_eq!(CephRelease(1).to_string(), "argonaut");
+        for unknown in [CephRelease::UNKNOWN, CephRelease(22), CephRelease::NONE] {
+            assert_eq!(unknown.to_string(), "unknown");
+        }
+        let ascending = [
+            CephRelease::NONE,
+            CephRelease::UNKNOWN,
+            CephRelease::REEF,
+            CephRelease::SQUID,
+            CephRelease::TENTACLE,
+            CephRelease::UMBRELLA,
+            CephRelease(22),
+        ];
+        for pair in ascending.windows(2) {
+            assert!(pair[0] < pair[1], "{:?} < {:?}", pair[0], pair[1]);
+        }
+        assert!(CephRelease(0x80) < CephRelease::UNKNOWN);
+        assert!(!CephRelease::NONE.is_set());
+        assert!(CephRelease::UNKNOWN.is_set());
+        assert_eq!(u8::from(CephRelease::SQUID), 19);
+        assert_eq!(CephRelease::from(20), CephRelease::TENTACLE);
     }
 
     #[test]

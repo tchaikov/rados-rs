@@ -75,7 +75,7 @@ impl Keyring {
                             .insert(service.to_string(), cap_value.to_string());
                     }
                     _ => {
-                        warn!("Unknown keyring field: {} = {}", key, value);
+                        warn!("Unknown keyring field: {key}");
                     }
                 }
             }
@@ -105,6 +105,7 @@ impl Keyring {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::types::KeyType;
 
     #[test]
     fn test_parse_keyring() {
@@ -116,7 +117,7 @@ mod tests {
     caps osd = "allow *"
 
 [client.test]
-    key = AQABCDEFghijklmnU49nK6K8fO4MgTYFnrk+HQ==
+    key = AgAAAAAAAAAAACAAbUBNN/r3n53w0zVo0yBmmADrSDZHLqigJtFrcYJGDFI=
     caps mon = "allow r"
 "#;
 
@@ -129,8 +130,12 @@ mod tests {
         let admin_key = keyring
             .get_key("client.admin")
             .expect("admin key not found");
-        // CryptoKey stores the full encoded structure (12-byte header + 16-byte key = 28 bytes)
-        assert_eq!(admin_key.secret.len(), 28);
+        assert_eq!(admin_key.secret.len(), 16);
+        assert_eq!(admin_key.key_type().unwrap(), KeyType::Aes);
+
+        let test_key = keyring.get_key("client.test").expect("test key not found");
+        assert_eq!(test_key.key_type().unwrap(), KeyType::Aes256Krb5);
+        assert_eq!(test_key.secret.len(), 32);
 
         let admin_caps = keyring
             .get_caps("client.admin", "mon")
