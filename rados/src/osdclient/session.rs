@@ -97,6 +97,21 @@ impl AtomicConnectionState {
     }
 }
 
+/// Tell the client that the session to `osd_id` ended, if it was ever
+/// published. Returns whether the client took the report.
+pub(crate) fn report_reset(
+    published: &AtomicBool,
+    client: &std::sync::Weak<crate::osdclient::client::OSDClient>,
+    osd_id: i32,
+) -> bool {
+    if !published.load(Ordering::Acquire) {
+        return false;
+    }
+    client
+        .upgrade()
+        .is_some_and(|client| client.on_session_reset(osd_id))
+}
+
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
@@ -107,6 +122,8 @@ struct IoTaskContext {
     conn_state: Arc<AtomicConnectionState>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
+    /// Set once the session is in `OSDClient::sessions`.
+    published: Arc<AtomicBool>,
 }
 
 /// Per-OSD connection and request tracking
@@ -179,6 +196,11 @@ pub struct OSDSession {
     /// Initialized to a fresh (uncancelled) token in `new()` and replaced
     /// with a proper child token in `connect()`.
     io_loop_token: tokio_util::sync::CancellationToken,
+    /// Set by `mark_published` when the client inserts this session into
+    /// its map. Only a published session's end is reported as a reset: a
+    /// session that lost a `get_or_create_session` race and is closed
+    /// unused carries nothing to re-send.
+    published: Arc<AtomicBool>,
 }
 
 /// Tracking information for a pending operation
@@ -210,6 +232,19 @@ pub(crate) struct PendingOp {
     /// Used to detect and prevent infinite redirect loops.
     /// Reference: Ceph has FIXME comment but no implementation (Objecter.cc:3741)
     pub redirect_count: u32,
+    /// Whether a map change or a session reset re-sends the op. A linger
+    /// send (registration, reconnect, notify) and a watch ping are not
+    /// re-sent: the linger layer sends a fresh op for them, so the old one
+    /// is cancelled instead, as Objecter clears `Op::should_resend` for
+    /// them (v19.2.2:src/osdc/Objecter.cc:583, 715).
+    pub should_resend: bool,
+    /// False while `submit_op` has the op pending but has not yet checked
+    /// that its map is still current and claimed it to send. Until then
+    /// no frame of it may go out but the submitter's: the check may take
+    /// it back and place it again under a new tid, and a send under the
+    /// old one would let the OSD run it twice. A rescan may still take
+    /// such an op; the submitter then sends nothing.
+    pub submitted: bool,
 }
 
 impl OSDSession {
@@ -250,6 +285,7 @@ impl OSDSession {
             io_task_handle: Mutex::new(None),
             // Placeholder; replaced with a proper child token in connect().
             io_loop_token: tokio_util::sync::CancellationToken::new(),
+            published: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -365,6 +401,7 @@ impl OSDSession {
             client: self.client.clone(),
             conn_state: Arc::clone(&self.conn_state),
             shutdown_token: self.io_loop_token.clone(),
+            published: Arc::clone(&self.published),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -455,7 +492,8 @@ impl OSDSession {
                             }
                         }
                         crate::osdclient::messages::CEPH_MSG_OSD_OPREPLY
-                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF => {
+                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF
+                        | crate::osdclient::messages::CEPH_MSG_WATCH_NOTIFY => {
                             if let Some(client_arc) = client.upgrade() {
                                 if let Err(e) = client_arc.dispatch_from_osd(osd_id, msg).await {
                                     error!(
@@ -532,6 +570,15 @@ impl OSDSession {
                 ctx.osd_id, reason, n
             );
         }
+
+        // Every end of a session, a deliberate close included, passes here
+        // exactly once, so this is the one place that reports the reset.
+        report_reset(&ctx.published, &ctx.client, osd_id);
+    }
+
+    /// Record that the client published this session in its map.
+    pub(crate) fn mark_published(&self) {
+        self.published.store(true, Ordering::Release);
     }
 
     // ===========================================================================
@@ -684,15 +731,108 @@ impl OSDSession {
         Ok(msg)
     }
 
+    /// Track `op` as pending on this session, placed in a map whose pool
+    /// had `pg_num` PGs, and return its reply channel.
+    fn insert_pending(
+        &self,
+        op: Arc<MOSDOp>,
+        priority: i32,
+        pg_num: u32,
+        should_resend: bool,
+    ) -> oneshot::Receiver<Result<OpResult>> {
+        let tid = op.reqid.tid;
+        let (tx, rx) = oneshot::channel();
+        let target = crate::osdclient::types::OpTarget {
+            pg_num,
+            ..crate::osdclient::types::OpTarget::new(
+                op.osdmap_epoch,
+                op.pgid,
+                self.osd_id,
+                vec![self.osd_id],
+            )
+        };
+        self.pending_ops.insert(
+            tid,
+            PendingOp {
+                tid,
+                result_tx: tx,
+                attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
+                osdmap_epoch: op.osdmap_epoch,
+                op,
+                state: crate::osdclient::types::OpState::Queued,
+                target,
+                priority,
+                // Capture current session incarnation
+                // Following Ceph pattern: operation stores incarnation when sent
+                sent_incarnation: self.incarnation.load(Ordering::Acquire),
+                redirect_count: 0,
+                should_resend,
+                submitted: false,
+            },
+        );
+        rx
+    }
+
+    /// [`Self::insert_pending`] for tests, which have no connection to
+    /// send on: the op is as if sent.
+    #[cfg(test)]
+    pub(crate) fn insert_pending_for_test(
+        &self,
+        op: Arc<MOSDOp>,
+        pg_num: u32,
+        should_resend: bool,
+    ) -> oneshot::Receiver<Result<OpResult>> {
+        let tid = op.reqid.tid;
+        let rx = self.insert_pending(
+            op,
+            crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+            pg_num,
+            should_resend,
+        );
+        if let Some(mut pending) = self.pending_ops.get_mut(&tid) {
+            pending.submitted = true;
+        }
+        rx
+    }
+
+    /// Whether the session's I/O loop was told to stop.
+    #[cfg(test)]
+    pub(crate) fn io_loop_cancelled_for_test(&self) -> bool {
+        self.io_loop_token.is_cancelled()
+    }
+
+    /// Queue this session's sends on a channel of the test's instead of
+    /// a connection: the test reads the frames and answers the ops.
+    #[cfg(test)]
+    pub(crate) fn sends_for_test(&mut self) -> mpsc::Receiver<crate::msgr2::message::Message> {
+        let (tx, rx) = mpsc::channel(SEND_CHANNEL_BUFFER_SIZE);
+        self.send_tx = tx;
+        rx
+    }
+
     /// Submit an operation to the OSD
     ///
     /// This queues the message for sending (non-blocking, like ceph_con_send)
-    /// Priority is set in the message header (not the MOSDOp payload)
+    /// Priority is set in the message header (not the MOSDOp payload).
+    /// `pg_num` is the op's pool's pg_num in the map it was placed in;
+    /// `should_resend` is [`PendingOp::should_resend`].
+    ///
+    /// `still_placed` runs once the op is pending and before its frame is
+    /// queued, and says whether the map it was placed in is still the
+    /// current one. If not, the op is taken back unsent and `None`
+    /// returned for the caller to place it again, unless a map rescan
+    /// took it first: the rescan resends it, and its reply comes on the
+    /// channel returned, with nothing sent here. Until the check passes
+    /// the op is not [`PendingOp::submitted`], and no other path sends
+    /// it.
     pub async fn submit_op(
         &self,
         op: Arc<MOSDOp>,
         priority: i32,
-    ) -> Result<oneshot::Receiver<Result<OpResult>>> {
+        pg_num: u32,
+        should_resend: bool,
+        still_placed: impl FnOnce() -> bool,
+    ) -> Result<Option<oneshot::Receiver<Result<OpResult>>>> {
         let tid = op.reqid.tid;
 
         // Check if operation is blocked by backoff
@@ -703,31 +843,22 @@ impl OSDSession {
             )));
         }
 
-        // Create channel for result
-        let (tx, rx) = oneshot::channel();
+        let rx = self.insert_pending(Arc::clone(&op), priority, pg_num, should_resend);
 
-        self.pending_ops.insert(
-            tid,
-            PendingOp {
-                tid,
-                result_tx: tx,
-                attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                osdmap_epoch: op.osdmap_epoch,
-                op: op.clone(),
-                state: crate::osdclient::types::OpState::Queued,
-                target: crate::osdclient::types::OpTarget::new(
-                    op.osdmap_epoch,
-                    op.pgid,
-                    self.osd_id,
-                    vec![self.osd_id],
-                ),
-                priority,
-                // Capture current session incarnation
-                // Following Ceph pattern: operation stores incarnation when sent
-                sent_incarnation: self.incarnation.load(Ordering::Acquire),
-                redirect_count: 0,
-            },
-        );
+        if !still_placed() {
+            return Ok(
+                match self.pending_ops.remove_if(&tid, |_, op| !op.submitted) {
+                    Some(_) => None,
+                    None => Some(rx),
+                },
+            );
+        }
+
+        // Claim the op to send. A rescan that took it since resends it.
+        match self.pending_ops.get_mut(&tid) {
+            Some(mut pending) if !pending.submitted => pending.submitted = true,
+            _ => return Ok(Some(rx)),
+        }
 
         // Track operation timeout
         if let Some(tracker) = &self.tracker {
@@ -742,12 +873,13 @@ impl OSDSession {
         // Send to channel (non-blocking, like Linux kernel's list_add_tail + queue_con)
         debug!("Submitting operation tid={} to OSD {}", tid, self.osd_id);
 
-        self.send_tx
-            .send(msg)
-            .await
-            .map_err(|_| OSDClientError::Connection("I/O task has exited".into()))?;
+        if self.send_tx.send(msg).await.is_err() {
+            // Nothing went out: the caller may place it again.
+            self.pending_ops.remove(&tid);
+            return Err(OSDClientError::Connection("I/O task has exited".into()));
+        }
 
-        Ok(rx)
+        Ok(Some(rx))
     }
 
     /// Handle an operation reply
@@ -759,7 +891,10 @@ impl OSDSession {
         pending_ops: &Arc<DashMap<u64, PendingOp>>,
         current_incarnation: u32,
     ) -> Option<(PendingOp, u32)> {
-        let pending_op = pending_ops.remove(&tid).map(|(_, v)| v)?;
+        // An op not yet submitted has had no frame out under this tid.
+        let pending_op = pending_ops
+            .remove_if(&tid, |_, op| op.submitted)
+            .map(|(_, v)| v)?;
 
         // Validate operation staleness
         if !Self::validate_reply_freshness(tid, &reply, &pending_op, current_incarnation) {
@@ -915,8 +1050,9 @@ impl OSDSession {
         // Find all operations in this PG that fall within the backoff range
         for entry in pending_ops.iter() {
             let (tid, pending_op) = entry.pair();
-            // Check if this operation is for the same PG
-            if pending_op.op.pgid != *pgid {
+            // Check if this operation is for the same PG. One not yet
+            // submitted is left to its submitter, which may take it back.
+            if pending_op.op.pgid != *pgid || !pending_op.submitted {
                 continue;
             }
 
@@ -1023,20 +1159,15 @@ impl OSDSession {
 
     /// Get metadata for all pending operations
     ///
-    /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
-    /// Used by OSDClient to determine which operations need rescanning.
-    /// Note: object_id is cloned here, but this is only called during OSDMap updates (infrequent).
-    pub fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
+    /// Returns (tid, op, osdmap_epoch, target pg_num) for each pending
+    /// operation. Used by OSDClient to determine which operations need
+    /// rescanning.
+    pub fn get_pending_ops_metadata(&self) -> Vec<(u64, Arc<MOSDOp>, u32, u32)> {
         self.pending_ops
             .iter()
             .map(|entry| {
                 let (tid, op) = entry.pair();
-                (
-                    *tid,
-                    op.op.object.pool,
-                    op.op.object.oid.clone(),
-                    op.osdmap_epoch,
-                )
+                (*tid, Arc::clone(&op.op), op.osdmap_epoch, op.target.pg_num)
             })
             .collect()
     }
@@ -1047,6 +1178,14 @@ impl OSDSession {
     /// migrated to a different OSD. Returns None if the operation doesn't exist.
     pub fn remove_pending_op(&self, tid: u64) -> Option<PendingOp> {
         self.pending_ops.remove(&tid).map(|(_, v)| v)
+    }
+
+    /// [`Self::remove_pending_op`], only if the op is
+    /// [`PendingOp::submitted`].
+    pub(crate) fn remove_submitted_op(&self, tid: u64) -> Option<PendingOp> {
+        self.pending_ops
+            .remove_if(&tid, |_, op| op.submitted)
+            .map(|(_, v)| v)
     }
 
     /// Insert a migrated operation from another session
@@ -1078,6 +1217,7 @@ impl OSDSession {
         // Update incarnation to current session incarnation (operation is being resent)
         // This is critical: migrated operations get new incarnation from target session
         pending_op.sent_incarnation = self.incarnation.load(Ordering::Acquire);
+        pending_op.submitted = true;
 
         // Check if operation is blocked by backoff
         if self.is_blocked_by_backoff(&pending_op.op).await {

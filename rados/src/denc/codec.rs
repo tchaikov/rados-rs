@@ -773,7 +773,13 @@ macro_rules! impl_denc_map {
     };
 }
 
-// BTreeMap: tree-based, no with_capacity
+// BTreeMap: tree-based, no with_capacity. A repeated key keeps its last
+// value, as C++'s `std::map`/`flat_map` decode does when the key or the
+// value is a struct with its own `decode` (`decode(m[k], p)`, though C++
+// decodes over the earlier value in place). C++ keeps the first when both
+// have denc traits (`emplace_hint`, e.g. a `map<string, uint32_t>`) and
+// for every `unordered_map` (`emplace`). Well-formed encodings never
+// repeat a key.
 impl_denc_map!(BTreeMap, Ord,);
 
 // HashMap: hash-based, pre-allocate with the decoded count
@@ -1322,5 +1328,69 @@ mod tests {
 
         let next = u8::decode(&mut read_buf, 0).unwrap();
         assert_eq!(next, 9);
+    }
+
+    #[test]
+    fn btreemap_encodes_as_count_then_pairs() {
+        use std::collections::BTreeMap;
+        let mut map: BTreeMap<String, Bytes> = BTreeMap::new();
+        map.insert("a".to_owned(), Bytes::from_static(b"x"));
+        let mut buf = BytesMut::new();
+        map.encode(&mut buf, 0).expect("encode");
+        assert_eq!(
+            buf.as_ref(),
+            &[1, 0, 0, 0, 1, 0, 0, 0, b'a', 1, 0, 0, 0, b'x'][..]
+        );
+        let back: BTreeMap<String, Bytes> = Denc::decode(&mut buf.freeze(), 0).expect("decode");
+        assert_eq!(back, map);
+        assert_eq!(map.encoded_size(0), Some(14));
+    }
+
+    #[derive(Debug, PartialEq, Eq, crate::VersionedDenc)]
+    #[denc(
+        crate = "crate",
+        version = 2,
+        compat = 2,
+        min_version = 2,
+        ceph_release = "Test v2+"
+    )]
+    struct FlooredV2 {
+        a: u32,
+    }
+
+    #[derive(Debug, PartialEq, Eq, crate::VersionedDenc)]
+    #[denc(crate = "crate", version = 2, compat = 2)]
+    struct UnflooredV2 {
+        a: u32,
+    }
+
+    #[test]
+    fn versioned_denc_min_version_rejects_older_headers() {
+        let v1: &[u8] = &[1, 1, 4, 0, 0, 0, 7, 0, 0, 0];
+        let v2: &[u8] = &[2, 2, 4, 0, 0, 0, 7, 0, 0, 0];
+
+        let err = FlooredV2::decode(&mut &v1[..], 0).expect_err("v1 below the floor");
+        assert!(
+            matches!(
+                err,
+                RadosError::Codec(CodecError::VersionTooOld {
+                    got: 1,
+                    min: 2,
+                    type_name: "FlooredV2",
+                    ceph_release: "Test v2+",
+                })
+            ),
+            "{err:?}"
+        );
+        assert_eq!(
+            FlooredV2::decode(&mut &v2[..], 0).expect("v2"),
+            FlooredV2 { a: 7 }
+        );
+
+        // Without the attribute the older header is still read.
+        assert_eq!(
+            UnflooredV2::decode(&mut &v1[..], 0).expect("v1 unfloored"),
+            UnflooredV2 { a: 7 }
+        );
     }
 }

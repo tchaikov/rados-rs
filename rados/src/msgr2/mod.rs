@@ -536,7 +536,7 @@ impl ConnectionConfig {
         Ok(())
     }
 
-    /// Create config from Ceph configuration file
+    /// Create config for `client.admin` from Ceph configuration file
     /// Reads throttle settings from ceph.conf to match Ceph client behavior
     ///
     /// # Example
@@ -547,14 +547,25 @@ impl ConnectionConfig {
     ///     .expect("Failed to read ceph.conf");
     /// ```
     pub fn from_ceph_conf(path: &str) -> Result<Self> {
+        Self::from_ceph_conf_for(path, crate::EntityName::client("admin"))
+    }
+
+    /// Create config for `entity_name` from Ceph configuration file, reading
+    /// its options from the entity's own section, then its type's, then
+    /// `[global]`.
+    pub fn from_ceph_conf_for(path: &str, entity_name: crate::EntityName) -> Result<Self> {
         let ceph_config = crate::cephconfig::CephConfig::from_file(path)
             .map_err(|e| Msgr2Error::config_error(&format!("Failed to read ceph.conf: {e}")))?;
 
-        let mut config = Self::default();
+        let mut config = Self {
+            entity_name,
+            ..Self::default()
+        };
 
         // Load messenger options from ceph.conf
-        let sections: &[&str] = &["global", "client"];
-        let msgr_opts = MessengerOptions::from_ceph_config(&ceph_config, sections);
+        let entity = config.entity_name.to_string();
+        let sections = crate::cephconfig::CephConfig::sections_for(&entity);
+        let msgr_opts = MessengerOptions::from_ceph_config(&ceph_config, &sections);
 
         // Apply throttle config if set (non-zero)
         if msgr_opts.ms_dispatch_throttle_bytes.0 > 0 {

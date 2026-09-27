@@ -24,6 +24,8 @@ struct DencAttrs {
     struct_v: Option<u8>,
     /// Minimum accepted decoded struct_v for `StructVDenc`.
     min_struct_v: Option<u8>,
+    /// Minimum accepted decoded version for `VersionedDenc`.
+    min_version: Option<u8>,
     /// Enforce decoded struct_v == struct_v for `StructVDenc`.
     strict_struct_v: bool,
     /// Optional Ceph release label used in min-version errors.
@@ -39,6 +41,7 @@ impl DencAttrs {
             feature_dependent: false,
             struct_v: None,
             min_struct_v: None,
+            min_version: None,
             strict_struct_v: false,
             ceph_release: None,
         }
@@ -76,6 +79,7 @@ impl DencAttrs {
     /// - `compat = N`       — compat version (defaults to `version`)
     /// - `struct_v = N`     — fixed struct version for `StructVDenc`
     /// - `min_struct_v = N` — minimum accepted decoded struct_v for `StructVDenc`
+    /// - `min_version = N`  — minimum accepted decoded version for `VersionedDenc`
     /// - `strict_struct_v`  — enforce decoded struct_v == struct_v
     /// - `ceph_release = "..."` — release label for min-version checks
     /// - `feature_dependent` — emit `FEATURE_DEPENDENT = true` in generated impls
@@ -117,6 +121,9 @@ impl DencAttrs {
                         } else if nv.path.is_ident("min_struct_v") {
                             out.min_struct_v =
                                 Self::parse_u8_expr(val, "Invalid #[denc(min_struct_v = N)]");
+                        } else if nv.path.is_ident("min_version") {
+                            out.min_version =
+                                Self::parse_u8_expr(val, "Invalid #[denc(min_version = N)]");
                         } else if nv.path.is_ident("ceph_release") {
                             out.ceph_release = Self::parse_litstr_expr(val);
                         }
@@ -355,6 +362,22 @@ fn generate_zerocopy_denc(name: &syn::Ident, krate: &TokenStream2) -> TokenStrea
 /// #[denc(version = N, compat = M)]  // encoding version + compat version (defaults to N)
 /// ```
 ///
+/// # Version floor
+///
+/// Without a floor the generated decoder accepts any `struct_v` up to
+/// `version` and reads the current layout from it. To reject older
+/// encodings, give the oldest accepted version and the release that
+/// writes it:
+///
+/// ```ignore
+/// #[denc(version = 2, compat = 2, min_version = 2, ceph_release = "Pacific v16+")]
+/// ```
+///
+/// A `struct_v` below `min_version` fails with `CodecError::VersionTooOld`,
+/// the error `check_min_version!` returns. `ceph_release` is required with
+/// `min_version`. `min_struct_v` is the `StructVDenc` spelling and panics
+/// at compile time here rather than leaving the decoder unfloored.
+///
 /// # Crate path
 ///
 /// Same `#[denc(crate = "crate")]` convention as the `Denc` derive.
@@ -387,10 +410,33 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
     let krate = &attrs.krate;
     let name = &input.ident;
 
+    assert!(
+        attrs.min_struct_v.is_none(),
+        "`min_struct_v` is a StructVDenc attribute; VersionedDenc uses `min_version`"
+    );
+
     let version = attrs
         .version
         .expect("#[denc(version = N)] is required when using #[derive(VersionedDenc)]");
     let compat = attrs.compat.unwrap_or(version);
+
+    let (version_param, version_check) = match attrs.min_version {
+        Some(min_v) => {
+            let release = attrs
+                .ceph_release
+                .as_ref()
+                .expect("#[denc(min_version = N)] requires #[denc(ceph_release = \"...\")]");
+            assert!(
+                min_v <= version,
+                "#[denc(min_version = N)] must not exceed #[denc(version = N)]"
+            );
+            (
+                quote! { struct_v },
+                quote! { #krate::check_min_version!(struct_v, #min_v, stringify!(#name), #release); },
+            )
+        }
+        None => (quote! { _version }, quote! {}),
+    };
 
     let (codegen, decode_expr) = match &input.data {
         Data::Struct(data_struct) => match &data_struct.fields {
@@ -441,9 +487,10 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
             fn decode_content<B: bytes::Buf>(
                 buf: &mut B,
                 features: u64,
-                _version: u8,
+                #version_param: u8,
                 compat_version: u8,
             ) -> ::std::result::Result<Self, #krate::RadosError> {
+                #version_check
                 if compat_version > #version {
                     return ::std::result::Result::Err(#krate::RadosError::Protocol(
                         ::std::format!(
@@ -508,6 +555,9 @@ pub fn derive_versioned_denc(input: TokenStream) -> TokenStream {
 /// - `#[denc(ceph_release = "...")]` (used with `min_struct_v`)
 /// - `#[denc(strict_struct_v)]` (mutually exclusive with `min_struct_v`)
 ///
+/// `min_version` is the `VersionedDenc` spelling and panics at compile time
+/// here rather than leaving the decoder unfloored.
+///
 /// The first struct field must be named `struct_v` and have type `u8`.
 /// When pairing this derive with `serde::Serialize` for Ceph-style `dump_json`
 /// output, annotate the `struct_v` field with `#[serde(skip)]` so the wire-only
@@ -522,6 +572,11 @@ pub fn derive_struct_v_denc(input: TokenStream) -> TokenStream {
     let struct_v_lit = attrs
         .struct_v
         .expect("#[denc(struct_v = N)] is required when using #[derive(StructVDenc)]");
+
+    assert!(
+        attrs.min_version.is_none(),
+        "`min_version` is a VersionedDenc attribute; StructVDenc uses `min_struct_v`"
+    );
 
     assert!(
         !(attrs.strict_struct_v && attrs.min_struct_v.is_some()),

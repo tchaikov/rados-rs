@@ -61,7 +61,6 @@ impl StateKind {
 }
 
 /// Connection context that holds protocol state for the msgr2 connection.
-#[derive(Debug)]
 pub struct StateMachine {
     state_kind: StateKind,
     /// Frame decryptor for SECURE mode (connection_mode = 2)
@@ -100,6 +99,55 @@ pub struct StateMachine {
     negotiated_features: u64,
     /// Last time we received a Keepalive2Ack (for timeout detection)
     last_keepalive_ack: Option<std::time::Instant>,
+}
+
+impl std::fmt::Debug for StateMachine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::auth::types::Redacted;
+        let Self {
+            state_kind,
+            frame_decryptor,
+            frame_encryptor,
+            compression_ctx,
+            pre_auth_rxbuf,
+            pre_auth_txbuf,
+            pre_auth_enabled,
+            session_key,
+            connection_mode,
+            connection_secret,
+            server_addr,
+            client_addr,
+            peer_supported_features,
+            config,
+            server_auth_handler,
+            global_id,
+            negotiated_features,
+            last_keepalive_ack,
+        } = self;
+        f.debug_struct("StateMachine")
+            .field("state_kind", state_kind)
+            .field("frame_decryptor", frame_decryptor)
+            .field("frame_encryptor", frame_encryptor)
+            .field("compression_ctx", compression_ctx)
+            .field("pre_auth_rxbuf", pre_auth_rxbuf)
+            .field("pre_auth_txbuf", pre_auth_txbuf)
+            .field("pre_auth_enabled", pre_auth_enabled)
+            .field("session_key", &session_key.as_deref().map(Redacted))
+            .field("connection_mode", connection_mode)
+            .field(
+                "connection_secret",
+                &connection_secret.as_deref().map(Redacted),
+            )
+            .field("server_addr", server_addr)
+            .field("client_addr", client_addr)
+            .field("peer_supported_features", peer_supported_features)
+            .field("config", config)
+            .field("server_auth_handler", server_auth_handler)
+            .field("global_id", global_id)
+            .field("negotiated_features", negotiated_features)
+            .field("last_keepalive_ack", last_keepalive_ack)
+            .finish()
+    }
 }
 
 impl StateMachine {

@@ -229,6 +229,52 @@ pub fn ceph_str_hash_rjenkins(data: &[u8]) -> u32 {
     c
 }
 
+/// `pg_pool_t::object_hash` value selecting the linux dcache hash
+/// (`CEPH_STR_HASH_LINUX`, `src/include/ceph_hash.h`).
+pub const CEPH_STR_HASH_LINUX: u8 = 1;
+
+/// `pg_pool_t::object_hash` value selecting the rjenkins hash
+/// (`CEPH_STR_HASH_RJENKINS`, `src/include/ceph_hash.h`). A v19 monitor
+/// creates every pool with it.
+pub const CEPH_STR_HASH_RJENKINS: u8 = 2;
+
+/// Hash a byte string with the linux dcache hash, as Ceph's
+/// `ceph_str_hash_linux` (`src/common/ceph_hash.cc`).
+pub fn ceph_str_hash_linux(data: &[u8]) -> u32 {
+    data.iter().fold(0u32, |hash, &c| {
+        let c = u32::from(c);
+        hash.wrapping_add(c << 4)
+            .wrapping_add(c >> 4)
+            .wrapping_mul(11)
+    })
+}
+
+/// Hash a byte string with the hash a pool's `object_hash` selects, as
+/// Ceph's `ceph_str_hash` (`src/common/ceph_hash.cc`).
+///
+/// Returns `None` for an unknown hash type, where Ceph returns `-1`.
+pub fn ceph_str_hash(kind: u8, data: &[u8]) -> Option<u32> {
+    match kind {
+        CEPH_STR_HASH_LINUX => Some(ceph_str_hash_linux(data)),
+        CEPH_STR_HASH_RJENKINS => Some(ceph_str_hash_rjenkins(data)),
+        _ => None,
+    }
+}
+
+/// Hash an object's placement key as Ceph's `pg_pool_t::hash_key`
+/// (`src/osd/osd_types.cc`): `key` alone in the default namespace,
+/// otherwise the bytes `ns + 0x1f + key`.
+pub(crate) fn hash_key(kind: u8, key: &str, ns: &str) -> Option<u32> {
+    if ns.is_empty() {
+        return ceph_str_hash(kind, key.as_bytes());
+    }
+    let mut buf = Vec::with_capacity(ns.len() + 1 + key.len());
+    buf.extend_from_slice(ns.as_bytes());
+    buf.push(0x1f);
+    buf.extend_from_slice(key.as_bytes());
+    ceph_str_hash(kind, &buf)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -244,19 +290,44 @@ mod tests {
         );
     }
 
+    // Raw ps values reported by `ceph osd map` on a v19.2.2 cluster.
     #[test]
     fn test_ceph_str_hash_rjenkins() {
-        // Test with a simple string
-        let hash = ceph_str_hash_rjenkins(b"hello");
-        // Just verify it produces a reasonable value
-        assert_ne!(hash, 0);
+        let vectors: [(&[u8], u32); 7] = [
+            (b"foo", 0x7fc1f406),
+            (b"bar", 0xefe6384b),
+            (b"obj", 0xaabc5e21),
+            (b"e", 0xef61efce),
+            (b"ns1\x1ffoo", 0xf4569544),
+            (b"users.uid\x1ftestuser", 0xa13aa4c1),
+            (b"gc\x1fgc.0", 0x031bb659),
+        ];
+        for (data, want) in vectors {
+            assert_eq!(ceph_str_hash_rjenkins(data), want, "{data:?}");
+        }
+    }
 
-        // Same input should give same output
-        let hash2 = ceph_str_hash_rjenkins(b"hello");
-        assert_eq!(hash, hash2);
+    // Transcribed from ceph_hash.cc's ceph_str_hash_linux: a v19 monitor
+    // creates no linux-hash pool, so there is no cluster oracle.
+    #[test]
+    fn test_ceph_str_hash_linux() {
+        assert_eq!(ceph_str_hash_linux(b"foo"), 0x0024db2a);
+        assert_eq!(ceph_str_hash_linux(b"ns1\x1ffoo"), 0xce6afc4d);
+        assert_eq!(ceph_str_hash_linux(b""), 0);
+    }
 
-        // Different input should give different output (with high probability)
-        let hash3 = ceph_str_hash_rjenkins(b"world");
-        assert_ne!(hash, hash3);
+    #[test]
+    fn test_ceph_str_hash_dispatch() {
+        assert_eq!(ceph_str_hash(1, b"foo"), Some(0x0024db2a));
+        assert_eq!(ceph_str_hash(2, b"foo"), Some(0x7fc1f406));
+        assert_eq!(ceph_str_hash(0, b"foo"), None);
+        assert_eq!(ceph_str_hash(3, b"foo"), None);
+    }
+
+    #[test]
+    fn test_hash_key() {
+        assert_eq!(hash_key(2, "foo", "ns1"), Some(0xf4569544));
+        assert_eq!(hash_key(2, "foo", ""), Some(0x7fc1f406));
+        assert_eq!(hash_key(0, "foo", "ns1"), None);
     }
 }

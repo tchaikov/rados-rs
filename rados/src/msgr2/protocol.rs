@@ -910,7 +910,12 @@ impl ConnectionState {
             .set_connection_mode(auth_out.connection_mode);
         self.state_machine
             .set_connection_secret(auth_out.connection_secret.clone());
-        if let Some(ref secret) = auth_out.connection_secret {
+        if auth_out.connection_mode == u32::from(crate::msgr2::ConnectionMode::Secure) {
+            // Never run a SECURE connection in the clear; Ceph asserts a
+            // secret here (crypto_onwire.cc `create_handler_pair`).
+            let secret = auth_out.connection_secret.as_ref().ok_or_else(|| {
+                Error::protocol_error("SECURE mode negotiated without a connection secret")
+            })?;
             self.state_machine.setup_encryption(secret)?;
         }
 
@@ -1943,6 +1948,7 @@ impl Connection {
 mod tests {
     use super::*;
     use crate::msgr2::message::MessagePriority;
+    use crate::msgr2::phase::auth::AuthOutput;
     use crate::msgr2::state_machine::StateMachine;
 
     /// Create a minimal Connection for unit tests using a loopback TCP socket pair.
@@ -1978,6 +1984,39 @@ mod tests {
         assert!(!diag.can_reconnect); // no server_cookie yet
         assert!(diag.last_keepalive_ack.is_none());
         assert!(!diag.is_lossy);
+    }
+
+    fn auth_output(mode: crate::msgr2::ConnectionMode, secret: Option<&[u8]>) -> AuthOutput {
+        AuthOutput {
+            global_id: 1,
+            connection_mode: mode.into(),
+            session_key: Some(Bytes::from_static(&[0x11; 16])),
+            connection_secret: secret.map(Bytes::copy_from_slice),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_complete_auth_refuses_secure_without_a_usable_secret() {
+        use crate::msgr2::ConnectionMode::{Crc, Secure};
+        for secret in [None, Some(&[0x5a; 39][..])] {
+            let mut conn = make_test_connection().await;
+            assert!(
+                conn.state
+                    .complete_auth(&auth_output(Secure, secret))
+                    .is_err()
+            );
+            assert!(!conn.state.state_machine.has_encryption());
+        }
+
+        let mut conn = make_test_connection().await;
+        conn.state
+            .complete_auth(&auth_output(Secure, Some(&[0x5a; 64])))
+            .unwrap();
+        assert!(conn.state.state_machine.has_encryption());
+
+        let mut conn = make_test_connection().await;
+        conn.state.complete_auth(&auth_output(Crc, None)).unwrap();
+        assert!(!conn.state.state_machine.has_encryption());
     }
 
     #[tokio::test]

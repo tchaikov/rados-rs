@@ -26,13 +26,13 @@ pub fn test_pool_name() -> String {
     std::env::var("CEPH_TEST_POOL").unwrap_or_else(|_| "test-pool".to_owned())
 }
 
-/// Build a [`rados::Client`] using the test cluster configuration.
+/// A [`rados::ClientBuilder`] configured for the test cluster.
 ///
 /// Resolution order, highest precedence first:
 /// 1. `CEPH_CONF` env var (required — the test is skipped if absent/missing).
 /// 2. `CEPH_KEYRING` env var (overrides `keyring` in ceph.conf).
 /// 3. Everything else comes from ceph.conf via [`rados::Client::builder`].
-pub async fn build_test_client() -> Result<rados::Client, Box<dyn std::error::Error>> {
+pub fn test_client_builder() -> Result<rados::ClientBuilder, Box<dyn std::error::Error>> {
     let ceph_conf = std::env::var("CEPH_CONF").unwrap_or_else(|_| "/etc/ceph/ceph.conf".to_owned());
     if !Path::new(&ceph_conf).exists() {
         return Err(format!("ceph.conf not found at: {ceph_conf}").into());
@@ -47,7 +47,12 @@ pub async fn build_test_client() -> Result<rados::Client, Box<dyn std::error::Er
         builder = builder.keyring(keyring);
     }
 
-    Ok(builder.build().await?)
+    Ok(builder)
+}
+
+/// Build a [`rados::Client`] from [`test_client_builder`].
+pub async fn build_test_client() -> Result<rados::Client, Box<dyn std::error::Error>> {
+    Ok(test_client_builder()?.build().await?)
 }
 
 /// Build a client and open the configured test pool in a single call — the

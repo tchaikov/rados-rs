@@ -14,6 +14,51 @@ pub const CEPH_AUTH_GSS: u32 = 0x4;
 pub const CEPHX_GET_AUTH_SESSION_KEY: u16 = 0x0100;
 pub const CEPHX_GET_PRINCIPAL_SESSION_KEY: u16 = 0x0200;
 
+/// Cephx key usages (`CephxProtocol.h`). The aes256k cipher derives its keys
+/// per usage; AES ignores it. C++'s plain `encrypt`/`decrypt` is usage 0.
+pub const CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET: u32 = 0x03;
+pub const CEPHX_KEY_USAGE_TICKET_SESSION_KEY: u32 = 0x04;
+pub const CEPHX_KEY_USAGE_TICKET_BLOB: u32 = 0x05;
+pub const CEPHX_KEY_USAGE_AUTHORIZE: u32 = 0x10;
+pub const CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE: u32 = 0x11;
+pub const CEPHX_KEY_USAGE_AUTHORIZE_REPLY: u32 = 0x12;
+pub const CEPHX_KEY_USAGE_ROTATING_SECRET: u32 = 0x20;
+pub const CEPHX_KEY_USAGE_TICKET_INFO: u32 = 0x30;
+
+/// msgr2 connection modes (`CEPH_CON_MODE_*`, ceph_fs.h)
+pub const CEPH_CON_MODE_CRC: u32 = 0x1;
+pub const CEPH_CON_MODE_SECURE: u32 = 0x2;
+
+/// Shortest connection secret SECURE mode can key from: an AES-128-GCM key
+/// and two 12-byte nonces, which C++ `rxtx_t::create_handler_pair` asserts.
+pub const CONNECTION_SECRET_MIN_LEN: usize = 16 + 2 * 12;
+
+/// Connection secret length a server generates for a connection mode, as C++
+/// `AuthConnectionMeta::get_connection_secret_length`: four 16-byte blocks
+/// for SECURE, none for CRC.
+pub fn connection_secret_len(con_mode: u32) -> usize {
+    match con_mode {
+        CEPH_CON_MODE_SECURE => 16 * 4,
+        _ => 0,
+    }
+}
+
+/// A SECURE-mode connection secret: the given one, or an error when it is
+/// missing or too short to key the connection. Ceph never continues a SECURE
+/// connection without one.
+pub fn require_secure_connection_secret(secret: Option<Bytes>) -> crate::auth::Result<Bytes> {
+    match secret {
+        Some(secret) if secret.len() >= CONNECTION_SECRET_MIN_LEN => Ok(secret),
+        Some(secret) => Err(crate::auth::CephXError::ProtocolError(format!(
+            "SECURE mode connection secret is {} bytes, need at least {CONNECTION_SECRET_MIN_LEN}",
+            secret.len()
+        ))),
+        None => Err(crate::auth::CephXError::ProtocolError(
+            "SECURE mode without a connection secret".into(),
+        )),
+    }
+}
+
 /// AES-128 key length in bytes
 pub const AES_KEY_LEN: usize = 16;
 /// AES block size in bytes
@@ -106,13 +151,24 @@ pub struct EncryptedServiceTicket {
 /// - `service_id: u32` - Service type (MON=6, OSD=4, MDS=2, MGR=32)
 /// - `encrypted_service_ticket: EncryptedServiceTicket` - Encrypted ticket
 /// - `ticket_enc: u8` - Ticket encoding type (1 = encrypted, 0 = unencrypted)
-/// - `ticket_blob: CephXTicketBlob` - The actual ticket blob for the service
+/// - `ticket_blob` - The ticket blob for the service, see [`TicketBlobField`]
 #[derive(Debug, Clone)]
 pub struct ServiceTicketInfo {
     pub service_id: u32,
     pub encrypted_service_ticket: EncryptedServiceTicket,
     pub ticket_enc: u8,
-    pub ticket_blob: CephXTicketBlob,
+    pub ticket_blob: TicketBlobField,
+}
+
+/// The ticket blob of a [`ServiceTicketInfo`], a length-prefixed buffer.
+#[derive(Debug, Clone)]
+pub enum TicketBlobField {
+    /// `ticket_enc == 0`: an encoded [`CephXTicketBlob`].
+    Clear(CephXTicketBlob),
+    /// `ticket_enc != 0`: the encoded blob in an encrypted envelope, under
+    /// usage `CEPHX_KEY_USAGE_TICKET_BLOB` and the session key the client held
+    /// for the service before this reply. Only that client can open it.
+    Encrypted(Bytes),
 }
 
 impl Denc for ServiceTicketInfo {
@@ -121,11 +177,16 @@ impl Denc for ServiceTicketInfo {
         self.encrypted_service_ticket.encode(buf, features)?;
         self.ticket_enc.encode(buf, 0)?;
 
-        // C++ encode(bufferlist, bl): outer length prefix around the ticket blob
-        let mut temp_buf =
-            bytes::BytesMut::with_capacity(self.ticket_blob.encoded_size(features).unwrap_or(64));
-        self.ticket_blob.encode(&mut temp_buf, features)?;
-        temp_buf.freeze().encode(buf, 0)?;
+        match &self.ticket_blob {
+            TicketBlobField::Clear(blob) => {
+                // C++ encode(bufferlist, bl): outer length prefix around the ticket blob
+                let mut temp_buf =
+                    bytes::BytesMut::with_capacity(blob.encoded_size(features).unwrap_or(64));
+                blob.encode(&mut temp_buf, features)?;
+                temp_buf.freeze().encode(buf, 0)?;
+            }
+            TicketBlobField::Encrypted(ciphertext) => ciphertext.encode(buf, 0)?,
+        }
 
         Ok(())
     }
@@ -136,7 +197,14 @@ impl Denc for ServiceTicketInfo {
         let ticket_enc = u8::decode(buf, 0)?;
 
         let ticket_blob_bytes = Bytes::decode(buf, 0)?;
-        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes.as_ref(), features)?;
+        let ticket_blob = if ticket_enc == 0 {
+            TicketBlobField::Clear(CephXTicketBlob::decode(
+                &mut ticket_blob_bytes.as_ref(),
+                features,
+            )?)
+        } else {
+            TicketBlobField::Encrypted(ticket_blob_bytes)
+        };
 
         Ok(Self {
             service_id,
@@ -147,12 +215,16 @@ impl Denc for ServiceTicketInfo {
     }
 
     fn encoded_size(&self, features: u64) -> Option<usize> {
+        let blob_len = match &self.ticket_blob {
+            TicketBlobField::Clear(blob) => blob.encoded_size(features)?,
+            TicketBlobField::Encrypted(ciphertext) => ciphertext.len(),
+        };
         Some(
             4 + // service_id
             self.encrypted_service_ticket.encoded_size(features)? +
             1 + // ticket_enc
             4 + // outer length prefix
-            self.ticket_blob.encoded_size(features)?,
+            blob_len,
         )
     }
 }
@@ -418,10 +490,23 @@ impl CephXAuthorizeB {
 ///
 /// Sent by the service back to the client after validating the authorizer.
 /// struct_v >= 2 includes connection_secret for SECURE mode.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CephXAuthorizeReply {
     pub nonce_plus_one: u64,
     pub connection_secret: Option<Bytes>,
+}
+
+impl std::fmt::Debug for CephXAuthorizeReply {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::auth::types::Redacted;
+        f.debug_struct("CephXAuthorizeReply")
+            .field("nonce_plus_one", &self.nonce_plus_one)
+            .field(
+                "connection_secret",
+                &self.connection_secret.as_deref().map(Redacted),
+            )
+            .finish()
+    }
 }
 
 impl CephXAuthorizeReply {
@@ -491,6 +576,7 @@ impl Denc for CephXAuthorizeReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::auth::types::test_keys::AES_TEST_KEY;
     use bytes::BytesMut;
     use serde_json::json;
     use std::time::Duration;
@@ -511,10 +597,18 @@ mod tests {
     }
 
     #[test]
+    fn authorize_reply_debug_redacts_the_connection_secret() {
+        let reply = CephXAuthorizeReply::with_connection_secret(7, Bytes::from_static(&[0xab; 64]));
+        let out = format!("{reply:?}");
+        assert!(out.contains("nonce_plus_one: 7"), "{out}");
+        assert!(out.contains("<64 bytes redacted>"), "{out}");
+        assert!(!out.to_lowercase().contains("xab"), "{out}");
+        assert!(!out.contains("171"), "{out}");
+    }
+
+    #[test]
     fn test_service_ticket_encode_decode() {
-        let key =
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-                .unwrap();
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
         let validity = Duration::from_secs(3600);
         let ticket = CephXServiceTicket::new(key.clone(), validity);
 
@@ -556,12 +650,13 @@ mod tests {
                 version: 1,
                 encrypted_data: encrypted_data.clone(),
             },
-            ticket_enc: 1,
-            ticket_blob: CephXTicketBlob::new(42, ticket_blob_data.clone()),
+            ticket_enc: 0,
+            ticket_blob: TicketBlobField::Clear(CephXTicketBlob::new(42, ticket_blob_data.clone())),
         };
 
         let mut buf = BytesMut::new();
         info.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), info.encoded_size(0).unwrap());
 
         let mut read_buf = buf.freeze();
         let decoded = ServiceTicketInfo::decode(&mut read_buf, 0).unwrap();
@@ -571,9 +666,39 @@ mod tests {
             decoded.encrypted_service_ticket.encrypted_data,
             encrypted_data
         );
+        assert_eq!(decoded.ticket_enc, 0);
+        let TicketBlobField::Clear(blob) = decoded.ticket_blob else {
+            panic!("clear ticket blob decoded as encrypted");
+        };
+        assert_eq!(blob.secret_id, 42);
+        assert_eq!(blob.blob, ticket_blob_data);
+        assert_eq!(read_buf.remaining(), 0);
+    }
+
+    #[test]
+    fn test_service_ticket_info_keeps_an_encrypted_blob() {
+        let ciphertext = Bytes::from(vec![9u8; 48]);
+        let info = ServiceTicketInfo {
+            service_id: 32, // AUTH
+            encrypted_service_ticket: EncryptedServiceTicket {
+                version: 1,
+                encrypted_data: Bytes::from(vec![1, 2, 3, 4]),
+            },
+            ticket_enc: 1,
+            ticket_blob: TicketBlobField::Encrypted(ciphertext.clone()),
+        };
+
+        let mut buf = BytesMut::new();
+        info.encode(&mut buf, 0).unwrap();
+        assert_eq!(buf.len(), info.encoded_size(0).unwrap());
+
+        let mut read_buf = buf.freeze();
+        let decoded = ServiceTicketInfo::decode(&mut read_buf, 0).unwrap();
         assert_eq!(decoded.ticket_enc, 1);
-        assert_eq!(decoded.ticket_blob.secret_id, 42);
-        assert_eq!(decoded.ticket_blob.blob, ticket_blob_data);
+        let TicketBlobField::Encrypted(bytes) = decoded.ticket_blob else {
+            panic!("encrypted ticket blob decoded as clear");
+        };
+        assert_eq!(bytes, ciphertext);
         assert_eq!(read_buf.remaining(), 0);
     }
 
@@ -587,8 +712,8 @@ mod tests {
                 version: 1,
                 encrypted_data: encrypted_data.clone(),
             },
-            ticket_enc: 1,
-            ticket_blob: CephXTicketBlob::new(42, ticket_blob_data.clone()),
+            ticket_enc: 0,
+            ticket_blob: TicketBlobField::Clear(CephXTicketBlob::new(42, ticket_blob_data.clone())),
         };
 
         let reply = ServiceTicketReply {
