@@ -3,10 +3,14 @@
 use crate::Denc;
 use crate::auth::error::{CephXError, Result};
 use crate::auth::protocol::{
-    AuthMode, CEPHX_GET_AUTH_SESSION_KEY, CephXAuthenticate, CephXRequestHeader,
-    CephXServerChallenge,
+    AuthMode, CEPHX_GET_AUTH_SESSION_KEY, CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET,
+    CEPHX_KEY_USAGE_AUTHORIZE, CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE, CEPHX_KEY_USAGE_TICKET_BLOB,
+    CEPHX_KEY_USAGE_TICKET_SESSION_KEY, CephXAuthenticate, CephXRequestHeader,
+    CephXServerChallenge, ServiceTicketInfo, TicketBlobField,
 };
-use crate::auth::types::{CephXSession, CephXTicketBlob, CryptoKey, EntityName, EntityType};
+use crate::auth::types::{
+    CephXSession, CephXTicketBlob, CryptoKey, EntityName, EntityType, KeyType,
+};
 use bytes::{Buf, Bytes, BytesMut};
 use rand::RngCore;
 use std::time::Duration;
@@ -52,6 +56,48 @@ pub struct CephXClientHandler {
     /// client. AUTH is always implied and should not be included here. Defaults to
     /// `MON | OSD | MGR`, matching what librados requests.
     want_keys: EntityType,
+}
+
+/// C++ `cephx_calc_client_server_challenge`: the response a client proves
+/// its key with, and the value the monitor recomputes to check it.
+///
+/// An AES key encrypts the challenge blob (C++ `encode_encrypt`: a `u32`
+/// length and the ciphertext of the magic envelope). Every other key type
+/// takes `HMAC-SHA256` of the bare blob under the raw secret instead, because
+/// aes256k's random confounder makes its ciphertext differ on every call. The
+/// result is XOR-folded over its complete little-endian `u64` words.
+pub(crate) fn cephx_calc_client_server_challenge(
+    key: &CryptoKey,
+    server_challenge: u64,
+    client_challenge: u64,
+) -> Result<u64> {
+    use crate::auth::protocol::{CephXChallengeBlob, CephXEncryptedEnvelope};
+
+    let blob = CephXChallengeBlob {
+        server_challenge,
+        client_challenge,
+    };
+    let mut folding_data = match key.key_type()? {
+        KeyType::Aes => {
+            let mut bl = BytesMut::with_capacity(32);
+            CephXEncryptedEnvelope { payload: blob }.encode(&mut bl, 0)?;
+            let ciphertext = key.encrypt(0, &bl)?;
+            let mut out = BytesMut::with_capacity(4 + ciphertext.len());
+            ciphertext.encode(&mut out, 0)?;
+            out.freeze()
+        }
+        _ => {
+            let mut bl = BytesMut::with_capacity(16);
+            blob.encode(&mut bl, 0)?;
+            Bytes::copy_from_slice(&key.hmac_sha256(&bl)?)
+        }
+    };
+
+    let mut folded = 0u64;
+    for _ in 0..folding_data.len() / 8 {
+        folded ^= u64::decode(&mut folding_data, 0)?;
+    }
+    Ok(folded)
 }
 
 impl CephXClientHandler {
@@ -162,46 +208,18 @@ impl CephXClientHandler {
         Ok(payload.freeze())
     }
 
-    /// Calculate session key from client secret and challenges
-    ///
-    /// Implements cephx_calc_client_server_challenge() from CephxProtocol.cc
+    /// The folded challenge response a client sends in `CephXAuthenticate::key`.
     fn calculate_session_key(
         secret_key: &CryptoKey,
         server_challenge: u64,
         client_challenge: u64,
     ) -> Result<u64> {
-        use crate::auth::protocol::{CephXChallengeBlob, CephXEncryptedEnvelope};
-
         debug!(
             "Calculating session key: server_challenge=0x{:016x}, client_challenge=0x{:016x}",
             server_challenge, client_challenge
         );
-
-        let envelope = CephXEncryptedEnvelope {
-            payload: CephXChallengeBlob {
-                server_challenge,
-                client_challenge,
-            },
-        };
-
-        let mut bl = BytesMut::with_capacity(32);
-        envelope.encode(&mut bl, 0)?;
-
-        let ciphertext = secret_key.encrypt(&bl)?;
-
-        // C++ encode_encrypt() adds a u32 length prefix before XOR folding
-        let mut folding_buffer = BytesMut::with_capacity(4 + ciphertext.len());
-        ciphertext.encode(&mut folding_buffer, 0)?;
-        let mut folding_data = folding_buffer.freeze();
-
-        // XOR fold into 64 bits; C++ only processes complete 8-byte chunks
-        let num_complete_chunks = folding_data.len() / 8;
-        let mut key = 0u64;
-
-        for _ in 0..num_complete_chunks {
-            key ^= u64::decode(&mut folding_data, 0)?;
-        }
-
+        let key =
+            cephx_calc_client_server_challenge(secret_key, server_challenge, client_challenge)?;
         debug!("Calculated session key: 0x{:016x}", key);
         Ok(key)
     }
@@ -243,7 +261,10 @@ impl CephXClientHandler {
     ) -> Result<(CryptoKey, Duration)> {
         use crate::auth::protocol::CephXEncryptedEnvelope;
 
-        let mut decrypted_data = secret_key.decrypt(&encrypted_ticket.encrypted_data)?;
+        let mut decrypted_data = secret_key.decrypt(
+            CEPHX_KEY_USAGE_TICKET_SESSION_KEY,
+            &encrypted_ticket.encrypted_data,
+        )?;
 
         let envelope = CephXEncryptedEnvelope::<crate::auth::protocol::CephXServiceTicket>::decode(
             &mut decrypted_data,
@@ -307,27 +328,57 @@ impl CephXClientHandler {
         buf: &mut Bytes,
         auth_session_key: &CryptoKey,
     ) -> Result<DecodedServiceTicket> {
-        let service_type = EntityType::from_bits_retain(u32::decode(buf, 0)?);
-        let encrypted_ticket = crate::auth::protocol::EncryptedServiceTicket::decode(buf, 0)?;
+        let info = ServiceTicketInfo::decode(buf, 0)?;
+        self.decode_service_ticket(info, auth_session_key)
+    }
+
+    /// One ticket of a reply, as C++ `verify_service_ticket_reply` reads it:
+    /// the session key and validity under `key`, then the ticket blob.
+    fn decode_service_ticket(
+        &self,
+        info: ServiceTicketInfo,
+        key: &CryptoKey,
+    ) -> Result<DecodedServiceTicket> {
+        let service_type = EntityType::from_bits_retain(info.service_id);
         let (session_key, validity) =
-            self.decrypt_service_ticket(&encrypted_ticket, auth_session_key)?;
-
-        let ticket_enc = u8::decode(buf, 0)?;
-        let mut ticket_blob_bytes = if ticket_enc != 0 {
-            let encrypted_bl = Bytes::decode(buf, 0)?;
-            session_key.decrypt(&encrypted_bl)?
-        } else {
-            Bytes::decode(buf, 0)?
+            self.decrypt_service_ticket(&info.encrypted_service_ticket, key)?;
+        let ticket_blob = match info.ticket_blob {
+            TicketBlobField::Clear(blob) => blob,
+            TicketBlobField::Encrypted(ciphertext) => {
+                self.decrypt_ticket_blob(service_type, &ciphertext)?
+            }
         };
-
-        let ticket_blob = CephXTicketBlob::decode(&mut ticket_blob_bytes, 0)?;
-
         Ok(DecodedServiceTicket {
             service_type,
             session_key,
             ticket_blob,
             validity,
         })
+    }
+
+    /// An encrypted ticket blob is sealed under the session key this handler
+    /// held for the service before the reply, not the one the reply carries.
+    fn decrypt_ticket_blob(
+        &self,
+        service_type: EntityType,
+        ciphertext: &[u8],
+    ) -> Result<CephXTicketBlob> {
+        use crate::auth::protocol::CephXEncryptedEnvelope;
+
+        let previous_key = self
+            .session
+            .as_ref()
+            .and_then(|session| session.ticket_handlers.get(&service_type))
+            .map(|handler| &handler.session_key)
+            .filter(|key| !key.is_empty())
+            .ok_or_else(|| {
+                CephXError::ProtocolError(format!(
+                    "ticket blob encrypted but no previous session key for {service_type:?}"
+                ))
+            })?;
+        let mut plain = previous_key.decrypt(CEPHX_KEY_USAGE_TICKET_BLOB, ciphertext)?;
+        let mut blob_bl = CephXEncryptedEnvelope::<Bytes>::decode(&mut plain, 0)?.payload;
+        Ok(CephXTicketBlob::decode(&mut blob_bl, 0)?)
     }
 
     /// Try to decode connection_secret from payload (inner method with ? error propagation)
@@ -347,7 +398,8 @@ impl CephXClientHandler {
             return Ok(None);
         }
 
-        let mut decrypted_secret = session_key.decrypt(&encrypted_secret)?;
+        let mut decrypted_secret =
+            session_key.decrypt(CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET, &encrypted_secret)?;
 
         let envelope = CephXEncryptedEnvelope::<Bytes>::decode(&mut decrypted_secret, 0)?;
 
@@ -359,19 +411,31 @@ impl CephXClientHandler {
         }
     }
 
-    /// Decode connection_secret from payload (outer method that handles errors gracefully)
+    /// Decode the connection secret that follows the tickets in AUTH_DONE.
     ///
-    /// Returns Ok(None) if decoding fails (connection_secret is optional for CRC mode)
+    /// In SECURE mode a secret that is missing, short, or fails to decrypt or
+    /// decode is an error, because the connection cannot be encrypted without
+    /// it. In CRC mode the secret is unused, so a failure yields `None`.
     fn decode_connection_secret(
         &self,
         payload: &mut Bytes,
         session_key: &CryptoKey,
+        con_mode: u32,
     ) -> Result<Option<Bytes>> {
-        if payload.remaining() == 0 {
-            return Ok(None);
-        }
+        use crate::auth::protocol::{CEPH_CON_MODE_SECURE, require_secure_connection_secret};
 
-        match Self::try_decode_connection_secret(payload, session_key) {
+        let decoded = if payload.remaining() == 0 {
+            Ok(None)
+        } else {
+            Self::try_decode_connection_secret(payload, session_key)
+        };
+
+        if con_mode == CEPH_CON_MODE_SECURE {
+            let secret = require_secure_connection_secret(decoded?)?;
+            debug!("Connection secret: {} bytes", secret.len());
+            return Ok(Some(secret));
+        }
+        match decoded {
             Ok(secret) => {
                 if let Some(ref s) = secret {
                     debug!("Connection secret: {} bytes", s.len());
@@ -470,20 +534,12 @@ impl CephXClientHandler {
             Vec::with_capacity(ticket_reply.tickets.len());
 
         for ticket_info in ticket_reply.tickets {
-            let (session_key, validity) =
-                self.decrypt_service_ticket(&ticket_info.encrypted_service_ticket, secret_key)?;
-
+            let ticket = self.decode_service_ticket(ticket_info, secret_key)?;
             debug!(
-                "Decoded ticket for service_id={}, validity={:?}",
-                ticket_info.service_id, validity
+                "Decoded ticket for service {:?}, validity={:?}",
+                ticket.service_type, ticket.validity
             );
-
-            ticket_handlers.push(DecodedServiceTicket {
-                service_type: EntityType::from_bits_retain(ticket_info.service_id),
-                session_key,
-                ticket_blob: ticket_info.ticket_blob,
-                validity,
-            });
+            ticket_handlers.push(ticket);
         }
 
         let auth_session_key = ticket_handlers
@@ -494,7 +550,7 @@ impl CephXClientHandler {
         let session_key_bytes = auth_session_key.secret.clone();
 
         let connection_secret_bytes =
-            self.decode_connection_secret(&mut auth_payload, &auth_session_key)?;
+            self.decode_connection_secret(&mut auth_payload, &auth_session_key, con_mode)?;
 
         trace!(
             "After connection_secret, auth_payload remaining: {} bytes",
@@ -564,7 +620,9 @@ impl CephXClientHandler {
         let encrypted_data = Bytes::decode(&mut encrypted_payload, 0)?;
         trace!("encrypted_len: {}", encrypted_data.len());
 
-        let mut dec_buf = handler.session_key.decrypt(&encrypted_data)?;
+        let mut dec_buf = handler
+            .session_key
+            .decrypt(CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE, &encrypted_data)?;
 
         let envelope = CephXEncryptedEnvelope::<CephXAuthorizeReply>::decode(&mut dec_buf, 0)?;
 
@@ -659,7 +717,7 @@ impl CephXClientHandler {
         let mut envelope_buf = BytesMut::with_capacity(64);
         envelope.encode(&mut envelope_buf, 0)?;
 
-        let ciphertext = session_key.encrypt(&envelope_buf)?;
+        let ciphertext = session_key.encrypt(CEPHX_KEY_USAGE_AUTHORIZE, &envelope_buf)?;
 
         let mut result = BytesMut::with_capacity(4 + ciphertext.len());
         (ciphertext.len() as u32).encode(&mut result, 0)?;
@@ -715,6 +773,77 @@ impl CephXClientHandler {
         Ok(payload.freeze())
     }
 
+    /// The services whose tickets are due for renewal, for a
+    /// `CEPHX_GET_PRINCIPAL_SESSION_KEY` request. AUTH is never included:
+    /// Ceph's client does not ask for it there and the monitor skips it.
+    pub fn service_keys_due(&self) -> EntityType {
+        let Some(session) = self.session.as_ref() else {
+            return EntityType::empty();
+        };
+        session
+            .ticket_handlers
+            .iter()
+            .filter(|(service, handler)| **service != EntityType::AUTH && handler.need_key())
+            .fold(EntityType::empty(), |keys, (service, _)| keys | *service)
+    }
+
+    /// Mark every service ticket except AUTH as due for renewal, keeping its
+    /// blob, as C++ `invalidate_all_tickets` does when the monmap's auth epoch
+    /// rises. The AUTH ticket stays valid: the wipe that raises the epoch keeps
+    /// the AUTH rotating keys, and it authorizes the renewal request.
+    pub fn invalidate_service_tickets(&mut self) {
+        let Some(session) = self.session.as_mut() else {
+            return;
+        };
+        for (service, handler) in session.ticket_handlers.iter_mut() {
+            if *service != EntityType::AUTH {
+                handler.renew_after = Some(std::time::UNIX_EPOCH);
+            }
+        }
+    }
+
+    /// Store the tickets of a monitor's reply to a
+    /// `CEPHX_GET_PRINCIPAL_SESSION_KEY` request (an `MAuthReply`'s
+    /// `result_bl`). The ticket list is encrypted under the AUTH session key.
+    /// Returns the services whose tickets were stored.
+    pub fn handle_principal_reply(&mut self, mut reply: Bytes) -> Result<EntityType> {
+        use crate::auth::protocol::{CEPHX_GET_PRINCIPAL_SESSION_KEY, CephXResponseHeader};
+
+        let header = CephXResponseHeader::decode(&mut reply, 0)?;
+        if header.request_type != CEPHX_GET_PRINCIPAL_SESSION_KEY {
+            debug!(
+                "Ignoring cephx reply of type 0x{:04x} outside authentication",
+                header.request_type
+            );
+            return Ok(EntityType::empty());
+        }
+        if header.status != 0 {
+            return Err(CephXError::AuthenticationFailed(format!(
+                "principal session key request failed with status {}",
+                header.status
+            )));
+        }
+
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| CephXError::AuthenticationFailed("No session available".into()))?;
+        let global_id = session.global_id;
+        let auth_session_key = session
+            .ticket_handlers
+            .get(&EntityType::AUTH)
+            .map(|handler| handler.session_key.clone())
+            .ok_or_else(|| CephXError::AuthenticationFailed("No AUTH ticket".into()))?;
+
+        let tickets = self.decode_extra_tickets(&mut reply, &auth_session_key)?;
+        debug!("Principal reply renewed {} tickets", tickets.len());
+        let stored = tickets.iter().fold(EntityType::empty(), |keys, ticket| {
+            keys | ticket.service_type
+        });
+        self.store_ticket_handlers(tickets, global_id)?;
+        Ok(stored)
+    }
+
     pub fn reset(&mut self) {
         debug!("Resetting CephX client handler");
         self.server_challenge = None;
@@ -727,6 +856,7 @@ impl CephXClientHandler {
 mod tests {
     use super::*;
     use crate::auth::protocol::AuthMode;
+    use crate::auth::types::test_keys::{AES_TEST_KEY, AES256K_TEST_KEY};
     use crate::auth::types::{CephXSession, CryptoKey};
 
     #[test]
@@ -749,9 +879,7 @@ mod tests {
     #[test]
     fn test_set_secret_key() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
-        let key =
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-                .unwrap();
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
 
         handler.set_secret_key(key.clone());
         assert!(handler.secret_key.is_some());
@@ -761,7 +889,7 @@ mod tests {
     #[test]
     fn test_set_secret_key_from_base64() {
         let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
-        let base64_key = "AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==";
+        let base64_key = AES_TEST_KEY;
 
         handler.set_secret_key_from_base64(base64_key).unwrap();
         assert!(handler.secret_key.is_some());
@@ -835,8 +963,7 @@ mod tests {
         handler.session = Some(CephXSession::new(
             entity_name,
             12345,
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-                .unwrap(),
+            CryptoKey::from_base64(AES_TEST_KEY).unwrap(),
         ));
 
         handler.reset();
@@ -847,11 +974,9 @@ mod tests {
 
     #[test]
     fn test_crypto_key_decrypt_invalid_ciphertext() {
-        let key =
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
-                .unwrap();
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
 
-        let result = key.decrypt(&[1, 2, 3, 4]);
+        let result = key.decrypt(0, &[1, 2, 3, 4]);
         assert!(result.is_err());
     }
 
@@ -888,11 +1013,848 @@ mod tests {
 
     #[test]
     fn test_crypto_key_decrypt_empty_ciphertext() {
-        let key =
-            CryptoKey::from_base64("AQAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAEAAAABAgMEBQYHCA==")
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
+
+        let result = key.decrypt(0, &[]);
+        assert!(result.is_err());
+    }
+
+    const SERVER_CHALLENGE: u64 = 0x0123456789abcdef;
+    const CLIENT_CHALLENGE: u64 = 0xfedcba9876543210;
+
+    // The value calculate_session_key produced for this key and these
+    // challenges before the key type was parsed (6632c80), confirmed in
+    // Python with the `cryptography` package.
+    #[test]
+    fn aes_challenge_fold_is_unchanged() {
+        let key = CryptoKey::from_base64(AES_TEST_KEY).unwrap();
+        assert_eq!(
+            cephx_calc_client_server_challenge(&key, SERVER_CHALLENGE, CLIENT_CHALLENGE).unwrap(),
+            0xda40f59232ab17c2
+        );
+    }
+
+    // HMAC-SHA256(RFC 8009 key, le64(s) | le64(c)) =
+    // 87956304acfb25b7e02f0ef45a6b68737b1c2a819da54d8e2f8b36f77ab8770c, folded;
+    // computed with Python's hmac module.
+    #[test]
+    fn aes256k_challenge_is_a_folded_hmac() {
+        let key = CryptoKey::from_base64(AES256K_TEST_KEY).unwrap();
+        assert_eq!(
+            cephx_calc_client_server_challenge(&key, SERVER_CHALLENGE, CLIENT_CHALLENGE).unwrap(),
+            0x46778d1186712d33
+        );
+    }
+
+    #[test]
+    fn aes256k_challenge_is_deterministic_where_encryption_is_not() {
+        let key = CryptoKey::from_base64(AES256K_TEST_KEY).unwrap();
+        let fold = || {
+            cephx_calc_client_server_challenge(&key, SERVER_CHALLENGE, CLIENT_CHALLENGE).unwrap()
+        };
+        assert_eq!(fold(), fold());
+
+        let mut blob = BytesMut::new();
+        crate::auth::protocol::CephXChallengeBlob {
+            server_challenge: SERVER_CHALLENGE,
+            client_challenge: CLIENT_CHALLENGE,
+        }
+        .encode(&mut blob, 0)
+        .unwrap();
+        assert_ne!(
+            key.encrypt(0, &blob).unwrap(),
+            key.encrypt(0, &blob).unwrap()
+        );
+    }
+
+    mod auth_done {
+        use super::*;
+        use crate::auth::protocol::{
+            CEPHX_KEY_USAGE_AUTHORIZE_REPLY, CephXAuthorizeA, CephXAuthorizeB, CephXAuthorizeReply,
+            CephXEncryptedEnvelope, CephXResponseHeader, CephXServiceTicket,
+            EncryptedServiceTicket, ServiceTicketInfo,
+        };
+        use crate::auth::provider::{AuthProvider, ServiceAuthProvider};
+        use std::collections::BTreeMap;
+        use std::sync::{Arc, Mutex};
+
+        const GLOBAL_ID: u64 = 4242;
+        const SECURE: u32 = crate::auth::protocol::CEPH_CON_MODE_SECURE;
+        const CRC: u32 = crate::auth::protocol::CEPH_CON_MODE_CRC;
+        /// A connection secret as long as a SECURE-mode Ceph server makes.
+        const CONNECTION_SECRET: [u8; 64] = [0x5a; 64];
+
+        pub(crate) fn random_key(key_type: KeyType) -> CryptoKey {
+            let len = match key_type {
+                KeyType::Aes => 16,
+                _ => 32,
+            };
+            let mut secret = vec![0u8; len];
+            rand::thread_rng().fill_bytes(&mut secret);
+            CryptoKey::new(key_type, Bytes::from(secret)).unwrap()
+        }
+
+        fn enveloped<T: Denc>(payload: T) -> BytesMut {
+            let mut bl = BytesMut::new();
+            CephXEncryptedEnvelope { payload }
+                .encode(&mut bl, 0)
+                .unwrap();
+            bl
+        }
+
+        pub(crate) fn encrypted_service_ticket(
+            under: &CryptoKey,
+            session_key: &CryptoKey,
+        ) -> EncryptedServiceTicket {
+            let ticket = CephXServiceTicket::new(session_key.clone(), Duration::from_secs(3600));
+            EncryptedServiceTicket {
+                version: 1,
+                encrypted_data: under
+                    .encrypt(CEPHX_KEY_USAGE_TICKET_SESSION_KEY, &enveloped(ticket))
+                    .unwrap(),
+            }
+        }
+
+        pub(crate) fn ticket_blob(secret_id: u64) -> CephXTicketBlob {
+            CephXTicketBlob::new(secret_id, Bytes::from(vec![secret_id as u8; 8]))
+        }
+
+        fn encode_bytes(bytes: &[u8]) -> Bytes {
+            let mut bl = BytesMut::new();
+            Bytes::copy_from_slice(bytes).encode(&mut bl, 0).unwrap();
+            bl.freeze()
+        }
+
+        /// One ticket of a reply: `session_key` under `under`, and a blob
+        /// with `secret_id` that is sealed under `blob_key` when it is given.
+        pub(crate) fn ticket_info(
+            service: EntityType,
+            under: &CryptoKey,
+            session_key: &CryptoKey,
+            secret_id: u64,
+            blob_key: Option<&CryptoKey>,
+        ) -> ServiceTicketInfo {
+            let (ticket_enc, ticket_blob) = match blob_key {
+                None => (0, TicketBlobField::Clear(ticket_blob(secret_id))),
+                Some(key) => {
+                    let mut blob = BytesMut::new();
+                    ticket_blob(secret_id).encode(&mut blob, 0).unwrap();
+                    let sealed = key
+                        .encrypt(CEPHX_KEY_USAGE_TICKET_BLOB, &enveloped(blob.freeze()))
+                        .unwrap();
+                    (1, TicketBlobField::Encrypted(sealed))
+                }
+            };
+            ServiceTicketInfo {
+                service_id: service.bits(),
+                encrypted_service_ticket: encrypted_service_ticket(under, session_key),
+                ticket_enc,
+                ticket_blob,
+            }
+        }
+
+        /// A ticket list as `decode_extra_tickets` and the principal reply
+        /// read it.
+        pub(crate) fn ticket_list(tickets: &[ServiceTicketInfo]) -> Bytes {
+            let mut bl = BytesMut::new();
+            1u8.encode(&mut bl, 0).unwrap();
+            (tickets.len() as u32).encode(&mut bl, 0).unwrap();
+            for ticket in tickets {
+                ticket.encode(&mut bl, 0).unwrap();
+            }
+            bl.freeze()
+        }
+
+        /// Extra tickets with clear blobs whose `secret_id` is the service bit.
+        pub(crate) fn extra_tickets(
+            auth_key: &CryptoKey,
+            tickets: &[(EntityType, CryptoKey)],
+        ) -> Vec<ServiceTicketInfo> {
+            tickets
+                .iter()
+                .map(|(service, key)| {
+                    ticket_info(*service, auth_key, key, u64::from(service.bits()), None)
+                })
+                .collect()
+        }
+
+        struct Built {
+            payload: Bytes,
+            encrypted_connection_secret: Bytes,
+        }
+
+        /// An AUTH_DONE payload in the layout `handle_auth_done` decodes.
+        fn build(
+            client_key: &CryptoKey,
+            auth_key: &CryptoKey,
+            extras: &[(EntityType, CryptoKey)],
+            connection_secret: &[u8],
+        ) -> Built {
+            let primary = ticket_info(
+                EntityType::AUTH,
+                client_key,
+                auth_key,
+                u64::from(EntityType::AUTH.bits()),
+                None,
+            );
+            build_with(
+                primary,
+                auth_key,
+                &extra_tickets(auth_key, extras),
+                connection_secret,
+            )
+        }
+
+        fn build_with(
+            primary: ServiceTicketInfo,
+            auth_key: &CryptoKey,
+            extras: &[ServiceTicketInfo],
+            connection_secret: &[u8],
+        ) -> Built {
+            let mut bl = BytesMut::new();
+            CephXResponseHeader {
+                request_type: CEPHX_GET_AUTH_SESSION_KEY,
+                status: 0,
+            }
+            .encode(&mut bl, 0)
+            .unwrap();
+
+            bl.extend_from_slice(&ticket_list(&[primary]));
+
+            let encrypted_connection_secret = auth_key
+                .encrypt(
+                    CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET,
+                    &enveloped(Bytes::copy_from_slice(connection_secret)),
+                )
+                .unwrap();
+            bl.extend_from_slice(&encode_bytes(&encode_bytes(&encrypted_connection_secret)));
+
+            ticket_list(extras).encode(&mut bl, 0).unwrap();
+
+            Built {
+                payload: bl.freeze(),
+                encrypted_connection_secret,
+            }
+        }
+
+        /// Authenticates a handler against a hand-built AUTH_DONE and checks
+        /// everything it stored; returns the handler and the keys built.
+        fn authenticate(
+            client_type: KeyType,
+            auth_type: KeyType,
+            extra_types: &[(EntityType, KeyType)],
+        ) -> (CephXClientHandler, BTreeMap<u32, CryptoKey>) {
+            let client_key = random_key(client_type);
+            let auth_key = random_key(auth_type);
+            let extras: Vec<(EntityType, CryptoKey)> = extra_types
+                .iter()
+                .map(|(service, t)| (*service, random_key(*t)))
+                .collect();
+            let connection_secret = CONNECTION_SECRET;
+            let built = build(&client_key, &auth_key, &extras, &connection_secret);
+
+            let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+            handler.set_secret_key(client_key);
+            let (session_key, secret) = handler
+                .handle_auth_done(built.payload.clone(), GLOBAL_ID, SECURE)
+                .unwrap();
+            assert_eq!(session_key.unwrap(), auth_key.secret);
+            assert_eq!(secret.unwrap().as_ref(), connection_secret);
+
+            let mut expected: BTreeMap<u32, CryptoKey> = extras
+                .iter()
+                .map(|(service, key)| (service.bits(), key.clone()))
+                .collect();
+            expected.insert(EntityType::AUTH.bits(), auth_key.clone());
+
+            let session = handler.get_session().unwrap();
+            let stored: Vec<u32> = session
+                .ticket_handlers
+                .keys()
+                .map(|s| s.bits())
+                .collect::<std::collections::BTreeSet<_>>()
+                .into_iter()
+                .collect();
+            assert_eq!(stored, expected.keys().copied().collect::<Vec<_>>());
+            for (service, key) in &expected {
+                let th = &session.ticket_handlers[&EntityType::from_bits_retain(*service)];
+                assert_eq!(
+                    th.session_key.crypto_type, key.crypto_type,
+                    "service {service}"
+                );
+                assert_eq!(th.session_key.secret, key.secret, "service {service}");
+            }
+
+            // The blob is sealed under the connection-secret key usage only.
+            let mut plain = auth_key
+                .decrypt(
+                    CEPHX_KEY_USAGE_AUTH_CONNECTION_SECRET,
+                    &built.encrypted_connection_secret,
+                )
+                .unwrap();
+            let envelope = CephXEncryptedEnvelope::<Bytes>::decode(&mut plain, 0).unwrap();
+            assert_eq!(envelope.payload.as_ref(), connection_secret);
+            if auth_type == KeyType::Aes256Krb5 {
+                assert!(
+                    auth_key
+                        .decrypt(
+                            CEPHX_KEY_USAGE_TICKET_SESSION_KEY,
+                            &built.encrypted_connection_secret
+                        )
+                        .is_err()
+                );
+            }
+
+            (handler, expected)
+        }
+
+        fn check_authorizer(
+            handler: &mut CephXClientHandler,
+            service: EntityType,
+            key: &CryptoKey,
+        ) {
+            let mut authorizer = handler.build_authorizer(service, GLOBAL_ID, None).unwrap();
+            let a = CephXAuthorizeA::decode(&mut authorizer, 0).unwrap();
+            assert_eq!(a.ticket_blob.secret_id, u64::from(service.bits()));
+            let encrypted = Bytes::decode(&mut authorizer, 0).unwrap();
+            let mut plain = key.decrypt(CEPHX_KEY_USAGE_AUTHORIZE, &encrypted).unwrap();
+            CephXEncryptedEnvelope::<CephXAuthorizeB>::decode(&mut plain, 0).unwrap();
+            if key.key_type().unwrap() == KeyType::Aes256Krb5 {
+                assert!(
+                    key.decrypt(CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE, &encrypted)
+                        .is_err()
+                );
+            }
+        }
+
+        fn encrypted_reply(key: &CryptoKey, usage: u32, reply: CephXAuthorizeReply) -> Bytes {
+            encode_bytes(&key.encrypt(usage, &enveloped(reply)).unwrap())
+        }
+
+        fn check_aes256k_challenge(
+            handler: &CephXClientHandler,
+            service: EntityType,
+            key: &CryptoKey,
+        ) {
+            let challenge = 0x1122334455667788;
+            let good = encrypted_reply(
+                key,
+                CEPHX_KEY_USAGE_AUTHORIZE_CHALLENGE,
+                CephXAuthorizeReply::new(challenge),
+            );
+            assert_eq!(
+                handler.decrypt_authorize_challenge(service, good).unwrap(),
+                challenge
+            );
+            let wrong_usage = encrypted_reply(
+                key,
+                CEPHX_KEY_USAGE_AUTHORIZE_REPLY,
+                CephXAuthorizeReply::new(challenge),
+            );
+            assert!(
+                handler
+                    .decrypt_authorize_challenge(service, wrong_usage)
+                    .is_err()
+            );
+        }
+
+        #[test]
+        fn all_aes() {
+            let (mut handler, keys) = authenticate(
+                KeyType::Aes,
+                KeyType::Aes,
+                &[
+                    (EntityType::OSD, KeyType::Aes),
+                    (EntityType::MGR, KeyType::Aes),
+                ],
+            );
+            check_authorizer(
+                &mut handler,
+                EntityType::OSD,
+                &keys[&EntityType::OSD.bits()],
+            );
+        }
+
+        #[test]
+        fn all_aes256k() {
+            let (mut handler, keys) = authenticate(
+                KeyType::Aes256Krb5,
+                KeyType::Aes256Krb5,
+                &[
+                    (EntityType::OSD, KeyType::Aes256Krb5),
+                    (EntityType::MGR, KeyType::Aes256Krb5),
+                ],
+            );
+            let osd = &keys[&EntityType::OSD.bits()];
+            check_authorizer(&mut handler, EntityType::OSD, osd);
+            check_aes256k_challenge(&handler, EntityType::OSD, osd);
+        }
+
+        #[test]
+        fn mixed_ticket_types() {
+            let (mut handler, keys) = authenticate(
+                KeyType::Aes256Krb5,
+                KeyType::Aes256Krb5,
+                &[
+                    (EntityType::OSD, KeyType::Aes),
+                    (EntityType::MGR, KeyType::Aes256Krb5),
+                ],
+            );
+            check_authorizer(
+                &mut handler,
+                EntityType::OSD,
+                &keys[&EntityType::OSD.bits()],
+            );
+            let mgr = &keys[&EntityType::MGR.bits()];
+            check_authorizer(&mut handler, EntityType::MGR, mgr);
+            check_aes256k_challenge(&handler, EntityType::MGR, mgr);
+        }
+
+        fn check_authorize_reply(osd_type: KeyType) {
+            let (handler, keys) = authenticate(osd_type, osd_type, &[(EntityType::OSD, osd_type)]);
+            let osd = keys[&EntityType::OSD.bits()].clone();
+            let mut provider =
+                ServiceAuthProvider::from_shared_handler(Arc::new(Mutex::new(handler)));
+            provider
+                .build_auth_payload(GLOBAL_ID, EntityType::OSD.bits())
                 .unwrap();
 
-        let result = key.decrypt(&[]);
-        assert!(result.is_err());
+            let secret = Bytes::from_static(&[0x77; 64]);
+            let reply = CephXAuthorizeReply::with_connection_secret(1, secret.clone());
+            let payload = encrypted_reply(&osd, CEPHX_KEY_USAGE_AUTHORIZE_REPLY, reply);
+            let (session_key, connection_secret) = provider
+                .handle_auth_response(payload.clone(), GLOBAL_ID, SECURE)
+                .unwrap();
+            assert_eq!(session_key.unwrap(), osd.secret);
+            assert_eq!(connection_secret.unwrap(), secret);
+
+            // The reply is sealed under the authorize-reply key usage only.
+            let encrypted = Bytes::decode(&mut payload.clone(), 0).unwrap();
+            osd.decrypt(CEPHX_KEY_USAGE_AUTHORIZE_REPLY, &encrypted)
+                .unwrap();
+            if osd_type == KeyType::Aes256Krb5 {
+                assert!(osd.decrypt(CEPHX_KEY_USAGE_AUTHORIZE, &encrypted).is_err());
+            }
+        }
+
+        #[test]
+        fn authorize_reply_aes() {
+            check_authorize_reply(KeyType::Aes);
+        }
+
+        #[test]
+        fn authorize_reply_aes256k() {
+            check_authorize_reply(KeyType::Aes256Krb5);
+        }
+
+        /// `payload` with the first byte of `blob` flipped, which garbles the
+        /// first cipher block (AES) or fails the HMAC (aes256k).
+        fn corrupted(payload: &Bytes, blob: &[u8]) -> Bytes {
+            let at = payload
+                .windows(blob.len())
+                .position(|w| w == blob)
+                .expect("blob in payload");
+            let mut bl = BytesMut::from(payload.as_ref());
+            bl[at] ^= 0xff;
+            bl.freeze()
+        }
+
+        fn auth_done_with_secret(
+            t: KeyType,
+            connection_secret: &[u8],
+        ) -> (CephXClientHandler, Built) {
+            let client_key = random_key(t);
+            let auth_key = random_key(t);
+            let built = build(&client_key, &auth_key, &[], connection_secret);
+            let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+            handler.set_secret_key(client_key);
+            (handler, built)
+        }
+
+        #[test]
+        fn secure_auth_done_with_an_undecryptable_secret_fails() {
+            for t in KEY_TYPES {
+                let (mut handler, built) = auth_done_with_secret(t, &CONNECTION_SECRET);
+                let payload = corrupted(&built.payload, &built.encrypted_connection_secret);
+                assert!(
+                    handler
+                        .handle_auth_done(payload.clone(), GLOBAL_ID, SECURE)
+                        .is_err(),
+                    "{t:?}"
+                );
+                let (session_key, secret) =
+                    handler.handle_auth_done(payload, GLOBAL_ID, CRC).unwrap();
+                assert!(session_key.is_some(), "{t:?}");
+                assert!(secret.is_none(), "{t:?}");
+            }
+        }
+
+        #[test]
+        fn secure_auth_done_with_a_short_or_empty_secret_fails() {
+            for t in KEY_TYPES {
+                for secret in [&[0x5a; 39][..], &[][..]] {
+                    let (mut handler, built) = auth_done_with_secret(t, secret);
+                    let err = handler
+                        .handle_auth_done(built.payload.clone(), GLOBAL_ID, SECURE)
+                        .unwrap_err()
+                        .to_string();
+                    assert!(err.contains("SECURE mode"), "{t:?}: {err}");
+                    handler
+                        .handle_auth_done(built.payload, GLOBAL_ID, CRC)
+                        .unwrap();
+                }
+                let (mut handler, built) = auth_done_with_secret(t, &[0x5a; 40]);
+                let (_, secret) = handler
+                    .handle_auth_done(built.payload, GLOBAL_ID, SECURE)
+                    .unwrap();
+                assert_eq!(secret.unwrap().len(), 40);
+            }
+        }
+
+        fn service_provider(t: KeyType) -> (ServiceAuthProvider, CryptoKey) {
+            let (handler, keys) = authenticate(t, t, &[(EntityType::OSD, t)]);
+            let osd = keys[&EntityType::OSD.bits()].clone();
+            let mut provider =
+                ServiceAuthProvider::from_shared_handler(Arc::new(Mutex::new(handler)));
+            provider
+                .build_auth_payload(GLOBAL_ID, EntityType::OSD.bits())
+                .unwrap();
+            (provider, osd)
+        }
+
+        #[test]
+        fn secure_authorize_reply_with_an_undecryptable_secret_fails() {
+            for t in KEY_TYPES {
+                let (mut provider, osd) = service_provider(t);
+                let reply =
+                    CephXAuthorizeReply::with_connection_secret(1, Bytes::from_static(&[0x77; 64]));
+                let payload = encrypted_reply(&osd, CEPHX_KEY_USAGE_AUTHORIZE_REPLY, reply);
+                let encrypted = Bytes::decode(&mut payload.clone(), 0).unwrap();
+                let payload = corrupted(&payload, &encrypted);
+                assert!(
+                    provider
+                        .handle_auth_response(payload.clone(), GLOBAL_ID, SECURE)
+                        .is_err(),
+                    "{t:?}"
+                );
+                let (session_key, secret) = provider
+                    .handle_auth_response(payload, GLOBAL_ID, CRC)
+                    .unwrap();
+                assert_eq!(session_key.unwrap(), osd.secret, "{t:?}");
+                assert!(secret.is_none(), "{t:?}");
+            }
+        }
+
+        #[test]
+        fn secure_authorize_reply_with_a_short_or_missing_secret_fails() {
+            for t in KEY_TYPES {
+                let (mut provider, osd) = service_provider(t);
+                for reply in [
+                    CephXAuthorizeReply::with_connection_secret(1, Bytes::from_static(&[0x77; 39])),
+                    CephXAuthorizeReply::new(1),
+                ] {
+                    let payload = encrypted_reply(&osd, CEPHX_KEY_USAGE_AUTHORIZE_REPLY, reply);
+                    assert!(
+                        provider
+                            .handle_auth_response(payload.clone(), GLOBAL_ID, SECURE)
+                            .is_err(),
+                        "{t:?}"
+                    );
+                    provider
+                        .handle_auth_response(payload, GLOBAL_ID, CRC)
+                        .unwrap();
+                }
+            }
+        }
+
+        const KEY_TYPES: [KeyType; 2] = [KeyType::Aes, KeyType::Aes256Krb5];
+
+        fn encoded(info: &ServiceTicketInfo) -> Bytes {
+            let mut bl = BytesMut::new();
+            info.encode(&mut bl, 0).unwrap();
+            bl.freeze()
+        }
+
+        fn stored(handler: &CephXClientHandler, service: EntityType) -> (CryptoKey, u64) {
+            let th = &handler.get_session().unwrap().ticket_handlers[&service];
+            (
+                th.session_key.clone(),
+                th.ticket_blob.as_ref().unwrap().secret_id,
+            )
+        }
+
+        #[test]
+        fn extra_ticket_blob_opens_with_the_previous_key() {
+            for t in KEY_TYPES {
+                let (mut handler, keys) = authenticate(t, t, &[(EntityType::OSD, t)]);
+                let auth = keys[&EntityType::AUTH.bits()].clone();
+                let old_osd = keys[&EntityType::OSD.bits()].clone();
+                let new_osd = random_key(t);
+
+                let sealed = ticket_info(EntityType::OSD, &auth, &new_osd, 99, Some(&old_osd));
+                let ticket = handler
+                    .try_decode_single_ticket(&mut encoded(&sealed), &auth)
+                    .unwrap();
+                assert_eq!(ticket.ticket_blob.secret_id, 99);
+                assert_eq!(ticket.session_key.secret, new_osd.secret);
+
+                let wrong = ticket_info(EntityType::OSD, &auth, &new_osd, 99, Some(&new_osd));
+                assert!(
+                    handler
+                        .try_decode_single_ticket(&mut encoded(&wrong), &auth)
+                        .is_err(),
+                    "{t:?}"
+                );
+
+                // The same ticket through a whole AUTH_DONE, which stores it.
+                let client_key = handler.secret_key.clone().unwrap();
+                let new_auth = random_key(t);
+                let primary = ticket_info(
+                    EntityType::AUTH,
+                    &client_key,
+                    &new_auth,
+                    u64::from(EntityType::AUTH.bits()),
+                    None,
+                );
+                let extra = ticket_info(EntityType::OSD, &new_auth, &new_osd, 99, Some(&old_osd));
+                let built = build_with(primary, &new_auth, &[extra], &CONNECTION_SECRET);
+                handler
+                    .handle_auth_done(built.payload, GLOBAL_ID, SECURE)
+                    .unwrap();
+                let (key, secret_id) = stored(&handler, EntityType::OSD);
+                assert_eq!(key.secret, new_osd.secret);
+                assert_eq!(secret_id, 99);
+            }
+        }
+
+        #[test]
+        fn extra_ticket_blob_without_a_previous_key_fails() {
+            for t in KEY_TYPES {
+                let handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+                let auth = random_key(t);
+                let osd = random_key(t);
+                let sealed = ticket_info(EntityType::OSD, &auth, &osd, 99, Some(&osd));
+                let err = handler
+                    .try_decode_single_ticket(&mut encoded(&sealed), &auth)
+                    .err()
+                    .unwrap()
+                    .to_string();
+                assert!(err.contains("no previous session key"), "{err}");
+            }
+        }
+
+        #[test]
+        fn primary_ticket_blob_opens_with_the_previous_auth_key() {
+            for t in KEY_TYPES {
+                let (mut handler, keys) = authenticate(t, t, &[]);
+                let client_key = handler.secret_key.clone().unwrap();
+                let old_auth = keys[&EntityType::AUTH.bits()].clone();
+                let new_auth = random_key(t);
+
+                let wrong = ticket_info(
+                    EntityType::AUTH,
+                    &client_key,
+                    &new_auth,
+                    77,
+                    Some(&new_auth),
+                );
+                let built = build_with(wrong, &new_auth, &[], &CONNECTION_SECRET);
+                assert!(
+                    handler
+                        .handle_auth_done(built.payload, GLOBAL_ID, SECURE)
+                        .is_err()
+                );
+
+                let sealed = ticket_info(
+                    EntityType::AUTH,
+                    &client_key,
+                    &new_auth,
+                    77,
+                    Some(&old_auth),
+                );
+                let built = build_with(sealed, &new_auth, &[], &CONNECTION_SECRET);
+                let (session_key, _) = handler
+                    .handle_auth_done(built.payload, GLOBAL_ID, SECURE)
+                    .unwrap();
+                assert_eq!(session_key.unwrap(), new_auth.secret);
+                let (key, secret_id) = stored(&handler, EntityType::AUTH);
+                assert_eq!(key.secret, new_auth.secret);
+                assert_eq!(secret_id, 77);
+            }
+        }
+
+        #[test]
+        fn primary_ticket_blob_without_a_previous_key_fails() {
+            for t in KEY_TYPES {
+                let client_key = random_key(t);
+                let auth = random_key(t);
+                let mut handler = CephXClientHandler::new("client.admin", AuthMode::Mon).unwrap();
+                handler.set_secret_key(client_key.clone());
+                let sealed = ticket_info(EntityType::AUTH, &client_key, &auth, 77, Some(&auth));
+                let built = build_with(sealed, &auth, &[], &CONNECTION_SECRET);
+                let err = handler
+                    .handle_auth_done(built.payload, GLOBAL_ID, SECURE)
+                    .unwrap_err()
+                    .to_string();
+                assert!(err.contains("no previous session key"), "{err}");
+            }
+        }
+
+        fn principal_reply(status: i32, request_type: u16, tickets: &[ServiceTicketInfo]) -> Bytes {
+            let mut bl = BytesMut::new();
+            CephXResponseHeader {
+                request_type,
+                status,
+            }
+            .encode(&mut bl, 0)
+            .unwrap();
+            bl.extend_from_slice(&ticket_list(tickets));
+            bl.freeze()
+        }
+
+        fn stored_services(handler: &CephXClientHandler) -> Vec<u32> {
+            let mut services: Vec<u32> = handler
+                .get_session()
+                .unwrap()
+                .ticket_handlers
+                .keys()
+                .map(|s| s.bits())
+                .collect();
+            services.sort();
+            services
+        }
+
+        #[test]
+        fn principal_reply_replaces_service_tickets() {
+            use crate::auth::protocol::CEPHX_GET_PRINCIPAL_SESSION_KEY;
+            for t in KEY_TYPES {
+                let (mut handler, keys) =
+                    authenticate(t, t, &[(EntityType::OSD, t), (EntityType::MGR, t)]);
+                let services_before = stored_services(&handler);
+                let auth = keys[&EntityType::AUTH.bits()].clone();
+                let old_osd = keys[&EntityType::OSD.bits()].clone();
+                let new_osd = random_key(t);
+                let new_mgr = random_key(t);
+
+                let reply = principal_reply(
+                    0,
+                    CEPHX_GET_PRINCIPAL_SESSION_KEY,
+                    &[
+                        ticket_info(EntityType::OSD, &auth, &new_osd, 55, None),
+                        // A sealed blob opens with the previous MGR key.
+                        ticket_info(
+                            EntityType::MGR,
+                            &auth,
+                            &new_mgr,
+                            56,
+                            Some(&keys[&EntityType::MGR.bits()]),
+                        ),
+                    ],
+                );
+                assert_eq!(
+                    handler.handle_principal_reply(reply).unwrap(),
+                    EntityType::OSD | EntityType::MGR
+                );
+
+                assert_eq!(stored_services(&handler), services_before);
+                let (key, secret_id) = stored(&handler, EntityType::OSD);
+                assert_eq!(key.crypto_type, new_osd.crypto_type);
+                assert_eq!(key.secret, new_osd.secret);
+                assert_ne!(key.secret, old_osd.secret);
+                assert_eq!(secret_id, 55);
+                let (key, secret_id) = stored(&handler, EntityType::MGR);
+                assert_eq!(key.secret, new_mgr.secret);
+                assert_eq!(secret_id, 56);
+                let (key, _) = stored(&handler, EntityType::AUTH);
+                assert_eq!(key.secret, auth.secret);
+            }
+        }
+
+        #[test]
+        fn principal_reply_of_another_type_is_ignored() {
+            let (mut handler, keys) = authenticate(
+                KeyType::Aes,
+                KeyType::Aes,
+                &[(EntityType::OSD, KeyType::Aes)],
+            );
+            let auth = keys[&EntityType::AUTH.bits()].clone();
+            let reply = principal_reply(
+                0,
+                CEPHX_GET_AUTH_SESSION_KEY,
+                &[ticket_info(
+                    EntityType::OSD,
+                    &auth,
+                    &random_key(KeyType::Aes),
+                    55,
+                    None,
+                )],
+            );
+            assert!(handler.handle_principal_reply(reply).unwrap().is_empty());
+            let (key, _) = stored(&handler, EntityType::OSD);
+            assert_eq!(key.secret, keys[&EntityType::OSD.bits()].secret);
+        }
+
+        #[test]
+        fn principal_reply_with_an_error_status_fails() {
+            use crate::auth::protocol::CEPHX_GET_PRINCIPAL_SESSION_KEY;
+            let (mut handler, _) = authenticate(KeyType::Aes, KeyType::Aes, &[]);
+            let reply = principal_reply(-13, CEPHX_GET_PRINCIPAL_SESSION_KEY, &[]);
+            assert!(handler.handle_principal_reply(reply).is_err());
+        }
+
+        #[test]
+        fn invalidation_leaves_auth_valid_and_keeps_blobs() {
+            let (mut handler, _) = authenticate(
+                KeyType::Aes256Krb5,
+                KeyType::Aes256Krb5,
+                &[
+                    (EntityType::OSD, KeyType::Aes256Krb5),
+                    (EntityType::MGR, KeyType::Aes),
+                ],
+            );
+            assert!(handler.service_keys_due().is_empty());
+
+            handler.invalidate_service_tickets();
+
+            let session = handler.get_session().unwrap();
+            for (service, th) in &session.ticket_handlers {
+                assert_eq!(th.need_key(), *service != EntityType::AUTH, "{service:?}");
+                assert!(th.ticket_blob.is_some(), "{service:?}");
+            }
+            assert_eq!(
+                handler.service_keys_due(),
+                EntityType::OSD | EntityType::MGR
+            );
+        }
+
+        #[test]
+        fn renewal_request_never_asks_for_auth() {
+            let (mut handler, _) = authenticate(
+                KeyType::Aes,
+                KeyType::Aes,
+                &[
+                    (EntityType::OSD, KeyType::Aes),
+                    (EntityType::MGR, KeyType::Aes),
+                ],
+            );
+            for th in handler
+                .get_session_mut()
+                .unwrap()
+                .ticket_handlers
+                .values_mut()
+            {
+                th.renew_after = Some(std::time::UNIX_EPOCH);
+            }
+            let needed = handler.service_keys_due();
+            assert_eq!(needed, EntityType::OSD | EntityType::MGR);
+
+            // The request ends with CephXServiceTicketRequest: struct_v, keys.
+            let request = handler
+                .build_ticket_renewal_request(GLOBAL_ID, needed)
+                .unwrap();
+            let keys = u32::from_le_bytes(request[request.len() - 4..].try_into().unwrap());
+            assert_eq!(keys, (EntityType::OSD | EntityType::MGR).bits());
+            assert_eq!(keys & EntityType::AUTH.bits(), 0);
+        }
     }
 }
