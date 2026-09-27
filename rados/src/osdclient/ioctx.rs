@@ -4,17 +4,25 @@
 //! object operations (create, read, write, stat, delete) and object listing.
 
 use bytes::Bytes;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::Denc;
 use crate::osdclient::client::OSDClient;
 use crate::osdclient::error::{OSDClientError, Result};
-use crate::osdclient::operation::OpBuilder;
+use crate::osdclient::omap::{
+    OmapKeySet, OmapKeys, OmapMap, OmapVals, decode_omap_keys, decode_omap_vals,
+    decode_omap_vals_by_keys,
+};
+use crate::osdclient::operation::{BuiltOp, OpBuilder};
 use crate::osdclient::snapshot::SnapId;
 use crate::osdclient::types::{
-    OSDOp, OsdOpFlags, ReadResult, SparseReadResult, StatResult, WriteResult,
+    AllocHintFlags, OSDOp, OpResult, OsdOpFlags, ReadResult, SparseReadResult, StatResult,
+    WriteResult,
 };
+use crate::osdclient::watch::{NotifyResult, Watcher};
+use crate::osdclient::watchers::{WatchItem, decode_list_watchers};
 
 /// Maximum entries per PGLS request for object listing pagination
 const MAX_ENTRIES_PER_REQUEST: usize = 100;
@@ -270,6 +278,46 @@ impl IoCtx {
         })
     }
 
+    /// Zero the bytes `[offset, offset + length)` of an object
+    ///
+    /// Like [`write`](Self::write) this does not truncate. A missing object
+    /// stays missing: the OSD treats the op as a no-op, not as `ENOENT`.
+    pub async fn zero(&self, oid: &str, offset: u64, length: u64) -> Result<WriteResult> {
+        debug!(
+            "Zeroing {} bytes of object {} at offset {}",
+            length, oid, offset
+        );
+
+        let op = OpBuilder::new().zero(offset, length).build();
+        let result = self.execute(oid, op).await?;
+        OSDClient::check_op_result(&result, "zero")?;
+        Ok(WriteResult {
+            version: result.version,
+        })
+    }
+
+    /// Hint the OSD about an object's expected size and access pattern, as
+    /// `rados_set_alloc_hint2` does. Creates the object if it does not exist.
+    pub async fn set_alloc_hint(
+        &self,
+        oid: &str,
+        expected_object_size: u64,
+        expected_write_size: u64,
+        flags: AllocHintFlags,
+    ) -> Result<()> {
+        debug!(
+            "Setting alloc hint on object {} in pool {}: {:?}",
+            oid, self.pool_id, flags
+        );
+
+        let op = OpBuilder::new()
+            .set_alloc_hint(expected_object_size, expected_write_size, flags)
+            .build();
+        let result = self.execute(oid, op).await?;
+        OSDClient::check_op_result(&result, "set_alloc_hint")?;
+        Ok(())
+    }
+
     /// Read data from an object
     ///
     /// # Arguments
@@ -383,7 +431,9 @@ impl IoCtx {
         Ok(())
     }
 
-    /// List objects in the pool with pagination
+    /// List the names of objects in this context's namespace, or in every
+    /// namespace when the namespace is
+    /// [`ALL_NSPACES`](crate::osdclient::ALL_NSPACES), with pagination.
     ///
     /// # Arguments
     ///
@@ -403,10 +453,7 @@ impl IoCtx {
             self.pool_id, cursor, max_entries
         );
 
-        let result = self
-            .client
-            .list(self.pool_id, cursor, max_entries as u64)
-            .await?;
+        let result = self.list_object_entries(cursor, max_entries).await?;
 
         // Extract object names from entries
         let object_names: Vec<String> = result.entries.into_iter().map(|entry| entry.oid).collect();
@@ -414,14 +461,28 @@ impl IoCtx {
         Ok((object_names, result.cursor))
     }
 
-    /// List all objects in the pool
+    /// As [`IoCtx::list_objects`], returning each entry's namespace, name
+    /// and locator key, which tells one name in two namespaces apart under
+    /// [`ALL_NSPACES`](crate::osdclient::ALL_NSPACES).
+    pub async fn list_object_entries(
+        &self,
+        cursor: Option<String>,
+        max_entries: usize,
+    ) -> Result<crate::osdclient::types::ListResult> {
+        self.client
+            .list_in_namespace(self.pool_id, &self.namespace, cursor, max_entries as u64)
+            .await
+    }
+
+    /// List all objects in this context's namespace
     ///
-    /// This method automatically handles pagination and returns all objects in the pool.
-    /// It's equivalent to the C++ librados `ls` command.
+    /// This method automatically handles pagination and returns all objects in the
+    /// namespace, as [`IoCtx::list_objects`] does. It's equivalent to the C++
+    /// librados `ls` command.
     ///
     /// # Returns
     ///
-    /// Returns a vector of all object names in the pool
+    /// Returns a vector of all object names in the namespace
     ///
     /// # Example
     ///
@@ -576,6 +637,7 @@ impl IoCtx {
         let op = OpBuilder::new().op(OSDOp::get_xattr(name_str)?).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattr")?;
 
         Ok(result.first_outdata()?.clone())
     }
@@ -604,7 +666,8 @@ impl IoCtx {
             .op(OSDOp::set_xattr(name_str, value)?)
             .build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "set_xattr")?;
         Ok(())
     }
 
@@ -628,11 +691,16 @@ impl IoCtx {
 
         let op = OpBuilder::new().op(OSDOp::remove_xattr(name_str)?).build();
 
-        self.execute(&oid_str, op).await?;
+        let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "remove_xattr")?;
         Ok(())
     }
 
-    /// List all extended attribute names for an object
+    /// Get all extended attributes of an object, as `rados_getxattrs` does
+    ///
+    /// The OSD answers `CEPH_OSD_OP_GETXATTRS` with an encoded
+    /// `map<string, bufferlist>`: a u32 entry count, then per entry a
+    /// length-prefixed name and a length-prefixed value.
     ///
     /// # Arguments
     ///
@@ -640,21 +708,291 @@ impl IoCtx {
     ///
     /// # Returns
     ///
-    /// Vector of attribute names
-    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+    /// Map from attribute name to attribute value
+    pub async fn get_xattrs(&self, oid: impl Into<String>) -> Result<BTreeMap<String, Bytes>> {
         let oid_str = oid.into();
         debug!(
-            "Listing xattrs for object '{}' in pool {}",
+            "Getting xattrs for object '{}' in pool {}",
             oid_str, self.pool_id
         );
 
         let op = OpBuilder::new().op(OSDOp::list_xattrs()).build();
 
         let result = self.execute(&oid_str, op).await?;
+        OSDClient::check_op_result(&result, "get_xattrs")?;
 
-        // Parse outdata as list of strings
-        let mut data = &result.first_outdata()?[..];
-        Ok(Vec::<String>::decode(&mut data, 0)?)
+        decode_xattrs(result.first_outdata()?)
+    }
+
+    /// List all extended attribute names for an object
+    ///
+    /// Issues the same op as [`get_xattrs`](Self::get_xattrs) and discards the
+    /// values.
+    ///
+    /// # Arguments
+    ///
+    /// * `oid` - Object identifier
+    ///
+    /// # Returns
+    ///
+    /// Attribute names in ascending order
+    pub async fn list_xattrs(&self, oid: impl Into<String>) -> Result<Vec<String>> {
+        Ok(self.get_xattrs(oid).await?.into_keys().collect())
+    }
+
+    /// List the clients watching an object, as `rados_list_watchers` does.
+    pub async fn list_watchers(&self, oid: impl Into<String>) -> Result<Vec<WatchItem>> {
+        let oid = oid.into();
+        debug!(
+            "Listing watchers of object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().list_watchers().build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "list_watchers")?;
+        decode_list_watchers(result.first_reply()?)
+    }
+
+    /// Watch `oid` with the OSD's default watch timeout
+    /// (`osd_client_watch_timeout`, 30 s), as `rados_watch2` does.
+    /// `ENOENT` if the object does not exist.
+    pub async fn watch(&self, oid: impl Into<String>) -> Result<Watcher> {
+        self.watch_with_timeout(oid, 0).await
+    }
+
+    /// Watch `oid`; the OSD drops the watch if it goes `timeout_secs`
+    /// without a ping (0 for the OSD's default), as `rados_watch3` does.
+    pub async fn watch_with_timeout(
+        &self,
+        oid: impl Into<String>,
+        timeout_secs: u32,
+    ) -> Result<Watcher> {
+        let oid = oid.into();
+        debug!("Watching object '{}' in pool {}", oid, self.pool_id);
+        let (linger, events) = self
+            .client
+            .linger_watch(self.object_id(&oid), timeout_secs)
+            .await?;
+        Ok(Watcher::new(Arc::clone(&self.client), linger, events))
+    }
+
+    /// Notify `oid`'s watchers with `payload` and wait until each acks or
+    /// the notify times out: `timeout_ms` of 0 means librados's default of
+    /// ten seconds. A timed-out notify is `Ok` with `timed_out` set and the
+    /// watchers that missed it, as librados hands back the reply whatever
+    /// the code. `ENOENT` if the object does not exist.
+    pub async fn notify(
+        &self,
+        oid: impl Into<String>,
+        payload: Bytes,
+        timeout_ms: u64,
+    ) -> Result<NotifyResult> {
+        let oid = oid.into();
+        debug!("Notifying object '{}' in pool {}", oid, self.pool_id);
+        self.client
+            .notify(self.object_id(&oid), payload, timeout_ms)
+            .await
+    }
+
+    /// This client's global id, which watchers see as a notify's
+    /// `notifier_gid` and notifiers as an ack's `gid`
+    /// (`rados_get_instance_id`).
+    pub fn instance_id(&self) -> u64 {
+        self.client.global_id()
+    }
+
+    /// Close this client's session to `oid`'s current primary, as a
+    /// connection reset would. A test aid for the watch reconnect path.
+    pub async fn close_primary_session_for_test(&self, oid: impl Into<String>) -> Result<()> {
+        let osd = self
+            .client
+            .primary_osd(&self.object_id(&oid.into()))
+            .await?;
+        self.client.close_session_for_test(osd).await;
+        Ok(())
+    }
+
+    /// List omap keys after `start_after`.
+    ///
+    /// `max_return` of 0 returns no entries; pass a positive limit, which
+    /// the OSD caps at its configured maximum and reports through `more`.
+    /// See [`OSDOp::omap_get_keys`] for the full semantics.
+    pub async fn omap_get_keys(
+        &self,
+        oid: impl Into<String>,
+        start_after: &[u8],
+        max_return: u64,
+    ) -> Result<OmapKeys> {
+        let oid = oid.into();
+        debug!(
+            "Listing omap keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .omap_get_keys(start_after, max_return)?
+            .build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_keys")?;
+        decode_omap_keys(result.first_reply()?)
+    }
+
+    /// List omap entries after `start_after` whose key starts with `filter_prefix`.
+    ///
+    /// `max_return` of 0 returns no entries; pass a positive limit, which
+    /// the OSD caps at its configured maximum and reports through `more`.
+    /// See [`OSDOp::omap_get_vals`] for the full semantics.
+    pub async fn omap_get_vals(
+        &self,
+        oid: impl Into<String>,
+        start_after: &[u8],
+        max_return: u64,
+        filter_prefix: &[u8],
+    ) -> Result<OmapVals> {
+        let oid = oid.into();
+        debug!(
+            "Listing omap values for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new()
+            .omap_get_vals(start_after, max_return, filter_prefix)?
+            .build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_vals")?;
+        decode_omap_vals(result.first_reply()?)
+    }
+
+    /// Get omap values for exactly the given `keys` (missing keys are simply absent).
+    pub async fn omap_get_vals_by_keys(
+        &self,
+        oid: impl Into<String>,
+        keys: &OmapKeySet,
+    ) -> Result<OmapMap> {
+        let oid = oid.into();
+        debug!(
+            "Getting omap values by keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_get_vals_by_keys(keys)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_vals_by_keys")?;
+        decode_omap_vals_by_keys(result.first_reply()?)
+    }
+
+    /// Get the object's omap header (separate from its key/value entries).
+    pub async fn omap_get_header(&self, oid: impl Into<String>) -> Result<Bytes> {
+        let oid = oid.into();
+        debug!(
+            "Getting omap header for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_get_header().build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_get_header")?;
+        Ok(result.first_outdata()?.clone())
+    }
+
+    /// Set (insert or overwrite) omap entries.
+    pub async fn omap_set(&self, oid: impl Into<String>, vals: &OmapMap) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Setting omap entries for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_set(vals)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_set")
+    }
+
+    /// Set the object's omap header. The header is raw bytes, not length-prefixed.
+    pub async fn omap_set_header(&self, oid: impl Into<String>, header: Bytes) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Setting omap header for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_set_header(header).build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_set_header")
+    }
+
+    /// Remove all omap entries (but not the header).
+    pub async fn omap_clear(&self, oid: impl Into<String>) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Clearing omap entries for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_clear().build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_clear")
+    }
+
+    /// Remove the given omap `keys`.
+    pub async fn omap_rm_keys(&self, oid: impl Into<String>, keys: &OmapKeySet) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Removing omap keys for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_rm_keys(keys)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_rm_keys")
+    }
+
+    /// Remove omap keys in `[begin, end)`.
+    pub async fn omap_rm_range(
+        &self,
+        oid: impl Into<String>,
+        begin: &[u8],
+        end: &[u8],
+    ) -> Result<()> {
+        let oid = oid.into();
+        debug!(
+            "Removing omap key range for object '{}' in pool {}",
+            oid, self.pool_id
+        );
+
+        let op = OpBuilder::new().omap_rm_range(begin, end)?.build();
+        let result = self.execute(&oid, op).await?;
+        OSDClient::check_op_result(&result, "omap_rm_range")
+    }
+
+    /// Execute a built, possibly compound, operation on `oid`.
+    ///
+    /// Only checks the overall result and the first op's return code (via
+    /// `check_op_result`, where a negative code is the failure); return
+    /// codes of later ops in a compound operation are the caller's to
+    /// inspect in the returned [`OpResult`].
+    pub async fn execute_op(&self, oid: impl Into<String>, op: BuiltOp) -> Result<OpResult> {
+        let result = self.execute_op_unchecked(oid, op).await?;
+        OSDClient::check_op_result(&result, "execute_op")?;
+        Ok(result)
+    }
+
+    /// Execute a built operation on `oid` and return the reply whatever
+    /// its result codes; only a failure to get a reply is an error.
+    ///
+    /// For methods that answer a negative result together with a reply
+    /// the caller must read, such as `cls_rgw`'s `bucket_list` and its
+    /// `EFBIG`.
+    pub async fn execute_op_unchecked(
+        &self,
+        oid: impl Into<String>,
+        op: BuiltOp,
+    ) -> Result<OpResult> {
+        let oid = oid.into();
+        debug!("Executing op for object '{}' in pool {}", oid, self.pool_id);
+
+        self.execute(&oid, op).await
     }
 
     // ---- Pool-level snapshot operations ----
@@ -778,5 +1116,27 @@ impl Clone for IoCtx {
             locator_key: self.locator_key.clone(),
             extra_op_flags: self.extra_op_flags,
         }
+    }
+}
+
+/// Decode a `CEPH_OSD_OP_GETXATTRS` reply, an encoded `map<string, bufferlist>`.
+fn decode_xattrs(mut data: &[u8]) -> Result<BTreeMap<String, Bytes>> {
+    Ok(BTreeMap::<String, Bytes>::decode(&mut data, 0)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_xattrs_reads_name_to_value_map() {
+        let outdata = [
+            1, 0, 0, 0, // entry count
+            6, 0, 0, 0, b'u', b's', b'e', b'r', b'.', b'x', // name
+            1, 0, 0, 0, b'1', // value
+        ];
+        let got = decode_xattrs(&outdata).unwrap();
+        let want = BTreeMap::from([("user.x".to_owned(), Bytes::from_static(b"1"))]);
+        assert_eq!(got, want);
     }
 }
