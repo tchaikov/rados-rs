@@ -103,11 +103,13 @@ async fn parse_pool(
     Err(format!("Pool '{pool}' not found in OSDMap").into())
 }
 
-/// Create pool via monitor command if it doesn't already exist.
+/// Create pool via monitor command if it doesn't already exist, with a
+/// fixed 32 PGs and the autoscaler off: on Squid a pool created without
+/// `pg_num` starts at 1 PG and the autoscaler splits it to 32 while the
+/// tests run.
 async fn ensure_pool_exists(mon_client: &Arc<rados::monclient::MonClient>, pool_name: &str) {
     let cmd = vec![format!(
-        r#"{{"prefix": "osd pool create", "pool": "{}"}}"#,
-        pool_name
+        r#"{{"prefix": "osd pool create", "pool": "{pool_name}", "pg_num": 32, "pgp_num": 32, "autoscale_mode": "off"}}"#
     )];
     let result = mon_client
         .invoke(cmd, Bytes::new())

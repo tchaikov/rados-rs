@@ -178,12 +178,26 @@ impl VersionedEncode for MonInfo {
 
 crate::denc::impl_denc_for_versioned!(MonInfo);
 
+/// The monitor map's cephx settings (MonMap v10, Ceph v19.2.6 and v20.2.4+).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct MonMapAuth {
+    /// Raised by `ceph auth wipe-rotating-service-keys`; clients then drop
+    /// their service tickets.
+    pub epoch: u32,
+    /// Key type of new rotating service keys (`CEPH_CRYPTO_*`).
+    pub service_cipher: i32,
+    /// Key types an entity's key may have, sorted.
+    pub allowed_ciphers: Vec<i32>,
+    /// Key type of new entity keys.
+    pub preferred_cipher: i32,
+}
+
 /// Monitor map (MonMap in C++)
 /// Version 9 encoding format
 ///
 /// ## Supported Versions
-/// - **Encoding**: v9 (current Quincy+ layout)
-/// - **Decoding**: v6-v9 (modern format with ranks)
+/// - **Encoding**: v9 (current Quincy+ layout); `auth` is not encoded
+/// - **Decoding**: v6-v10 (modern format with ranks)
 ///
 /// ## Version History
 /// - v1: Legacy format with entity_inst_t (not supported)
@@ -193,6 +207,7 @@ crate::denc::impl_denc_for_versioned!(MonInfo);
 /// - v7: Added min_mon_release
 /// - v8: Added removed_ranks, strategy, and disallowed_leaders
 /// - v9: Added stretch mode fields (stretch_mode_enabled, tiebreaker_mon, stretch_marked_down_mons)
+/// - v10: Added the cephx fields in [`MonMapAuth`]
 ///
 /// The implementation focuses on modern formats (v6+) as these are used in
 /// all actively supported Ceph releases (Quincy and later).
@@ -213,6 +228,9 @@ pub struct MonMap {
     pub stretch_mode_enabled: bool,
     pub tiebreaker_mon: String,
     pub stretch_marked_down_mons: Vec<String>,
+    /// Present when the map was decoded from v10 or later.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth: Option<MonMapAuth>,
 }
 
 impl VersionedEncode for MonMap {
@@ -304,6 +322,17 @@ impl VersionedEncode for MonMap {
             (false, String::new(), Vec::new())
         };
 
+        let auth = if version >= 10 {
+            Some(MonMapAuth {
+                epoch: <u32 as Denc>::decode(buf, features)?,
+                service_cipher: <i32 as Denc>::decode(buf, features)?,
+                allowed_ciphers: <Vec<i32> as Denc>::decode(buf, features)?,
+                preferred_cipher: <i32 as Denc>::decode(buf, features)?,
+            })
+        } else {
+            None
+        };
+
         Ok(MonMap {
             fsid,
             epoch,
@@ -320,6 +349,7 @@ impl VersionedEncode for MonMap {
             stretch_mode_enabled,
             tiebreaker_mon,
             stretch_marked_down_mons,
+            auth,
         })
     }
 
@@ -427,5 +457,64 @@ mod tests {
 
         assert_eq!(buf[0], MONMAP_ENCODING_VERSION);
         assert_eq!(buf[1], MONMAP_COMPAT_VERSION);
+    }
+
+    fn sample_monmap() -> MonMap {
+        MonMap {
+            epoch: crate::denc::ids::Epoch::new(7),
+            fsid: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+            ranks: vec![],
+            ..Default::default()
+        }
+    }
+
+    /// `monmap` encoded at v9 with the v10 fields appended in
+    /// `MonMap.cc`'s order and the header patched to v10, compat 6.
+    fn v10_bytes(monmap: &MonMap) -> BytesMut {
+        let mut buf = BytesMut::new();
+        monmap.encode(&mut buf, u64::MAX).unwrap();
+        assert_eq!(buf[0], 9);
+        3u32.encode(&mut buf, 0).unwrap();
+        2i32.encode(&mut buf, 0).unwrap();
+        vec![1i32, 2].encode(&mut buf, 0).unwrap();
+        2i32.encode(&mut buf, 0).unwrap();
+        buf[0] = 10;
+        buf[1] = 6;
+        let len = (buf.len() - 6) as u32;
+        buf[2..6].copy_from_slice(&len.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn test_monmap_v10_decodes_auth() {
+        let monmap = sample_monmap();
+        let decoded = MonMap::decode(&mut v10_bytes(&monmap).freeze(), u64::MAX).unwrap();
+        assert_eq!(decoded.epoch, monmap.epoch);
+        assert_eq!(
+            decoded.auth,
+            Some(MonMapAuth {
+                epoch: 3,
+                service_cipher: 2,
+                allowed_ciphers: vec![1, 2],
+                preferred_cipher: 2,
+            })
+        );
+    }
+
+    #[test]
+    fn test_monmap_v9_has_no_auth_and_encodes_v9() {
+        let mut monmap =
+            MonMap::decode(&mut v10_bytes(&sample_monmap()).freeze(), u64::MAX).unwrap();
+        assert!(monmap.auth.is_some());
+
+        let mut buf = BytesMut::new();
+        monmap.encode(&mut buf, u64::MAX).unwrap();
+        assert_eq!(buf[0], MONMAP_ENCODING_VERSION);
+        let reencoded = MonMap::decode(&mut buf.freeze(), u64::MAX).unwrap();
+        assert_eq!(reencoded.auth, None);
+
+        monmap.auth = None;
+        let json = serde_json::to_value(&monmap).unwrap();
+        assert!(json.get("auth").is_none(), "{json}");
     }
 }
