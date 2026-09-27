@@ -1,6 +1,8 @@
 use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
+use rados::crush::hash::CEPH_STR_HASH_RJENKINS;
 use rados::crush::{
-    BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, RuleOp, RuleType,
+    BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, ObjectLocator,
+    RuleOp, RuleType,
 };
 use rados::osdclient::osdmap::{OSDMap, PgId, PgPool};
 use rados::osdclient::types::PoolFlags;
@@ -58,12 +60,22 @@ fn create_test_osdmap(num_osds: usize, replica_count: usize) -> OSDMap {
     let pool = PgPool {
         size: replica_count as u8,
         crush_rule: 0,
+        object_hash: CEPH_STR_HASH_RJENKINS,
         pg_num: 256,
         flags: PoolFlags::HASHPSPOOL.bits(),
         ..Default::default()
     };
     osdmap.pools.insert(1, pool);
     osdmap
+}
+
+fn object_to_osds(osdmap: &OSDMap, pool: u64, name: &str) -> Vec<i32> {
+    let raw = osdmap
+        .object_locator_to_pg(name, &ObjectLocator::new(pool))
+        .unwrap();
+    osdmap
+        .pg_to_osds(&osdmap.raw_pg_to_pg(raw).unwrap())
+        .unwrap()
 }
 
 fn bench_pg_to_osds_cache_hit(c: &mut Criterion) {
@@ -110,13 +122,13 @@ fn bench_object_to_osds_warm_batch(c: &mut Criterion) {
     let object_names: Vec<String> = (0..128).map(|i| format!("object-{i}")).collect();
 
     for name in &object_names {
-        osdmap.object_to_osds(1, name).unwrap();
+        object_to_osds(&osdmap, 1, name);
     }
 
     group.bench_function("object_to_osds_warm_batch_128", |b| {
         b.iter(|| {
             for name in &object_names {
-                let osds = osdmap.object_to_osds(1, black_box(name)).unwrap();
+                let osds = object_to_osds(&osdmap, 1, black_box(name));
                 black_box(osds);
             }
         });

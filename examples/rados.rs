@@ -111,14 +111,14 @@ async fn main() -> Result<()> {
     let mon_addrs: Vec<String> = if let Some(mon_host) = cli.mon_host {
         mon_host.split(',').map(|s| s.trim().to_string()).collect()
     } else if let Some(ref config) = ceph_config {
-        config.mon_addrs().unwrap_or_default()
+        config.mon_addrs_for(&cli.name).unwrap_or_default()
     } else {
         Vec::new()
     };
 
     let dns_srv_name = ceph_config
         .as_ref()
-        .map(|c| c.mon_dns_srv_name())
+        .map(|c| c.mon_dns_srv_name_for(&cli.name))
         .unwrap_or_else(|| "ceph-mon".to_string());
 
     info!("Connecting to monitors: {:?}", mon_addrs);
@@ -126,7 +126,7 @@ async fn main() -> Result<()> {
     let keyring_path = if let Some(keyring) = cli.keyring {
         keyring
     } else if let Some(ref config) = ceph_config {
-        config.keyring().unwrap_or_else(|_| {
+        config.keyring_for(&cli.name).unwrap_or_else(|_| {
             debug!("Keyring not found in ceph.conf, using default");
             "/etc/ceph/keyring".to_string()
         })

@@ -90,6 +90,40 @@ ms_dispatch_throttle_bytes = {input}
 }
 
 #[test]
+fn test_from_ceph_conf_reads_the_entity_section_first() {
+    let temp_dir = TempDir::new().unwrap();
+    let conf_path = temp_dir.path().join("ceph.conf");
+
+    fs::write(
+        &conf_path,
+        r#"
+[global]
+ms_dispatch_throttle_bytes = 1M
+[client]
+ms_dispatch_throttle_bytes = 2M
+[client.rgw.x]
+ms_dispatch_throttle_bytes = 3M
+"#,
+    )
+    .unwrap();
+    let path = conf_path.to_str().unwrap();
+
+    let admin = ConnectionConfig::from_ceph_conf(path).expect("Failed to load config");
+    assert_eq!(
+        admin.throttle_config.unwrap().max_bytes_per_sec,
+        2 * 1024 * 1024
+    );
+
+    let rgw = ConnectionConfig::from_ceph_conf_for(path, "client.rgw.x".parse().unwrap())
+        .expect("Failed to load config");
+    assert_eq!(rgw.entity_name.to_string(), "client.rgw.x");
+    assert_eq!(
+        rgw.throttle_config.unwrap().max_bytes_per_sec,
+        3 * 1024 * 1024
+    );
+}
+
+#[test]
 fn test_with_ceph_default_throttle() {
     let config = ConnectionConfig::default().with_ceph_default_throttle();
 
