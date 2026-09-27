@@ -25,6 +25,7 @@
 //! # Ok::<(), crate::auth::CephXError>(())
 //! ```
 
+pub(crate) mod aes256krb5;
 pub mod client;
 pub mod error;
 pub mod keyring;
@@ -50,6 +51,7 @@ pub use server::CephXServerHandler;
 
 // Common auth types
 pub use types::{
-    AuthCapsInfo, AuthTicket, CEPH_CRYPTO_AES, CephXServiceTicketInfo, CephXSession,
-    CephXTicketBlob, CryptoKey, EntityType, TicketHandler,
+    AuthCapsInfo, AuthTicket, CEPH_CRYPTO_AES, CEPH_CRYPTO_AES256KRB5, CEPH_CRYPTO_NONE,
+    CephXServiceTicketInfo, CephXSession, CephXTicketBlob, CryptoKey, EntityType, KeyType,
+    TicketHandler,
 };

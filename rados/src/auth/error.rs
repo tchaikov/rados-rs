@@ -23,6 +23,9 @@ pub enum CephXError {
     #[error("Codec error: {0}")]
     Codec(#[from] crate::denc::CodecError),
 
+    #[error("unsupported cephx key type {0} (supported: none=0, aes=1, aes256k=2)")]
+    UnsupportedKeyType(u16),
+
     #[error("Time error: {0}")]
     TimeError(String),
 }

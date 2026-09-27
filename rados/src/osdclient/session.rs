@@ -97,6 +97,21 @@ impl AtomicConnectionState {
     }
 }
 
+/// Tell the client that the session to `osd_id` ended, if it was ever
+/// published. Returns whether the client took the report.
+pub(crate) fn report_reset(
+    published: &AtomicBool,
+    client: &std::sync::Weak<crate::osdclient::client::OSDClient>,
+    osd_id: i32,
+) -> bool {
+    if !published.load(Ordering::Acquire) {
+        return false;
+    }
+    client
+        .upgrade()
+        .is_some_and(|client| client.on_session_reset(osd_id))
+}
+
 /// Context passed to the I/O task
 struct IoTaskContext {
     osd_id: i32,
@@ -107,6 +122,8 @@ struct IoTaskContext {
     conn_state: Arc<AtomicConnectionState>,
     /// Shutdown token for graceful termination
     shutdown_token: tokio_util::sync::CancellationToken,
+    /// Set once the session is in `OSDClient::sessions`.
+    published: Arc<AtomicBool>,
 }
 
 /// Per-OSD connection and request tracking
@@ -179,6 +196,11 @@ pub struct OSDSession {
     /// Initialized to a fresh (uncancelled) token in `new()` and replaced
     /// with a proper child token in `connect()`.
     io_loop_token: tokio_util::sync::CancellationToken,
+    /// Set by `mark_published` when the client inserts this session into
+    /// its map. Only a published session's end is reported as a reset: a
+    /// session that lost a `get_or_create_session` race and is closed
+    /// unused carries nothing to re-send.
+    published: Arc<AtomicBool>,
 }
 
 /// Tracking information for a pending operation
@@ -210,6 +232,12 @@ pub(crate) struct PendingOp {
     /// Used to detect and prevent infinite redirect loops.
     /// Reference: Ceph has FIXME comment but no implementation (Objecter.cc:3741)
     pub redirect_count: u32,
+    /// Whether a map change or a session reset re-sends the op. A linger
+    /// send (registration, reconnect, notify) and a watch ping are not
+    /// re-sent: the linger layer sends a fresh op for them, so the old one
+    /// is cancelled instead, as Objecter clears `Op::should_resend` for
+    /// them (v19.2.2:src/osdc/Objecter.cc:583, 715).
+    pub should_resend: bool,
 }
 
 impl OSDSession {
@@ -250,6 +278,7 @@ impl OSDSession {
             io_task_handle: Mutex::new(None),
             // Placeholder; replaced with a proper child token in connect().
             io_loop_token: tokio_util::sync::CancellationToken::new(),
+            published: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -365,6 +394,7 @@ impl OSDSession {
             client: self.client.clone(),
             conn_state: Arc::clone(&self.conn_state),
             shutdown_token: self.io_loop_token.clone(),
+            published: Arc::clone(&self.published),
         };
         // IMPORTANT: Keep a clone of send_tx alive in the io_task to prevent premature channel closure.
         // The mpsc channel closes when all Senders are dropped. By keeping this clone alive for the
@@ -455,7 +485,8 @@ impl OSDSession {
                             }
                         }
                         crate::osdclient::messages::CEPH_MSG_OSD_OPREPLY
-                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF => {
+                        | crate::osdclient::messages::CEPH_MSG_OSD_BACKOFF
+                        | crate::osdclient::messages::CEPH_MSG_WATCH_NOTIFY => {
                             if let Some(client_arc) = client.upgrade() {
                                 if let Err(e) = client_arc.dispatch_from_osd(osd_id, msg).await {
                                     error!(
@@ -532,6 +563,15 @@ impl OSDSession {
                 ctx.osd_id, reason, n
             );
         }
+
+        // Every end of a session, a deliberate close included, passes here
+        // exactly once, so this is the one place that reports the reset.
+        report_reset(&ctx.published, &ctx.client, osd_id);
+    }
+
+    /// Record that the client published this session in its map.
+    pub(crate) fn mark_published(&self) {
+        self.published.store(true, Ordering::Release);
     }
 
     // ===========================================================================
@@ -684,14 +724,76 @@ impl OSDSession {
         Ok(msg)
     }
 
+    /// Track `op` as pending on this session, placed in a map whose pool
+    /// had `pg_num` PGs, and return its reply channel.
+    fn insert_pending(
+        &self,
+        op: Arc<MOSDOp>,
+        priority: i32,
+        pg_num: u32,
+        should_resend: bool,
+    ) -> oneshot::Receiver<Result<OpResult>> {
+        let tid = op.reqid.tid;
+        let (tx, rx) = oneshot::channel();
+        let target = crate::osdclient::types::OpTarget {
+            pg_num,
+            ..crate::osdclient::types::OpTarget::new(
+                op.osdmap_epoch,
+                op.pgid,
+                self.osd_id,
+                vec![self.osd_id],
+            )
+        };
+        self.pending_ops.insert(
+            tid,
+            PendingOp {
+                tid,
+                result_tx: tx,
+                attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
+                osdmap_epoch: op.osdmap_epoch,
+                op,
+                state: crate::osdclient::types::OpState::Queued,
+                target,
+                priority,
+                // Capture current session incarnation
+                // Following Ceph pattern: operation stores incarnation when sent
+                sent_incarnation: self.incarnation.load(Ordering::Acquire),
+                redirect_count: 0,
+                should_resend,
+            },
+        );
+        rx
+    }
+
+    /// [`Self::insert_pending`] for tests, which have no connection to
+    /// send on.
+    #[cfg(test)]
+    pub(crate) fn insert_pending_for_test(
+        &self,
+        op: Arc<MOSDOp>,
+        pg_num: u32,
+        should_resend: bool,
+    ) -> oneshot::Receiver<Result<OpResult>> {
+        self.insert_pending(
+            op,
+            crate::osdclient::messages::CEPH_MSG_PRIO_DEFAULT,
+            pg_num,
+            should_resend,
+        )
+    }
+
     /// Submit an operation to the OSD
     ///
     /// This queues the message for sending (non-blocking, like ceph_con_send)
-    /// Priority is set in the message header (not the MOSDOp payload)
+    /// Priority is set in the message header (not the MOSDOp payload).
+    /// `pg_num` is the op's pool's pg_num in the map it was placed in;
+    /// `should_resend` is [`PendingOp::should_resend`].
     pub async fn submit_op(
         &self,
         op: Arc<MOSDOp>,
         priority: i32,
+        pg_num: u32,
+        should_resend: bool,
     ) -> Result<oneshot::Receiver<Result<OpResult>>> {
         let tid = op.reqid.tid;
 
@@ -703,31 +805,7 @@ impl OSDSession {
             )));
         }
 
-        // Create channel for result
-        let (tx, rx) = oneshot::channel();
-
-        self.pending_ops.insert(
-            tid,
-            PendingOp {
-                tid,
-                result_tx: tx,
-                attempts: 1, // First attempt (matches Linux kernel: r_attempts starts at 1)
-                osdmap_epoch: op.osdmap_epoch,
-                op: op.clone(),
-                state: crate::osdclient::types::OpState::Queued,
-                target: crate::osdclient::types::OpTarget::new(
-                    op.osdmap_epoch,
-                    op.pgid,
-                    self.osd_id,
-                    vec![self.osd_id],
-                ),
-                priority,
-                // Capture current session incarnation
-                // Following Ceph pattern: operation stores incarnation when sent
-                sent_incarnation: self.incarnation.load(Ordering::Acquire),
-                redirect_count: 0,
-            },
-        );
+        let rx = self.insert_pending(Arc::clone(&op), priority, pg_num, should_resend);
 
         // Track operation timeout
         if let Some(tracker) = &self.tracker {
@@ -1023,20 +1101,15 @@ impl OSDSession {
 
     /// Get metadata for all pending operations
     ///
-    /// Returns (tid, pool_id, object_id, osdmap_epoch) for each pending operation.
-    /// Used by OSDClient to determine which operations need rescanning.
-    /// Note: object_id is cloned here, but this is only called during OSDMap updates (infrequent).
-    pub fn get_pending_ops_metadata(&self) -> Vec<(u64, u64, String, u32)> {
+    /// Returns (tid, op, osdmap_epoch, target pg_num) for each pending
+    /// operation. Used by OSDClient to determine which operations need
+    /// rescanning.
+    pub fn get_pending_ops_metadata(&self) -> Vec<(u64, Arc<MOSDOp>, u32, u32)> {
         self.pending_ops
             .iter()
             .map(|entry| {
                 let (tid, op) = entry.pair();
-                (
-                    *tid,
-                    op.op.object.pool,
-                    op.op.object.oid.clone(),
-                    op.osdmap_epoch,
-                )
+                (*tid, Arc::clone(&op.op), op.osdmap_epoch, op.target.pg_num)
             })
             .collect()
     }

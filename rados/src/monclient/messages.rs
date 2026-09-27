@@ -125,6 +125,20 @@ pub struct MMonSubscribeAck {
 
 impl_denc_ceph_message!(MMonSubscribeAck, CEPH_MSG_MON_SUBSCRIBE_ACK, 1);
 
+/// MAuthReply - A monitor's reply to an MAuth request
+/// (`MAuthReply.h`); after authentication, a ticket renewal's result.
+#[derive(Debug, Clone, crate::Denc)]
+#[denc(crate = "crate")]
+pub struct MAuthReply {
+    pub protocol: u32,
+    pub result: i32,
+    pub global_id: u64,
+    pub result_bl: Bytes,
+    pub result_msg: String,
+}
+
+impl_denc_ceph_message!(MAuthReply, crate::msgr2::message::CEPH_MSG_AUTH_REPLY, 1);
+
 /// MMonGetVersion - Query map version
 #[derive(Debug, Clone, crate::Denc)]
 #[denc(crate = "crate")]
@@ -693,6 +707,32 @@ mod tests {
         assert_eq!(decoded.what.len(), 2);
         assert_eq!(decoded.what.get("osdmap").unwrap().start, 10);
         assert_eq!(decoded.what.get("monmap").unwrap().flags, 1);
+    }
+
+    #[test]
+    fn test_auth_reply_decode() {
+        use crate::msgr2::ceph_message::{CephMessagePayload, CephMsgHeader};
+
+        // MAuthReply.h field order: protocol, result, global_id, result_bl,
+        // result_msg.
+        let mut front = BytesMut::new();
+        2u32.encode(&mut front, 0).unwrap();
+        (-13i32).encode(&mut front, 0).unwrap();
+        4242u64.encode(&mut front, 0).unwrap();
+        Bytes::from_static(b"blob").encode(&mut front, 0).unwrap();
+        "denied".to_string().encode(&mut front, 0).unwrap();
+
+        let header = CephMsgHeader::new(MAuthReply::msg_type(), MAuthReply::msg_version(0));
+        let reply = MAuthReply::decode_payload(&header, &front, &[], &[]).unwrap();
+        assert_eq!(
+            MAuthReply::msg_type(),
+            crate::msgr2::message::CEPH_MSG_AUTH_REPLY
+        );
+        assert_eq!(reply.protocol, 2);
+        assert_eq!(reply.result, -13);
+        assert_eq!(reply.global_id, 4242);
+        assert_eq!(reply.result_bl, Bytes::from_static(b"blob"));
+        assert_eq!(reply.result_msg, "denied");
     }
 
     #[test]

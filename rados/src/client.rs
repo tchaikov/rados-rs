@@ -45,7 +45,7 @@ use crate::monclient::{AuthConfig, MOSDMap, MonClient, MonClientConfig, MonClien
 use crate::msgr2::map_channel;
 use crate::osdclient::client::default_client_inc;
 use crate::osdclient::tracker::TrackerConfig;
-use crate::osdclient::{IoCtx, OSDClient, OSDClientConfig, OSDClientError};
+use crate::osdclient::{CephRelease, IoCtx, OSDClient, OSDClientConfig, OSDClientError};
 
 /// Depth of the internal msgr2 map channel used to hand OSDMap updates from
 /// the MonClient receive task to the OSDClient drain task. Sized to absorb a
@@ -127,6 +127,11 @@ impl Client {
         &self.osd_client
     }
 
+    /// See [`OSDClient::require_osd_release`].
+    pub fn require_osd_release(&self) -> Option<CephRelease> {
+        self.osd_client.require_osd_release()
+    }
+
     /// Gracefully shut down both the OSDClient and the MonClient.
     ///
     /// Cancels every background task spawned by the two sub-clients (per-OSD
@@ -171,6 +176,7 @@ pub struct ClientBuilder {
     osdmap_wait_timeout: Duration,
     max_inflight_ops: usize,
     max_inflight_bytes: usize,
+    assume_osd_release: Option<CephRelease>,
 }
 
 impl Default for ClientBuilder {
@@ -187,6 +193,7 @@ impl Default for ClientBuilder {
             osdmap_wait_timeout: Duration::from_secs(10),
             max_inflight_ops: DEFAULT_MAX_OPS,
             max_inflight_bytes: DEFAULT_MAX_BYTES,
+            assume_osd_release: None,
         }
     }
 }
@@ -271,6 +278,12 @@ impl ClientBuilder {
     /// [`max_inflight_ops`]: Self::max_inflight_ops
     pub fn max_inflight_bytes(mut self, max: usize) -> Self {
         self.max_inflight_bytes = max;
+        self
+    }
+
+    /// Sets [`OSDClientConfig::assume_osd_release`].
+    pub fn assume_osd_release(mut self, release: CephRelease) -> Self {
+        self.assume_osd_release = Some(release);
         self
     }
 
@@ -404,6 +417,7 @@ impl ClientBuilder {
             },
             max_inflight_ops: self.max_inflight_ops,
             max_inflight_bytes: self.max_inflight_bytes,
+            assume_osd_release: self.assume_osd_release,
             ..Default::default()
         };
         let osd_client =

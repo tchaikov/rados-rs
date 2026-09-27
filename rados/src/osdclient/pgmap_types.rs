@@ -9,13 +9,6 @@ use std::collections::BTreeMap;
 const OBJECT_STAT_SUM_ENCODED_SIZE: usize =
     36 * std::mem::size_of::<i64>() + 4 * std::mem::size_of::<i32>();
 
-/// Number of u32 fields in OsdStatInterfaces (1 + 3×6 + 1 = 21 fields for
-/// last_update, back_{pingtime,min,max}[3], back_last, front_{pingtime,min,max}[3], front_last)
-const OSD_STAT_INTERFACES_NUM_FIELDS: usize = 21;
-
-/// Wire size of OsdStatInterfaces: 21 × u32
-const OSD_STAT_INTERFACES_SIZE: usize = OSD_STAT_INTERFACES_NUM_FIELDS * std::mem::size_of::<u32>();
-
 /// PG count statistics for an OSD
 /// C++ definition: PGMapDigest::pg_count in mon/PGMap.h
 #[allow(dead_code)]
@@ -572,7 +565,9 @@ pub(crate) struct OsdStatInterfaces {
 }
 
 impl FixedSize for OsdStatInterfaces {
-    const SIZE: usize = OSD_STAT_INTERFACES_SIZE;
+    // 21 u32 fields: last_update, back_{pingtime,min,max}[3], back_last,
+    // front_{pingtime,min,max}[3], front_last.
+    const SIZE: usize = 21 * std::mem::size_of::<u32>();
 }
 
 /// OSD statistics
@@ -785,7 +780,7 @@ impl Denc for OsdStat {
 
         // hb_pingtime map
         size += 4; // map length
-        size += self.hb_pingtime.len() * (4 + 84); // osd_id + Interfaces
+        size += self.hb_pingtime.len() * (4 + OsdStatInterfaces::SIZE); // osd_id + Interfaces
 
         Some(size)
     }
@@ -1105,8 +1100,7 @@ mod tests {
         let mut buf = BytesMut::new();
         original.encode(&mut buf, 0).unwrap();
 
-        // 21 u32 fields = 84 bytes
-        assert_eq!(buf.len(), 84);
+        assert_eq!(buf.len(), OsdStatInterfaces::SIZE);
 
         let decoded = OsdStatInterfaces::decode(&mut buf, 0).unwrap();
         assert_eq!(decoded, original);
