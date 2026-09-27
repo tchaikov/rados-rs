@@ -12,6 +12,9 @@ pub const EACCES: i32 = -13; // Permission denied
 pub const EEXIST: i32 = -17; // File exists
 pub const EINVAL: i32 = -22; // Invalid argument
 pub const ENOSPC: i32 = -28; // No space left on device
+pub const ENOTCONN: i32 = -107; // Transport endpoint is not connected (a lost watch)
+pub const ECANCELED: i32 = -125; // Operation canceled (a notify cut off by shutdown)
+pub const ETIMEDOUT: i32 = -110; // Connection timed out (a notify's timeout; a watch to reconnect)
 
 /// Errors that can occur during OSD client operations.
 ///
@@ -78,6 +81,11 @@ pub enum OSDClientError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// The op was dropped before any reply: its pending entry went away
+    /// without an answer or an error.
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 /// Result type alias for OSD client operations
@@ -190,6 +198,8 @@ impl OSDClientError {
                 _ => K::Other,
             },
             Self::Other(_) | Self::Crush(_) | Self::Internal(_) => K::Other,
+            // Not `Interrupted`: std's I/O loops retry that at once.
+            Self::Cancelled => K::ConnectionAborted,
         }
     }
 }
@@ -298,6 +308,10 @@ mod tests {
             K::ConnectionAborted
         );
         assert_eq!(OSDClientError::NoOSDs.io_error_kind(), K::NotConnected);
+        assert_eq!(
+            OSDClientError::Cancelled.io_error_kind(),
+            K::ConnectionAborted
+        );
         assert_eq!(
             OSDClientError::InvalidOperation("bad op".into()).io_error_kind(),
             K::InvalidInput

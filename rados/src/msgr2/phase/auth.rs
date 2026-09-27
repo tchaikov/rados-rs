@@ -33,7 +33,6 @@ fn os_error(result: i32) -> std::io::Error {
 // ── Shared output ─────────────────────────────────────────────────────────────
 
 /// Data produced by a completed auth phase.
-#[derive(Debug)]
 pub struct AuthOutput {
     /// Global ID assigned by the server (or 0 for AUTH_NONE with monitors).
     pub global_id: u64,
@@ -43,6 +42,21 @@ pub struct AuthOutput {
     pub session_key: Option<Bytes>,
     /// Connection secret for SECURE-mode AES-GCM encryption (None for CRC mode).
     pub connection_secret: Option<Bytes>,
+}
+
+impl std::fmt::Debug for AuthOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use crate::auth::types::Redacted;
+        f.debug_struct("AuthOutput")
+            .field("global_id", &self.global_id)
+            .field("connection_mode", &self.connection_mode)
+            .field("session_key", &self.session_key.as_deref().map(Redacted))
+            .field(
+                "connection_secret",
+                &self.connection_secret.as_deref().map(Redacted),
+            )
+            .finish()
+    }
 }
 
 // ── Client ────────────────────────────────────────────────────────────────────
@@ -370,7 +384,14 @@ impl AuthServer {
     fn handle_auth_request(mut self, frame: Frame) -> Result<Step<Self, AuthOutput>> {
         let auth_request = AuthRequestFrame::from_frame(&frame)?;
         self.client_preferred_modes = auth_request.preferred_modes.clone();
-        let connection_mode = Self::negotiate_mode(&auth_request.preferred_modes);
+        // Without authentication there is no connection secret to key SECURE
+        // mode from, so AUTH_NONE only allows CRC, as C++
+        // `AuthRegistry::get_supported_modes` does.
+        let connection_mode = if self.auth_handler.is_some() {
+            Self::negotiate_mode(&auth_request.preferred_modes)
+        } else {
+            crate::msgr2::ConnectionMode::Crc.into()
+        };
         self.connection_mode = Some(connection_mode);
 
         if let Some(ref mut handler) = self.auth_handler {
@@ -434,8 +455,12 @@ impl AuthServer {
             .connection_mode
             .ok_or_else(|| Error::protocol_error("Missing connection_mode in phase 1"))?;
 
-        let (session_key, connection_secret, auth_payload) =
-            handler.handle_authenticate(entity_name, global_id, &auth_payload)?;
+        let (session_key, connection_secret, auth_payload) = handler.handle_authenticate(
+            entity_name,
+            global_id,
+            &auth_payload,
+            crate::auth::protocol::connection_secret_len(connection_mode),
+        )?;
         tracing::info!("Server: {entity_name} authenticated successfully");
 
         let done_payload = handler.build_auth_done_response(
@@ -454,7 +479,7 @@ impl AuthServer {
                 global_id,
                 connection_mode,
                 session_key: Some(session_key.secret.clone()),
-                connection_secret: Some(connection_secret.secret.clone()),
+                connection_secret: (!connection_secret.is_empty()).then_some(connection_secret),
             },
             Some(done_frame),
         ))
@@ -466,6 +491,25 @@ mod tests {
     use super::*;
     use crate::msgr2::frames::{FrameFlags, MAX_NUM_SEGMENTS, Preamble, SegmentDescriptor};
     use bytes::BytesMut;
+
+    #[test]
+    fn auth_output_debug_redacts_the_secrets() {
+        let out = format!(
+            "{:?}",
+            AuthOutput {
+                global_id: 9,
+                connection_mode: 2,
+                session_key: Some(Bytes::from_static(&[0xab; 16])),
+                connection_secret: Some(Bytes::from_static(&[0xcd; 64])),
+            }
+        );
+        assert!(out.contains("global_id: 9"), "{out}");
+        assert!(out.contains("<16 bytes redacted>"), "{out}");
+        assert!(out.contains("<64 bytes redacted>"), "{out}");
+        let lower = out.to_lowercase();
+        assert!(!lower.contains("xab") && !lower.contains("xcd"), "{out}");
+        assert!(!out.contains("171") && !out.contains("205"), "{out}");
+    }
 
     /// Build an AUTH_BAD_METHOD frame's first segment from raw field
     /// values. Payload layout matches what `AuthClient::step` decodes:

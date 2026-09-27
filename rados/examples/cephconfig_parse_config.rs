@@ -30,6 +30,9 @@ fn main() {
         }
     };
 
+    // Options below are read as this entity reads them.
+    let entity_name = config.entity_name();
+
     // Display sections
     println!("📋 Configuration sections:");
     for section in config.sections() {
@@ -38,7 +41,7 @@ fn main() {
     println!();
 
     // Get monitor addresses
-    match config.mon_addrs() {
+    match config.mon_addrs_for(&entity_name) {
         Ok(addrs) => {
             println!("🖥️  Monitor addresses ({} total):", addrs.len());
             for addr in &addrs {
@@ -54,7 +57,7 @@ fn main() {
             println!();
 
             // Get first v2 address
-            if let Ok(v2_addr) = config.first_v2_mon_addr() {
+            if let Ok(v2_addr) = config.first_v2_mon_addr_for(&entity_name) {
                 println!("✓ First v2 monitor: {v2_addr}");
                 println!();
             }
@@ -66,7 +69,7 @@ fn main() {
     }
 
     // Get keyring path
-    match config.keyring() {
+    match config.keyring_for(&entity_name) {
         Ok(keyring) => {
             println!("🔑 Keyring path: {keyring}");
         }
@@ -76,8 +79,7 @@ fn main() {
     }
     println!();
 
-    // Get entity name
-    let entity_name = config.entity_name();
+    // Show entity name
     println!("👤 Entity name: {entity_name}");
     println!();
 

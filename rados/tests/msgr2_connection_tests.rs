@@ -18,11 +18,15 @@
 //! Authentication settings are read from ceph.conf automatically.
 //!
 
+use rados::auth::protocol::{CEPH_AUTH_CEPHX, CEPH_AUTH_NONE};
 use rados::msgr2::Connection;
 use rados::msgr2::{AuthMethod, ConnectionConfig};
 use std::env;
 use std::net::SocketAddr;
 use std::path::Path;
+
+/// The entity the tests authenticate as and read ceph.conf as.
+const ENTITY: &str = "client.admin";
 
 /// Helper function to get the Ceph monitor address from ceph.conf
 fn get_ceph_mon_addr() -> SocketAddr {
@@ -33,7 +37,7 @@ fn get_ceph_mon_addr() -> SocketAddr {
         .unwrap_or_else(|_| panic!("Failed to read ceph.conf at {conf_path}"));
 
     let addr = config
-        .first_v2_mon_addr()
+        .first_v2_mon_addr_for(ENTITY)
         .expect("Failed to get v2 monitor address from ceph.conf");
 
     // Parse v2:IP:PORT format
@@ -47,8 +51,9 @@ fn get_ceph_mon_addr() -> SocketAddr {
 }
 
 /// Helper function to configure authentication method based on ceph.conf
-/// This reads the ceph.conf file, parses the 'auth client required' setting,
-/// and configures the authentication methods accordingly.
+/// This reads the ceph.conf file, takes `auth_client_required` as ENTITY
+/// reads it (cephx when unset, as in C++), and configures the
+/// authentication methods accordingly.
 fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
     // Debug: Print all environment variables related to CEPH
     tracing::info!("=== Environment Variable Debug ===");
@@ -78,92 +83,70 @@ fn configure_auth_method(mut config: ConnectionConfig) -> ConnectionConfig {
         Ok(ceph_config) => {
             tracing::info!("✓ Successfully parsed ceph.conf");
 
-            // Get auth_client_required setting from global section
-            let auth_methods_str = ceph_config
-                .get_with_fallback(&["global", "client"], "auth client required")
-                .or_else(|| {
-                    ceph_config.get_with_fallback(&["global", "client"], "auth_client_required")
-                });
+            let auth_methods = ceph_config.get_auth_client_required_for(ENTITY);
+            tracing::info!("  auth_client_required = {:?}", auth_methods);
 
-            if let Some(auth_str) = auth_methods_str {
-                // Parse auth methods (comma, semicolon, space separated)
-                let auth_methods: Vec<String> = auth_str
-                    .split(&[',', ';', ' ', '\t'][..])
-                    .map(|s| s.trim())
-                    .filter(|s| !s.is_empty())
-                    .map(|s| s.to_lowercase())
-                    .collect();
+            // Convert auth method constants to AuthMethod enum
+            let mut supported_methods = Vec::new();
 
-                tracing::info!("  auth_client_required = {:?}", auth_methods);
+            for method in auth_methods {
+                match method {
+                    CEPH_AUTH_CEPHX => {
+                        // Try to get keyring path from config or environment
+                        let keyring_path = std::env::var("CEPH_KEYRING")
+                            .or_else(|_| std::env::var("CEPH_CLIENT_KEYRING"))
+                            .or_else(|_| ceph_config.keyring_for(ENTITY))
+                            .unwrap_or_else(|_| "/etc/ceph/ceph.client.admin.keyring".to_string());
 
-                // Convert string auth methods to AuthMethod enum
-                let mut supported_methods = Vec::new();
+                        tracing::info!("  Checking for keyring at: {}", keyring_path);
 
-                for method in auth_methods {
-                    match method.as_str() {
-                        "cephx" => {
-                            // Try to get keyring path from config or environment
-                            let keyring_path = std::env::var("CEPH_KEYRING")
-                                .or_else(|_| std::env::var("CEPH_CLIENT_KEYRING"))
-                                .or_else(|_| ceph_config.keyring())
-                                .unwrap_or_else(|_| {
-                                    "/etc/ceph/ceph.client.admin.keyring".to_string()
-                                });
-
-                            tracing::info!("  Checking for keyring at: {}", keyring_path);
-
-                            if Path::new(&keyring_path).exists() {
-                                // Check if readable by trying to load auth provider
-                                match rados::auth::MonitorAuthProvider::new("client.admin") {
-                                    Ok(mut mon_auth) => {
-                                        match mon_auth.set_secret_key_from_keyring(&keyring_path) {
-                                            Ok(_) => {
-                                                tracing::info!(
-                                                    "  ✓ Keyring is available and readable"
-                                                );
-                                                supported_methods.push(AuthMethod::Cephx);
-                                                config.auth_provider = Some(Box::new(mon_auth));
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "  Keyring exists but cannot load key: {}, skipping cephx",
-                                                    e
-                                                );
-                                            }
+                        if Path::new(&keyring_path).exists() {
+                            // Check if readable by trying to load auth provider
+                            match rados::auth::MonitorAuthProvider::new(ENTITY) {
+                                Ok(mut mon_auth) => {
+                                    match mon_auth.set_secret_key_from_keyring(&keyring_path) {
+                                        Ok(_) => {
+                                            tracing::info!("  ✓ Keyring is available and readable");
+                                            supported_methods.push(AuthMethod::Cephx);
+                                            config.auth_provider = Some(Box::new(mon_auth));
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "  Keyring exists but cannot load key: {}, skipping cephx",
+                                                e
+                                            );
                                         }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "  Failed to create auth provider: {}, skipping cephx",
-                                            e
-                                        );
-                                    }
                                 }
-                            } else {
-                                tracing::warn!(
-                                    "  Keyring not found at {}, skipping cephx",
-                                    keyring_path
-                                );
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "  Failed to create auth provider: {}, skipping cephx",
+                                        e
+                                    );
+                                }
                             }
-                        }
-                        "none" => {
-                            tracing::info!("  ✓ Adding AuthMethod::None");
-                            supported_methods.push(AuthMethod::None);
-                        }
-                        _ => {
-                            tracing::warn!("  Unknown auth method: {}", method);
+                        } else {
+                            tracing::warn!(
+                                "  Keyring not found at {}, skipping cephx",
+                                keyring_path
+                            );
                         }
                     }
+                    CEPH_AUTH_NONE => {
+                        tracing::info!("  ✓ Adding AuthMethod::None");
+                        supported_methods.push(AuthMethod::None);
+                    }
+                    _ => {
+                        tracing::warn!("  Unsupported auth method: {}", method);
+                    }
                 }
+            }
 
-                if !supported_methods.is_empty() {
-                    tracing::info!("  Final supported_auth_methods = {:?}", supported_methods);
-                    config.supported_auth_methods = supported_methods;
-                } else {
-                    tracing::warn!("  No supported auth methods found, using default");
-                }
+            if !supported_methods.is_empty() {
+                tracing::info!("  Final supported_auth_methods = {:?}", supported_methods);
+                config.supported_auth_methods = supported_methods;
             } else {
-                tracing::info!("  auth_client_required not found in ceph.conf, using default");
+                tracing::warn!("  No supported auth methods found, using default");
             }
         }
         Err(e) => {
