@@ -222,32 +222,53 @@ impl ServiceAuthProvider {
         &self.handler
     }
 
-    /// Try to extract connection_secret from AUTH_DONE payload.
+    /// Extract the connection secret from an authorizer reply (AUTH_DONE).
     ///
-    /// Returns `None` if the payload is empty, con_mode is 0, no session key
-    /// is available, or decryption/decoding fails.
-    fn try_extract_connection_secret(
+    /// In SECURE mode a missing session key, a reply that fails to decrypt or
+    /// decode, or a missing or short secret is an error, because the
+    /// connection cannot be encrypted without it. In CRC mode any of those
+    /// yields `None`.
+    fn extract_connection_secret(
         con_mode: u32,
         payload: &Bytes,
         session_key: Option<&CryptoKey>,
-    ) -> Option<Bytes> {
-        if con_mode == 0 || payload.is_empty() {
-            return None;
+    ) -> Result<Option<Bytes>> {
+        use crate::auth::protocol::{CEPH_CON_MODE_SECURE, require_secure_connection_secret};
+
+        if con_mode == CEPH_CON_MODE_SECURE {
+            let secret = Self::decode_authorize_reply(payload, session_key)?;
+            return require_secure_connection_secret(secret).map(Some);
         }
-        let sess_key = session_key?;
+        if con_mode == 0 || payload.is_empty() {
+            return Ok(None);
+        }
+        Ok(Self::decode_authorize_reply(payload, session_key)
+            .inspect_err(|e| debug!("Ignoring undecodable authorizer reply in CRC mode: {e}"))
+            .ok()
+            .flatten())
+    }
+
+    fn decode_authorize_reply(
+        payload: &Bytes,
+        session_key: Option<&CryptoKey>,
+    ) -> Result<Option<Bytes>> {
+        let sess_key = session_key
+            .ok_or_else(|| CephXError::ProtocolError("No session key for the service".into()))?;
         let mut buf = payload.clone();
-        let encrypted_data = Bytes::decode(&mut buf, 0).ok()?;
-        let mut decrypted = sess_key.decrypt(&encrypted_data).ok()?;
+        let encrypted_data = Bytes::decode(&mut buf, 0)?;
+        let mut decrypted = sess_key.decrypt(
+            crate::auth::protocol::CEPHX_KEY_USAGE_AUTHORIZE_REPLY,
+            &encrypted_data,
+        )?;
         let envelope = crate::auth::protocol::CephXEncryptedEnvelope::<
             crate::auth::protocol::CephXAuthorizeReply,
-        >::decode(&mut decrypted, 0)
-        .ok()?;
+        >::decode(&mut decrypted, 0)?;
 
         debug!(
             "CephXAuthorizeReply: nonce_plus_one=0x{:016x}",
             envelope.payload.nonce_plus_one
         );
-        envelope.payload.connection_secret
+        Ok(envelope.payload.connection_secret)
     }
 }
 
@@ -281,13 +302,13 @@ impl AuthProvider for ServiceAuthProvider {
             CephXError::ProtocolError("No service_type set in ServiceAuthProvider".into())
         })?;
 
-        // AUTH_REPLY_MORE carries an encrypted authorize challenge (u32 length
-        // prefix + 2 AES blocks = 36 bytes).  AUTH_DONE carries the authorize
-        // reply, which in CRC mode is also 36 bytes (nonce_plus_one only, no
-        // connection secret).  Distinguishing by payload size is therefore
-        // ambiguous: use con_mode == 0 instead, which is only set by the
-        // AUTH_REPLY_MORE call path (handle_auth_reply_more passes global_id=0,
-        // con_mode=0, while handle_auth_done always passes the real con_mode ≥ 1).
+        // AUTH_REPLY_MORE carries an encrypted authorize challenge, and AUTH_DONE
+        // the authorize reply, which in CRC mode has no connection secret. Their
+        // sizes can coincide (both are 36 bytes under an AES key), so
+        // distinguishing them by payload size is ambiguous: use con_mode == 0
+        // instead, which is only set by the AUTH_REPLY_MORE call path
+        // (handle_auth_reply_more passes global_id=0, con_mode=0, while
+        // handle_auth_done always passes the real con_mode ≥ 1).
         if con_mode == 0 {
             debug!("Received encrypted authorize challenge, decrypting...");
 
@@ -323,7 +344,7 @@ impl AuthProvider for ServiceAuthProvider {
         );
 
         let connection_secret =
-            Self::try_extract_connection_secret(con_mode, &payload, session_key_ref);
+            Self::extract_connection_secret(con_mode, &payload, session_key_ref)?;
 
         if let Some(ref secret) = connection_secret {
             debug!("Extracted connection_secret: {} bytes", secret.len());

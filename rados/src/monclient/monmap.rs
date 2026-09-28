@@ -31,6 +31,13 @@ pub struct MonMapState {
     /// List of monitors
     pub monitors: Vec<MonInfo>,
 
+    /// Cephx auth epoch. A map decoded without one (pre-v10) holds 0, and a
+    /// map not yet received from the cluster holds `u32::MAX`, so the first
+    /// real map never counts as a rise; C++ `MonMap::decode` and
+    /// `MonMap::build_initial` set the same values.
+    #[serde(default)]
+    pub auth_epoch: u32,
+
     /// Monitor name to index mapping
     #[serde(skip)]
     name_to_rank: HashMap<String, usize>,
@@ -96,6 +103,7 @@ impl MonMapState {
             created: 0,
             modified: 0,
             monitors: Vec::new(),
+            auth_epoch: u32::MAX,
             name_to_rank: HashMap::new(),
             rank_to_index: HashMap::new(),
             addr_to_rank: HashMap::new(),
@@ -344,6 +352,7 @@ impl MonMapState {
             stretch_mode_enabled: self.stretch_mode_enabled,
             tiebreaker_mon: self.tiebreaker_mon.clone(),
             stretch_marked_down_mons: self.stretch_marked_down_mons.clone(),
+            auth: None,
         }
     }
 
@@ -365,6 +374,7 @@ impl MonMapState {
             stretch_mode_enabled,
             tiebreaker_mon,
             stretch_marked_down_mons,
+            auth,
         } = denc_monmap;
 
         // Convert fsid from [u8; 16] to Uuid
@@ -408,6 +418,7 @@ impl MonMapState {
             created,
             modified,
             monitors,
+            auth_epoch: auth.map_or(0, |a| a.epoch),
             name_to_rank: HashMap::with_capacity(n),
             rank_to_index: HashMap::with_capacity(n),
             addr_to_rank: HashMap::with_capacity(n),
@@ -427,6 +438,13 @@ impl MonMapState {
         monmap.rebuild_indices();
         Ok(monmap)
     }
+}
+
+/// Whether a new monmap's auth epoch is a rise over the held map's, which
+/// makes the client drop its service tickets, as C++ `MonClient::handle_monmap`
+/// decides.
+pub(crate) fn auth_epoch_rose(held: u32, new: u32) -> bool {
+    held < new
 }
 
 impl Default for MonMapState {
@@ -750,9 +768,11 @@ mod tests {
             stretch_mode_enabled: false,
             tiebreaker_mon: String::new(),
             stretch_marked_down_mons: Vec::new(),
+            auth: None,
         })
         .unwrap();
 
+        assert_eq!(monmap.auth_epoch, 0);
         assert_eq!(monmap.get_name(0), Some("mon.b"));
         assert_eq!(monmap.get_name(1), Some("mon.a"));
         assert_eq!(monmap.get_rank("mon.b"), Some(0));
@@ -801,8 +821,15 @@ mod tests {
             stretch_mode_enabled: true,
             tiebreaker_mon: "mon.a".to_string(),
             stretch_marked_down_mons: vec!["mon.c".to_string()],
+            auth: Some(crate::denc::MonMapAuth {
+                epoch: 9,
+                service_cipher: 2,
+                allowed_ciphers: vec![1, 2],
+                preferred_cipher: 2,
+            }),
         })
         .unwrap();
+        assert_eq!(monmap.auth_epoch, 9);
 
         let denc_monmap = monmap.to_denc_monmap();
         let mon_a = denc_monmap.mon_info.get("mon.a").unwrap();
@@ -831,6 +858,29 @@ mod tests {
             Some("r1")
         );
         assert_eq!(mon_orphan.time_added.sec, 21);
+    }
+
+    #[test]
+    fn test_auth_epoch_rose() {
+        let bootstrap = MonMapState::build_initial(&["v2:127.0.0.1:3300".to_string()])
+            .unwrap()
+            .auth_epoch;
+        assert_eq!(bootstrap, u32::MAX);
+        assert_eq!(MonMapState::default().auth_epoch, u32::MAX);
+        // A real map without the auth fields (pre-v10) holds 0.
+        let v9 = 0;
+        for (held, new, rose) in [
+            (bootstrap, 3, false),
+            (bootstrap, v9, false),
+            (v9, 3, true),
+            (v9, v9, false),
+            (5, 5, false),
+            (5, 6, true),
+            (6, 5, false),
+            (5, v9, false),
+        ] {
+            assert_eq!(auth_epoch_rose(held, new), rose, "{held} -> {new}");
+        }
     }
 
     #[test]
