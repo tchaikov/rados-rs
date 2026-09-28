@@ -29,7 +29,8 @@ impl AuthConfig {
     /// Create auth config from ceph.conf (convenience method)
     ///
     /// This parses the ceph.conf file and automatically configures authentication
-    /// based on the `auth_client_required` setting and keyring path.
+    /// based on the `auth_client_required` setting and keyring path, both read
+    /// as the conf's `entity_name` does.
     ///
     /// # Arguments
     /// * `ceph_conf_path` - Path to ceph.conf file
@@ -42,10 +43,10 @@ impl AuthConfig {
             .map_err(|e| MonClientError::ConfigError(format!("Failed to parse ceph.conf: {e}")))?;
 
         let entity_name = config.entity_name();
-        let auth_methods = config.get_auth_client_required();
+        let auth_methods = config.get_auth_client_required_for(&entity_name);
 
         let auth_provider = if auth_methods.contains(&crate::auth::protocol::CEPH_AUTH_CEPHX) {
-            let keyring_path = config.keyring().map_err(|e| {
+            let keyring_path = config.keyring_for(&entity_name).map_err(|e| {
                 MonClientError::ConfigError(format!("Failed to get keyring path: {e}"))
             })?;
             let mut provider = new_monitor_auth_provider(&entity_name)?;

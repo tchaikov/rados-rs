@@ -40,12 +40,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::EntityType;
 use crate::cephconfig::{CephConfig, ConfigError};
 use crate::monclient::{AuthConfig, MOSDMap, MonClient, MonClientConfig, MonClientError};
-use crate::msgr2::map_channel;
+use crate::msgr2::{ClientModes, ConnectionMode, map_channel};
 use crate::osdclient::client::default_client_inc;
 use crate::osdclient::tracker::TrackerConfig;
-use crate::osdclient::{IoCtx, OSDClient, OSDClientConfig, OSDClientError};
+use crate::osdclient::{CephRelease, IoCtx, OSDClient, OSDClientConfig, OSDClientError};
 
 /// Depth of the internal msgr2 map channel used to hand OSDMap updates from
 /// the MonClient receive task to the OSDClient drain task. Sized to absorb a
@@ -127,6 +128,11 @@ impl Client {
         &self.osd_client
     }
 
+    /// See [`OSDClient::require_osd_release`].
+    pub fn require_osd_release(&self) -> Option<CephRelease> {
+        self.osd_client.require_osd_release()
+    }
+
     /// Gracefully shut down both the OSDClient and the MonClient.
     ///
     /// Cancels every background task spawned by the two sub-clients (per-OSD
@@ -155,9 +161,10 @@ impl Client {
 /// Builder for [`Client`].
 ///
 /// All fields are optional. `config_file` is the most common entry point and
-/// will populate `mon_addrs`, the keyring path, and the DNS SRV name from
-/// ceph.conf. Explicit setters override values from the file when both are
-/// provided.
+/// will populate `mon_addrs`, the keyring path, the DNS SRV name and the
+/// connection modes from ceph.conf, as the builder's
+/// [`entity_name`](Self::entity_name()) reads them. Explicit setters override
+/// values from the file when both are provided.
 #[derive(Debug, Clone)]
 #[must_use = "ClientBuilder does nothing until build() is awaited"]
 pub struct ClientBuilder {
@@ -171,13 +178,16 @@ pub struct ClientBuilder {
     osdmap_wait_timeout: Duration,
     max_inflight_ops: usize,
     max_inflight_bytes: usize,
+    assume_osd_release: Option<CephRelease>,
+    mon_client_modes: Option<Vec<ConnectionMode>>,
+    client_modes: Option<Vec<ConnectionMode>>,
 }
 
 impl Default for ClientBuilder {
     fn default() -> Self {
         use crate::osdclient::throttle::{DEFAULT_MAX_BYTES, DEFAULT_MAX_OPS};
         Self {
-            entity_name: "client.admin".to_owned(),
+            entity_name: CephConfig::DEFAULT_ENTITY_NAME.to_owned(),
             config_file: None,
             mon_addrs: Vec::new(),
             keyring_path: None,
@@ -187,12 +197,16 @@ impl Default for ClientBuilder {
             osdmap_wait_timeout: Duration::from_secs(10),
             max_inflight_ops: DEFAULT_MAX_OPS,
             max_inflight_bytes: DEFAULT_MAX_BYTES,
+            assume_osd_release: None,
+            mon_client_modes: None,
+            client_modes: None,
         }
     }
 }
 
 impl ClientBuilder {
-    /// Ceph entity name (defaults to `"client.admin"`).
+    /// Ceph entity name (defaults to `"client.admin"`). ceph.conf options
+    /// are read from its own section, then its type's, then `[global]`.
     pub fn entity_name(mut self, name: impl Into<String>) -> Self {
         self.entity_name = name.into();
         self
@@ -274,12 +288,45 @@ impl ClientBuilder {
         self
     }
 
+    /// Sets [`OSDClientConfig::assume_osd_release`].
+    pub fn assume_osd_release(mut self, release: CephRelease) -> Self {
+        self.assume_osd_release = Some(release);
+        self
+    }
+
+    /// Connection modes to offer monitors, in order of preference,
+    /// overriding `ms_mon_client_mode` from `ceph.conf` (default: SECURE,
+    /// then CRC). `[ConnectionMode::Secure]` requires SECURE.
+    ///
+    /// The mon config database is not read for this option, though C++
+    /// applies it before it creates the messenger
+    /// (v19.2.6:src/librados/RadosClient.cc:232, then 247), so require
+    /// SECURE through this setter or `ceph.conf`.
+    pub fn mon_client_modes(mut self, modes: impl IntoIterator<Item = ConnectionMode>) -> Self {
+        self.mon_client_modes = Some(modes.into_iter().collect());
+        self
+    }
+
+    /// Connection modes to offer OSDs, in order of preference, overriding
+    /// `ms_client_mode` from `ceph.conf` (default: CRC, then SECURE).
+    /// `[ConnectionMode::Secure]` requires SECURE.
+    ///
+    /// The mon config database is not read for this option, though C++
+    /// applies it before it creates the messenger
+    /// (v19.2.6:src/librados/RadosClient.cc:232, then 247), so require
+    /// SECURE through this setter or `ceph.conf`.
+    pub fn client_modes(mut self, modes: impl IntoIterator<Item = ConnectionMode>) -> Self {
+        self.client_modes = Some(modes.into_iter().collect());
+        self
+    }
+
     /// Connect to the cluster and produce a ready-to-use [`Client`].
     ///
-    /// Steps: parse `ceph.conf`, resolve mon addrs / keyring / DNS SRV name,
-    /// build `AuthConfig`, wire the msgr2 map channel, start the `MonClient`,
-    /// wait for the first MonMap, start the `OSDClient` with a freshly
-    /// derived `client_inc`, and wait for the first OSDMap.
+    /// Steps: parse `ceph.conf`, resolve mon addrs / keyring / DNS SRV name /
+    /// connection modes, build `AuthConfig`, wire the msgr2 map channel,
+    /// start the `MonClient`, wait for the first MonMap, start the
+    /// `OSDClient` with a freshly derived `client_inc`, and wait for the
+    /// first OSDMap.
     pub async fn build(self) -> Result<Client, ClientError> {
         // Step 1: parse ceph.conf if provided.
         let ceph_config = self
@@ -289,11 +336,13 @@ impl ClientBuilder {
             .transpose()?;
 
         // Step 2: resolve mon addrs, keyring, dns SRV name with explicit
-        // setters winning over ceph.conf values.
+        // setters winning over ceph.conf values, which are read as the
+        // entity this client runs as.
+        let entity = self.entity_name.as_str();
         let mon_addrs = if self.mon_addrs.is_empty() {
             ceph_config
                 .as_ref()
-                .and_then(|c| c.mon_addrs().ok())
+                .and_then(|c| c.mon_addrs_for(entity).ok())
                 .unwrap_or_default()
         } else {
             self.mon_addrs
@@ -301,28 +350,28 @@ impl ClientBuilder {
 
         let dns_srv_name = self
             .dns_srv_name
-            .or_else(|| ceph_config.as_ref().map(|c| c.mon_dns_srv_name()))
+            .or_else(|| ceph_config.as_ref().map(|c| c.mon_dns_srv_name_for(entity)))
             .unwrap_or_default();
+
+        let modes = resolve_client_modes(
+            self.mon_client_modes,
+            self.client_modes,
+            ceph_config.as_ref(),
+            entity,
+        );
 
         // Step 3: decide auth method. Clusters with `auth_client_required = none`
         // don't need a keyring at all; attempting to read one would just fail.
         // When `ceph.conf` is available, honour its `auth_client_required` /
         // `auth_supported` setting; otherwise fall back to CephX (the common case).
         let cephx_required = ceph_config.as_ref().is_none_or(|c| {
-            c.get_auth_client_required()
+            c.get_auth_client_required_for(entity)
                 .contains(&crate::auth::protocol::CEPH_AUTH_CEPHX)
         });
 
         let auth = if cephx_required {
-            let keyring_path: PathBuf = self
-                .keyring_path
-                .or_else(|| {
-                    ceph_config
-                        .as_ref()
-                        .and_then(|c| c.keyring().ok())
-                        .map(PathBuf::from)
-                })
-                .unwrap_or_else(|| PathBuf::from("/etc/ceph/keyring"));
+            let keyring_path =
+                resolve_keyring_path(self.keyring_path, ceph_config.as_ref(), entity);
 
             // Validate UTF-8 up front so the spawn_blocking closure can be
             // infallible about the path.
@@ -361,6 +410,7 @@ impl ClientBuilder {
             mon_addrs,
             auth: Some(auth),
             dns_srv_name,
+            connection_modes: modes.for_peer(EntityType::MON).to_vec(),
             ..Default::default()
         };
         let mon_client = MonClient::new(mon_config, Some(osdmap_tx.clone())).await?;
@@ -404,6 +454,8 @@ impl ClientBuilder {
             },
             max_inflight_ops: self.max_inflight_ops,
             max_inflight_bytes: self.max_inflight_bytes,
+            assume_osd_release: self.assume_osd_release,
+            connection_modes: modes.for_peer(EntityType::OSD).to_vec(),
             ..Default::default()
         };
         let osd_client =
@@ -416,6 +468,39 @@ impl ClientBuilder {
             mon_client,
             osd_client,
         })
+    }
+}
+
+/// The keyring path for `entity`: the explicit setter, then `keyring` from
+/// ceph.conf as `entity` reads it, then `/etc/ceph/keyring`.
+fn resolve_keyring_path(
+    explicit: Option<PathBuf>,
+    ceph_config: Option<&CephConfig>,
+    entity: &str,
+) -> PathBuf {
+    explicit
+        .or_else(|| {
+            ceph_config
+                .and_then(|c| c.keyring_for(entity).ok())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| PathBuf::from("/etc/ceph/keyring"))
+}
+
+/// The connection modes for `entity`: each list from its setter, then from
+/// ceph.conf as `entity` reads it, then C++'s default.
+fn resolve_client_modes(
+    mon_client_modes: Option<Vec<ConnectionMode>>,
+    client_modes: Option<Vec<ConnectionMode>>,
+    ceph_config: Option<&CephConfig>,
+    entity: &str,
+) -> ClientModes {
+    let configured = ceph_config.map_or_else(ClientModes::default, |c| {
+        ClientModes::from_ceph_config(c, entity)
+    });
+    ClientModes {
+        mon_client_modes: mon_client_modes.unwrap_or(configured.mon_client_modes),
+        client_modes: client_modes.unwrap_or(configured.client_modes),
     }
 }
 
@@ -513,6 +598,94 @@ mod tests {
         assert_eq!(b.osdmap_wait_timeout, Duration::from_secs(3));
         assert_eq!(b.max_inflight_ops, 256);
         assert_eq!(b.max_inflight_bytes, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn keyring_path_follows_the_entity_in_use() {
+        let conf = CephConfig::parse(
+            r#"
+[client.admin]
+keyring = /etc/ceph/ceph.client.admin.keyring
+[client.rgw.x]
+keyring = /etc/ceph/ceph.client.rgw.x.keyring
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_keyring_path(None, Some(&conf), "client.admin"),
+            PathBuf::from("/etc/ceph/ceph.client.admin.keyring")
+        );
+        assert_eq!(
+            resolve_keyring_path(None, Some(&conf), "client.rgw.x"),
+            PathBuf::from("/etc/ceph/ceph.client.rgw.x.keyring")
+        );
+        assert_eq!(
+            resolve_keyring_path(None, Some(&conf), "client.other"),
+            PathBuf::from("/etc/ceph/keyring")
+        );
+        assert_eq!(
+            resolve_keyring_path(Some("/k".into()), Some(&conf), "client.rgw.x"),
+            PathBuf::from("/k")
+        );
+    }
+
+    #[test]
+    fn connection_modes_take_the_setter_then_the_conf_then_the_default() {
+        use ConnectionMode::{Crc, Secure};
+        let conf = CephConfig::parse(
+            r#"
+[client.rgw.x]
+ms_client_mode = secure
+"#,
+        )
+        .unwrap();
+
+        // No setter and no conf: C++'s defaults.
+        assert_eq!(
+            resolve_client_modes(None, None, None, "client.rgw.x"),
+            ClientModes::default()
+        );
+        // The conf, as the entity reads it, over the defaults.
+        let modes = resolve_client_modes(None, None, Some(&conf), "client.rgw.x");
+        assert_eq!(modes.client_modes, vec![Secure]);
+        assert_eq!(modes.mon_client_modes, vec![Secure, Crc]);
+        let modes = resolve_client_modes(None, None, Some(&conf), "client.admin");
+        assert_eq!(modes, ClientModes::default());
+        // Each setter over the conf, independently.
+        let modes = resolve_client_modes(None, Some(vec![Crc]), Some(&conf), "client.rgw.x");
+        assert_eq!(modes.client_modes, vec![Crc]);
+        assert_eq!(modes.mon_client_modes, vec![Secure, Crc]);
+        let modes = resolve_client_modes(Some(vec![Secure]), None, Some(&conf), "client.rgw.x");
+        assert_eq!(modes.mon_client_modes, vec![Secure]);
+        assert_eq!(modes.client_modes, vec![Secure]);
+    }
+
+    #[test]
+    fn connection_modes_default_to_secure_first_for_mons_only() {
+        use ConnectionMode::{Crc, Secure};
+        // ms_mon_client_mode's default "secure crc" and ms_client_mode's
+        // "crc secure".
+        assert_eq!(
+            MonClientConfig::default().connection_modes,
+            vec![Secure, Crc]
+        );
+        assert_eq!(
+            OSDClientConfig::default().connection_modes,
+            vec![Crc, Secure]
+        );
+    }
+
+    #[test]
+    fn connection_mode_setters_thread_through() {
+        use ConnectionMode::{Crc, Secure};
+        let b = ClientBuilder::default();
+        assert_eq!((b.mon_client_modes, b.client_modes), (None, None));
+        let b = ClientBuilder::default()
+            .mon_client_modes([Secure])
+            .client_modes([Secure, Crc]);
+        assert_eq!(b.mon_client_modes, Some(vec![Secure]));
+        assert_eq!(b.client_modes, Some(vec![Secure, Crc]));
     }
 
     #[test]

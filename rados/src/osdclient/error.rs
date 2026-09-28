@@ -12,6 +12,9 @@ pub const EACCES: i32 = -13; // Permission denied
 pub const EEXIST: i32 = -17; // File exists
 pub const EINVAL: i32 = -22; // Invalid argument
 pub const ENOSPC: i32 = -28; // No space left on device
+pub const ENOTCONN: i32 = -107; // Transport endpoint is not connected (a lost watch)
+pub const ECANCELED: i32 = -125; // Operation canceled (a notify cut off by shutdown)
+pub const ETIMEDOUT: i32 = -110; // Connection timed out (a notify's timeout; a watch to reconnect)
 
 /// Errors that can occur during OSD client operations.
 ///
@@ -25,12 +28,19 @@ pub const ENOSPC: i32 = -28; // No space left on device
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum OSDClientError {
+    /// The OSD may already have applied a write that fails with this.
+    /// Re-check the state the write would change rather than issue it
+    /// again: an op issued again is a new op, with a new tid, which the
+    /// OSD does not deduplicate against the first.
     #[error("Connection error: {0}")]
     Connection(String),
 
     #[error("OSD error {code}: {message}")]
     OSDError { code: i32, message: String },
 
+    /// The OSD may already have applied a write that times out. Re-check
+    /// the state the write would change rather than issue it again, as
+    /// for [`Connection`](Self::Connection).
     #[error("Operation timeout after {0:?}")]
     Timeout(Duration),
 
@@ -78,6 +88,11 @@ pub enum OSDClientError {
 
     #[error("Internal error: {0}")]
     Internal(String),
+
+    /// The op was dropped before any reply: its pending entry went away
+    /// without an answer or an error.
+    #[error("Operation cancelled")]
+    Cancelled,
 }
 
 /// Result type alias for OSD client operations
@@ -96,7 +111,11 @@ impl From<OSDClientError> for crate::RadosError {
 /// Error category for retry decision making
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorCategory {
-    /// Can retry immediately
+    /// May succeed if tried again, but not by re-issuing a write blindly:
+    /// after a [`Connection`](OSDClientError::Connection) or
+    /// [`Timeout`](OSDClientError::Timeout) the OSD may already have
+    /// applied it, and a re-issued op is a new op, with a new tid, which
+    /// the OSD does not deduplicate. Re-check the state first.
     Transient,
     /// Should not retry
     Permanent,
@@ -190,6 +209,8 @@ impl OSDClientError {
                 _ => K::Other,
             },
             Self::Other(_) | Self::Crush(_) | Self::Internal(_) => K::Other,
+            // Not `Interrupted`: std's I/O loops retry that at once.
+            Self::Cancelled => K::ConnectionAborted,
         }
     }
 }
@@ -298,6 +319,10 @@ mod tests {
             K::ConnectionAborted
         );
         assert_eq!(OSDClientError::NoOSDs.io_error_kind(), K::NotConnected);
+        assert_eq!(
+            OSDClientError::Cancelled.io_error_kind(),
+            K::ConnectionAborted
+        );
         assert_eq!(
             OSDClientError::InvalidOperation("bad op".into()).io_error_kind(),
             K::InvalidInput

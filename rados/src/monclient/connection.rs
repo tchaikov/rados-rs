@@ -31,6 +31,23 @@ pub struct MonConnectionParams {
     pub osdmap_tx: Option<MapSender<MOSDMap>>,
     /// Channel for routing monitor messages
     pub mon_msg_tx: mpsc::Sender<crate::msgr2::message::Message>,
+    /// Connection modes to offer the monitor, in order of preference
+    pub connection_modes: Vec<crate::msgr2::ConnectionMode>,
+}
+
+impl MonConnectionParams {
+    fn connection_config(&self) -> ConnectionConfig {
+        let mut config = if let Some(auth_provider) = &self.auth_provider {
+            ConnectionConfig::with_auth_provider(Box::new(auth_provider.clone()))
+        } else {
+            ConnectionConfig::with_no_auth()
+        };
+        config.preferred_modes = self.connection_modes.clone();
+        // Monitor connections are lossy (mirrors librados Policy::lossy_client):
+        // the client does not replay messages on reconnect; it reconnects fresh.
+        config.is_lossy = true;
+        config
+    }
 }
 
 /// Keepalive policy for the connection
@@ -97,19 +114,9 @@ impl MonConnection {
             params.addr
         );
 
-        // Create connection config with authentication
-        let mut config = if let Some(auth_provider) = params.auth_provider {
-            ConnectionConfig::with_auth_provider(Box::new(auth_provider))
-        } else {
-            // No auth provider, use no authentication
-            ConnectionConfig::with_no_auth()
-        };
-        // Monitor connections are lossy (mirrors librados Policy::lossy_client):
-        // the client does not replay messages on reconnect; it reconnects fresh.
-        config.is_lossy = true;
-
         // Connect using msgr2 (banner exchange only)
-        let mut connection = Msgr2Connection::connect(params.addr, config).await?;
+        let mut connection =
+            Msgr2Connection::connect(params.addr, params.connection_config()).await?;
 
         tracing::debug!("Banner exchange complete, establishing session...");
 
@@ -308,5 +315,31 @@ impl MonConnection {
 impl std::fmt::Display for MonConnection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "MonConnection(rank={})", self.rank)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::msgr2::ConnectionMode::{Crc, Secure};
+
+    #[test]
+    fn connection_config_offers_the_configured_modes() {
+        let (mon_msg_tx, _mon_msg_rx) = mpsc::channel(1);
+        let auth_provider = crate::auth::MonitorAuthProvider::new("client.admin").unwrap();
+        for auth_provider in [None, Some(auth_provider)] {
+            for modes in [vec![Secure], vec![Secure, Crc]] {
+                let params = MonConnectionParams {
+                    addr: "127.0.0.1:3300".parse().unwrap(),
+                    rank: 0,
+                    auth_provider: auth_provider.clone(),
+                    keepalive_policy: KeepalivePolicy::disabled(),
+                    osdmap_tx: None,
+                    mon_msg_tx: mon_msg_tx.clone(),
+                    connection_modes: modes.clone(),
+                };
+                assert_eq!(params.connection_config().preferred_modes, modes);
+            }
+        }
     }
 }

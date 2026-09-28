@@ -15,7 +15,9 @@ use crate::osdclient::ioctx::IoCtx;
 use futures::stream::Stream;
 use std::collections::VecDeque;
 
-/// Create a lazily-paginated stream of object names in a pool.
+/// Create a lazily-paginated stream of the names of objects in `ioctx`'s
+/// namespace, or in every namespace when it is
+/// [`ALL_NSPACES`](crate::osdclient::ALL_NSPACES).
 ///
 /// Each page fetches at most `page_size` objects from the cluster via
 /// `list_objects`. The stream ends automatically when the cluster signals

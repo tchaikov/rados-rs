@@ -38,7 +38,7 @@ pub use error::RadosError;
 pub use entity_addr::{EntityAddr, EntityAddrType, EntityAddrvec};
 pub use hobject::{HObject, SNAP_DIR, SNAP_HEAD};
 pub use ids::{Epoch, GlobalId, OsdId, PoolId};
-pub use monmap::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo, MonMap};
+pub use monmap::{ElectionStrategy, MonCephRelease, MonFeature, MonInfo, MonMap, MonMapAuth};
 pub use types::{EVersion, EntityName, EntityType, FsId, UTime, UuidD, Version};
 
 // Feature flags

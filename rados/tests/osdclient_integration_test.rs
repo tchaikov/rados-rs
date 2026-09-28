@@ -13,6 +13,7 @@
 //! - Monitor addresses (mon_host or mon_addr)
 //! - Keyring path
 //! - Entity name
+//! - Connection modes (ms_mon_client_mode, ms_client_mode), if not the defaults
 //!
 //! Environment variables:
 //! - `CEPH_CONF`: Path to ceph.conf file (default: /etc/ceph/ceph.conf)
@@ -34,6 +35,7 @@ struct TestConfig {
     keyring_path: Option<String>,
     entity_name: String,
     pool: String,
+    modes: rados::msgr2::ClientModes,
 }
 
 impl TestConfig {
@@ -49,30 +51,34 @@ impl TestConfig {
     fn from_ceph_conf(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let config = rados::cephconfig::CephConfig::from_file(path)?;
 
+        // Get entity name (defaults to client.admin); the options below are
+        // read from its section, then its type's, then [global].
+        let entity_name = config.entity_name();
+
         // Get monitor addresses (prefer v2)
-        let mon_addrs = config.mon_addrs()?;
+        let mon_addrs = config.mon_addrs_for(&entity_name)?;
 
         // Get required auth methods for client connections
-        let auth_methods = config.get_auth_client_required();
+        let auth_methods = config.get_auth_client_required_for(&entity_name);
 
         // Get keyring path only if CephX is in the supported methods
         let keyring_path = if auth_methods.contains(&rados::auth::protocol::CEPH_AUTH_CEPHX) {
-            Some(config.keyring()?)
+            Some(config.keyring_for(&entity_name)?)
         } else {
             None
         };
 
-        // Get entity name (defaults to client.admin)
-        let entity_name = config.entity_name();
-
         // Get test pool (name or ID)
         let pool = env::var("CEPH_TEST_POOL").unwrap_or_else(|_| "test-pool".to_string());
+
+        let modes = rados::msgr2::ClientModes::from_ceph_config(&config, &entity_name);
 
         Ok(Self {
             mon_addrs,
             keyring_path,
             entity_name,
             pool,
+            modes,
         })
     }
 }
@@ -103,11 +109,13 @@ async fn parse_pool(
     Err(format!("Pool '{pool}' not found in OSDMap").into())
 }
 
-/// Create pool via monitor command if it doesn't already exist.
+/// Create pool via monitor command if it doesn't already exist, with a
+/// fixed 32 PGs and the autoscaler off: on Squid a pool created without
+/// `pg_num` starts at 1 PG and the autoscaler splits it to 32 while the
+/// tests run.
 async fn ensure_pool_exists(mon_client: &Arc<rados::monclient::MonClient>, pool_name: &str) {
     let cmd = vec![format!(
-        r#"{{"prefix": "osd pool create", "pool": "{}"}}"#,
-        pool_name
+        r#"{{"prefix": "osd pool create", "pool": "{pool_name}", "pg_num": 32, "pgp_num": 32, "autoscale_mode": "off"}}"#
     )];
     let result = mon_client
         .invoke(cmd, Bytes::new())
@@ -146,6 +154,7 @@ async fn setup() -> (
     let mon_config = rados::monclient::MonClientConfig {
         mon_addrs: config.mon_addrs.clone(),
         auth: Some(auth),
+        connection_modes: config.modes.for_peer(rados::EntityType::MON).to_vec(),
         ..Default::default()
     };
 
@@ -177,6 +186,7 @@ async fn setup() -> (
         .unwrap_or(true);
     let osd_config = rados::osdclient::OSDClientConfig {
         ms_crc_data,
+        connection_modes: config.modes.for_peer(rados::EntityType::OSD).to_vec(),
         ..Default::default()
     };
 
