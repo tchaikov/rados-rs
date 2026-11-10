@@ -1,0 +1,121 @@
+# Quincy v17.2.7 crushtool mapping vectors; equivalent default-index form for index-0 update states.
+reweight-create 0 0 1
+reweight-create 1 0 1
+reweight-create 2 1 0
+reweight-create 3 0 1
+reweight-create 4 1 0
+reweight-create 5 0 1
+reweight-create 6 1 0
+reweight-create 7 1 0
+reweight-create 8 1 0
+reweight-create 9 1 0
+reweight-compat-osd0 0 0 1
+reweight-compat-osd0 1 0 1
+reweight-compat-osd0 2 1 0
+reweight-compat-osd0 3 0 1
+reweight-compat-osd0 4 1 0
+reweight-compat-osd0 5 0 1
+reweight-compat-osd0 6 1 0
+reweight-compat-osd0 7 1 0
+reweight-compat-osd0 8 1 0
+reweight-compat-osd0 9 1 0
+reweight-add-osd2 0 0 1
+reweight-add-osd2 1 0 1
+reweight-add-osd2 2 1 0
+reweight-add-osd2 3 0 1
+reweight-add-osd2 4 1 0
+reweight-add-osd2 5 0 1
+reweight-add-osd2 6 1 0
+reweight-add-osd2 7 1 0
+reweight-add-osd2 8 1 0
+reweight-add-osd2 9 1 0
+reweight-canonical-osd2 0 0 1
+reweight-canonical-osd2 1 0 1
+reweight-canonical-osd2 2 1 0
+reweight-canonical-osd2 3 0 1
+reweight-canonical-osd2 4 1 0
+reweight-canonical-osd2 5 0 1
+reweight-canonical-osd2 6 1 0
+reweight-canonical-osd2 7 1 0
+reweight-canonical-osd2 8 1 0
+reweight-canonical-osd2 9 1 0
+move-create 0 0 1
+move-create 1 0 1
+move-create 2 1 0
+move-create 3 0 1
+move-create 4 1 0
+move-create 5 0 1
+move-create 6 1 0
+move-create 7 1 0
+move-create 8 1 0
+move-create 9 1 0
+move-rack 0 0 1
+move-rack 1 0 1
+move-rack 2 1 0
+move-rack 3 0 1
+move-rack 4 1 0
+move-rack 5 0 1
+move-rack 6 1 0
+move-rack 7 1 0
+move-rack 8 1 0
+move-rack 9 1 0
+move-compat-osd0 0 0 1
+move-compat-osd0 1 0 1
+move-compat-osd0 2 1 0
+move-compat-osd0 3 0 1
+move-compat-osd0 4 1 0
+move-compat-osd0 5 1 0
+move-compat-osd0 6 1 0
+move-compat-osd0 7 1 0
+move-compat-osd0 8 1 0
+move-compat-osd0 9 1 0
+move-osd0-to-foo 0 0 1
+move-osd0-to-foo 1 1 0
+move-osd0-to-foo 2 1 0
+move-osd0-to-foo 3 0 1
+move-osd0-to-foo 4 1 0
+move-osd0-to-foo 5 0 1
+move-osd0-to-foo 6 0 1
+move-osd0-to-foo 7 1 0
+move-osd0-to-foo 8 1 0
+move-osd0-to-foo 9 1 0
+update-pre 0 0
+update-pre 1 0
+update-pre 2 0
+update-pre 3 0
+update-pre 4 0
+update-pre 5 0
+update-pre 6 0
+update-pre 7 0
+update-pre 8 0
+update-pre 9 0
+update-remove 0 0
+update-remove 1 0
+update-remove 2 0
+update-remove 3 0
+update-remove 4 0
+update-remove 5 0
+update-remove 6 0
+update-remove 7 0
+update-remove 8 0
+update-remove 9 0
+no-update-pre 0 0
+no-update-pre 1 0
+no-update-pre 2 0
+no-update-pre 3 0
+no-update-pre 4 0
+no-update-pre 5 0
+no-update-pre 6 0
+no-update-pre 7 0
+no-update-pre 8 0
+no-update-pre 9 0
+no-update-remove 0 0
+no-update-remove 1 0
+no-update-remove 2 0
+no-update-remove 3 0
+no-update-remove 4 0
+no-update-remove 5 0
+no-update-remove 6 0
+no-update-remove 7 0
+no-update-remove 8 0
+no-update-remove 9 0

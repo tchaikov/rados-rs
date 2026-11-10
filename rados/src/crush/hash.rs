@@ -95,7 +95,8 @@ pub fn crush_hash32_4(mut a: u32, mut b: u32, mut c: u32, mut d: u32) -> u32 {
     hash
 }
 
-/// Hash a byte string using rjenkins
+/// Hash a byte string using rjenkins.
+/// Ceph-compatible for inputs up to `u32::MAX` bytes (its unsigned length limit).
 pub fn ceph_str_hash_rjenkins(data: &[u8]) -> u32 {
     let mut a: u32 = 0x9e3779b9; // the golden ratio
     let mut b: u32 = a;

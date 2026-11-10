@@ -37,6 +37,7 @@ Note: Hooks already run `cargo fmt` and `cargo clippy` after every Edit/Write/Ba
 ## Workflow
 
 - Read files before modifying them.
+- Before implementing, porting, or reviewing tests or Ceph-compatible behavior, read and follow [Testing requirements](TESTING.md).
 - Test after every change. Never accumulate multiple untested changes.
 - Commit immediately after tests pass with a descriptive message.
 - If a test fails, investigate — don't retry blindly.

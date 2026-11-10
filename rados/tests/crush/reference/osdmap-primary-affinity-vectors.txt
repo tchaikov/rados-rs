@@ -1,0 +1,15 @@
+# SHA-256 of 10,000 canonical PgPlacement rows per pinned release/pool/state.
+# Row bytes: up length/u32 then i32 OSDs, acting length/u32 then i32 OSDs, up_primary/i32, acting_primary/i32; all big endian.
+# fields: release pool affinity-state count sha256
+quincy 1 default 10000 027775b627f4368011aac68a0bbc20575788d525bc3aab1061504e548924b1e5
+quincy 1 zero 10000 7d43c0ab5add7f180657ad295e99e6fc7cc1b853164ef605754b0258af13d3b3
+quincy 1 half 10000 c28c69909a261c2a6d30952b34ed7b1a8c0200d6914dd29adfb3fea709c28a98
+quincy 2 default 10000 0f41c825ff28f209e307d822355a8a4d2e69d1112793b1736ced7c8be277d50c
+quincy 2 zero 10000 eacabe9014b8c17fe0dc77c8053c90734dd7e08f7c85c9e25c5cd4c8f06a8190
+quincy 2 half 10000 7d2ede55cb3f0c8361b8e173ff2b79413eac093352dc6a9484c7dd31367b1d24
+tentacle 1 default 10000 027775b627f4368011aac68a0bbc20575788d525bc3aab1061504e548924b1e5
+tentacle 1 zero 10000 7d43c0ab5add7f180657ad295e99e6fc7cc1b853164ef605754b0258af13d3b3
+tentacle 1 half 10000 c28c69909a261c2a6d30952b34ed7b1a8c0200d6914dd29adfb3fea709c28a98
+tentacle 2 default 10000 0f41c825ff28f209e307d822355a8a4d2e69d1112793b1736ced7c8be277d50c
+tentacle 2 zero 10000 eacabe9014b8c17fe0dc77c8053c90734dd7e08f7c85c9e25c5cd4c8f06a8190
+tentacle 2 half 10000 7d2ede55cb3f0c8361b8e173ff2b79413eac093352dc6a9484c7dd31367b1d24

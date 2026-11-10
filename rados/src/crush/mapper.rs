@@ -1,10 +1,10 @@
 // CRUSH rule execution engine
 // Reference: ~/dev/ceph/src/crush/mapper.c
 
-use crate::crush::bucket::bucket_choose;
-use crate::crush::error::Result;
+use crate::crush::bucket::{bucket_choose_with_arg, bucket_perm_choose};
+use crate::crush::error::{CrushError, Result};
 use crate::crush::hash::crush_hash32_2;
-use crate::crush::types::{CrushMap, RuleOp};
+use crate::crush::types::{ChooseProfile, CrushChooseArg, CrushMap, RuleOp};
 use crate::denc::constants::crush::{FIXED_POINT_MASK, FIXED_POINT_ONE};
 
 /// Sentinel value for "no item selected" in INDEP mode
@@ -25,7 +25,7 @@ fn calculate_numrep(step_arg: i32, result_max: usize) -> usize {
     } else if step_arg > 0 {
         step_arg as usize
     } else {
-        (result_max as i32 + step_arg).max(0) as usize
+        result_max.saturating_sub(step_arg.unsigned_abs() as usize)
     }
 }
 
@@ -41,7 +41,7 @@ fn get_item_type(map: &CrushMap, item: i32) -> Option<i32> {
 }
 
 /// Check if an OSD is "out" (failed, fully offloaded)
-fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
+fn is_out(weight: &[u32], item: i32, x: i32) -> bool {
     if item < 0 || item as usize >= weight.len() {
         return true;
     }
@@ -60,8 +60,16 @@ fn is_out(weight: &[u32], item: i32, x: u32) -> bool {
 
     // Probabilistic: use hash to determine if item is in or out
     // This allows gradual weight changes
-    let hash = crush_hash32_2(x, item as u32);
+    let hash = crush_hash32_2(x as u32, item as u32);
     (hash & FIXED_POINT_MASK) >= w
+}
+
+#[inline]
+fn choose_arg(
+    choose_args: Option<&[Option<CrushChooseArg>]>,
+    bucket_id: i32,
+) -> Option<&CrushChooseArg> {
+    choose_args?.get((-1 - bucket_id) as usize)?.as_ref()
 }
 
 /// Execute a CRUSH rule to map a PG to OSDs
@@ -84,20 +92,107 @@ pub fn crush_do_rule(
     result_max: usize,
     weights: &[u32],
 ) -> Result<()> {
+    crush_do_rule_with_choose_args(map, rule_id, x, result, result_max, weights, -1)
+}
+
+/// Execute a conventional CRUSH rule while collecting retry observations in `profile`.
+pub fn crush_do_rule_with_choose_profile(
+    map: &CrushMap,
+    rule_id: u32,
+    x: u32,
+    result: &mut Vec<i32>,
+    result_max: usize,
+    weights: &[u32],
+    profile: &mut ChooseProfile,
+) -> Result<()> {
+    if matches!(
+        map.get_rule(rule_id)?.rule_type,
+        crate::crush::types::RuleType::MsrFirstN | crate::crush::types::RuleType::MsrIndep
+    ) {
+        return Err(CrushError::InvalidRuleState(
+            "retry profiling is unsupported for MSR rules",
+        ));
+    }
+    crush_do_rule_impl(
+        map,
+        rule_id,
+        x,
+        result,
+        result_max,
+        weights,
+        -1,
+        Some(profile),
+    )
+}
+
+/// Execute a CRUSH rule using a pool's choose-argument index.
+pub fn crush_do_rule_with_choose_args(
+    map: &CrushMap,
+    rule_id: u32,
+    x: u32,
+    result: &mut Vec<i32>,
+    result_max: usize,
+    weights: &[u32],
+    choose_args_index: i64,
+) -> Result<()> {
+    crush_do_rule_impl(
+        map,
+        rule_id,
+        x,
+        result,
+        result_max,
+        weights,
+        choose_args_index,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn crush_do_rule_impl(
+    map: &CrushMap,
+    rule_id: u32,
+    x: u32,
+    result: &mut Vec<i32>,
+    result_max: usize,
+    weights: &[u32],
+    choose_args_index: i64,
+    mut profile: Option<&mut ChooseProfile>,
+) -> Result<()> {
+    // NOTE: Ceph's public mapper takes signed 32-bit counts and input bits.
+    // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L2016-L2020
+    if result_max > i32::MAX as usize || weights.len() > i32::MAX as usize {
+        return Err(CrushError::InvalidRuleState(
+            "mapper count exceeds i32::MAX",
+        ));
+    }
+    let x = x as i32;
     let rule = map.get_rule(rule_id)?;
+    let choose_args = map
+        .choose_args
+        .get(&choose_args_index)
+        .or_else(|| map.choose_args.get(&-1))
+        .map(Vec::as_slice);
+
+    if matches!(
+        rule.rule_type,
+        crate::crush::types::RuleType::MsrFirstN | crate::crush::types::RuleType::MsrIndep
+    ) {
+        return crush_msr_do_rule(map, rule, x, result, result_max, weights, choose_args);
+    }
 
     result.clear();
 
     let mut work: Vec<i32> = Vec::with_capacity(result_max);
     let mut scratch: Vec<i32> = Vec::with_capacity(result_max);
 
-    // C++ mapper.c: "the original choose_total_tries value was off by one
-    // (it counted 'retries' and not 'tries'). add one."
-    let mut choose_tries = map.choose_total_tries + 1;
-    let mut chooseleaf_vary_r = map.chooseleaf_vary_r;
-    let mut chooseleaf_stable = map.chooseleaf_stable;
-    let mut msr_descents = map.msr_descents;
-    let mut msr_collision_tries = map.msr_collision_tries;
+    // NOTE: Ceph adds one to this u32 retry count; overflow wraps before use.
+    // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L849-L853
+    let mut choose_tries = map.choose_total_tries.wrapping_add(1);
+    let mut choose_leaf_tries = 0;
+    let mut choose_local_tries = map.choose_local_tries;
+    let mut choose_local_fallback_tries = map.choose_local_fallback_tries;
+    let mut chooseleaf_vary_r = u32::from(map.chooseleaf_vary_r);
+    let mut chooseleaf_stable = u32::from(map.chooseleaf_stable);
 
     for step in &rule.steps {
         match step.op {
@@ -111,21 +206,43 @@ pub fn crush_do_rule(
                 let numrep = calculate_numrep(step.arg1, result_max);
                 let item_type = step.arg2;
 
+                let recurse_tries = if choose_leaf_tries > 0 {
+                    choose_leaf_tries
+                } else if map.chooseleaf_descend_once != 0 {
+                    1
+                } else {
+                    choose_tries
+                };
                 scratch.clear();
+                let mut domains = vec![CRUSH_ITEM_NONE; result_max];
+                let mut leaves = vec![CRUSH_ITEM_NONE; result_max];
                 for &item in &work {
-                    crush_choose_firstn(
+                    if item >= 0 || numrep == 0 {
+                        continue;
+                    }
+                    let remaining = result_max - scratch.len();
+                    let count = crush_choose_firstn(
                         map,
                         item,
                         x,
                         numrep,
                         item_type,
-                        &mut scratch,
+                        &mut domains[..remaining],
+                        0,
                         weights,
                         choose_tries,
-                        recurse_to_leaf,
+                        recurse_tries,
+                        choose_local_tries,
+                        choose_local_fallback_tries,
                         chooseleaf_vary_r,
                         chooseleaf_stable,
+                        recurse_to_leaf.then_some(&mut leaves[..remaining]),
+                        0,
+                        choose_args,
+                        profile.as_deref_mut(),
                     )?;
+                    let selected = if recurse_to_leaf { &leaves } else { &domains };
+                    scratch.extend_from_slice(&selected[..count]);
                 }
                 std::mem::swap(&mut work, &mut scratch);
             }
@@ -136,47 +253,39 @@ pub fn crush_do_rule(
                 let item_type = step.arg2;
 
                 scratch.clear();
-                let mut indep_out = vec![CRUSH_ITEM_NONE; numrep];
+                let mut domains = vec![CRUSH_ITEM_NONE; result_max];
+                let mut leaves = vec![CRUSH_ITEM_NONE; result_max];
                 for &item in &work {
-                    indep_out.fill(CRUSH_ITEM_NONE);
+                    // As in Ceph's executor, devices and unresolved positions
+                    // cannot be inputs to another bucket selection step.
+                    if item >= 0 || numrep == 0 {
+                        continue;
+                    }
+                    let out_size = numrep.min(result_max - scratch.len());
                     crush_choose_indep(
                         map,
                         item,
                         x,
+                        out_size,
                         numrep,
                         item_type,
-                        &mut indep_out,
+                        &mut domains[..out_size],
+                        0,
                         weights,
                         choose_tries,
+                        if choose_leaf_tries > 0 {
+                            choose_leaf_tries
+                        } else {
+                            1
+                        },
                         recurse_to_leaf,
+                        recurse_to_leaf.then_some(&mut leaves[..out_size]),
                         0, // top-level call: parent_r = 0
+                        choose_args,
+                        profile.as_deref_mut(),
                     )?;
-                    scratch.extend_from_slice(&indep_out);
-                }
-                std::mem::swap(&mut work, &mut scratch);
-            }
-
-            RuleOp::ChooseMsr => {
-                let numrep = calculate_numrep(step.arg1, result_max);
-                let item_type = step.arg2;
-
-                scratch.clear();
-                let mut msr_out = vec![CRUSH_ITEM_NONE; numrep];
-                for &item in &work {
-                    msr_out.fill(CRUSH_ITEM_NONE);
-                    crush_choose_msr(
-                        map,
-                        item,
-                        x,
-                        numrep,
-                        item_type,
-                        &mut msr_out,
-                        weights,
-                        msr_descents,
-                        msr_collision_tries,
-                        false,
-                    )?;
-                    scratch.extend(msr_out.iter().copied().filter(|&v| v != CRUSH_ITEM_NONE));
+                    let selected = if recurse_to_leaf { &leaves } else { &domains };
+                    scratch.extend_from_slice(&selected[..out_size]);
                 }
                 std::mem::swap(&mut work, &mut scratch);
             }
@@ -187,17 +296,35 @@ pub fn crush_do_rule(
                         result.push(item);
                     }
                 }
+                work.clear();
             }
 
-            RuleOp::SetChooseTries => choose_tries = step.arg1 as u32,
-            RuleOp::SetChooseLeafVaryR => chooseleaf_vary_r = step.arg1 as u8,
-            RuleOp::SetChooseLeafStable => chooseleaf_stable = step.arg1 as u8,
-            RuleOp::SetMsrDescents => msr_descents = step.arg1 as u32,
-            RuleOp::SetMsrCollisionTries => msr_collision_tries = step.arg1 as u32,
-
-            RuleOp::SetChooseLeafTries
+            RuleOp::SetChooseTries if step.arg1 > 0 => choose_tries = step.arg1 as u32,
+            RuleOp::SetChooseLeafTries => {
+                if step.arg1 > 0 {
+                    choose_leaf_tries = step.arg1 as u32;
+                }
+            }
+            RuleOp::SetChooseLocalTries if step.arg1 >= 0 => {
+                choose_local_tries = step.arg1 as u32;
+            }
+            RuleOp::SetChooseLocalFallbackTries if step.arg1 >= 0 => {
+                choose_local_fallback_tries = step.arg1 as u32;
+            }
+            RuleOp::SetChooseLeafVaryR if step.arg1 >= 0 => {
+                chooseleaf_vary_r = step.arg1 as u32;
+            }
+            RuleOp::SetChooseLeafStable if step.arg1 >= 0 => {
+                chooseleaf_stable = step.arg1 as u32;
+            }
+            RuleOp::SetChooseTries
             | RuleOp::SetChooseLocalTries
             | RuleOp::SetChooseLocalFallbackTries
+            | RuleOp::SetChooseLeafVaryR
+            | RuleOp::SetChooseLeafStable
+            | RuleOp::SetMsrDescents
+            | RuleOp::SetMsrCollisionTries
+            | RuleOp::ChooseMsr
             | RuleOp::Noop => {}
         }
     }
@@ -205,152 +332,249 @@ pub fn crush_do_rule(
     Ok(())
 }
 
-/// Choose N items using FIRSTN algorithm
-///
-/// This is the core CRUSH selection algorithm that recursively descends
-/// through the bucket hierarchy to select items.
+/// Choose failure domains with FIRSTN, optionally selecting a leaf in each.
+/// `out` retains domains for collision checks; `leaves` retains the OSDs.
+/// The returned position includes any prefix supplied by a recursive call.
+/// Reference: src/crush/mapper.c::crush_choose_firstn, v17.2.7 and v20.2.4.
 #[allow(clippy::too_many_arguments)]
 fn crush_choose_firstn(
     map: &CrushMap,
     bucket_id: i32,
-    x: u32,
+    x: i32,
     numrep: usize,
     item_type: i32,
-    out: &mut Vec<i32>,
+    out: &mut [i32],
+    mut outpos: usize,
     weights: &[u32],
     tries: u32,
-    recurse_to_leaf: bool,
-    vary_r: u8,
-    stable: u8,
-) -> Result<()> {
-    tracing::debug!(
-        "crush_choose_firstn: bucket_id={}, numrep={}, item_type={}, recurse_to_leaf={}",
+    recurse_tries: u32,
+    local_tries: u32,
+    local_fallback_tries: u32,
+    vary_r: u32,
+    stable: u32,
+    mut leaves: Option<&mut [i32]>,
+    parent_r: i32,
+    choose_args: Option<&[Option<CrushChooseArg>]>,
+    mut profile: Option<&mut ChooseProfile>,
+) -> Result<usize> {
+    let _span = tracing::debug_span!(
+        "crush_choose_firstn",
         bucket_id,
+        x,
         numrep,
         item_type,
-        recurse_to_leaf
-    );
-
-    if bucket_id >= 0 {
-        if item_type == 0 && !is_out(weights, bucket_id, x) {
-            out.push(bucket_id);
-        }
-        return Ok(());
-    }
-
-    let bucket = map.get_bucket(bucket_id)?;
+        parent_r
+    )
+    .entered();
     tracing::debug!(
-        "Got bucket: id={}, type={}, size={}, items={:?}",
-        bucket.id,
-        bucket.bucket_type,
-        bucket.size,
-        bucket.items
+        outpos,
+        capacity = out.len(),
+        tries,
+        recurse_tries,
+        local_retries = local_tries,
+        local_fallback_retries = local_fallback_tries,
+        vary_r,
+        stable,
+        chooseleaf = leaves.is_some(),
+        "Starting FIRSTN selection"
     );
-
-    for rep in 0..numrep {
-        let mut found = false;
-        let r = if stable != 0 { 0 } else { rep as u32 };
-        let mut current_bucket;
-
-        tracing::trace!("=== crush_choose_firstn rep={} START ===", rep);
-        tracing::trace!(
-            "  bucket_id={}, x={}, numrep={}, item_type={}",
-            bucket_id,
-            x,
-            numrep,
-            item_type
-        );
-
-        'tries: for ftotal in 0..tries {
-            current_bucket = bucket; // reset to starting bucket each retry (C++ `in = bucket`)
-            let r_prime = if vary_r != 0 { r + ftotal } else { r };
-
-            tracing::trace!(
-                "  rep={}: r_prime = r({}) + ftotal({}) = {}, vary_r={}",
-                rep,
-                r,
-                ftotal,
-                r_prime,
-                vary_r
-            );
-
-            loop {
-                let item = bucket_choose(current_bucket, x, r_prime);
-
-                tracing::debug!(
-                    "Selected item {} from bucket {} (rep={}, try={})",
-                    item,
-                    current_bucket.id,
-                    rep,
-                    ftotal
-                );
-
-                let Some(itemtype) = get_item_type(map, item) else {
-                    tracing::debug!("Invalid bucket {}", item);
-                    continue 'tries;
+    let bucket = map.get_bucket(bucket_id)?;
+    let first_rep = if stable != 0 { 0 } else { outpos };
+    'replicas: for rep in first_rep..numrep {
+        if outpos == out.len() {
+            tracing::trace!(rep, outpos, "Output capacity reached");
+            break;
+        }
+        let mut current_bucket = bucket;
+        let mut total_failures = 0u32;
+        let mut local_failures = 0u32;
+        loop {
+            // Retries always change r. vary_r only controls the recursive seed.
+            let r = (rep as i32)
+                .wrapping_add(parent_r)
+                .wrapping_add(total_failures as i32);
+            let mut collide = false;
+            if current_bucket.size != 0 {
+                let item = if local_fallback_tries > 0
+                    && local_failures >= current_bucket.size / 2
+                    && local_failures > local_fallback_tries
+                {
+                    tracing::trace!(
+                        rep,
+                        r,
+                        current_bucket_id = current_bucket.id,
+                        local_failures,
+                        "Using permutation fallback"
+                    );
+                    bucket_perm_choose(current_bucket, x, r)
+                } else {
+                    bucket_choose_with_arg(
+                        current_bucket,
+                        x,
+                        r,
+                        choose_arg(choose_args, current_bucket.id),
+                        outpos,
+                    )
                 };
-
-                tracing::debug!(
-                    "Item {} has type {}, looking for type {}",
+                tracing::trace!(
+                    rep,
+                    r,
+                    current_bucket_id = current_bucket.id,
                     item,
-                    itemtype,
-                    item_type
+                    "Selected candidate"
                 );
-
-                if itemtype != item_type {
+                if item >= map.max_devices {
+                    tracing::trace!(
+                        rep,
+                        item,
+                        max_devices = map.max_devices,
+                        "Skipping replica: invalid device"
+                    );
+                    continue 'replicas;
+                }
+                let Some(selected_type) = get_item_type(map, item) else {
+                    tracing::trace!(rep, item, "Skipping replica: invalid bucket");
+                    continue 'replicas;
+                };
+                if selected_type != item_type {
                     if item >= 0 {
-                        tracing::debug!("Device {} has wrong type", item);
-                        continue 'tries;
+                        tracing::trace!(
+                            rep,
+                            item,
+                            selected_type,
+                            "Skipping replica: wrong item type"
+                        );
+                        continue 'replicas;
                     }
+                    tracing::trace!(
+                        rep,
+                        from = current_bucket.id,
+                        to = item,
+                        selected_type,
+                        "Descending through hierarchy"
+                    );
                     current_bucket = map.get_bucket(item)?;
-                    tracing::debug!("Descending into bucket {}", item);
                     continue;
                 }
 
-                if out.contains(&item) {
-                    tracing::debug!("Item {} already in output, skipping", item);
-                    continue 'tries;
+                collide = out[..outpos].contains(&item);
+                if collide {
+                    tracing::trace!(rep, item, outpos, "Rejecting candidate: collision");
                 }
-
-                if item >= 0 && is_out(weights, item, x) {
-                    tracing::debug!("Device {} is out", item);
-                    continue 'tries;
-                }
-
-                if recurse_to_leaf && item < 0 {
-                    let before_len = out.len();
-                    crush_choose_firstn(
-                        map, item, x, 1, 0, // Type 0 = device
-                        out, weights, tries, true, vary_r, stable,
-                    )?;
-
-                    if out.len() > before_len {
-                        found = true;
-                        break 'tries;
+                let mut reject = false;
+                if !collide && let Some(leaf_out) = leaves.as_deref_mut() {
+                    if item < 0 {
+                        let sub_r = if vary_r == 0 {
+                            0
+                        } else {
+                            // NOTE: Ceph shifts a signed int here (arithmetic shift).
+                            // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L548-L553
+                            r.checked_shr(vary_r - 1)
+                                .ok_or(CrushError::InvalidRuleState(
+                                    "chooseleaf_vary_r exceeds 32-bit shift range",
+                                ))?
+                        };
+                        tracing::trace!(
+                            rep,
+                            item,
+                            outpos,
+                            sub_r,
+                            recurse_tries,
+                            "Selecting leaf in failure domain"
+                        );
+                        let end = crush_choose_firstn(
+                            map,
+                            item,
+                            x,
+                            if stable != 0 { 1 } else { outpos + 1 },
+                            0,
+                            leaf_out,
+                            outpos,
+                            weights,
+                            recurse_tries,
+                            0,
+                            local_tries,
+                            local_fallback_tries,
+                            vary_r,
+                            stable,
+                            None,
+                            sub_r,
+                            choose_args,
+                            profile.as_deref_mut(),
+                        )?;
+                        reject = end == outpos;
+                        if reject {
+                            tracing::trace!(rep, item, "Rejecting candidate: no eligible leaf");
+                        }
                     } else {
-                        tracing::debug!("Failed to find leaf in bucket {}", item);
-                        continue 'tries;
+                        leaf_out[outpos] = item;
                     }
                 }
-
-                tracing::debug!("Found valid item {}", item);
-                tracing::trace!("crush_choose_firstn: rep={}, item={} SELECTED", rep, item);
-                out.push(item);
-                found = true;
-                break 'tries;
+                if !reject && !collide && item >= 0 {
+                    reject = is_out(weights, item, x);
+                    if reject {
+                        tracing::trace!(rep, item, "Rejecting candidate: device is out");
+                    }
+                }
+                if !reject && !collide {
+                    tracing::trace!(
+                        bucket_id,
+                        x,
+                        rep,
+                        item,
+                        total_failures,
+                        "CRUSH FIRSTN selected item"
+                    );
+                    out[outpos] = item;
+                    outpos += 1;
+                    if let Some(profile) = profile.as_deref_mut() {
+                        profile.record(total_failures);
+                    }
+                    continue 'replicas;
+                }
+            } else {
+                tracing::trace!(
+                    rep,
+                    current_bucket_id = current_bucket.id,
+                    "Rejecting empty bucket"
+                );
             }
-        }
 
-        if !found {
-            tracing::debug!(
-                "Failed to find item for replica {} after {} tries",
-                rep,
-                tries
-            );
+            // NOTE: Failure counters and the fallback bound use u32 arithmetic in C.
+            // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L586-L598
+            total_failures = total_failures.wrapping_add(1);
+            local_failures = local_failures.wrapping_add(1);
+            if (collide && local_failures <= local_tries)
+                || (local_fallback_tries > 0
+                    && local_failures <= current_bucket.size.wrapping_add(local_fallback_tries))
+            {
+                // A local retry stays in the bucket where the collision occurred.
+                tracing::trace!(
+                    rep,
+                    current_bucket_id = current_bucket.id,
+                    total_failures,
+                    local_failures,
+                    "Retrying current bucket"
+                );
+                continue;
+            }
+            if total_failures >= tries {
+                tracing::debug!(
+                    rep,
+                    outpos,
+                    total_failures,
+                    "Skipping replica: retry budget exhausted"
+                );
+                continue 'replicas;
+            }
+            // A descent retry starts again at the original failure domain.
+            tracing::trace!(rep, total_failures, "Restarting descent");
+            current_bucket = bucket;
+            local_failures = 0;
         }
     }
-
-    Ok(())
+    tracing::debug!(outpos, "Finished FIRSTN selection");
+    Ok(outpos)
 }
 
 /// Choose N items using INDEP (independent) algorithm
@@ -365,14 +589,20 @@ fn crush_choose_firstn(
 fn crush_choose_indep(
     map: &CrushMap,
     bucket_id: i32,
-    x: u32,
+    x: i32,
+    mut left: usize,
     numrep: usize,
     item_type: i32,
     out: &mut [i32],
+    outpos: usize,
     weights: &[u32],
     tries: u32,
+    recurse_tries: u32,
     recurse_to_leaf: bool,
+    mut leaves: Option<&mut [i32]>,
     parent_r: i32,
+    choose_args: Option<&[Option<CrushChooseArg>]>,
+    mut profile: Option<&mut ChooseProfile>,
 ) -> Result<()> {
     tracing::debug!(
         "crush_choose_indep: bucket_id={}, numrep={}, item_type={}, recurse_to_leaf={}",
@@ -381,13 +611,6 @@ fn crush_choose_indep(
         item_type,
         recurse_to_leaf
     );
-
-    if bucket_id >= 0 {
-        if item_type == 0 && !is_out(weights, bucket_id, x) && !out.is_empty() {
-            out[0] = bucket_id;
-        }
-        return Ok(());
-    }
 
     let bucket = map.get_bucket(bucket_id)?;
     tracing::debug!(
@@ -398,34 +621,45 @@ fn crush_choose_indep(
         bucket.items
     );
 
-    // UNDEF distinguishes "slot not yet filled" from definitive NONE (not retried).
-    for slot in out.iter_mut().take(numrep) {
-        *slot = CRUSH_ITEM_UNDEF;
+    let endpos = (outpos + left).min(out.len());
+    for rep in outpos..endpos {
+        out[rep] = CRUSH_ITEM_UNDEF;
+        if let Some(leaves) = leaves.as_deref_mut() {
+            leaves[rep] = CRUSH_ITEM_UNDEF;
+        }
     }
 
-    for ftotal in 0..tries {
-        let mut all_done = true;
-
-        for rep in 0..numrep {
+    let mut ftotal = 0;
+    while ftotal < tries && left > 0 {
+        for rep in outpos..endpos {
             if out[rep] != CRUSH_ITEM_UNDEF {
                 continue;
             }
-
-            all_done = false;
-
             let mut current_bucket = bucket;
 
-            // r = rep + parent_r + numrep * ftotal
-            // Matches C++ crush_choose_indep (non-uniform bucket path).
-            let r = (rep as u32)
-                .wrapping_add(parent_r as u32)
-                .wrapping_add((numrep as u32).wrapping_mul(ftotal));
-
-            let mut item = CRUSH_ITEM_NONE;
-            let mut item_found = false;
-
             loop {
-                let candidate = bucket_choose(current_bucket, x, r);
+                if current_bucket.size == 0 {
+                    // Keep this position unresolved and retry from the original bucket.
+                    break;
+                }
+                let retry_stride = if current_bucket.alg
+                    == crate::crush::types::BucketAlgorithm::Uniform
+                    && current_bucket.size % numrep as u32 == 0
+                {
+                    numrep + 1
+                } else {
+                    numrep
+                };
+                let r = (rep as i32)
+                    .wrapping_add(parent_r)
+                    .wrapping_add((retry_stride as u32).wrapping_mul(ftotal) as i32);
+                let candidate = bucket_choose_with_arg(
+                    current_bucket,
+                    x,
+                    r,
+                    choose_arg(choose_args, current_bucket.id),
+                    outpos,
+                );
 
                 tracing::debug!(
                     "Selected item {} from bucket {} (rep={}, try={})",
@@ -438,6 +672,10 @@ fn crush_choose_indep(
                 let Some(itemtype) = get_item_type(map, candidate) else {
                     tracing::debug!("Invalid bucket {}", candidate);
                     out[rep] = CRUSH_ITEM_NONE;
+                    if let Some(leaves) = leaves.as_deref_mut() {
+                        leaves[rep] = CRUSH_ITEM_NONE;
+                    }
+                    left -= 1;
                     break;
                 };
 
@@ -452,6 +690,10 @@ fn crush_choose_indep(
                     if candidate >= 0 {
                         tracing::debug!("Device {} has wrong type", candidate);
                         out[rep] = CRUSH_ITEM_NONE;
+                        if let Some(leaves) = leaves.as_deref_mut() {
+                            leaves[rep] = CRUSH_ITEM_NONE;
+                        }
+                        left -= 1;
                         break;
                     }
                     current_bucket = map.get_bucket(candidate)?;
@@ -461,190 +703,471 @@ fn crush_choose_indep(
 
                 let collision = out
                     .iter()
-                    .enumerate()
-                    .take(numrep)
-                    .any(|(j, &val)| j != rep && val == candidate);
+                    .take(endpos)
+                    .skip(outpos)
+                    .any(|&val| val == candidate);
                 if collision {
                     tracing::debug!("Item {} collides with another position", candidate);
                     break;
                 }
 
-                if candidate >= 0 && is_out(weights, candidate, x) {
-                    tracing::debug!("Device {} is out", candidate);
-                    break;
-                }
-
                 if recurse_to_leaf && candidate < 0 {
-                    let mut leaf_out = [CRUSH_ITEM_UNDEF; 1];
+                    let leaf_out = leaves
+                        .as_deref_mut()
+                        .ok_or(CrushError::InvalidRuleState("missing chooseleaf output"))?;
                     crush_choose_indep(
                         map,
                         candidate,
                         x,
                         1,
+                        numrep,
                         0, // Type 0 = device
-                        &mut leaf_out,
+                        leaf_out,
+                        rep,
                         weights,
-                        tries,
-                        true,
-                        r as i32,
+                        recurse_tries,
+                        0,
+                        false,
+                        None,
+                        r,
+                        choose_args,
+                        profile.as_deref_mut(),
                     )?;
-
-                    if leaf_out[0] == CRUSH_ITEM_NONE || leaf_out[0] == CRUSH_ITEM_UNDEF {
+                    if leaf_out[rep] == CRUSH_ITEM_NONE {
                         tracing::debug!("Failed to find leaf in bucket {}", candidate);
                         break;
                     }
+                } else if recurse_to_leaf {
+                    leaves
+                        .as_deref_mut()
+                        .ok_or(CrushError::InvalidRuleState("missing chooseleaf output"))?[rep] =
+                        candidate;
+                }
 
-                    let leaf_collision = out
-                        .iter()
-                        .enumerate()
-                        .take(numrep)
-                        .any(|(j, &val)| j != rep && val == leaf_out[0]);
-                    if leaf_collision {
-                        tracing::debug!("Leaf item {} collides with another position", leaf_out[0]);
-                        break;
-                    }
-
-                    item = leaf_out[0];
-                    item_found = true;
+                if itemtype == 0 && is_out(weights, candidate, x) {
+                    tracing::debug!("Device {} is out", candidate);
                     break;
                 }
 
-                tracing::debug!("Found valid item {}", candidate);
-                item = candidate;
-                item_found = true;
+                out[rep] = candidate;
+                left -= 1;
+                tracing::trace!(
+                    "crush_choose_indep: rep={}, item={} SELECTED",
+                    rep,
+                    candidate
+                );
                 break;
             }
-
-            if item_found {
-                out[rep] = item;
-                tracing::trace!("crush_choose_indep: rep={}, item={} SELECTED", rep, item);
-            }
         }
+        ftotal += 1;
+    }
 
-        if all_done {
-            break;
+    for rep in outpos..endpos {
+        if out[rep] == CRUSH_ITEM_UNDEF {
+            out[rep] = CRUSH_ITEM_NONE;
+        }
+        if let Some(leaves) = leaves.as_deref_mut()
+            && leaves[rep] == CRUSH_ITEM_UNDEF
+        {
+            leaves[rep] = CRUSH_ITEM_NONE;
         }
     }
 
-    for slot in out.iter_mut().take(numrep) {
-        if *slot == CRUSH_ITEM_UNDEF {
-            *slot = CRUSH_ITEM_NONE;
-        }
+    if let Some(profile) = profile {
+        profile.record(ftotal);
     }
 
     Ok(())
 }
 
-/// Choose N items using MSR (Main Search Rule) algorithm
-///
-/// MSR is an alternative selection algorithm for multi-way replication.
-/// It uses a different hash function and collision handling strategy.
-///
-/// Reference: ~/dev/ceph/src/crush/mapper.c (crush_choose_msr)
-#[allow(clippy::too_many_arguments)]
-fn crush_choose_msr(
+fn crush_msr_do_rule(
     map: &CrushMap,
-    bucket_id: i32,
-    x: u32,
-    numrep: usize,
-    item_type: i32,
-    out: &mut [i32],
+    rule: &crate::crush::types::CrushRule,
+    x: i32,
+    result: &mut Vec<i32>,
+    result_max: usize,
     weights: &[u32],
-    descents: u32,
-    collision_tries: u32,
-    recurse_to_leaf: bool,
+    choose_args: Option<&[Option<CrushChooseArg>]>,
 ) -> Result<()> {
+    let mut descents = map.msr_descents;
+    let mut collision_tries = map.msr_collision_tries;
+    let mut step = 0;
+    while let Some(config) = rule.steps.get(step) {
+        match config.op {
+            RuleOp::SetMsrDescents => descents = config.arg1 as u32,
+            RuleOp::SetMsrCollisionTries => collision_tries = config.arg1 as u32,
+            _ => break,
+        }
+        step += 1;
+    }
     tracing::debug!(
-        "crush_choose_msr: bucket_id={}, numrep={}, item_type={}, descents={}, collision_tries={}",
-        bucket_id,
-        numrep,
-        item_type,
+        rule_id = rule.rule_id,
+        x,
+        result_max,
         descents,
-        collision_tries
+        collision_tries,
+        "executing MSR rule"
     );
 
-    if bucket_id >= 0 {
-        if item_type == 0 && !is_out(weights, bucket_id, x) {
-            out[0] = bucket_id;
+    result.clear();
+    result.resize(result_max, CRUSH_ITEM_NONE);
+    let mut returned = 0;
+    let mut start_index = 0usize;
+
+    while step < rule.steps.len() {
+        let take = &rule.steps[step];
+        if take.op != RuleOp::Take {
+            result.clear();
+            return Ok(());
         }
-        return Ok(());
-    }
+        let first_choose = step + 1;
+        let Some(emit) = rule.steps[first_choose..]
+            .iter()
+            .position(|candidate| candidate.op == RuleOp::Emit)
+            .map(|offset| first_choose + offset)
+        else {
+            result.clear();
+            return Ok(());
+        };
+        if rule.steps[first_choose..emit]
+            .iter()
+            .any(|candidate| candidate.op != RuleOp::ChooseMsr)
+        {
+            result.clear();
+            return Ok(());
+        }
 
-    let bucket = map.get_bucket(bucket_id)?;
+        let mut total_children = 1usize;
+        for choose in &rule.steps[first_choose..emit] {
+            // Ceph assumes a nonnegative MSR fanout. Reject invalid input
+            // before converting it to an allocation size in choose_msr.
+            let fanout = usize::try_from(choose.arg1)
+                .map_err(|_| CrushError::InvalidMsrFanout(choose.arg1))?;
+            total_children = total_children
+                .checked_mul(if fanout == 0 { result_max } else { fanout })
+                .filter(|&count| count <= u32::MAX as usize)
+                .ok_or(CrushError::InvalidRuleState(
+                    "MSR fanout product exceeds u32::MAX",
+                ))?;
+        }
+        // NOTE: Ceph stores MSR fanout products and indices in unsigned int.
+        // Reject overflow instead of widening it into a different traversal.
+        // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L1139-L1212
+        let end_index = start_index
+            .checked_add(total_children)
+            .filter(|&end| end <= u32::MAX as usize)
+            .ok_or(CrushError::InvalidRuleState(
+                "MSR end index exceeds u32::MAX",
+            ))?
+            .min(result_max);
 
-    let mut chosen_items: Vec<i32> = Vec::with_capacity(numrep);
-    let mut collisions = vec![0u32; numrep];
-
-    for rep in 0..numrep {
-        let mut descent = 0;
-
-        'retry: loop {
-            if descent >= descents {
-                break 'retry;
+        if take.arg1 >= 0 {
+            if first_choose != emit {
+                result.clear();
+                return Ok(());
             }
-            descent += 1;
-
-            let r = rep as u32 + descent * numrep as u32 + collisions[rep];
-            let hash = crush_hash32_2(x + r, bucket_id as u32);
-            let item = bucket_choose(bucket, hash, r);
-
-            let item_type_match = match get_item_type(map, item) {
-                Some(t) => t == item_type || item_type == 0,
-                None => false,
-            };
-
-            if item < 0 && (recurse_to_leaf || !item_type_match) {
-                let mut sub_out = [CRUSH_ITEM_NONE; 1];
-                crush_choose_msr(
+            if start_index < result_max {
+                emit_msr_result(
+                    rule.rule_type,
+                    result,
+                    &mut returned,
+                    start_index,
+                    take.arg1,
+                );
+            }
+        } else if first_choose < emit && total_children > 0 {
+            let mut workspace = vec![vec![CRUSH_ITEM_UNDEF; result_max]; emit - first_choose];
+            let return_limit = returned + end_index.saturating_sub(start_index);
+            for attempt in 0..descents {
+                if returned >= return_limit {
+                    break;
+                }
+                choose_msr(
                     map,
-                    item,
+                    rule,
                     x,
-                    1,
-                    item_type,
-                    &mut sub_out,
+                    result_max,
                     weights,
-                    descents,
                     collision_tries,
-                    recurse_to_leaf,
+                    &mut workspace,
+                    result,
+                    &mut returned,
+                    take.arg1,
+                    total_children,
+                    start_index,
+                    end_index,
+                    first_choose,
+                    emit,
+                    attempt,
+                    first_choose,
+                    choose_args,
                 )?;
-
-                if sub_out[0] == CRUSH_ITEM_NONE {
-                    continue 'retry;
-                }
-
-                if chosen_items.contains(&sub_out[0]) {
-                    collisions[rep] += 1;
-                    if collisions[rep] < collision_tries {
-                        continue 'retry;
-                    }
-                    break 'retry;
-                }
-
-                out[rep] = sub_out[0];
-                chosen_items.push(sub_out[0]);
-                break 'retry;
             }
+        }
+        start_index = end_index;
+        step = emit + 1;
+    }
 
-            if item >= 0 && is_out(weights, item, x) {
-                continue 'retry;
-            }
+    if rule.rule_type == crate::crush::types::RuleType::MsrFirstN {
+        result.truncate(returned);
+    }
+    tracing::debug!(rule_id = rule.rule_id, returned, "MSR rule completed");
+    Ok(())
+}
 
-            if item_type_match {
-                if chosen_items.contains(&item) {
-                    collisions[rep] += 1;
-                    if collisions[rep] < collision_tries {
-                        continue 'retry;
-                    }
-                    break 'retry;
-                }
-                out[rep] = item;
-                chosen_items.push(item);
-                break 'retry;
+fn emit_msr_result(
+    rule_type: crate::crush::types::RuleType,
+    result: &mut [i32],
+    returned: &mut usize,
+    position: usize,
+    item: i32,
+) {
+    let output = if rule_type == crate::crush::types::RuleType::MsrFirstN {
+        *returned
+    } else {
+        position
+    };
+    result[output] = item;
+    *returned += 1;
+    tracing::trace!(
+        position,
+        output,
+        item,
+        returned = *returned,
+        "MSR item selected"
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn descend_msr(
+    map: &CrushMap,
+    x: i32,
+    result_max: usize,
+    mut bucket_id: i32,
+    item_type: i32,
+    attempt: u32,
+    local_attempt: u32,
+    index: usize,
+    choose_args: Option<&[Option<CrushChooseArg>]>,
+) -> Result<i32> {
+    loop {
+        let bucket = map.get_bucket(bucket_id)?;
+        let retry = attempt
+            .wrapping_mul(result_max as u32)
+            .wrapping_add(index as u32)
+            .wrapping_shl(16)
+            .wrapping_add(local_attempt);
+        // NOTE: Ceph computes an unsigned retry value, then passes it to an int.
+        // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/mapper.c#L1249-L1268
+        let candidate = bucket_choose_with_arg(
+            bucket,
+            x,
+            retry as i32,
+            choose_arg(choose_args, bucket.id),
+            index,
+        );
+        tracing::trace!(
+            bucket_id,
+            candidate,
+            item_type,
+            attempt,
+            local_attempt,
+            index,
+            retry,
+            "MSR descent candidate"
+        );
+        if candidate >= 0 {
+            return Ok(candidate);
+        }
+        let child = map.get_bucket(candidate)?;
+        if child.bucket_type == item_type {
+            return Ok(candidate);
+        }
+        bucket_id = candidate;
+    }
+}
+
+fn valid_msr_candidate(
+    selected: &[i32],
+    exclude: std::ops::Range<usize>,
+    include: std::ops::Range<usize>,
+    candidate: i32,
+) -> bool {
+    let exclude_start = exclude.start;
+    selected[exclude]
+        .iter()
+        .enumerate()
+        .find(|&(_, &item)| item == candidate)
+        .is_none_or(|(offset, _)| include.contains(&(offset + exclude_start)))
+}
+
+fn push_msr_candidate(selected: &mut [i32], candidate: i32) -> Result<bool> {
+    if selected.contains(&candidate) {
+        return Ok(false);
+    }
+    *selected
+        .iter_mut()
+        .find(|item| **item == CRUSH_ITEM_UNDEF)
+        .ok_or(CrushError::InvalidRuleState(
+            "MSR stride capacity exhausted",
+        ))? = candidate;
+    Ok(true)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn choose_msr(
+    map: &CrushMap,
+    rule: &crate::crush::types::CrushRule,
+    x: i32,
+    result_max: usize,
+    weights: &[u32],
+    collision_tries: u32,
+    workspace: &mut [Vec<i32>],
+    result: &mut [i32],
+    returned: &mut usize,
+    bucket_id: i32,
+    total_descendants: usize,
+    start_index: usize,
+    end_index: usize,
+    current_step: usize,
+    end_step: usize,
+    attempt: u32,
+    workspace_start: usize,
+    choose_args: Option<&[Option<CrushChooseArg>]>,
+) -> Result<usize> {
+    let _span = tracing::debug_span!(
+        "crush_choose_msr",
+        bucket_id,
+        start_index,
+        end_index,
+        current_step,
+        attempt
+    )
+    .entered();
+    let choose = &rule.steps[current_step];
+    let num_strides = if choose.arg1 == 0 {
+        result_max
+    } else {
+        choose.arg1 as usize
+    };
+    let stride_length = total_descendants / num_strides;
+    let workspace_index = current_step - workspace_start;
+    let leaf_index = end_step - workspace_start - 1;
+    // Only strides intersecting the requested output can acquire undo entries.
+    let mut undo = vec![CRUSH_ITEM_UNDEF; (end_index - start_index).div_ceil(stride_length)];
+    let mut mapped = 0;
+
+    for (stride, stride_start) in (start_index..end_index).step_by(stride_length).enumerate() {
+        let stride_end = (stride_start + stride_length).min(end_index);
+        if workspace[leaf_index][stride_start..stride_end]
+            .iter()
+            .all(|&item| item != CRUSH_ITEM_UNDEF)
+        {
+            continue;
+        }
+
+        let mut candidate = None;
+        for local_attempt in 0..collision_tries {
+            let item = descend_msr(
+                map,
+                x,
+                result_max,
+                bucket_id,
+                choose.arg2,
+                attempt,
+                local_attempt,
+                stride,
+                choose_args,
+            )?;
+            if valid_msr_candidate(
+                &workspace[workspace_index],
+                start_index..end_index,
+                stride_start..stride_end,
+                item,
+            ) {
+                candidate = Some(item);
+                break;
             }
+        }
+        let Some(candidate) = candidate else {
+            tracing::trace!(
+                stride,
+                stride_start,
+                stride_end,
+                "MSR collision retries exhausted"
+            );
+            continue;
+        };
+
+        if choose.arg2 == 0 {
+            if stride_length != 1 || current_step + 1 != end_step {
+                continue;
+            }
+            if is_out(weights, candidate, x) {
+                tracing::trace!(candidate, stride_start, "MSR candidate is out");
+                continue;
+            }
+            push_msr_candidate(
+                &mut workspace[workspace_index][stride_start..stride_end],
+                candidate,
+            )?;
+            emit_msr_result(rule.rule_type, result, returned, stride_start, candidate);
+            mapped += 1;
+            continue;
+        }
+
+        if current_step + 1 >= end_step {
+            continue;
+        }
+        let child_mapped = choose_msr(
+            map,
+            rule,
+            x,
+            result_max,
+            weights,
+            collision_tries,
+            workspace,
+            result,
+            returned,
+            candidate,
+            stride_length,
+            stride_start,
+            stride_end,
+            current_step + 1,
+            end_step,
+            attempt,
+            workspace_start,
+            choose_args,
+        )?;
+        let pushed = push_msr_candidate(
+            &mut workspace[workspace_index][stride_start..stride_end],
+            candidate,
+        )?;
+        if pushed && child_mapped == 0 {
+            undo[stride] = candidate;
+            tracing::trace!(candidate, stride, "MSR descent produced no leaf");
+        } else {
+            mapped += child_mapped;
         }
     }
 
-    Ok(())
+    for (stride, stride_start) in (start_index..end_index).step_by(stride_length).enumerate() {
+        if undo[stride] == CRUSH_ITEM_UNDEF {
+            continue;
+        }
+        let stride_end = (stride_start + stride_length).min(end_index);
+        let selected = &mut workspace[workspace_index][stride_start..stride_end];
+        let entry = selected
+            .iter_mut()
+            .rev()
+            .find(|item| **item != CRUSH_ITEM_UNDEF)
+            .ok_or(CrushError::InvalidRuleState("missing MSR undo candidate"))?;
+        debug_assert_eq!(*entry, undo[stride]);
+        tracing::trace!(candidate = *entry, stride, "MSR unused candidate removed");
+        *entry = CRUSH_ITEM_UNDEF;
+    }
+
+    Ok(mapped)
 }
 
 #[cfg(test)]
@@ -747,17 +1270,16 @@ mod tests {
 
         map.buckets = vec![Some(bucket)];
 
-        let mut out = Vec::new();
+        let mut out = vec![CRUSH_ITEM_NONE; 2];
         let weights = vec![0x10000, 0x10000, 0x10000];
+        let count = crush_choose_firstn(
+            &map, -1, 123, 2, 0, &mut out, 0, &weights, 50, 50, 0, 0, 0, 0, None, 0, None, None,
+        )
+        .unwrap();
+        out.truncate(count);
 
-        let res = crush_choose_firstn(&map, -1, 123, 2, 0, &mut out, &weights, 50, false, 0, 0);
-
-        assert!(res.is_ok());
-        assert!(out.len() <= 2);
-        // Should have selected distinct items
-        if out.len() == 2 {
-            assert_ne!(out[0], out[1]);
-        }
+        assert_eq!(out.len(), 2);
+        assert_ne!(out[0], out[1]);
     }
 
     #[test]
@@ -784,7 +1306,9 @@ mod tests {
         let mut out = vec![CRUSH_ITEM_NONE; 3];
         let weights = vec![0x10000, 0x10000, 0x10000, 0x10000];
 
-        let res = crush_choose_indep(&map, -1, 123, 3, 0, &mut out, &weights, 50, false, 0);
+        let res = crush_choose_indep(
+            &map, -1, 123, 3, 3, 0, &mut out, 0, &weights, 50, 0, false, None, 0, None, None,
+        );
 
         assert!(res.is_ok());
         // All positions should be filled (enough devices available)
@@ -826,9 +1350,81 @@ mod tests {
         // Run the same input twice - should produce identical results
         let mut out1 = vec![CRUSH_ITEM_NONE; 3];
         let mut out2 = vec![CRUSH_ITEM_NONE; 3];
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out1, &weights, 50, false, 0).unwrap();
-        crush_choose_indep(&map, -1, 42, 3, 0, &mut out2, &weights, 50, false, 0).unwrap();
+        crush_choose_indep(
+            &map, -1, 42, 3, 3, 0, &mut out1, 0, &weights, 50, 0, false, None, 0, None, None,
+        )
+        .unwrap();
+        crush_choose_indep(
+            &map, -1, 42, 3, 3, 0, &mut out2, 0, &weights, 50, 0, false, None, 0, None, None,
+        )
+        .unwrap();
         assert_eq!(out1, out2, "same input should produce same output");
+    }
+
+    #[test]
+    fn indep_retries_empty_intermediate_bucket() {
+        let mut map = CrushMap::new();
+        map.max_devices = 2;
+        map.max_buckets = 6;
+        map.buckets = [
+            (-1, 3, vec![-2, -3, -4]),
+            (-2, 2, vec![]),
+            (-3, 2, vec![-5]),
+            (-4, 2, vec![-6]),
+            (-5, 1, vec![0]),
+            (-6, 1, vec![1]),
+        ]
+        .into_iter()
+        .map(|(id, bucket_type, items)| {
+            Some(CrushBucket {
+                id,
+                bucket_type,
+                alg: BucketAlgorithm::Uniform,
+                hash: 0,
+                weight: items.len() as u32 * 0x10000,
+                size: items.len() as u32,
+                items,
+                data: BucketData::Uniform {
+                    item_weight: 0x10000,
+                },
+            })
+        })
+        .collect();
+
+        for (op, expected) in [(RuleOp::ChooseLeafIndep, 0), (RuleOp::ChooseIndep, -5)] {
+            map.rules = vec![Some(CrushRule {
+                rule_id: 0,
+                rule_type: crate::crush::types::RuleType::Erasure,
+                steps: vec![
+                    CrushRuleStep {
+                        op: RuleOp::Take,
+                        arg1: -1,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op,
+                        arg1: 1,
+                        arg2: 1,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::Emit,
+                        arg1: 0,
+                        arg2: 0,
+                    },
+                ],
+            })];
+
+            // x=1 descends into empty rack -2 on its first attempt.
+            let mut result = Vec::new();
+            map.choose_total_tries = 0;
+            crush_do_rule(&map, 0, 1, &mut result, 1, &[0x10000; 2]).unwrap();
+            assert_eq!(result, [CRUSH_ITEM_NONE]);
+
+            // Ceph retries from the root and selects host -5 / osd.0.
+            map.choose_total_tries = 50;
+            crush_do_rule(&map, 0, 1, &mut result, 1, &[0x10000; 2]).unwrap();
+            assert_eq!(result, [expected]);
+        }
     }
 
     #[test]
@@ -862,12 +1458,18 @@ mod tests {
             -1,
             100,
             3,
+            3,
             0,
             &mut out_all,
+            0,
             &weights_all_in,
             50,
-            false,
             0,
+            false,
+            None,
+            0,
+            None,
+            None,
         )
         .unwrap();
 
@@ -1017,3 +1619,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "tests/mapper_types.rs"]
+mod type_tests;

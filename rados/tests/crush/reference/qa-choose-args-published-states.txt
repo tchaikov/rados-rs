@@ -1,0 +1,18 @@
+# Local transcription of qa/standalone/crush/crush-choose-args.sh assertions.
+# Fields: transition canonical/compat totals and leaf states, in 16.16-free units.
+update-pre root=3/2 HOST=3/2 ids=root:-10,HOST:-20
+update-add root=6/5 HOST=6/5 leaves=osd.0:3/2,osd.1:3/3 ids=root:-10,HOST:-20,1
+update-remove root=3/2 HOST=3/2 ids=root:-10,HOST:-20
+no-update-pre root=3/2,1 HOST=3/2,1 ids=root:-10,HOST:-20
+no-update-add root=6/2,1 HOST=6/2,0,1,0 ids=root:-10,HOST:-20,1
+no-update-remove root=3/2,1 HOST=3/2,1 ids=root:-10,HOST:-20
+reweight-create HOST=6/6 leaves=osd.0:3/3,osd.1:3/3
+reweight-compat-osd0 HOST=6/5 leaves=osd.0:3/2,osd.1:3/3
+reweight-add-osd2 HOST=9/5 leaves=osd.0:3/2,osd.1:3/3,osd.2:3/0
+reweight-canonical-osd2 HOST=10/5 leaves=osd.0:3/2,osd.1:3/3,osd.2:4/0
+reweight-compat-osd2 HOST=10/9 leaves=osd.0:3/2,osd.1:3/3,osd.2:4/4
+move-create HOST=6/4 leaves=osd.0:3/2,osd.1:3/2
+move-rack HOST=6/4 RACK=6/4 leaves=osd.0:3/2,osd.1:3/2
+move-compat-osd0 HOST=6/3 RACK=6/3 leaves=osd.0:3/1,osd.1:3/2
+move-osd0-to-FOO HOST=3/2 RACK=3/2 FOO=3/3 leaves=osd.0:3/3,osd.1:3/2
+move-osd1-to-FOO HOST=0/0 RACK=0/0 FOO=6/3 leaves=osd.0:3/3,osd.1:3/0

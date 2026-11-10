@@ -1,0 +1,83 @@
+# Faithful text reconstruction of CrushWrapperTest.choose_args_compat.
+# Builder insertion order: osd.1 under b1/r11/default, then osd.2 under
+# b2/r12/default.  IDs are the builder-assigned sequence used by the test.
+#
+# Source: src/test/crush/CrushWrapper.cc::CrushWrapperTest.choose_args_compat
+# Quincy b12291d110049b2f35e32e0de30d70e9a4c060d2; Tentacle
+# 7f793731f1b39eb4f465e960113d2363c311b964. LGPL-2.1-or-later.
+
+# begin crush map
+tunable choose_local_tries 2
+tunable choose_local_fallback_tries 5
+tunable choose_total_tries 19
+tunable chooseleaf_descend_once 0
+tunable chooseleaf_vary_r 0
+tunable chooseleaf_stable 0
+tunable straw_calc_version 0
+tunable allowed_bucket_algs 0
+
+# devices
+device 1 osd.1
+device 2 osd.2
+
+# types
+type 0 osd
+type 1 host
+type 2 rack
+type 3 root
+
+# buckets
+host b1 {
+	id -1
+	alg straw2
+	hash 0
+	item osd.1 weight 12.00000
+}
+rack r11 {
+	id -2
+	alg straw2
+	hash 0
+	item b1 weight 12.00000
+}
+host b2 {
+	id -4
+	alg straw2
+	hash 0
+	item osd.2 weight 12.00000
+}
+rack r12 {
+	id -5
+	alg straw2
+	hash 0
+	item b2 weight 12.00000
+}
+root default {
+	id -3
+	alg straw2
+	hash 0
+	item r11 weight 12.00000
+	item r12 weight 12.00000
+}
+
+# rules
+rule rule1 {
+	id 0
+	type erasure
+	step take r11
+	step choose firstn 0 type host
+	step emit
+}
+
+# choose_args
+# CrushCompiler parses choose-args indexes as u64; this is the wire value for
+# CrushWrapper::DEFAULT_CHOOSE_ARGS (-1).
+choose_args 18446744073709551615 {
+	{
+		bucket_id -1
+		weight_set [
+			[ 666.00000 ]
+		]
+	}
+}
+
+# end crush map

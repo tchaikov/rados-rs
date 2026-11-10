@@ -7,7 +7,7 @@
 //! [`CrushMap`](crate::crush::types::CrushMap).
 
 use crate::crush::error::Result;
-use crate::crush::mapper::crush_do_rule;
+use crate::crush::mapper::crush_do_rule_with_choose_args;
 use crate::crush::types::CrushMap;
 use crate::denc::{Denc, FixedSize, RadosError, VersionedEncode};
 use bytes::{Buf, BufMut};
@@ -234,9 +234,9 @@ pub fn object_to_pg(
 ) -> crate::crush::error::Result<PgId> {
     use crate::crush::hash::ceph_str_hash_rjenkins;
 
-    if pg_num == 0 {
+    if pg_num == 0 || pg_num > i32::MAX as u32 {
         return Err(crate::crush::error::CrushError::DecodeError(
-            "pg_num must be non-zero".into(),
+            "pg_num must be in 1..=i32::MAX".into(),
         ));
     }
 
@@ -248,7 +248,9 @@ pub fn object_to_pg(
 
     // Hash the key, prepending "namespace\x1f" when a namespace is set.
     // Matches pg_pool_t::hash_key(): ns + '\037' + key_or_oid.
-    let hash = if locator.namespace.is_empty() {
+    let hash = if locator.hash >= 0 {
+        locator.hash as u32
+    } else if locator.namespace.is_empty() {
         ceph_str_hash_rjenkins(hash_key.as_bytes())
     } else {
         let ns = locator.namespace.as_bytes();
@@ -260,7 +262,7 @@ pub fn object_to_pg(
         ceph_str_hash_rjenkins(&hash_input)
     };
 
-    let pg_seed = hash % pg_num;
+    let pg_seed = ceph_stable_mod(hash, pg_num, pg_num_mask(pg_num));
 
     Ok(PgId::new(locator.pool_id, pg_seed))
 }
@@ -279,8 +281,11 @@ pub fn object_to_pg(
 /// ```
 #[inline]
 pub fn ceph_stable_mod(x: u32, b: u32, bmask: u32) -> u32 {
+    // NOTE: Ceph compares and shifts signed ints, even though pool fields are u32.
+    // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/include/rados.h#L96-L102
+    let (x, b, bmask) = (x as i32, b as i32, bmask as i32);
     let masked = x & bmask;
-    if masked < b { masked } else { x & (bmask >> 1) }
+    (if masked < b { masked } else { x & (bmask >> 1) }) as u32
 }
 
 /// Compute the `pg_num_mask` (or `pgp_num_mask`) from a count.
@@ -297,8 +302,7 @@ pub fn pg_num_mask(count: u32) -> u32 {
     if count <= 1 {
         0
     } else {
-        let bits = 32 - (count - 1).leading_zeros();
-        (1u32 << bits).wrapping_sub(1)
+        u32::MAX >> (count - 1).leading_zeros()
     }
 }
 
@@ -313,7 +317,7 @@ pub fn pg_num_mask(count: u32) -> u32 {
 /// * `pgp_num` - Placement group number for placement (usually equals
 ///   `pg_num`, but diverges during autoscaler-driven splits while the
 ///   mon gradually raises `pgp_num_actual` toward `pgp_num_target`).
-///   Must be `> 0`.
+///   Must be in `1..=i32::MAX`.
 /// * `rule_id` - CRUSH rule to use (from pool configuration)
 /// * `osd_weights` - OSD weights (from OSDMap)
 /// * `result_max` - Maximum number of OSDs to return (typically pool size)
@@ -330,16 +334,35 @@ pub fn pg_to_osds(
     result_max: usize,
     hashpspool: bool,
 ) -> Result<Vec<i32>> {
+    if pgp_num == 0 || pgp_num > i32::MAX as u32 {
+        return Err(crate::crush::error::CrushError::DecodeError(
+            "pgp_num must be in 1..=i32::MAX".into(),
+        ));
+    }
     let x = pg_to_pps(pg, pgp_num, hashpspool);
     let mut result = Vec::new();
-    crush_do_rule(crush_map, rule_id, x, &mut result, result_max, osd_weights)?;
+    crush_do_rule_with_choose_args(
+        crush_map,
+        rule_id,
+        x,
+        &mut result,
+        result_max,
+        osd_weights,
+        pg.pool as i64,
+    )?;
     Ok(result)
 }
 
 /// Compute the `pps` (placement seed) C++ feeds to CRUSH and to the
 /// primary-affinity hash.  Mirrors `pg_pool_t::raw_pg_to_pps`: fold
-/// `pg.seed` onto `pgp_num` via `ceph_stable_mod`, then optionally
-/// hash with the pool id (`hashpspool`).
+/// `pg.seed` onto `pgp_num` via `ceph_stable_mod`, then hash with the
+/// pool id for `hashpspool` pools or add the pool id for legacy pools.
+///
+/// Requires `pgp_num` in `1..=i32::MAX`, like the validated placement entry points.
+///
+/// Source: `src/osd/osd_types.cc::pg_pool_t::raw_pg_to_pps` in Ceph
+/// Quincy `b12291d110049b2f35e32e0de30d70e9a4c060d2` and Tentacle
+/// `7f793731f1b39eb4f465e960113d2363c311b964`.
 ///
 /// Skipping the `ceph_stable_mod` fold is what produces a different
 /// CRUSH input on the client vs OSD side during an autoscaler-driven
@@ -355,7 +378,7 @@ pub fn pg_to_pps(pg: PgId, pgp_num: u32, hashpspool: bool) -> u32 {
         use crate::crush::hash::crush_hash32_2;
         crush_hash32_2(pps_seed, pg.pool as u32)
     } else {
-        pps_seed
+        pps_seed.wrapping_add(pg.pool as u32)
     }
 }
 
@@ -432,6 +455,15 @@ mod tests {
     }
 
     #[test]
+    fn pg_to_pps_adds_legacy_pool_and_hashes_hashpspool_pool() {
+        let pg = PgId::new(2, 74);
+        // `74 & 63` folds to 10.  Pinned `raw_pg_to_pps` adds pool 2
+        // without HASHPSPOOL and hashes `(10, 2)` with it.
+        assert_eq!(pg_to_pps(pg, 64, false), 12);
+        assert_eq!(pg_to_pps(pg, 64, true), 1_838_530_675);
+    }
+
+    #[test]
     fn test_object_to_pg() {
         let locator = ObjectLocator::new(1);
 
@@ -446,6 +478,35 @@ mod tests {
         let pg3 = object_to_pg("otherobject", &locator, 100).unwrap();
         assert_eq!(pg3.pool, 1);
         assert!(pg3.seed < 100);
+    }
+
+    #[test]
+    fn object_to_pg_uses_stable_mod_and_explicit_hash() {
+        let locator = ObjectLocator::new(1);
+        // Ceph RJenkins hash = 3981378195: stable_mod(..., 3, 3) = 1, modulo = 0.
+        assert_eq!(
+            object_to_pg("object-1", &locator, 3).unwrap(),
+            PgId::new(1, 1)
+        );
+        assert_eq!(object_to_pg("object-1", &locator, 4).unwrap().seed, 3);
+        assert_eq!(object_to_pg("object-1", &locator, 1).unwrap().seed, 0);
+        assert!(object_to_pg("object-1", &locator, 0).is_err());
+
+        let locator = ObjectLocator::with_hash(7, 2);
+        assert_eq!(
+            object_to_pg("object-1", &locator, 3).unwrap(),
+            PgId::new(7, 2)
+        );
+        for count in [1, 3, 4, i32::MAX as u32] {
+            let locator = ObjectLocator::with_hash(1, i64::from(u32::MAX));
+            assert!(object_to_pg("ignored", &locator, count).unwrap().seed < count);
+        }
+        for count in [0, 0x8000_0000, 0x8000_0001, u32::MAX] {
+            assert!(object_to_pg("ignored", &locator, count).is_err());
+            assert!(pg_to_osds(&CrushMap::new(), PgId::new(1, 0), count, 0, &[], 1, true).is_err());
+        }
+        assert_eq!(ceph_stable_mod(0x4000_0000, 0x8000_0000, 0x7fff_ffff), 0);
+        assert_eq!(pg_num_mask(0x8000_0001), u32::MAX);
     }
 
     #[test]

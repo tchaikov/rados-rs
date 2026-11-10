@@ -18,3 +18,7 @@ logs/
 
 # Test outputs
 test_results/
+
+# Local agent working state
+.notes/
+.renchik/

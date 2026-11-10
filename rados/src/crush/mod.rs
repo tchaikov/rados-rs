@@ -53,7 +53,9 @@ pub mod placement;
 pub mod types;
 
 pub use error::{CrushError, Result};
+pub use mapper::{crush_do_rule_with_choose_args, crush_do_rule_with_choose_profile};
 pub use placement::{ObjectLocator, PgId, object_to_osds, object_to_pg, pg_to_osds};
 pub use types::{
-    BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, RuleOp, RuleType,
+    BucketAlgorithm, BucketData, ChooseProfile, CrushBucket, CrushChooseArg, CrushMap, CrushRule,
+    CrushRuleStep, RuleOp, RuleType,
 };

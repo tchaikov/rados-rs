@@ -530,7 +530,7 @@ impl OSDClient {
         osdmap: &crate::osdclient::osdmap::OSDMap,
         pool: u64,
         oid: &str,
-    ) -> Result<(StripedPgId, Vec<i32>)> {
+    ) -> Result<(StripedPgId, crate::osdclient::osdmap::PgPlacement)> {
         let pool_info = osdmap
             .pools
             .get(&pool)
@@ -547,7 +547,7 @@ impl OSDClient {
         let pg = crate::crush::placement::object_to_pg(oid, &locator, pool_info.pg_num)
             .map_err(|e| OSDClientError::Crush(format!("Object->PG mapping failed: {e}")))?;
 
-        let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
+        let placement = Self::pg_to_osds_in_map(osdmap, pg)?;
 
         // For EC pools the wire spg_t carries a per-PG shard index.  For
         // replicated pools `pg_to_spg_shard` returns NO_SHARD (-1), so
@@ -558,20 +558,20 @@ impl OSDClient {
             .map_err(|e| OSDClientError::Crush(format!("EC shard lookup: {e}")))?;
         let spg = StripedPgId::new(pg.pool, pg.seed, shard.0);
         debug!(
-            "Mapped {}/{} to PG {:?}, OSDs: {:?}, shard: {}",
-            pool, oid, pg, osds, shard.0
+            "Mapped {}/{} to PG {:?}, acting={:?}, primary={}, shard: {}",
+            pool, oid, pg, placement.acting, placement.acting_primary, shard.0
         );
 
-        Ok((spg, osds))
+        Ok((spg, placement))
     }
 
     fn cached_rescan_osds(
         &self,
-        cache: &mut HashMap<(u64, String), (StripedPgId, Vec<i32>)>,
+        cache: &mut HashMap<(u64, String), (StripedPgId, crate::osdclient::osdmap::PgPlacement)>,
         osdmap: &crate::osdclient::osdmap::OSDMap,
         pool_id: u64,
         object_id: &str,
-    ) -> Result<(StripedPgId, Vec<i32>)> {
+    ) -> Result<(StripedPgId, crate::osdclient::osdmap::PgPlacement)> {
         let key = (pool_id, object_id.to_owned());
         if let Some(entry) = cache.get(&key) {
             return Ok(entry.clone());
@@ -589,16 +589,16 @@ impl OSDClient {
     fn pg_to_osds_in_map(
         osdmap: &crate::osdclient::osdmap::OSDMap,
         pg: crate::crush::placement::PgId,
-    ) -> Result<Vec<i32>> {
-        let osds = osdmap
-            .pg_to_acting_osds(&pg)
+    ) -> Result<crate::osdclient::osdmap::PgPlacement> {
+        let placement = osdmap
+            .pg_to_placement(&pg)
             .map_err(|e| OSDClientError::Crush(format!("PG->OSD mapping failed: {e}")))?;
 
-        if osds.is_empty() {
+        if placement.acting.is_empty() || placement.acting_primary < 0 {
             return Err(OSDClientError::NoOSDs);
         }
 
-        Ok(osds)
+        Ok(placement)
     }
 
     /// Apply redirect to an operation
@@ -823,17 +823,18 @@ impl OSDClient {
             }
 
             // Map to OSDs based on current object (using the osdmap we already have)
-            let (spg, osds) =
+            let (spg, placement) =
                 self.object_to_osds_in_map(&osdmap, msg.object.pool, &msg.object.oid)?;
-            let primary_osd = osds[0];
+            let primary_osd = placement.acting_primary;
             tracing::trace!(
                 target: "rados::osdclient::routing",
-                "routing epoch={} pool={} oid={} spg={:?} osds={:?} hash=0x{:08x}",
+                "routing epoch={} pool={} oid={} spg={:?} acting={:?} primary={} hash=0x{:08x}",
                 osdmap.epoch.as_u32(),
                 msg.object.pool,
                 msg.object.oid,
                 spg,
-                osds,
+                placement.acting,
+                primary_osd,
                 msg.object.hash,
             );
 
@@ -868,9 +869,9 @@ impl OSDClient {
                     // and now — re-prune the snapc against any new
                     // removals before we encode the wire op.
                     live.prune_snap_context(msg.object.pool, &mut Arc::make_mut(&mut msg).snaps);
-                    let (new_spg, new_osds) =
+                    let (new_spg, new_placement) =
                         self.object_to_osds_in_map(&live, msg.object.pool, &msg.object.oid)?;
-                    if new_osds.first().copied() != Some(primary_osd) {
+                    if new_placement.acting_primary != primary_osd {
                         osdmap = live;
                         continue;
                     }
@@ -1265,8 +1266,8 @@ impl OSDClient {
             seed: current_pg,
         };
 
-        let osds = Self::pg_to_osds_in_map(osdmap, pg)?;
-        let primary_osd = osds[0];
+        let placement = Self::pg_to_osds_in_map(osdmap, pg)?;
+        let primary_osd = placement.acting_primary;
 
         // For replicated pools `pg_to_spg_shard` returns NO_SHARD; for
         // non-optimised EC it returns the primary's position; for
@@ -1786,9 +1787,9 @@ impl OSDClient {
                 continue;
             }
 
-            let (new_spg, new_osds) =
+            let (new_spg, new_placement) =
                 self.cached_rescan_osds(&mut placement_cache, osdmap, pool_id, &object_id)?;
-            let new_primary = new_osds.first().copied().unwrap_or(-1);
+            let new_primary = new_placement.acting_primary;
 
             // Scan path: only resend if primary changed or pool forced a resend.
             // Drain path (current_osd == None): always resend.
@@ -1814,7 +1815,8 @@ impl OSDClient {
                     session.cancel_io_loop();
                     any_migrated = true;
                 }
-                op.target.update(new_epoch, new_primary, new_osds.clone());
+                op.target
+                    .update(new_epoch, new_primary, new_placement.acting.clone());
                 // Restamp the MOSDOp pgid from the new map.  A pg_num change
                 // (autoscaler split, manual resize) shifts the seed even when
                 // the primary OSD is unchanged; without this, the migrated op
@@ -1912,7 +1914,7 @@ impl OSDClient {
             // when the primary OSD is unchanged, so keeping the old pgid would
             // send a stale seed to the fresh session.
             let new_osdmap = self.get_osdmap().await?;
-            let (new_spg, osds) = match self.object_to_osds_in_map(
+            let (new_spg, placement) = match self.object_to_osds_in_map(
                 &new_osdmap,
                 pending_op.op.object.pool,
                 &pending_op.op.object.oid,
@@ -1932,7 +1934,7 @@ impl OSDClient {
                 }
             };
 
-            target_osd = osds[0];
+            target_osd = placement.acting_primary;
             epoch_for_op = new_osdmap.epoch.as_u32();
             {
                 let msg = Arc::make_mut(&mut pending_op.op);
@@ -2611,5 +2613,87 @@ impl OSDClient {
             .await;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crush::{
+        BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, PgId, RuleOp,
+        RuleType,
+    };
+    use crate::denc::Epoch;
+    use crate::osdclient::osdmap::{OSDMap, OSDMapIncremental, PgPool};
+
+    #[test]
+    fn pg_route_keeps_primary_temp_separate_from_acting() {
+        let mut crush = CrushMap::new();
+        crush.max_buckets = 1;
+        crush.max_devices = 3;
+        crush.buckets = vec![Some(CrushBucket {
+            id: -1,
+            bucket_type: 1,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: 3 * 0x1_0000,
+            size: 3,
+            items: vec![0, 1, 2],
+            data: BucketData::Straw2 {
+                item_weights: vec![0x1_0000; 3],
+            },
+        })];
+        crush.rules = vec![Some(CrushRule {
+            rule_id: 0,
+            rule_type: RuleType::Replicated,
+            steps: vec![
+                CrushRuleStep {
+                    op: RuleOp::Take,
+                    arg1: -1,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::ChooseFirstN,
+                    arg1: 0,
+                    arg2: 0,
+                },
+                CrushRuleStep {
+                    op: RuleOp::Emit,
+                    arg1: 0,
+                    arg2: 0,
+                },
+            ],
+        })];
+
+        let pg = PgId::new(7, 1);
+        let mut map = OSDMap::new();
+        map.max_osd = 3;
+        map.osd_state = vec![0x3; 3];
+        map.osd_weight = vec![0x1_0000; 3];
+        map.osd_primary_affinity = vec![0x1_0000; 3];
+        map.crush = Some(crush);
+        map.pools.insert(
+            7,
+            PgPool {
+                pool_type: PgPool::TYPE_REPLICATED,
+                size: 3,
+                pg_num: 64,
+                pgp_num: 64,
+                crush_rule: 0,
+                tier_of: -1,
+                ..Default::default()
+            },
+        );
+        let mut pg_temp = OSDMapIncremental::new(Epoch::new(1));
+        pg_temp.new_pg_temp.insert(pg, vec![0, 1, 2]);
+        pg_temp.apply_to(&mut map).unwrap();
+        let mut primary_temp = OSDMapIncremental::new(Epoch::new(2));
+        primary_temp.new_primary_temp.insert(pg, 2);
+        primary_temp.apply_to(&mut map).unwrap();
+
+        let placement = OSDClient::pg_to_osds_in_map(&map, pg).unwrap();
+        assert_eq!(placement.acting, vec![0, 1, 2]);
+        assert_eq!(placement.acting_primary, 2);
+        assert_ne!(placement.acting[0], placement.acting_primary);
     }
 }

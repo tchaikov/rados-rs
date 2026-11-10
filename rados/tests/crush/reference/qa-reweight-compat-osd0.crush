@@ -1,0 +1,48 @@
+# Local source-shaped state from crush-choose-args.sh::reweight-compat-osd0.
+# Published canonical/compat HOST totals: 6/5.
+# begin crush map
+tunable choose_local_tries 0
+tunable choose_local_fallback_tries 0
+tunable choose_total_tries 50
+tunable chooseleaf_descend_once 1
+tunable chooseleaf_vary_r 1
+tunable chooseleaf_stable 1
+# devices
+device 0 osd.0
+device 1 osd.1
+# types
+type 0 osd
+type 1 host
+type 2 root
+# buckets
+host HOST {
+ id -2
+ alg straw2
+ hash 0
+ item osd.0 weight 3.00000
+ item osd.1 weight 3.00000
+}
+root default {
+ id -1
+ alg straw2
+ hash 0
+ item HOST weight 6.00000
+}
+# rules
+rule replicated_rule {
+ id 0
+ type replicated
+ step take default
+ step choose firstn 0 type osd
+ step emit
+}
+# choose_args
+choose_args 18446744073709551615 {
+ { bucket_id -1 weight_set [
+  [ 5.00000 ]
+ ]  }
+ { bucket_id -2 weight_set [
+  [ 2.00000 3.00000 ]
+ ]  }
+}
+# end crush map

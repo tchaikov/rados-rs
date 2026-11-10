@@ -15,7 +15,14 @@ const CRUSH_MAGIC: u32 = 0x00010000;
 ///
 /// Unlike `Vec<T>::decode()` which reads a u32 length prefix first,
 /// CRUSH bucket items have their count in a separate `size` field.
-fn decode_n<T: Denc>(buf: &mut impl Buf, count: usize) -> Result<Vec<T>> {
+/// `item_size` is the fixed encoded size, not the in-memory size of `T`.
+fn decode_n<T: Denc>(buf: &mut impl Buf, count: usize, item_size: usize) -> Result<Vec<T>> {
+    if count > buf.remaining() / item_size {
+        return Err(CrushError::DecodeError(format!(
+            "Item count {count} exceeds remaining {} bytes",
+            buf.remaining()
+        )));
+    }
     let mut vec = Vec::with_capacity(count);
     for _ in 0..count {
         vec.push(T::decode(buf, 0)?);
@@ -40,6 +47,17 @@ impl CrushMap {
         let max_rules = u32::decode(data, 0)?;
         let max_devices = i32::decode(data, 0)?;
 
+        if max_buckets < 0 || max_buckets as usize > data.remaining() / 4 {
+            return Err(CrushError::DecodeError(format!(
+                "Invalid bucket count: {max_buckets}"
+            )));
+        }
+        if max_devices < 0 {
+            return Err(CrushError::DecodeError(format!(
+                "Invalid device count: {max_devices}"
+            )));
+        }
+
         let mut map = CrushMap::new();
         map.max_buckets = max_buckets;
         map.max_rules = max_rules;
@@ -57,8 +75,13 @@ impl CrushMap {
             map.buckets.push(Some(bucket));
         }
 
+        if max_rules as usize > data.remaining() / 4 {
+            return Err(CrushError::DecodeError(format!(
+                "Invalid rule count: {max_rules}"
+            )));
+        }
         map.rules = Vec::with_capacity(max_rules as usize);
-        for _ in 0..max_rules {
+        for rule_index in 0..max_rules {
             let exists = u32::decode(data, 0)?;
             if exists == 0 {
                 map.rules.push(None);
@@ -66,6 +89,14 @@ impl CrushMap {
             }
 
             let rule = decode_rule(data)?;
+            // NOTE: Ceph compares the u8 legacy ruleset with the full rule index.
+            // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/CrushWrapper.cc#L3307-L3311
+            if rule.rule_id != rule_index {
+                return Err(CrushError::DecodeError(format!(
+                    "Rule at index {rule_index} has ruleset ID {}",
+                    rule.rule_id
+                )));
+            }
             map.rules.push(Some(rule));
         }
 
@@ -81,30 +112,27 @@ impl CrushMap {
         map.names = HashMap::decode(data, 0)?;
         map.rule_names = HashMap::decode(data, 0)?;
 
-        // Tunables (optional trailing fields)
-        if data.remaining() >= 4 {
+        // NOTE: Ceph requires each optional section to be complete once present.
+        // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/CrushWrapper.cc#L3328-L3348
+        if data.has_remaining() {
             map.choose_local_tries = u32::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
             map.choose_local_fallback_tries = u32::decode(data, 0)?;
-        }
-        if data.remaining() >= 4 {
             map.choose_total_tries = u32::decode(data, 0)?;
         }
-        if data.remaining() >= 4 {
+        if data.has_remaining() {
             map.chooseleaf_descend_once = u32::decode(data, 0)?;
         }
-        if data.remaining() >= 1 {
+        if data.has_remaining() {
             map.chooseleaf_vary_r = u8::decode(data, 0)?;
         }
-        if data.remaining() >= 1 {
+        if data.has_remaining() {
             // straw_calc_version (skip)
             let _ = u8::decode(data, 0)?;
         }
-        if data.remaining() >= 4 {
+        if data.has_remaining() {
             map.allowed_bucket_algs = u32::decode(data, 0)?;
         }
-        if data.remaining() >= 1 {
+        if data.has_remaining() {
             map.chooseleaf_stable = u8::decode(data, 0)?;
         }
 
@@ -120,32 +148,93 @@ impl CrushMap {
             map.class_bucket = HashMap::decode(data, 0)?;
         }
 
-        // Skip choose_args (complex per-bucket weight sets, not needed for placement).
+        // Choose args are producer-provided CRUSH alternatives. Rust consumes
+        // these fixtures; it does not implement a CRUSH map encoder.
         if data.remaining() > 0 {
             let choose_args_size = u32::decode(data, 0)?;
+            if choose_args_size as usize > data.remaining() / 12 {
+                return Err(CrushError::DecodeError(format!(
+                    "Too many choose-argument sets: {choose_args_size}"
+                )));
+            }
             for _ in 0..choose_args_size {
-                let _choose_args_index = u64::decode(data, 0)?;
+                let choose_args_index = i64::decode(data, 0)?;
                 let size = u32::decode(data, 0)?;
+                if size > map.buckets.len() as u32 || size as usize > data.remaining() / 12 {
+                    return Err(CrushError::DecodeError(format!(
+                        "Too many choose-argument buckets: {size}"
+                    )));
+                }
+                let mut args = vec![None; map.buckets.len()];
                 for _ in 0..size {
-                    let _bucket_index = u32::decode(data, 0)?;
+                    let bucket_index = u32::decode(data, 0)? as usize;
+                    let bucket = map.buckets.get(bucket_index).ok_or_else(|| {
+                        CrushError::DecodeError(format!(
+                            "Choose argument references invalid bucket index {bucket_index}"
+                        ))
+                    })?;
                     let weight_set_positions = u32::decode(data, 0)?;
+                    if weight_set_positions as usize > data.remaining() / 4 {
+                        return Err(CrushError::DecodeError(format!(
+                            "Too many choose-argument positions: {weight_set_positions}"
+                        )));
+                    }
+                    let mut weight_set = Vec::with_capacity(weight_set_positions as usize);
                     for _ in 0..weight_set_positions {
                         let ws_size = u32::decode(data, 0)?;
-                        for _ in 0..ws_size {
-                            let _weight = u32::decode(data, 0)?;
-                        }
+                        weight_set.push(decode_n(data, ws_size as usize, 4)?);
                     }
                     let ids_size = u32::decode(data, 0)?;
-                    for _ in 0..ids_size {
-                        let _id = i32::decode(data, 0)?;
+                    if ids_size != 0 && bucket.as_ref().is_none_or(|bucket| ids_size != bucket.size)
+                    {
+                        return Err(CrushError::DecodeError(format!(
+                            "Choose argument ID length {ids_size} does not match bucket index {bucket_index}"
+                        )));
+                    }
+                    let ids = decode_n(data, ids_size as usize, 4)?;
+                    args[bucket_index] = Some(CrushChooseArg { weight_set, ids });
+                }
+                // NOTE: Ceph infers the position count before removing stale
+                // arguments and skips normalization when position counts differ.
+                // https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/crush/CrushWrapper.cc#L442-L513
+                let positions = args
+                    .iter()
+                    .flatten()
+                    .map(|arg| arg.weight_set.len())
+                    .find(|&positions| positions != 0)
+                    .unwrap_or(1);
+                for (arg, bucket) in args.iter_mut().zip(&map.buckets) {
+                    let Some(bucket) = bucket
+                        .as_ref()
+                        .filter(|bucket| bucket.alg == BucketAlgorithm::Straw2)
+                    else {
+                        *arg = None;
+                        continue;
+                    };
+                    let Some(arg) = arg else {
+                        continue;
+                    };
+                    let normalize = arg.weight_set.len() == positions;
+                    for weights in &mut arg.weight_set {
+                        if normalize {
+                            weights.resize(bucket.size as usize, 0);
+                        } else if weights.len() != bucket.size as usize {
+                            return Err(CrushError::DecodeError(format!(
+                                "Choose argument weight length {} does not match bucket {} size {}",
+                                weights.len(),
+                                bucket.id,
+                                bucket.size
+                            )));
+                        }
                     }
                 }
+                map.choose_args.insert(choose_args_index, args);
             }
         }
 
         // Decode MSR tunables (Reef+) — comes after choose_args on the wire.
         // C++ default (set_default_msr_tunables): 100/100.
-        if data.remaining() >= 8 {
+        if data.has_remaining() {
             map.msr_descents = u32::decode(data, 0)?;
             map.msr_collision_tries = u32::decode(data, 0)?;
         }
@@ -162,6 +251,7 @@ impl CrushMap {
 /// - Bucket index consistency: bucket at index i has id == -1 - i
 /// - Item references: each item in a bucket is a valid device or bucket
 /// - TAKE rule args: each TAKE step references a valid bucket or device
+/// - Bucket references are acyclic
 fn validate_crush_map(map: &CrushMap) -> Result<()> {
     // Shared check: item must be a valid device index or an occupied bucket slot.
     let validate_item_ref = |item: i32, context: &str| -> Result<()> {
@@ -209,6 +299,42 @@ fn validate_crush_map(map: &CrushMap) -> Result<()> {
         }
     }
 
+    // Iterative DFS avoids overflowing the call stack on deep hierarchies.
+    let mut state = vec![0u8; map.buckets.len()];
+    let mut stack = Vec::new();
+    for root in 0..map.buckets.len() {
+        if state[root] != 0 || map.buckets[root].is_none() {
+            continue;
+        }
+        state[root] = 1;
+        stack.push((root, 0));
+        while let Some((index, next_item)) = stack.last_mut() {
+            let bucket = map.buckets[*index].as_ref().unwrap();
+            let Some(&item) = bucket.items.get(*next_item) else {
+                state[*index] = 2;
+                stack.pop();
+                continue;
+            };
+            *next_item += 1;
+            if item >= 0 {
+                continue;
+            }
+            let child = (-1 - item) as usize;
+            match state[child] {
+                1 => {
+                    return Err(CrushError::DecodeError(format!(
+                        "Bucket hierarchy contains a cycle through {item}"
+                    )));
+                }
+                0 => {
+                    state[child] = 1;
+                    stack.push((child, 0));
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -232,13 +358,13 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
         )));
     }
 
-    if size > 10000 {
+    if hash != 0 {
         return Err(CrushError::DecodeError(format!(
-            "Bucket size too large: {size}"
+            "Unsupported bucket hash type: {hash}"
         )));
     }
 
-    let items: Vec<i32> = decode_n(data, size as usize)?;
+    let items: Vec<i32> = decode_n(data, size as usize, 4)?;
 
     let algorithm = BucketAlgorithm::try_from(alg_byte)
         .map_err(|_| CrushError::InvalidBucketAlgorithm(alg_byte))?;
@@ -249,7 +375,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             BucketData::Uniform { item_weight }
         }
         BucketAlgorithm::List => {
-            let (item_weights, sum_weights) = decode_n::<(u32, u32)>(data, size as usize)?
+            let (item_weights, sum_weights) = decode_n::<(u32, u32)>(data, size as usize, 8)?
                 .into_iter()
                 .unzip();
             BucketData::List {
@@ -258,20 +384,15 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             }
         }
         BucketAlgorithm::Tree => {
-            let num_nodes = u32::decode(data, 0)?;
-            if num_nodes > 10000 {
-                return Err(CrushError::DecodeError(format!(
-                    "Tree num_nodes {num_nodes} exceeds maximum 10000"
-                )));
-            }
-            let node_weights: Vec<u32> = decode_n(data, num_nodes as usize)?;
+            let num_nodes = u32::from(u8::decode(data, 0)?);
+            let node_weights: Vec<u32> = decode_n(data, num_nodes as usize, 4)?;
             BucketData::Tree {
                 num_nodes,
                 node_weights,
             }
         }
         BucketAlgorithm::Straw => {
-            let (item_weights, straws) = decode_n::<(u32, u32)>(data, size as usize)?
+            let (item_weights, straws) = decode_n::<(u32, u32)>(data, size as usize, 8)?
                 .into_iter()
                 .unzip();
             BucketData::Straw {
@@ -280,7 +401,7 @@ fn decode_bucket(data: &mut Bytes, alg: u32) -> Result<CrushBucket> {
             }
         }
         BucketAlgorithm::Straw2 => {
-            let item_weights: Vec<u32> = decode_n(data, size as usize)?;
+            let item_weights: Vec<u32> = decode_n(data, size as usize, 4)?;
             BucketData::Straw2 { item_weights }
         }
     };
@@ -336,7 +457,7 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
     let _min_size = u8::decode(data, 0)?;
     let _max_size = u8::decode(data, 0)?;
 
-    let steps: Vec<CrushRuleStep> = decode_n(data, len as usize)?;
+    let steps: Vec<CrushRuleStep> = decode_n(data, len as usize, 12)?;
 
     Ok(CrushRule {
         rule_id: rule_id as u32,
@@ -345,6 +466,10 @@ fn decode_rule(data: &mut Bytes) -> Result<CrushRule> {
         steps,
     })
 }
+
+#[cfg(test)]
+#[path = "tests/decode_regressions.rs"]
+mod decode_regressions;
 
 #[cfg(test)]
 mod tests {

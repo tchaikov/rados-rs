@@ -244,7 +244,8 @@ impl CephMessagePayload for MOSDOp {
         // Return v9 if SERVER_SQUID feature is present (Ceph v19+)
         // Return v8 otherwise for backward compatibility with Ceph v18
         use crate::denc::features::CephFeatures;
-        if features & CephFeatures::MASK_SERVER_SQUID.bits() != 0 {
+        if crate::denc::features::has_significant_feature(features, CephFeatures::MASK_SERVER_SQUID)
+        {
             9
         } else {
             8
@@ -296,7 +297,8 @@ impl CephMessagePayload for MOSDOp {
 
         // 6b. otel_trace (jspan_context) - added in v9, only encode if SERVER_SQUID feature is present
         use crate::denc::features::CephFeatures;
-        if features & CephFeatures::MASK_SERVER_SQUID.bits() != 0 {
+        if crate::denc::features::has_significant_feature(features, CephFeatures::MASK_SERVER_SQUID)
+        {
             let otel_trace = JaegerSpanContext::invalid();
             otel_trace.encode(&mut buf, 0)?;
         }
@@ -755,5 +757,46 @@ mod tests {
             39,
             "Data section should contain 39-byte HObject cursor"
         );
+    }
+
+    #[test]
+    // Rust contract: no upstream boundary regression test found. These cases
+    // exercise the selected MOSDOp encoding branches directly.
+    // Quincy source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/messages/MOSDOp.h#L363-L393
+    // Tentacle source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/messages/MOSDOp.h#L367-L427
+    fn test_mosdop_squid_version_requires_complete_feature_mask() {
+        use crate::denc::features::CephFeatures;
+        use crate::msgr2::ceph_message::{CephMessage, CephMessagePayload, CrcFlags};
+        use crate::osdclient::types::{OSDOp, ObjectId, RequestId, StripedPgId};
+
+        let mosdop = MOSDOp::new(
+            1,
+            20,
+            0,
+            ObjectId::new(3, ""),
+            StripedPgId::from_pg(3, 0),
+            vec![OSDOp::pgls(100, crate::HObject::empty_cursor(3), 20).unwrap()],
+            RequestId::from_str_name("client.0", 1, 1),
+            0,
+        );
+        let squid = CephFeatures::SERVER_SQUID.bits();
+        let incarnation = CephFeatures::SERVER_JEWEL.bits();
+
+        for (features, version) in [
+            (0, 8),
+            (squid, 8),
+            (incarnation, 8),
+            (0x3f01cfbf7ffdffff, 8), // Quincy v17.2.7 negotiated features.
+            (CephFeatures::MASK_SERVER_SQUID.bits(), 9),
+            (0x3f07fffffffdffff, 9), // Tentacle v20.2.4 negotiated features.
+        ] {
+            let message = CephMessage::from_payload(&mosdop, features, CrcFlags::ALL).unwrap();
+            assert_eq!(MOSDOp::msg_version(features), version);
+            assert_eq!(message.header.version, version);
+            assert_eq!(
+                message.front.len(),
+                MOSDOp::expected_front_size_pgls(version).unwrap()
+            );
+        }
     }
 }

@@ -1,173 +1,210 @@
 use bytes::Bytes;
+use rados::crush::PgId;
 use rados::denc::VersionedEncode;
 use rados::osdclient::{OSDMap, OSDMapIncremental};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[test]
-fn test_osdmap_decode() {
-    // Path to the OSDMap corpus file
-    let corpus_path = PathBuf::from(env!("HOME"))
-        .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap/303e0d4679afb7b809fd924c7825eecd");
+type ReleaseFixture = (
+    &'static str,
+    &'static [u8],
+    &'static [u8],
+    &'static [u8],
+    &'static [u8],
+    &'static str,
+    &'static str,
+);
 
-    if !corpus_path.exists() {
-        eprintln!("Corpus file not found: {corpus_path:?}");
-        eprintln!("Skipping test");
-        return;
-    }
+const RELEASES: [ReleaseFixture; 2] = [
+    (
+        "quincy",
+        include_bytes!("osdmaptool-fixtures/create-racks-quincy.osdmap"),
+        include_bytes!("osdmaptool-fixtures/test-map-pgs-quincy.osdmap"),
+        include_bytes!("osdmaptool-fixtures/crush-quincy.osdmap"),
+        include_bytes!("osdmaptool-fixtures/create-print-quincy.osdmap"),
+        include_str!("osdmaptool-fixtures/test-map-pgs-results-quincy.txt"),
+        include_str!("osdmaptool-fixtures/create-racks-pg0-quincy.txt"),
+    ),
+    (
+        "tentacle",
+        include_bytes!("osdmaptool-fixtures/create-racks-tentacle.osdmap"),
+        include_bytes!("osdmaptool-fixtures/test-map-pgs-tentacle.osdmap"),
+        include_bytes!("osdmaptool-fixtures/crush-tentacle.osdmap"),
+        include_bytes!("osdmaptool-fixtures/create-print-tentacle.osdmap"),
+        include_str!("osdmaptool-fixtures/test-map-pgs-results-tentacle.txt"),
+        include_str!("osdmaptool-fixtures/create-racks-pg0-tentacle.txt"),
+    ),
+];
 
-    // Read the corpus file
-    let data = fs::read(&corpus_path).expect("Failed to read corpus file");
-    let mut bytes = Bytes::from(data);
-
-    println!("Corpus file size: {} bytes", bytes.len());
-    println!("First 32 bytes: {:02x?}", &bytes[..32.min(bytes.len())]);
-
-    // Decode the OSDMap
-    match OSDMap::decode_versioned(&mut bytes, 0) {
-        Ok(osdmap) => {
-            println!("Successfully decoded OSDMap!");
-            println!("  Epoch: {}", osdmap.epoch);
-            println!("  FSID: {:?}", osdmap.fsid);
-            println!("  Max OSD: {}", osdmap.max_osd);
-            println!("  Pool count: {}", osdmap.pools.len());
-            println!("  Flags: 0x{:x}", osdmap.flags);
-            println!("  Remaining bytes: {}", bytes.len());
-
-            // Verify against expected values from C++ dencoder output
-            assert_eq!(
-                osdmap.epoch,
-                rados::denc::Epoch::new(0),
-                "Epoch should be 0"
-            );
-            assert_eq!(osdmap.max_osd, 0, "Max OSD should be 0");
-            assert_eq!(osdmap.pools.len(), 0, "Should have 0 pools");
-            assert_eq!(osdmap.flags, 0, "Flags should be 0");
-        }
-        Err(e) => {
-            panic!("Failed to decode OSDMap: {e:?}");
-        }
-    }
-}
-
-#[test]
-fn test_all_osdmap_corpus_files() {
-    let corpus_dir = PathBuf::from(env!("HOME"))
-        .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap");
-
-    if !corpus_dir.exists() {
-        eprintln!("Corpus directory not found: {corpus_dir:?}");
-        eprintln!("Skipping test");
-        return;
-    }
-
-    let entries = fs::read_dir(&corpus_dir).expect("Failed to read corpus directory");
-
-    let mut success_count = 0;
-    let mut failure_count = 0;
-
-    for entry in entries {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if !path.is_file() {
-            continue;
-        }
-
-        println!("\nTesting corpus file: {:?}", path.file_name());
-
-        let data = match fs::read(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("  Failed to read file: {e:?}");
-                failure_count += 1;
-                continue;
-            }
-        };
-
-        let mut bytes = Bytes::from(data);
-        let original_len = bytes.len();
-
-        match OSDMap::decode_versioned(&mut bytes, 0) {
-            Ok(osdmap) => {
-                println!(
-                    "  ✓ Success! Epoch: {}, Max OSD: {}, Pools: {}, Remaining: {} bytes",
-                    osdmap.epoch,
-                    osdmap.max_osd,
-                    osdmap.pools.len(),
-                    bytes.len()
-                );
-                success_count += 1;
-            }
-            Err(e) => {
-                eprintln!("  ✗ Failed: {e:?}");
-                eprintln!("    File size: {original_len} bytes");
-                failure_count += 1;
-            }
-        }
-    }
-
-    println!("\n=== Summary ===");
-    println!("Success: {success_count}");
-    println!("Failure: {failure_count}");
-    println!("Total: {}", success_count + failure_count);
-
-    // We expect at least some files to decode successfully
+fn decode(bytes: &[u8]) -> OSDMap {
+    let mut bytes = Bytes::copy_from_slice(bytes);
+    let map = OSDMap::decode_versioned(&mut bytes, 0).expect("decode pinned OSDMap fixture");
     assert!(
-        success_count > 0,
-        "At least one corpus file should decode successfully"
+        bytes.is_empty(),
+        "fixture decoder left {} bytes",
+        bytes.len()
     );
+    map
 }
 
-#[test]
-fn test_osdmap_incremental_with_old_pools() {
-    // Test with corpus file that has old_pools populated
-    // File 7f73c6135ad5af1bcdd620e2097b9b94 has:
-    // - epoch: 347
-    // - 18 new pools
-    // - 5 old pools: [127, 146, 147, 160, 162]
-    let corpus_path = PathBuf::from(env!("HOME"))
-        .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap::Incremental/7f73c6135ad5af1bcdd620e2097b9b94");
+fn corpus_dir(variable: &str) -> PathBuf {
+    let path = std::env::var_os(variable)
+        .unwrap_or_else(|| panic!("{variable} must name the v19.2.x corpus directory"));
+    let path = PathBuf::from(path);
+    assert!(
+        path.is_dir(),
+        "{variable} is not a directory: {}",
+        path.display()
+    );
+    path
+}
 
-    if !corpus_path.exists() {
-        eprintln!("Corpus file not found: {corpus_path:?}");
-        eprintln!("Skipping test");
-        return;
+fn corpus_files(directory: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<_> = fs::read_dir(directory)
+        .expect("read external corpus directory")
+        .map(|entry| entry.expect("read external corpus entry").path())
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "external corpus directory is empty");
+    paths
+}
+
+fn source_counts(output: &str) -> Vec<(usize, usize, usize)> {
+    let mut counts = vec![(0, 0, 0); 500];
+    let mut seen = 0;
+    for line in output.lines().filter(|line| line.starts_with("osd.")) {
+        let fields: Vec<_> = line.split_whitespace().collect();
+        assert_eq!(fields.len(), 6, "unexpected source row: {line}");
+        let osd: usize = fields[0].strip_prefix("osd.").unwrap().parse().unwrap();
+        counts[osd] = (
+            fields[1].parse().unwrap(),
+            fields[2].parse().unwrap(),
+            fields[3].parse().unwrap(),
+        );
+        seen += 1;
     }
+    assert_eq!(seen, 500, "source output must list every OSD");
+    counts
+}
 
-    // Read the corpus file
-    let data = fs::read(&corpus_path).expect("Failed to read corpus file");
-    let mut bytes = Bytes::from(data);
+// Upstream: v17.2.7/v20.2.4 src/test/cli/osdmaptool/create-racks.t::PG0.0
+// Sources: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/cli/osdmaptool/create-racks.t
+// https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/cli/osdmaptool/create-racks.t
+// Empty missing-pool placement: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/osd/OSDMap.cc#L2797
+#[test]
+fn osdmaptool_create_racks_retains_pg0_source_result() {
+    for (release, racks, _, _, _, _, pg0_output) in RELEASES {
+        let map = decode(racks);
+        assert_eq!(map.max_osd, 239, "{release}");
+        assert_eq!(map.pools[&1].size, 3, "{release}");
+        assert_eq!(map.pools[&1].pg_num, 15_296, "{release}");
+        assert!(
+            pg0_output.contains("0.0 raw ([], p-1) up ([], p-1) acting ([], p-1)"),
+            "{release}"
+        );
+        let empty = rados::osdclient::PgPlacement {
+            raw: vec![],
+            up: vec![],
+            acting: vec![],
+            up_primary: -1,
+            acting_primary: -1,
+        };
+        assert_eq!(
+            map.pg_to_placement(&PgId { pool: 0, seed: 0 }).unwrap(),
+            empty,
+            "{release}"
+        );
+    }
+}
 
-    println!("Corpus file size: {} bytes", bytes.len());
-    println!("First 32 bytes: {:02x?}", &bytes[..32.min(bytes.len())]);
+// Upstream: v17.2.7/v20.2.4 src/test/cli/osdmaptool/test-map-pgs.t::500-OSD STRAW workload
+// Sources: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/cli/osdmaptool/test-map-pgs.t
+// https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/cli/osdmaptool/test-map-pgs.t
+#[test]
+fn osdmaptool_test_map_pgs_replays_all_source_pgs() {
+    for (release, _, pgs, _, _, tool_output, _) in RELEASES {
+        assert!(tool_output.contains("pool 1 pg_num 8000"), "{release}");
+        assert!(tool_output.contains("size 3\t8000"), "{release}");
 
-    // Decode the OSDMapIncremental
-    match OSDMapIncremental::decode_versioned(&mut bytes, 0) {
-        Ok(inc) => {
-            println!("Successfully decoded OSDMapIncremental!");
-            println!("  Epoch: {}", inc.epoch);
-            println!("  FSID: {:?}", inc.fsid);
-            println!("  New pools: {}", inc.new_pools.len());
-            println!("  Old pools: {} = {:?}", inc.old_pools.len(), inc.old_pools);
-            println!("  Remaining bytes: {}", bytes.len());
+        let mut map = decode(pgs);
+        assert_eq!(map.max_osd, 500, "{release}");
+        assert_eq!(map.pools[&1].size, 3, "{release}");
+        assert_eq!(map.pools[&1].pg_num, 8_000, "{release}");
+        map.osd_state = vec![0x3; 500]; // `osdmaptool --mark-up-in`
+        map.osd_weight = vec![0x1_0000; 500];
 
-            // Verify against expected values from C++ dencoder output
-            assert_eq!(
-                inc.epoch,
-                rados::denc::Epoch::new(347),
-                "Epoch should be 347"
-            );
-            assert_eq!(inc.new_pools.len(), 18, "Should have 18 new pools");
-            assert_eq!(inc.old_pools.len(), 5, "Should have 5 old pools");
-            assert_eq!(
-                inc.old_pools,
-                vec![127, 146, 147, 160, 162],
-                "Old pools should be [127, 146, 147, 160, 162]"
-            );
+        let expected = source_counts(tool_output);
+        let mut actual = vec![(0, 0, 0); 500];
+        for seed in 0..8_000 {
+            let placement = map.pg_to_placement(&PgId { pool: 1, seed }).unwrap();
+            assert_eq!(placement.raw.len(), 3, "{release} PG 1.{seed:x}");
+            assert_eq!(placement.up.len(), 3, "{release} PG 1.{seed:x}");
+            assert_eq!(placement.acting.len(), 3, "{release} PG 1.{seed:x}");
+            for osd in &placement.acting {
+                actual[*osd as usize].0 += 1;
+            }
+            actual[placement.acting[0] as usize].1 += 1;
+            actual[placement.acting_primary as usize].2 += 1;
         }
-        Err(e) => {
-            panic!("Failed to decode OSDMapIncremental: {e:?}");
-        }
+        assert_eq!(actual, expected, "{release}");
+    }
+}
+
+// Upstream: v17.2.7/v20.2.4 src/test/cli/osdmaptool/crush.t::create_export_import;
+// src/test/cli/osdmaptool/create-print.t::createsimple_3 (locally assigned decode subsets).
+// Sources: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/cli/osdmaptool/crush.t
+// https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/cli/osdmaptool/crush.t
+// https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/cli/osdmaptool/create-print.t
+// https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/cli/osdmaptool/create-print.t
+#[test]
+fn osdmaptool_crush_and_create_print_maps_decode() {
+    for (release, _, _, crush, create_print, _, _) in RELEASES {
+        let crush = decode(crush);
+        assert_eq!(crush.max_osd, 3, "{release}");
+        assert_eq!(crush.pools[&1].size, 3, "{release}");
+        assert!(crush.get_crush_map().is_some(), "{release}");
+
+        let create_print = decode(create_print);
+        assert_eq!(create_print.max_osd, 3, "{release}");
+        assert_eq!(create_print.pools[&1].size, 3, "{release}");
+        assert_eq!(create_print.pools[&1].pg_num, 192, "{release}");
+        assert_eq!(create_print.pools[&1].pgp_num, 192, "{release}");
+        assert!(create_print.get_crush_map().is_some(), "{release}");
+    }
+}
+
+/// Supplemental external corpus gate; it is not a pinned-release fixture.
+#[test]
+#[ignore = "requires RADOS_OSDMAP_CORPUS_DIR with the v19.2.x OSDMap corpus"]
+fn v19_osdmap_corpus_files_all_decode() {
+    for path in corpus_files(&corpus_dir("RADOS_OSDMAP_CORPUS_DIR")) {
+        let mut bytes = Bytes::from(fs::read(&path).expect("read external OSDMap corpus file"));
+        OSDMap::decode_versioned(&mut bytes, 0)
+            .unwrap_or_else(|error| panic!("decode {}: {error:?}", path.display()));
+        assert!(
+            bytes.is_empty(),
+            "{} left {} bytes",
+            path.display(),
+            bytes.len()
+        );
+    }
+}
+
+/// Supplemental external corpus gate; it is not a pinned-release fixture.
+#[test]
+#[ignore = "requires RADOS_OSDMAP_INCREMENTAL_CORPUS_DIR with the v19.2.x incremental corpus"]
+fn v19_osdmap_incremental_corpus_files_all_decode() {
+    for path in corpus_files(&corpus_dir("RADOS_OSDMAP_INCREMENTAL_CORPUS_DIR")) {
+        let mut bytes =
+            Bytes::from(fs::read(&path).expect("read external incremental corpus file"));
+        OSDMapIncremental::decode_versioned(&mut bytes, 0)
+            .unwrap_or_else(|error| panic!("decode {}: {error:?}", path.display()));
+        assert!(
+            bytes.is_empty(),
+            "{} left {} bytes",
+            path.display(),
+            bytes.len()
+        );
     }
 }

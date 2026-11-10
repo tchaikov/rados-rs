@@ -37,7 +37,9 @@ pub use list_stream::list_objects_stream;
 pub use lock::{LockFlags, LockRequest, LockType, UnlockRequest};
 pub use object_io::RadosObject;
 pub use operation::{BuiltOp, OpBuilder};
-pub use osdmap::{OSDMap, OSDMapIncremental, PgMergeMeta, PgPool, PoolSnapInfo, UuidD};
+pub use osdmap::{
+    OSDMap, OSDMapIncremental, PgMergeMeta, PgPlacement, PgPool, PoolSnapInfo, UuidD,
+};
 pub use pg_nls_response::{ListObjectImpl, PgNlsResponse};
 pub use pgmap_types::{ObjectstorePerfStat, PoolStat};
 pub use snapshot::SnapId;

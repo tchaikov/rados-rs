@@ -1,0 +1,44 @@
+# Quincy v17.2.7 crushtool --test --show-mappings, x=0..9, replicas=2.
+# The update/no-update source maps use index 0; the oracle uses an otherwise
+# identical local default-index spelling because crushtool's test CLI has no
+# choose-argument-index option. Rust selects index 0 for those decoded maps.
+update 0 0 1
+update 1 1 0
+update 2 1 0
+update 3 0 1
+update 4 1 0
+update 5 1 0
+update 6 1 0
+update 7 0 1
+update 8 0 1
+update 9 0 1
+no-update 0 0
+no-update 1 0
+no-update 2 0
+no-update 3 0
+no-update 4 0
+no-update 5 0
+no-update 6 0
+no-update 7 0
+no-update 8 0
+no-update 9 0
+reweight 0 0 2
+reweight 1 2 0
+reweight 2 1 2
+reweight 3 0 2
+reweight 4 2 0
+reweight 5 2 0
+reweight 6 2 1
+reweight 7 1 2
+reweight 8 2 0
+reweight 9 2 1
+move 0 0
+move 1 0
+move 2 0
+move 3 0
+move 4 0
+move 5 0
+move 6 0
+move 7 0
+move 8 0
+move 9 0

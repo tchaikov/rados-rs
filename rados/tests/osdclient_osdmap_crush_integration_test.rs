@@ -5,129 +5,66 @@ use rados::osdclient::OSDMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Test that OSDMap correctly integrates with CRUSH map
+/// Supplemental external corpus gate; it is not a pinned-release fixture.
 #[test]
-fn test_osdmap_crush_integration() {
-    // Path to the OSDMap corpus file
-    let corpus_path = PathBuf::from(env!("HOME"))
-        .join("dev/ceph/ceph-object-corpus/archive/19.2.0-404-g78ddc7f9027/objects/OSDMap");
+#[ignore = "requires RADOS_OSDMAP_CORPUS_DIR with the v19.2.x OSDMap corpus"]
+fn v19_osdmap_corpus_crush_rules_all_decode() {
+    let directory = PathBuf::from(
+        std::env::var_os("RADOS_OSDMAP_CORPUS_DIR")
+            .expect("RADOS_OSDMAP_CORPUS_DIR must name the v19.2.x OSDMap corpus directory"),
+    );
+    assert!(
+        directory.is_dir(),
+        "not a corpus directory: {}",
+        directory.display()
+    );
 
-    if !corpus_path.exists() {
-        eprintln!("Corpus directory not found: {corpus_path:?}");
-        eprintln!("Skipping test");
-        return;
-    }
+    let mut paths: Vec<_> = fs::read_dir(&directory)
+        .expect("read external corpus directory")
+        .map(|entry| entry.expect("read external corpus entry").path())
+        .filter(|path| path.is_file())
+        .collect();
+    paths.sort();
+    assert!(!paths.is_empty(), "external corpus directory is empty");
 
-    let entries = match fs::read_dir(&corpus_path) {
-        Ok(e) => e,
-        Err(_) => {
-            eprintln!("Cannot read corpus directory, skipping test");
-            return;
-        }
-    };
+    let mut decoded = 0;
+    let mut crush_maps = 0;
+    for path in paths {
+        let mut bytes = Bytes::from(fs::read(&path).expect("read external OSDMap corpus file"));
+        let map = OSDMap::decode_versioned(&mut bytes, 0)
+            .unwrap_or_else(|error| panic!("decode {}: {error:?}", path.display()));
+        assert!(
+            bytes.is_empty(),
+            "{} left {} bytes",
+            path.display(),
+            bytes.len()
+        );
+        decoded += 1;
 
-    let mut tested_count = 0;
-    let mut crush_parsed_count = 0;
-
-    for entry in entries {
-        let entry = entry.expect("Failed to read directory entry");
-        let path = entry.path();
-
-        if !path.is_file() {
-            continue;
-        }
-
-        println!("\nTesting corpus file: {:?}", path.file_name());
-
-        let data = match fs::read(&path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("  Failed to read file: {e:?}");
-                continue;
-            }
-        };
-
-        let mut bytes = Bytes::from(data);
-
-        match OSDMap::decode_versioned(&mut bytes, 0) {
-            Ok(osdmap) => {
-                tested_count += 1;
-                println!("  ✓ Decoded OSDMap successfully");
-                println!("    Epoch: {}", osdmap.epoch);
-                println!("    Max OSD: {}", osdmap.max_osd);
-                println!("    Pool count: {}", osdmap.pools.len());
-
-                // Test CRUSH map integration
-                if let Some(crush_map) = osdmap.get_crush_map() {
-                    crush_parsed_count += 1;
-                    println!("    ✓ CRUSH map parsed!");
-                    println!("      Max buckets: {}", crush_map.max_buckets);
-                    println!("      Max devices: {}", crush_map.max_devices);
-                    println!("      Max rules: {}", crush_map.max_rules);
-
-                    // Test pool access methods
-                    for pool_id in osdmap.pools.keys() {
-                        let pool_name = osdmap.get_pool_name(*pool_id);
-                        let crush_rule = osdmap.get_pool_crush_rule(*pool_id);
-
-                        println!(
-                            "      Pool {pool_id}: name={pool_name:?}, crush_rule={crush_rule:?}"
-                        );
-
-                        // Verify crush_rule exists in the CRUSH map
-                        if let Some(rule_id) = crush_rule {
-                            match crush_map.get_rule(rule_id as u32) {
-                                Ok(rule) => {
-                                    println!(
-                                        "        ✓ CRUSH rule {} found with {} steps",
-                                        rule.rule_id,
-                                        rule.steps.len()
-                                    );
-                                }
-                                Err(e) => {
-                                    println!("        ⚠ CRUSH rule {rule_id} not found: {e:?}");
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    println!("    ⚠ No CRUSH map in this OSDMap");
+        if let Some(crush) = map.get_crush_map() {
+            crush_maps += 1;
+            for pool_id in map.pools.keys() {
+                if let Some(rule_id) = map.get_pool_crush_rule(*pool_id) {
+                    crush.get_rule(rule_id as u32).unwrap_or_else(|error| {
+                        panic!(
+                            "{} pool {pool_id} rule {rule_id}: {error:?}",
+                            path.display()
+                        )
+                    });
                 }
             }
-            Err(e) => {
-                eprintln!("  ✗ Failed to decode: {e:?}");
-            }
         }
     }
-
-    println!("\n=== Summary ===");
-    println!("OSDMaps decoded: {tested_count}");
-    println!("CRUSH maps parsed: {crush_parsed_count}");
-
-    // We expect at least some files to be tested
-    assert!(
-        tested_count > 0,
-        "Should have decoded at least one OSDMap file"
-    );
+    assert!(decoded > 0);
+    assert!(crush_maps > 0, "external corpus had no decoded CRUSH map");
 }
 
-/// Test helper methods for accessing pool and CRUSH data
 #[test]
-fn test_osdmap_helper_methods() {
-    // Create a simple OSDMap for testing
+fn osdmap_helper_methods_without_crush_fail() {
     let osdmap = OSDMap::new();
-
-    // Initially, all access methods should return None or empty
     assert!(osdmap.get_crush_map().is_none());
     assert!(osdmap.get_pool(1).is_none());
     assert!(osdmap.get_pool_name(1).is_none());
     assert!(osdmap.get_pool_crush_rule(1).is_none());
-
-    // Test pg_to_osds returns error when no CRUSH map
-    let pg = PgId { pool: 1, seed: 0 };
-    let result = osdmap.pg_to_osds(&pg);
-    assert!(result.is_err());
-
-    // The helper methods are tested more thoroughly with real corpus data
-    // in the integration test above
+    assert!(osdmap.pg_to_osds(&PgId { pool: 1, seed: 0 }).is_err());
 }

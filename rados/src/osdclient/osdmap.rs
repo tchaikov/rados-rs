@@ -158,15 +158,15 @@ impl ShardIdSet {
 
 pub struct ShardIdSetIter<'a> {
     set: &'a ShardIdSet,
-    current: i8,
+    current: i16,
 }
 
 impl<'a> Iterator for ShardIdSetIter<'a> {
     type Item = ShardId;
 
     fn next(&mut self) -> Option<Self::Item> {
-        while self.current >= 0 && (self.current as usize) < 128 {
-            let shard_id = ShardId(self.current);
+        while self.current < 128 {
+            let shard_id = ShardId(self.current as i8);
             self.current += 1;
             if self.set.contains(shard_id) {
                 return Some(shard_id);
@@ -972,6 +972,70 @@ impl PgPool {
         result
     }
 
+    /// Reverse `pgtemp_primaryfirst_vec` when the PG has a stored temp set.
+    /// Returns an error if the optimized EC layout exceeds 128 shards,
+    /// has out-of-range nonprimary shards, or its temp length differs from size.
+    pub fn pgtemp_undo_primaryfirst_vec(
+        &self,
+        has_pg_temp: bool,
+        acting: &[i32],
+    ) -> Result<Vec<i32>, RadosError> {
+        if !self.allows_ecoptimizations() || !has_pg_temp {
+            return Ok(acting.to_vec());
+        }
+        let size = usize::from(self.size);
+        if size > i8::MAX as usize + 1 || acting.len() != size {
+            return Err(RadosError::Protocol(format!(
+                "Invalid optimized EC pg_temp: pool size {size}, acting length {} (maximum 128 shards)",
+                acting.len()
+            )));
+        }
+        if self
+            .nonprimary_shards
+            .iter()
+            .any(|shard| shard.0 as usize >= size)
+        {
+            return Err(RadosError::Protocol(
+                "Optimized EC nonprimary shard is outside pool size".into(),
+            ));
+        }
+        let mut primary = 0;
+        let mut nonprimary = size - self.nonprimary_shards.iter().count();
+        Ok((0..size)
+            .map(|shard| {
+                let index = if self.is_nonprimary_shard(ShardId::new(shard as i8)) {
+                    let index = nonprimary;
+                    nonprimary += 1;
+                    index
+                } else {
+                    let index = primary;
+                    primary += 1;
+                    index
+                };
+                acting[index]
+            })
+            .collect())
+    }
+
+    /// Convert an original shard id to its primaryfirst position.
+    pub fn pgtemp_primaryfirst_shard(&self, has_pg_temp: bool, shard: ShardId) -> ShardId {
+        if shard == ShardId::NO_SHARD
+            || shard.0 == 0
+            || !self.allows_ecoptimizations()
+            || !has_pg_temp
+        {
+            return shard;
+        }
+        let nonprimary_count = self.nonprimary_shards.iter().count() as i32;
+        let num_parity_shards = self.size as i32 - nonprimary_count - 1;
+        let shard = shard.0 as i32;
+        ShardId::new(if shard >= self.size as i32 - num_parity_shards {
+            shard + num_parity_shards + 1 - self.size as i32
+        } else {
+            shard + num_parity_shards
+        } as i8)
+    }
+
     /// Inverse of `pgtemp_primaryfirst_vec` — convert a "primaryfirst"
     /// position back to the actual shard ID.  Mirrors the `shard_id_t`
     /// form of C++ `OSDMap::pgtemp_undo_primaryfirst`.
@@ -990,9 +1054,7 @@ impl PgPool {
             return pos;
         }
         let size = self.size as i32;
-        let nonprimary_count = (0..size as usize)
-            .filter(|&i| self.is_nonprimary_shard(ShardId::new(i as i8)))
-            .count() as i32;
+        let nonprimary_count = self.nonprimary_shards.iter().count() as i32;
         let num_parity_shards = size - nonprimary_count - 1;
         let p = pos.0 as i32;
         let result = if p > num_parity_shards {
@@ -1755,16 +1817,12 @@ impl VersionedEncode for OSDMapClientSection {
             ..Default::default()
         };
 
-        let crush_bytes = Bytes::decode(buf, features)?;
+        let mut crush_bytes = Bytes::decode(buf, features)?;
         if !crush_bytes.is_empty() {
-            let mut crush_buf = crush_bytes.clone();
-            match CrushMap::decode(&mut crush_buf) {
-                Ok(crush_map) => section.crush = Some(crush_map),
-                Err(e) => {
-                    tracing::warn!("Failed to parse CRUSH map: {:?}", e);
-                    section.crush = None;
-                }
-            }
+            section.crush = Some(
+                CrushMap::decode(&mut crush_bytes)
+                    .map_err(|error| RadosError::Crush(Box::new(error)))?,
+            );
         }
 
         section.erasure_code_profiles = BTreeMap::decode(buf, features)?;
@@ -2149,9 +2207,9 @@ impl OSDMapIncremental {
             new_hb_front_up: _,               // server-side heartbeat addrs
             new_require_min_compat_client: _, // mon-enforced feature gate
             new_require_osd_release: _,       // mon-enforced feature gate
-            new_crush_node_flags: _,          // carried in the CRUSH map bytes
-            new_device_class_flags: _,        // carried in the CRUSH map bytes
-            change_stretch_mode: _,           // stretch mode (rare deployment)
+            new_crush_node_flags: _,
+            new_device_class_flags: _, // carried in the CRUSH map bytes
+            change_stretch_mode: _,    // stretch mode (rare deployment)
             new_stretch_bucket_count: _,
             new_degraded_stretch_mode: _,
             new_recovering_stretch_mode: _,
@@ -2169,11 +2227,7 @@ impl OSDMapIncremental {
         // returns -EINVAL otherwise; the epoch clause asserts).  An
         // out-of-order or wrong-cluster incremental landing in our base
         // would silently corrupt routing state, so we refuse instead.
-        if base.epoch.as_u32() == 0 {
-            // First-ever apply: adopt the inc's fsid (matches the
-            // `if (inc.epoch == 1) fsid = inc.fsid` branch).
-            base.fsid = self.fsid;
-        } else if self.fsid != base.fsid {
+        if base.epoch.as_u32() != 0 && self.fsid != base.fsid {
             return Err(RadosError::Protocol(format!(
                 "OSDMap incremental fsid {:?} does not match base {:?}; \
                  refusing to apply (wrong cluster?)",
@@ -2187,19 +2241,6 @@ impl OSDMapIncremental {
                 self.epoch.as_u32(),
                 base.epoch.as_u32()
             )));
-        }
-
-        // Invalidate placement caches on any OSDMap update.
-        // Clear acting_cache first: a thread that misses it and falls through
-        // to CRUSH must also miss crush_cache, forcing a full recompute from
-        // the new OSDMap state rather than using stale crush results.
-        {
-            let mut cache = base.lock_acting_cache()?;
-            cache.clear();
-        }
-        {
-            let mut cache = base.lock_crush_cache()?;
-            cache.clear();
         }
 
         // Full-map replacement.  C++ apply_incremental short-circuits
@@ -2218,6 +2259,24 @@ impl OSDMapIncremental {
                 self.epoch.as_u32(),
                 self.fullmap.len()
             )));
+        }
+
+        // Decode before changing the base: a bad topology must not leave
+        // new pool/state data paired with the previous CRUSH map.
+        let crush = if self.crush.is_empty() {
+            None
+        } else {
+            Some(
+                CrushMap::decode(&mut self.crush.clone())
+                    .map_err(|error| RadosError::Crush(Box::new(error)))?,
+            )
+        };
+
+        // Invalidate placement caches only after the update is validated.
+        base.lock_acting_cache()?.clear();
+        base.lock_crush_cache()?.clear();
+        if base.epoch.as_u32() == 0 {
+            base.fsid = self.fsid;
         }
 
         // Update epoch
@@ -2258,14 +2317,61 @@ impl OSDMapIncremental {
             base.pool_name.insert(*pool_id, name.clone());
         }
 
-        // new_up_client: a freshly UP OSD's client-facing address.
-        // C++ `OSDMap::apply_incremental` also sets the EXISTS|UP
-        // bits explicitly here and clears the STOP bit, so an OSD
-        // that was previously DESTROYED gets transitioned back to
-        // UP even if the paired `new_state` entry only XORs other
-        // bits.  Without this, the OSD's UP flag in our base could
-        // remain stale and `is_up()` would return false on the next
-        // routing decision.
+        for (osd, weight) in &self.new_weight {
+            let idx = *osd as usize;
+            if idx < base.osd_weight.len() {
+                base.osd_weight[idx] = *weight;
+            }
+        }
+
+        // Apply primary_affinity changes.  C++ stores this as a parallel
+        // vector indexed by osd_id; we mirror that shape.
+        for (osd, affinity) in &self.new_primary_affinity {
+            let idx = *osd as usize;
+            if idx >= base.osd_primary_affinity.len() {
+                base.osd_primary_affinity
+                    .resize(idx + 1, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            }
+            base.osd_primary_affinity[idx] = *affinity;
+        }
+
+        // Apply state XORs before new_up_client, which forces EXISTS|UP.
+        // A zero delta toggles UP; toggling EXISTS off destroys the OSD.
+        for (osd, state) in &self.new_state {
+            let idx = *osd as usize;
+            if idx >= base.osd_state.len() {
+                continue;
+            }
+            let state = if *state == 0 { CEPH_OSD_UP } else { *state };
+            if base.osd_state[idx] & state & CEPH_OSD_EXISTS != 0 {
+                base.osd_state[idx] = 0;
+                if let Some(affinity) = base.osd_primary_affinity.get_mut(idx) {
+                    *affinity = CEPH_OSD_DEFAULT_PRIMARY_AFFINITY;
+                }
+                for addrs in [
+                    &mut base.osd_addrs_client,
+                    &mut base.osd_addrs_cluster,
+                    &mut base.osd_addrs_hb_front,
+                    &mut base.osd_addrs_hb_back,
+                ] {
+                    if let Some(addr) = addrs.get_mut(idx) {
+                        *addr = EntityAddrvec::default();
+                    }
+                }
+                if let Some(uuid) = base.osd_uuid.get_mut(idx) {
+                    *uuid = UuidD::default();
+                }
+                if let Some(info) = base.osd_info.get_mut(idx) {
+                    *info = OsdInfo::default();
+                }
+                if let Some(xinfo) = base.osd_xinfo.get_mut(idx) {
+                    *xinfo = OsdXInfo::default();
+                }
+            } else {
+                base.osd_state[idx] ^= state;
+            }
+        }
+
         for (osd, addrvec) in &self.new_up_client {
             let idx = *osd as usize;
             if idx >= base.osd_addrs_client.len() {
@@ -2276,26 +2382,6 @@ impl OSDMapIncremental {
             if idx < base.osd_state.len() {
                 base.osd_state[idx] |= CEPH_OSD_EXISTS | CEPH_OSD_UP;
                 base.osd_state[idx] &= !CEPH_OSD_STOP;
-            }
-        }
-
-        // new_state: XOR the state bits.  C++
-        // `OSDMap::apply_incremental` treats a zero value as a
-        // shorthand for "toggle the UP bit", so we need the same
-        // fallback or mark-up/down events encoded that way are
-        // silently dropped.
-        for (osd, state) in &self.new_state {
-            let idx = *osd as usize;
-            if idx < base.osd_state.len() {
-                let s = if *state == 0 { CEPH_OSD_UP } else { *state };
-                base.osd_state[idx] ^= s;
-            }
-        }
-
-        for (osd, weight) in &self.new_weight {
-            let idx = *osd as usize;
-            if idx < base.osd_weight.len() {
-                base.osd_weight[idx] = *weight;
             }
         }
 
@@ -2350,15 +2436,12 @@ impl OSDMapIncremental {
             base.pg_upmap_primaries.insert(*pgid, *primary);
         }
 
-        // Apply primary_affinity changes.  C++ stores this as a parallel
-        // vector indexed by osd_id; we mirror that shape.
-        for (osd, affinity) in &self.new_primary_affinity {
-            let idx = *osd as usize;
-            if idx >= base.osd_primary_affinity.len() {
-                base.osd_primary_affinity
-                    .resize(idx + 1, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+        for (node, flags) in &self.new_crush_node_flags {
+            if *flags == 0 {
+                base.crush_node_flags.remove(node);
+            } else {
+                base.crush_node_flags.insert(*node, *flags);
             }
-            base.osd_primary_affinity[idx] = *affinity;
         }
 
         // Apply erasure-code profile changes.
@@ -2381,35 +2464,14 @@ impl OSDMapIncremental {
         base.new_removed_snaps = self.new_removed_snaps.clone();
         base.new_purged_snaps = self.new_purged_snaps.clone();
 
-        // Apply CRUSH map update if the incremental carries one.  The
-        // mon inlines the full CRUSH map bytes whenever the topology,
-        // weights, or rules change; any such change invalidates our
-        // cached placement and we must re-parse.  Without this, a
-        // later `pg_to_acting_osds` call runs against the STALE crush
-        // map and can produce a different acting set than the OSD's
-        // — the exact symptom that surfaces as a "misdirected op"
-        // silent drop during autoscale-driven pool splits.
-        if !self.crush.is_empty() {
-            let mut crush_buf = self.crush.clone();
-            match CrushMap::decode(&mut crush_buf) {
-                Ok(crush_map) => {
-                    tracing::debug!(
-                        target: "rados::osdclient::crush",
-                        "incremental epoch={} applying new CRUSH map ({} bytes)",
-                        self.epoch.as_u32(),
-                        self.crush.len(),
-                    );
-                    base.crush = Some(crush_map);
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        target: "rados::osdclient::crush",
-                        "incremental epoch={} failed to decode new CRUSH map: {:?}",
-                        self.epoch.as_u32(),
-                        e,
-                    );
-                }
-            }
+        if let Some(crush) = crush {
+            tracing::debug!(
+                target: "rados::osdclient::crush",
+                epoch = self.epoch.as_u32(),
+                bytes = self.crush.len(),
+                "Applying new CRUSH map",
+            );
+            base.crush = Some(crush);
         }
 
         // Update timestamps
@@ -2489,7 +2551,7 @@ pub struct OSDMap {
     // the value includes all placement overrides, so callers on the I/O hot path
     // can skip the full CRUSH walk + override application on repeated lookups.
     #[serde(skip)]
-    acting_cache: std::sync::Mutex<lru::LruCache<(u64, u32), Vec<i32>>>,
+    acting_cache: std::sync::Mutex<lru::LruCache<(u64, u32), PgPlacement>>,
 
     // Version 4+ fields
     pub pg_upmap: BTreeMap<PgId, Vec<i32>>,
@@ -2574,6 +2636,45 @@ const CEPH_OSD_STOP: u32 = 1 << 9;
 /// `CEPH_OSD_DEFAULT_PRIMARY_AFFINITY` in `include/rados.h`.
 /// `0x10000` means "always primary if acting[0]".
 const CEPH_OSD_DEFAULT_PRIMARY_AFFINITY: u32 = 0x10000;
+
+const CEPH_FEATURE_CRUSH_TUNABLES: u64 = 1 << 18;
+const CEPH_FEATURE_CRUSH_TUNABLES2: u64 = 1 << 25;
+const CEPH_FEATURE_OSDHASHPSPOOL: u64 = 1 << 30;
+const CEPH_FEATURE_OSD_CACHEPOOL: u64 = 1 << 35;
+const CEPH_FEATURE_CRUSH_V2: u64 = 1 << 36;
+const CEPH_FEATURE_CRUSH_TUNABLES3: u64 = 1 << 41;
+const CEPH_FEATURE_CRUSH_V4: u64 = 1 << 48;
+const CEPH_FEATURE_CRUSH_TUNABLES5: u64 = 1 << 58;
+const CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS: u64 = (1 << 21) | (1 << 57);
+const CEPH_FEATUREMASK_CRUSH_MSR: u64 = (1 << 38) | (1 << 57);
+const CEPH_FEATUREMASK_OSDMAP_PG_UPMAP: u64 = (1 << 21) | (1 << 57);
+const CEPH_FEATUREMASK_SERVER_REEF: u64 = (1 << 31) | (1 << 28) | (1 << 57);
+const CEPH_FEATURE_SERVER_JEWEL: u64 = 1 << 57;
+const CEPH_FEATUREMASK_SERVER_KRAKEN: u64 = (1 << 14) | (1 << 57);
+const CEPH_FEATURE_MSG_ADDR2: u64 = 1 << 59;
+const CEPH_FEATURE_CEPHX_V2: u64 = 1 << 61;
+const CEPH_FEATUREMASK_STRETCH_MODE: u64 = (1 << 32) | (1 << 28) | (1 << 57);
+const CEPH_FEATURES_CRUSH_QUINCY: u64 = CEPH_FEATURE_CRUSH_TUNABLES
+    | CEPH_FEATURE_CRUSH_TUNABLES2
+    | CEPH_FEATURE_CRUSH_TUNABLES3
+    | CEPH_FEATURE_CRUSH_TUNABLES5
+    | CEPH_FEATURE_CRUSH_V2
+    | CEPH_FEATURE_CRUSH_V4
+    | CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS;
+const CEPH_FEATURES_CRUSH_TENTACLE: u64 = CEPH_FEATURE_CRUSH_TUNABLES
+    | CEPH_FEATURE_CRUSH_TUNABLES2
+    | CEPH_FEATURE_CRUSH_TUNABLES3
+    | CEPH_FEATURE_CRUSH_TUNABLES5
+    | CEPH_FEATURE_CRUSH_V2
+    | CEPH_FEATURE_CRUSH_V4
+    | CEPH_FEATUREMASK_CRUSH_MSR;
+
+/// Ceph release whose [`OSDMap::get_features_for_release`] rules should apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OSDMapFeatureRelease {
+    Quincy,
+    Tentacle,
+}
 
 impl Default for OSDMap {
     fn default() -> Self {
@@ -2692,10 +2793,25 @@ impl Clone for OSDMap {
     }
 }
 
-type PlacementCache = lru::LruCache<(u64, u32), Vec<i32>>;
+type RawPlacementCache = lru::LruCache<(u64, u32), Vec<i32>>;
+type PlacementCache = lru::LruCache<(u64, u32), PgPlacement>;
+
+/// The independently observable results of PG placement.
+///
+/// `raw` is the CRUSH result before OSDMap overrides. `up` applies upmaps and
+/// liveness, while `acting` additionally applies `pg_temp`. Primary IDs are
+/// deliberately separate: `primary_temp` does not reorder shard positions.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgPlacement {
+    pub raw: Vec<i32>,
+    pub up: Vec<i32>,
+    pub acting: Vec<i32>,
+    pub up_primary: i32,
+    pub acting_primary: i32,
+}
 
 impl OSDMap {
-    fn lock_crush_cache(&self) -> Result<std::sync::MutexGuard<'_, PlacementCache>, RadosError> {
+    fn lock_crush_cache(&self) -> Result<std::sync::MutexGuard<'_, RawPlacementCache>, RadosError> {
         self.crush_cache
             .lock()
             .map_err(|_| RadosError::Protocol("crush_cache lock poisoned".into()))
@@ -2707,7 +2823,7 @@ impl OSDMap {
             .map_err(|_| RadosError::Protocol("acting_cache lock poisoned".into()))
     }
 
-    /// Map a PG to its final acting OSD set via CRUSH + all overrides.
+    /// Map a PG to its raw, up, and acting OSD sets via CRUSH + OSDMap state.
     ///
     /// Results are cached per `(pool_id, pg_seed)` so repeated lookups for
     /// the same PG within the same OSDMap epoch skip the CRUSH tree walk.
@@ -2718,7 +2834,20 @@ impl OSDMap {
     /// `Objecter::_calc_target` behaviour we deliberately do not mirror.
     /// The feature is deprecated upstream and we have no plan to
     /// resurrect support for it.
-    pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+    pub fn pg_to_placement(&self, pg: &PgId) -> Result<PgPlacement, RadosError> {
+        let pool = match self.pools.get(&pg.pool) {
+            Some(pool) => pool,
+            _ => {
+                return Ok(PgPlacement {
+                    raw: Vec::new(),
+                    up: Vec::new(),
+                    acting: Vec::new(),
+                    up_primary: -1,
+                    acting_primary: -1,
+                });
+            }
+        };
+
         let cache_key = (pg.pool, pg.seed);
         {
             let mut cache = self.lock_acting_cache()?;
@@ -2727,65 +2856,96 @@ impl OSDMap {
             }
         }
 
-        let pool = self
-            .pools
-            .get(&pg.pool)
-            .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
-
-        let crush_map = self
-            .crush
-            .as_ref()
-            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
-
-        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
-
-        let mut osds = crate::crush::placement::pg_to_osds(
-            crush_map,
-            *pg,
-            pool.pgp_num,
-            pool.crush_rule as u32,
-            &self.osd_weight,
-            pool.size as usize,
-            hashpspool,
-        )
-        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
-
-        let raw_crush = osds.clone();
-        let upmap = self.pg_upmap.get(pg).cloned();
-        let upmap_primary = self.pg_upmap_primaries.get(pg).copied();
-        let pg_temp = self.pg_temp.get(pg).cloned();
-        let primary_temp = self.primary_temp.get(pg).copied();
-
-        // `pps` is the same seed CRUSH consumed and the same seed
-        // `_apply_primary_affinity` uses for its rejection hash.  Re-
-        // computing it here keeps the affinity decision in lockstep
-        // with the OSD's view.
-        let pps = crate::crush::placement::pg_to_pps(*pg, pool.pgp_num, hashpspool);
-        self.apply_pg_overrides(pg, pps, &mut osds);
-
-        tracing::trace!(
-            target: "rados::osdclient::crush",
-            "CRUSH epoch={} pg={}.{:x} pg_num={} pgp_num={} raw_crush={:?} \
-             upmap={:?} upmap_primary={:?} pg_temp={:?} primary_temp={:?} → {:?}",
-            self.epoch.as_u32(),
-            pg.pool,
-            pg.seed,
-            pool.pg_num,
-            pool.pgp_num,
-            raw_crush,
-            upmap,
-            upmap_primary,
-            pg_temp,
-            primary_temp,
-            osds,
-        );
+        let raw = self.pg_to_osds(pg)?;
+        let placement = self.placement_from_raw(pool, pg, raw)?;
 
         {
             let mut cache = self.lock_acting_cache()?;
-            cache.put(cache_key, osds.clone());
+            cache.put(cache_key, placement.clone());
+        }
+        Ok(placement)
+    }
+
+    fn placement_from_raw(
+        &self,
+        pool: &PgPool,
+        pg: &PgId,
+        raw: Vec<i32>,
+    ) -> Result<PgPlacement, RadosError> {
+        let mut up = raw.clone();
+        // Ceph removes nonexistent CRUSH results before applying upmaps.
+        if pool.is_replicated() {
+            up.retain(|&osd| self.exists(osd));
+        } else {
+            for osd in &mut up {
+                if !self.exists(*osd) {
+                    *osd = CRUSH_ITEM_NONE;
+                }
+            }
+        }
+        self.apply_upmap(pg, &mut up);
+        if pool.is_replicated() {
+            up.retain(|&osd| osd >= 0 && self.is_up(osd));
+        } else {
+            for osd in &mut up {
+                if *osd < 0 || self.is_down(*osd) {
+                    *osd = CRUSH_ITEM_NONE;
+                }
+            }
         }
 
-        Ok(osds)
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+        let pps = crate::crush::placement::pg_to_pps(*pg, pool.pgp_num, hashpspool);
+        let up_primary = self
+            .select_primary_index(pps, &up)
+            .map_or(-1, |pos| up[pos]);
+        if pool.is_replicated()
+            && let Some(pos) = up.iter().position(|&osd| osd == up_primary)
+        {
+            up[..=pos].rotate_right(1);
+        }
+
+        let mut acting = self.pg_temp.get(pg).cloned().unwrap_or_default();
+        let mut temp_primary = None;
+        let mut has_nonempty_temp = false;
+        if self.pg_temp.contains_key(pg) {
+            if pool.is_replicated() {
+                acting.retain(|&osd| osd >= 0 && self.is_up(osd));
+            } else {
+                for osd in &mut acting {
+                    if *osd < 0 || self.is_down(*osd) {
+                        *osd = CRUSH_ITEM_NONE;
+                    }
+                }
+            }
+            has_nonempty_temp = !acting.is_empty();
+            temp_primary = acting.iter().copied().find(|&osd| osd != CRUSH_ITEM_NONE);
+            if pool.is_erasure() {
+                acting = pool.pgtemp_undo_primaryfirst_vec(has_nonempty_temp, &acting)?;
+            }
+        }
+        if acting.is_empty() {
+            acting = up.clone();
+        }
+        let acting_primary = self.primary_temp.get(pg).copied().unwrap_or_else(|| {
+            if has_nonempty_temp {
+                temp_primary.unwrap_or(-1)
+            } else {
+                up_primary
+            }
+        });
+        Ok(PgPlacement {
+            raw,
+            up,
+            acting,
+            up_primary,
+            acting_primary,
+        })
+    }
+
+    /// Map a PG to its final acting OSD set via CRUSH + all overrides.
+    pub fn pg_to_acting_osds(&self, pg: &PgId) -> Result<Vec<i32>, RadosError> {
+        Ok(self.pg_to_placement(pg)?.acting)
     }
 
     /// Compute the `spg_t` shard for a PG.
@@ -2814,26 +2974,7 @@ impl OSDMap {
             return Ok(ShardId::NO_SHARD);
         }
 
-        // Run CRUSH; the post-CRUSH transformations and primary lookup
-        // live in `ec_shard_from_raw` so the unit tests can drive them
-        // with synthetic raw acting sets.
-        let crush_map = self
-            .crush
-            .as_ref()
-            .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
-        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
-        let raw = crate::crush::placement::pg_to_osds(
-            crush_map,
-            *pg,
-            pool.pgp_num,
-            pool.crush_rule as u32,
-            &self.osd_weight,
-            pool.size as usize,
-            hashpspool,
-        )
-        .map_err(|e| RadosError::Protocol(format!("CRUSH placement failed: {e}")))?;
-
-        self.ec_shard_from_raw(pg, raw)
+        self.ec_shard_from_placement(pool, pg, &self.pg_to_placement(pg)?)
     }
 
     /// Compute the EC `spg_t` shard from a hand-supplied raw CRUSH
@@ -2849,70 +2990,24 @@ impl OSDMap {
     /// vector, walks IT to find the primary, then runs
     /// `pgtemp_undo_primaryfirst` on the position.  We mirror the
     /// same call sequence so we land on the same shard the OSD picks.
-    fn ec_shard_from_raw(&self, pg: &PgId, mut raw: Vec<i32>) -> Result<ShardId, RadosError> {
+    #[cfg(test)]
+    fn ec_shard_from_raw(&self, pg: &PgId, raw: Vec<i32>) -> Result<ShardId, RadosError> {
         let pool = self
             .pools
             .get(&pg.pool)
             .ok_or_else(|| RadosError::Protocol(format!("Pool {} not found", pg.pool)))?;
-        // pg_upmap (whole-set replacement) and pg_upmap_items
-        // (per-OSD swap) — same OUT/duplicate guards as
-        // `apply_pg_overrides`.
-        if let Some(upmap_osds) = self.pg_upmap.get(pg)
-            && !upmap_osds
-                .iter()
-                .any(|&o| o != CRUSH_ITEM_NONE && self.is_out(o))
-        {
-            raw = upmap_osds.clone();
-        }
-        if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
-            for &(from_osd, to_osd) in upmap_items {
-                if raw.contains(&to_osd) {
-                    continue;
-                }
-                if to_osd != CRUSH_ITEM_NONE && self.is_out(to_osd) {
-                    continue;
-                }
-                if let Some(pos) = raw.iter().position(|&osd| osd == from_osd) {
-                    raw[pos] = to_osd;
-                }
-            }
-        }
+        let placement = self.placement_from_raw(pool, pg, raw)?;
+        self.ec_shard_from_placement(pool, pg, &placement)
+    }
 
-        // Build the EC up set: replace downs/dne with CRUSH_ITEM_NONE
-        // (matches the EC branch of C++ `_raw_to_up_osds` — positions
-        // must be preserved).
-        let up: Vec<i32> = raw
-            .iter()
-            .map(|&osd| {
-                if osd == CRUSH_ITEM_NONE || self.is_down(osd) {
-                    CRUSH_ITEM_NONE
-                } else {
-                    osd
-                }
-            })
-            .collect();
-
-        // Acting set: pg_temp if present (and non-empty), otherwise up.
-        let acting: &[i32] = if let Some(temp) = self.pg_temp.get(pg) {
-            if temp.is_empty() {
-                &up
-            } else {
-                temp.as_slice()
-            }
-        } else {
-            &up
-        };
-
-        // Acting primary: primary_temp override if set, otherwise the
-        // first non-NONE entry of the acting set.
-        let acting_primary = match self.primary_temp.get(pg) {
-            Some(&p) if p >= 0 => p,
-            _ => acting
-                .iter()
-                .copied()
-                .find(|&o| o != CRUSH_ITEM_NONE)
-                .unwrap_or(-1),
-        };
+    fn ec_shard_from_placement(
+        &self,
+        pool: &PgPool,
+        pg: &PgId,
+        placement: &PgPlacement,
+    ) -> Result<ShardId, RadosError> {
+        let acting = &placement.acting;
+        let acting_primary = placement.acting_primary;
 
         if acting_primary < 0 {
             return Err(RadosError::Protocol(format!(
@@ -2927,7 +3022,7 @@ impl OSDMap {
         // typical `nonprimary_shards = {4,5}` layout it's idempotent on
         // monitor-stored pg_temp, and for asymmetric layouts it produces
         // the primaryfirst view we need to walk.
-        let has_pg_temp = self.pg_temp.contains_key(pg);
+        let has_pg_temp = self.pg_temp.get(pg).is_some_and(|temp| !temp.is_empty());
         let primaryfirst_view: Vec<i32> = if has_pg_temp {
             pool.pgtemp_primaryfirst_vec(acting)
         } else {
@@ -3014,106 +3109,203 @@ impl OSDMap {
         fallback
     }
 
-    /// Apply PG placement overrides from the OSDMap.
-    ///
-    /// Mirrors C++ `_pg_to_up_acting_osds` / `_apply_upmap` order:
-    /// 1. pg_upmap — complete acting set replacement
-    /// 2. pg_upmap_items — fine-grained OSD swaps
-    /// 3. Pick a primary respecting `osd_primary_affinity` (and skipping
-    ///    down OSDs).  Mirrors `_raw_to_up_osds` + `_pick_primary` +
-    ///    `_apply_primary_affinity` in C++.  `pps` is the post-CRUSH
-    ///    seed used as the affinity hash key.
-    /// 4. pg_upmap_primaries — primary override within the up set
-    /// 5. pg_temp — if present, overrides the entire acting set
-    /// 6. primary_temp — overrides the primary (acting[0] in our flat-vec
-    ///    model); in C++ this is a separate `acting_primary` int that does
-    ///    not modify the acting vector
-    fn apply_pg_overrides(&self, pg: &PgId, pps: u32, osds: &mut Vec<i32>) {
-        // pg_upmap (complete acting-set replacement).  Reject the
-        // upmap if any target OSD is marked OUT.  Mirrors the
-        // OUT-target check at the top of `OSDMap::_apply_upmap` —
-        // C++ falls back to the raw CRUSH result in that case.
-        if let Some(upmap_osds) = self.pg_upmap.get(pg)
-            && !upmap_osds
-                .iter()
-                .any(|&o| o != CRUSH_ITEM_NONE && self.is_out(o))
-        {
-            *osds = upmap_osds.clone();
+    /// Apply `pg_upmap`, `pg_upmap_items`, and `pg_upmap_primary` to the
+    /// raw CRUSH result. This is deliberately before down filtering, matching
+    /// C++ `OSDMap::_apply_upmap`.
+    fn apply_upmap(&self, pg: &PgId, osds: &mut Vec<i32>) {
+        if let Some(upmap) = self.pg_upmap.get(pg) {
+            if upmap.iter().any(|&osd| self.upmap_target_is_out(osd)) {
+                return;
+            }
+            *osds = upmap.clone();
         }
-
-        // pg_upmap_items (per-osd swap).  Mirrors the duplicate-target
-        // and OUT-target guards inside `OSDMap::_apply_upmap`: skip
-        // the swap if `to` is already in the acting set (would create
-        // a duplicate) or if `to` is marked OUT.
-        if let Some(upmap_items) = self.pg_upmap_items.get(pg) {
-            for &(from_osd, to_osd) in upmap_items {
-                if osds.contains(&to_osd) {
+        if let Some(items) = self.pg_upmap_items.get(pg) {
+            for &(from, to) in items {
+                if osds.contains(&to) || self.upmap_target_is_out(to) {
                     continue;
                 }
-                if to_osd != CRUSH_ITEM_NONE && self.is_out(to_osd) {
-                    continue;
-                }
-                if let Some(pos) = osds.iter().position(|&osd| osd == from_osd) {
-                    osds[pos] = to_osd;
+                if let Some(pos) = osds.iter().position(|&osd| osd == from) {
+                    osds[pos] = to;
                 }
             }
         }
-
-        // Pick the primary, respecting `osd_primary_affinity` and
-        // skipping down OSDs.  This consolidates two C++ steps
-        // (`_pick_primary` and `_apply_primary_affinity`) and replaces
-        // the previous "swap first up to position 0" hack.  Explicit
-        // overrides below still take precedence — they're admin-trusted
-        // even if the target is down or has reduced affinity.
-        if let Some(pos) = self.select_primary_index(pps, osds)
-            && pos > 0
-        {
-            osds.swap(0, pos);
-        }
-
-        // pg_upmap_primaries (primary override).  Mirrors the
-        // pg_upmap_primaries branch of `OSDMap::_apply_upmap`:
-        // skip if the new primary is `CRUSH_ITEM_NONE` or marked OUT,
-        // search starting from index 1 so an already-at-0 primary is
-        // a no-op, and only swap if the new primary is found.
-        if let Some(&primary_osd) = self.pg_upmap_primaries.get(pg)
-            && primary_osd != CRUSH_ITEM_NONE
-            && !self.is_out(primary_osd)
-            && osds.len() > 1
-            && let Some(rel_pos) = osds[1..].iter().position(|&osd| osd == primary_osd)
-        {
-            let pos = rel_pos + 1;
-            osds.swap(0, pos);
-        }
-
-        if let Some(temp_osds) = self.pg_temp.get(pg)
-            && !temp_osds.is_empty()
-        {
-            *osds = temp_osds.clone();
-        }
-
-        // primary_temp: in C++ this sets a separate `acting_primary` output without
-        // touching the acting vector.  We use a flat Vec where [0] is the primary,
-        // so we swap-to-front when the OSD is already present (avoiding a duplicate)
-        // or overwrite [0] when it is not (losing the displaced OSD — acceptable
-        // because the client only uses [0] for routing).
-        if let Some(&primary) = self.primary_temp.get(pg)
+        if let Some(&primary) = self.pg_upmap_primaries.get(pg)
+            && primary != CRUSH_ITEM_NONE
             && primary >= 0
-            && !osds.is_empty()
+            && primary < self.max_osd
+            && self.osd_weight.get(primary as usize).copied().unwrap_or(0) != 0
+            && let Some(pos) = osds.iter().skip(1).position(|&osd| osd == primary)
         {
-            if let Some(pos) = osds.iter().position(|&osd| osd == primary) {
-                osds.swap(0, pos);
-            } else {
-                osds[0] = primary;
-            }
+            osds.swap(0, pos + 1);
         }
+    }
 
-        // Filter out CRUSH_ITEM_NONE (-1) sentinels.
-        osds.retain(|&osd| osd >= 0);
+    fn upmap_target_is_out(&self, osd: i32) -> bool {
+        osd != CRUSH_ITEM_NONE
+            && osd >= 0
+            && osd < self.max_osd
+            && self.osd_weight.get(osd as usize).copied() == Some(0)
     }
 
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Return the feature and possible-feature masks for a Ceph entity type.
+    ///
+    /// The selected source release controls release-specific CRUSH, upmap, and
+    /// server feature masks. This reads OSDMap state; it does not advertise a
+    /// messenger session's features.
+    pub fn get_features_for_release(
+        &self,
+        release: OSDMapFeatureRelease,
+        entity_type: crate::EntityType,
+    ) -> (u64, u64) {
+        let mut features = 0;
+        if let Some(crush) = &self.crush {
+            if crush.choose_local_tries != 2
+                || crush.choose_local_fallback_tries != 5
+                || crush.choose_total_tries != 19
+            {
+                features |= CEPH_FEATURE_CRUSH_TUNABLES;
+            }
+            if crush.chooseleaf_descend_once != 0 {
+                features |= CEPH_FEATURE_CRUSH_TUNABLES2;
+            }
+            if crush.chooseleaf_vary_r != 0 {
+                features |= CEPH_FEATURE_CRUSH_TUNABLES3;
+            }
+            if crush.chooseleaf_stable != 0 {
+                features |= CEPH_FEATURE_CRUSH_TUNABLES5;
+            }
+            if crush
+                .buckets
+                .iter()
+                .flatten()
+                .any(|bucket| bucket.alg == crate::crush::BucketAlgorithm::Straw2)
+            {
+                features |= CEPH_FEATURE_CRUSH_V4;
+            }
+            if !crush.choose_args.is_empty()
+                && (crush.choose_args.len() != 1
+                    || !crush.choose_args.contains_key(&-1)
+                    || crush
+                        .choose_args
+                        .values()
+                        .flatten()
+                        .flatten()
+                        .any(|arg| arg.weight_set.len() > 1 || !arg.ids.is_empty()))
+            {
+                features |= CEPH_FEATUREMASK_CRUSH_CHOOSE_ARGS;
+            }
+            if release == OSDMapFeatureRelease::Tentacle
+                && (crush.msr_descents != 100
+                    || crush.msr_collision_tries != 100
+                    || crush.rules.iter().flatten().any(|rule| {
+                        matches!(
+                            rule.rule_type,
+                            crate::crush::RuleType::MsrFirstN | crate::crush::RuleType::MsrIndep
+                        )
+                    }))
+            {
+                features |= CEPH_FEATUREMASK_CRUSH_MSR;
+            }
+            for pool in self.pools.values() {
+                if let Ok(rule) = crush.get_rule(pool.crush_rule as u32) {
+                    for step in &rule.steps {
+                        match step.op {
+                            crate::crush::RuleOp::ChooseIndep
+                            | crate::crush::RuleOp::ChooseLeafIndep
+                            | crate::crush::RuleOp::SetChooseTries
+                            | crate::crush::RuleOp::SetChooseLeafTries => {
+                                features |= CEPH_FEATURE_CRUSH_V2;
+                            }
+                            crate::crush::RuleOp::SetChooseLeafVaryR => {
+                                features |= CEPH_FEATURE_CRUSH_TUNABLES3;
+                            }
+                            crate::crush::RuleOp::SetChooseLeafStable => {
+                                features |= CEPH_FEATURE_CRUSH_TUNABLES5;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+        for pool in self.pools.values() {
+            if PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL) {
+                features |= CEPH_FEATURE_OSDHASHPSPOOL;
+            }
+            if !pool.tiers.is_empty() || pool.tier_of >= 0 {
+                features |= CEPH_FEATURE_OSD_CACHEPOOL;
+            }
+        }
+        if self
+            .osd_primary_affinity
+            .iter()
+            .take(self.max_osd.max(0) as usize)
+            .any(|&affinity| affinity != CEPH_OSD_DEFAULT_PRIMARY_AFFINITY)
+        {
+            features |= CEPH_FEATURE_CRUSH_TUNABLES3;
+        }
+        if !self.pg_upmap.is_empty() || !self.pg_upmap_items.is_empty() {
+            features |= CEPH_FEATUREMASK_OSDMAP_PG_UPMAP;
+        }
+        if release == OSDMapFeatureRelease::Tentacle && !self.pg_upmap_primaries.is_empty() {
+            features |= CEPH_FEATUREMASK_SERVER_REEF;
+        }
+        let mut mask = match release {
+            OSDMapFeatureRelease::Quincy => CEPH_FEATURES_CRUSH_QUINCY,
+            OSDMapFeatureRelease::Tentacle => {
+                CEPH_FEATURES_CRUSH_TENTACLE | CEPH_FEATUREMASK_SERVER_REEF
+            }
+        } | CEPH_FEATUREMASK_OSDMAP_PG_UPMAP
+            | CEPH_FEATURE_OSDHASHPSPOOL
+            | CEPH_FEATURE_OSD_CACHEPOOL
+            | CEPH_FEATURE_CRUSH_TUNABLES3;
+        if entity_type == crate::EntityType::OSD {
+            let jewel = self.require_osd_release >= 10;
+            let kraken = self.require_osd_release >= 11;
+            if jewel {
+                features |= CEPH_FEATURE_SERVER_JEWEL;
+            }
+            if kraken {
+                features |= CEPH_FEATUREMASK_SERVER_KRAKEN | CEPH_FEATURE_MSG_ADDR2;
+            }
+            mask |=
+                CEPH_FEATURE_SERVER_JEWEL | CEPH_FEATUREMASK_SERVER_KRAKEN | CEPH_FEATURE_MSG_ADDR2;
+            if self.stretch_mode_enabled {
+                features |= CEPH_FEATUREMASK_STRETCH_MODE;
+                mask |= CEPH_FEATUREMASK_STRETCH_MODE;
+            }
+        }
+        if self.require_min_compat_client >= 14
+            || (self.require_osd_release >= 14 && entity_type == crate::EntityType::OSD)
+        {
+            features |= CEPH_FEATURE_CEPHX_V2;
+        }
+        mask |= CEPH_FEATURE_CEPHX_V2;
+        (features, mask)
+    }
+
+    /// Return the flags inherited by an OSD from all named CRUSH ancestors.
+    pub fn get_osd_crush_node_flags(&self, osd: i32) -> u32 {
+        let Some(crush) = &self.crush else {
+            return 0;
+        };
+        crush
+            .location_ordered(osd)
+            .ok()
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, name)| {
+                crush
+                    .names
+                    .iter()
+                    .find_map(|(&id, candidate)| (candidate == &name).then_some(id))
+            })
+            .filter_map(|id| self.crush_node_flags.get(&id))
+            .fold(0, |flags, inherited| flags | inherited)
     }
 
     /// Check if an OSD is marked UP in the OSDMap.
@@ -3122,14 +3314,7 @@ impl OSDMap {
     ///
     /// Reference: Ceph `OSDMap::is_up(int osd)` in `src/osd/OSDMap.h`
     pub fn is_up(&self, osd_id: i32) -> bool {
-        if osd_id < 0 {
-            return false;
-        }
-        let idx = osd_id as usize;
-        if idx >= self.osd_state.len() {
-            return false;
-        }
-        self.osd_state[idx] & CEPH_OSD_UP != 0
+        self.exists(osd_id) && self.osd_state[osd_id as usize] & CEPH_OSD_UP != 0
     }
 
     /// Check if an OSD is marked DOWN in the OSDMap.
@@ -3259,7 +3444,7 @@ impl OSDMap {
     ///
     /// Reference: Ceph `OSDMap::exists(int osd)` in `src/osd/OSDMap.h`
     pub fn exists(&self, osd_id: i32) -> bool {
-        if osd_id < 0 {
+        if osd_id < 0 || osd_id >= self.max_osd {
             return false;
         }
         let idx = osd_id as usize;
@@ -3362,20 +3547,15 @@ impl OSDMap {
             .get_crush_map()
             .ok_or_else(|| RadosError::Protocol("CRUSH map not available".to_string()))?;
 
-        let _rule = crush_map
-            .get_rule(pool.crush_rule as u32)
-            .map_err(|e| RadosError::Protocol(format!("Failed to get CRUSH rule: {e}")))?;
-
-        let result_max = pool.size as usize;
-        let mut result = Vec::with_capacity(result_max);
-
-        crate::crush::mapper::crush_do_rule(
+        let hashpspool = PoolFlags::from_bits_truncate(pool.flags).contains(PoolFlags::HASHPSPOOL);
+        let result = crate::crush::placement::pg_to_osds(
             crush_map,
+            *pg,
+            pool.pgp_num,
             pool.crush_rule as u32,
-            pg.seed,
-            &mut result,
-            result_max,
             &self.osd_weight,
+            pool.size as usize,
+            hashpspool,
         )
         .map_err(|e| RadosError::Protocol(format!("CRUSH mapping failed: {e}")))?;
 
@@ -3506,10 +3686,1026 @@ mark_feature_dependent_encoding!(PgPool);
 mark_feature_dependent_encoding!(OSDMap);
 
 #[cfg(test)]
+#[path = "tests/osdmap_correctness.rs"]
+mod correctness_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::crush::{
+        BucketAlgorithm, BucketData, CrushBucket, CrushMap, CrushRule, CrushRuleStep, RuleOp,
+        RuleType,
+    };
     use bytes::Bytes;
     use serde_json::json;
+    use sha2::{Digest, Sha256};
+
+    const CRUSH_TUNABLES: u64 = 1 << 18;
+    const CRUSH_TUNABLES2: u64 = 1 << 25;
+    const OSDHASHPSPOOL: u64 = 1 << 30;
+    const CRUSH_V2: u64 = 1 << 36;
+    const CRUSH_TUNABLES3: u64 = 1 << 41;
+    const OSD_PRIMARY_AFFINITY: u64 = 1 << 41;
+    const CRUSH_TUNABLES5: u64 = 1 << 58;
+    const OSDMAP_PG_UPMAP: u64 = (1 << 21) | (1 << 57);
+    const SERVER_REEF: u64 = (1 << 31) | (1 << 28) | (1 << 57);
+    const STRETCH_MODE: u64 = 1 << 32;
+    const CRUSH_CHOOSE_ARGS: u64 = 1 << 21;
+    const CRUSH_FEATURE_MASK_QUINCY: u64 = CRUSH_TUNABLES
+        | CRUSH_TUNABLES2
+        | CRUSH_TUNABLES3
+        | CRUSH_TUNABLES5
+        | CRUSH_V2
+        | (1 << 48)
+        | ((1 << 21) | (1 << 57));
+    const CRUSH_FEATURE_MASK_TENTACLE: u64 = CRUSH_TUNABLES
+        | CRUSH_TUNABLES2
+        | CRUSH_TUNABLES3
+        | CRUSH_TUNABLES5
+        | CRUSH_V2
+        | (1 << 48)
+        | ((1 << 38) | (1 << 57));
+
+    fn store_bucket(map: &mut CrushMap, bucket: CrushBucket) {
+        let index = (-1 - bucket.id) as usize;
+        if map.buckets.len() <= index {
+            map.buckets.resize(index + 1, None);
+        }
+        map.buckets[index] = Some(bucket);
+    }
+
+    fn straw2_bucket(id: i32, bucket_type: i32, items: Vec<i32>) -> CrushBucket {
+        let size = items.len();
+        let weights = vec![0x1_0000; items.len()];
+        CrushBucket {
+            id,
+            bucket_type,
+            alg: BucketAlgorithm::Straw2,
+            hash: 0,
+            weight: weights.iter().sum(),
+            size: size as u32,
+            items,
+            data: BucketData::Straw2 {
+                item_weights: weights,
+            },
+        }
+    }
+
+    fn six_osd_crush_map() -> CrushMap {
+        let mut crush = CrushMap::new();
+        crush.chooseleaf_stable = 1;
+        crush.allowed_bucket_algs = (1 << 1) | (1 << 2) | (1 << 4) | (1 << 5);
+        crush.type_names = [
+            (0, "osd"),
+            (1, "host"),
+            (2, "chassis"),
+            (3, "rack"),
+            (4, "row"),
+            (5, "pdu"),
+            (6, "pod"),
+            (7, "room"),
+            (8, "datacenter"),
+            (9, "zone"),
+            (10, "region"),
+            (11, "root"),
+        ]
+        .into_iter()
+        .map(|(id, name)| (id, name.to_owned()))
+        .collect();
+        crush.names = [
+            (-1, "default"),
+            (-2, "localhost"),
+            (-3, "localrack"),
+            (0, "osd.0"),
+            (1, "osd.1"),
+            (2, "osd.2"),
+            (3, "osd.3"),
+            (4, "osd.4"),
+            (5, "osd.5"),
+        ]
+        .into_iter()
+        .map(|(id, name)| (id, name.to_owned()))
+        .collect();
+        store_bucket(&mut crush, straw2_bucket(-1, 11, vec![-3]));
+        store_bucket(&mut crush, straw2_bucket(-2, 1, (0..6).collect()));
+        store_bucket(&mut crush, straw2_bucket(-3, 3, vec![-2]));
+        crush.max_buckets = 3;
+        crush.max_devices = 6;
+        crush
+    }
+
+    #[test]
+    fn six_osd_source_fixture_ids_names_and_types() {
+        let crush = six_osd_crush_map();
+        let triples: Vec<_> = [-1, -2, -3]
+            .into_iter()
+            .map(|id| {
+                (
+                    id,
+                    crush.names.get(&id).map(String::as_str),
+                    crush.buckets[(-id - 1) as usize]
+                        .as_ref()
+                        .map(|bucket| bucket.bucket_type),
+                )
+            })
+            .collect();
+        assert_eq!(
+            triples,
+            [
+                (-1, Some("default"), Some(11)),
+                (-2, Some("localhost"), Some(1)),
+                (-3, Some("localrack"), Some(3)),
+            ]
+        );
+    }
+
+    fn source_six_osd_map() -> OSDMap {
+        let mut map = OSDMap::new();
+        let mut crush = six_osd_crush_map();
+        crush.rules = vec![
+            Some(CrushRule {
+                rule_id: 0,
+                rule_type: RuleType::Replicated,
+                steps: vec![
+                    CrushRuleStep {
+                        op: RuleOp::Take,
+                        arg1: -1,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::ChooseFirstN,
+                        arg1: 0,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::Emit,
+                        arg1: 0,
+                        arg2: 0,
+                    },
+                ],
+            }),
+            Some(CrushRule {
+                rule_id: 1,
+                rule_type: RuleType::Erasure,
+                steps: vec![
+                    CrushRuleStep {
+                        op: RuleOp::SetChooseLeafTries,
+                        arg1: 5,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::SetChooseTries,
+                        arg1: 100,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::Take,
+                        arg1: -1,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::ChooseIndep,
+                        arg1: 0,
+                        arg2: 0,
+                    },
+                    CrushRuleStep {
+                        op: RuleOp::Emit,
+                        arg1: 0,
+                        arg2: 0,
+                    },
+                ],
+            }),
+        ];
+        map.crush = Some(crush);
+
+        let mut osds = OSDMapIncremental::new(Epoch::new(1));
+        osds.new_max_osd = 6;
+        for osd in 0..6 {
+            osds.new_state.insert(osd, CEPH_OSD_EXISTS | (1 << 3));
+            osds.new_up_client.insert(osd, EntityAddrvec::default());
+            osds.new_weight.insert(osd, 0x1_0000);
+        }
+        osds.apply_to(&mut map).unwrap();
+
+        let mut pools = OSDMapIncremental::new(Epoch::new(2));
+        pools.new_pool_max = 2;
+        pools.new_pools.insert(
+            1,
+            PgPool {
+                pool_type: PgPool::TYPE_ERASURE,
+                size: 3,
+                pg_num: 64,
+                pgp_num: 64,
+                crush_rule: 1,
+                tier_of: -1,
+                ..Default::default()
+            },
+        );
+        pools.new_pool_names.insert(1, "ec".into());
+        pools.new_pools.insert(
+            2,
+            PgPool {
+                pool_type: PgPool::TYPE_REPLICATED,
+                size: 3,
+                pg_num: 64,
+                pgp_num: 64,
+                crush_rule: 0,
+                flags: PoolFlags::HASHPSPOOL.bits(),
+                tier_of: -1,
+                ..Default::default()
+            },
+        );
+        pools.new_pool_names.insert(2, "reppool".into());
+        pools.apply_to(&mut map).unwrap();
+        map
+    }
+
+    // Upstream: v17.2.7/src/test/osd/TestOSDMap.cc::OSDMapTest.MapPG,
+    // MapFunctionsMatch, PrimaryIsFirst, PGTempRespected, PrimaryTempRespected
+    // Source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/osd/TestOSDMap.cc#L261
+    // Upstream: v20.2.4/src/test/osd/TestOSDMap.cc::OSDMapTest.MapPG,
+    // MapFunctionsMatch, PrimaryIsFirst, PGTempRespected, PrimaryTempRespected
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/osd/TestOSDMap.cc#L502
+    #[test]
+    fn placement_ports_source_map_and_temp_primaries() {
+        let mut map = source_six_osd_map();
+        let pg = PgId::new(2, 0);
+        let placement = map.pg_to_placement(&pg).unwrap();
+        // Pinned C++ Jewel/STRAW2 setup maps raw PG 2.0 to this order.
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![3, 5, 1]);
+        assert_eq!(placement.acting, vec![3, 5, 1]);
+        assert_eq!(placement.up_primary, 3);
+        assert_eq!(placement.acting_primary, 3);
+        assert_eq!(map.pg_to_osds(&pg).unwrap(), vec![3, 5, 1]);
+        assert_eq!(map.pg_to_acting_osds(&pg).unwrap(), vec![3, 5, 1]);
+        assert_eq!(map.pg_to_placement(&pg).unwrap().acting_primary, 3);
+        assert_eq!(map.lock_acting_cache().unwrap().len(), 1);
+
+        let mut pg_temp = OSDMapIncremental::new(Epoch::new(3));
+        pg_temp.new_pg_temp.insert(pg, vec![1, 5, 3]);
+        pg_temp.apply_to(&mut map).unwrap();
+        let after_temp = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(after_temp.raw, vec![3, 5, 1]);
+        assert_eq!(after_temp.up, vec![3, 5, 1]);
+        assert_eq!(after_temp.acting, vec![1, 5, 3]);
+        assert_eq!(after_temp.up_primary, 3);
+        assert_eq!(after_temp.acting_primary, 1);
+        assert_eq!(map.lock_acting_cache().unwrap().len(), 1);
+
+        let mut primary_temp = OSDMapIncremental::new(Epoch::new(4));
+        primary_temp.new_primary_temp.insert(pg, 5);
+        primary_temp.apply_to(&mut map).unwrap();
+        let after_primary = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(after_primary.raw, vec![3, 5, 1]);
+        assert_eq!(after_primary.up, vec![3, 5, 1]);
+        assert_eq!(after_primary.acting, vec![1, 5, 3]);
+        assert_eq!(after_primary.up_primary, 3);
+        assert_eq!(after_primary.acting_primary, 5);
+    }
+
+    #[test]
+    fn optimized_ec_pg_temp_preserves_stored_primary_and_none_primary() {
+        let mut map = source_six_osd_map();
+        map.max_osd = 11;
+        map.osd_state.resize(11, CEPH_OSD_EXISTS | CEPH_OSD_UP);
+        map.osd_weight.resize(11, 0x1_0000);
+        map.osd_primary_affinity.resize(11, 0x1_0000);
+        let pool = map.pools.get_mut(&1).unwrap();
+        pool.size = 6;
+        pool.flags = PgPool::FLAG_EC_OPTIMIZATIONS;
+        pool.nonprimary_shards.insert(ShardId::new(1));
+        pool.nonprimary_shards.insert(ShardId::new(2));
+        pool.nonprimary_shards.insert(ShardId::new(3));
+
+        let pg = PgId::new(1, 0);
+        let mut temp = OSDMapIncremental::new(Epoch::new(3));
+        temp.new_pg_temp
+            .insert(pg, vec![CRUSH_ITEM_NONE, 9, 10, 6, 7, 8]);
+        temp.apply_to(&mut map).unwrap();
+
+        let placement = map.pg_to_placement(&pg).unwrap();
+        // Pinned build_simple + EC rule 1, x=pool 1 (no HASHPSPOOL).
+        assert_eq!(placement.raw, vec![5, 0, 2, 4, 3, 1]);
+        assert_eq!(placement.up, vec![5, 0, 2, 4, 3, 1]);
+        assert_eq!(placement.up_primary, 5);
+        assert_eq!(map.pg_to_osds(&pg).unwrap(), vec![5, 0, 2, 4, 3, 1]);
+        assert_eq!(placement.acting, vec![CRUSH_ITEM_NONE, 6, 7, 8, 9, 10]);
+        assert_eq!(placement.acting_primary, 9);
+        assert_eq!(map.pg_to_spg_shard(&pg).unwrap(), ShardId::new(4));
+
+        let mut all_none = OSDMapIncremental::new(Epoch::new(4));
+        all_none.new_pg_temp.insert(pg, vec![CRUSH_ITEM_NONE; 6]);
+        all_none.apply_to(&mut map).unwrap();
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.acting, vec![CRUSH_ITEM_NONE; 6]);
+        assert_eq!(placement.acting_primary, -1);
+    }
+
+    fn source_affinity_counts(map: &OSDMap, pool: u64) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+        let mut any = vec![0; 6];
+        let mut first = vec![0; 6];
+        let mut primary = vec![0; 6];
+        for seed in 0..10_000 {
+            let pg = PgId::new(pool, seed);
+            let placement = map.pg_to_placement(&pg).unwrap();
+            for &osd in &placement.acting {
+                if (0..6).contains(&osd) {
+                    any[osd as usize] += 1;
+                }
+            }
+            if let Some(&osd) = placement.acting.first()
+                && (0..6).contains(&osd)
+            {
+                first[osd as usize] += 1;
+            }
+            if (0..6).contains(&placement.acting_primary) {
+                primary[placement.acting_primary as usize] += 1;
+            }
+        }
+        (any, first, primary)
+    }
+
+    fn update_placement_digest(digest: &mut Sha256, placement: &PgPlacement) {
+        for osds in [&placement.up, &placement.acting] {
+            digest.update((osds.len() as u32).to_be_bytes());
+            for osd in osds {
+                digest.update(osd.to_be_bytes());
+            }
+        }
+        digest.update(placement.up_primary.to_be_bytes());
+        digest.update(placement.acting_primary.to_be_bytes());
+    }
+
+    fn placement_digests(map: &OSDMap, pool: u64) -> (String, String) {
+        let mut direct = Sha256::new();
+        let mut cached = Sha256::new();
+        for seed in 0..10_000 {
+            let pg = PgId::new(pool, seed);
+            let cache_key = (pg.pool, pg.seed);
+            assert!(!map.lock_acting_cache().unwrap().contains(&cache_key));
+            let miss = map.pg_to_placement(&pg).unwrap();
+            let inserted = map
+                .lock_acting_cache()
+                .unwrap()
+                .peek(&cache_key)
+                .cloned()
+                .expect("miss inserts placement cache entry");
+            let hit = map.pg_to_placement(&pg).unwrap();
+            assert_eq!(hit, inserted, "cache hit seed {seed}");
+            update_placement_digest(&mut direct, &miss);
+            update_placement_digest(&mut cached, &hit);
+        }
+        (
+            hex::encode(direct.finalize()),
+            hex::encode(cached.finalize()),
+        )
+    }
+
+    fn pinned_placement_digest(pool: u64, state: &str) -> String {
+        let values: Vec<_> =
+            include_str!("../../tests/crush/reference/osdmap-primary-affinity-vectors.txt")
+                .lines()
+                .filter(|line| !line.starts_with('#'))
+                .filter_map(|line| {
+                    let fields: Vec<_> = line.split_whitespace().collect();
+                    (fields.len() == 5 && fields[1] == pool.to_string() && fields[2] == state)
+                        .then(|| fields[4])
+                })
+                .collect();
+        assert_eq!(
+            values.len(),
+            2,
+            "pinned releases for pool {pool}, state {state}"
+        );
+        assert_eq!(values[0], values[1], "pinned releases diverge");
+        values[0].to_owned()
+    }
+
+    fn assert_placement_digests(map: &OSDMap, pool: u64, state: &str) {
+        let expected = pinned_placement_digest(pool, state);
+        let (miss, hit) = placement_digests(map, pool);
+        assert_eq!(
+            miss, expected,
+            "direct cache miss, pool {pool}, state {state}"
+        );
+        assert_eq!(
+            hit, expected,
+            "immediate cache hit, pool {pool}, state {state}"
+        );
+    }
+
+    #[test]
+    fn primary_affinity_matches_pinned_placement_digests() {
+        let mut map = source_six_osd_map();
+        for pool in [1, 2] {
+            assert_placement_digests(&map, pool, "default");
+
+            let mut zero = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            zero.new_primary_affinity.insert(0, 0);
+            zero.new_primary_affinity.insert(1, 0);
+            zero.apply_to(&mut map).unwrap();
+            assert_placement_digests(&map, pool, "zero");
+
+            let mut half = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            half.new_primary_affinity.insert(0, 0x8000);
+            half.new_primary_affinity.insert(1, 0);
+            half.apply_to(&mut map).unwrap();
+            assert_placement_digests(&map, pool, "half");
+
+            let mut restore = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            restore
+                .new_primary_affinity
+                .insert(0, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            restore
+                .new_primary_affinity
+                .insert(1, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            restore.apply_to(&mut map).unwrap();
+        }
+    }
+
+    // Upstream: v17.2.7/src/test/osd/TestOSDMap.cc::OSDMapTest.PrimaryAffinity
+    // Source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/osd/TestOSDMap.cc#L462
+    // Upstream: v20.2.4/src/test/osd/TestOSDMap.cc::OSDMapTest.PrimaryAffinity
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/osd/TestOSDMap.cc#L703
+    #[test]
+    fn primary_affinity_ports_all_source_states_for_both_pools() {
+        let mut map = source_six_osd_map();
+        for pool in [1, 2] {
+            let (any, first, primary) = source_affinity_counts(&map, pool);
+            for osd in 0..6 {
+                assert!(any[osd] > 0, "pool {pool}, osd {osd}");
+                assert!(first[osd] > 0, "pool {pool}, osd {osd}");
+                assert!(primary[osd] > 0, "pool {pool}, osd {osd}");
+            }
+
+            let mut zero = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            zero.new_primary_affinity.insert(0, 0);
+            zero.new_primary_affinity.insert(1, 0);
+            zero.apply_to(&mut map).unwrap();
+            let (any, first, primary) = source_affinity_counts(&map, pool);
+            for osd in 0..6 {
+                assert!(any[osd] > 0, "pool {pool}, osd {osd}");
+                if osd >= 2 {
+                    assert!(first[osd] > 0, "pool {pool}, osd {osd}");
+                    assert!(primary[osd] > 0, "pool {pool}, osd {osd}");
+                } else {
+                    if pool == 2 {
+                        assert_eq!(first[osd], 0, "pool {pool}, osd {osd}");
+                    }
+                    assert_eq!(primary[osd], 0, "pool {pool}, osd {osd}");
+                }
+            }
+
+            let mut half = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            half.new_primary_affinity.insert(0, 0x8000);
+            half.new_primary_affinity.insert(1, 0);
+            half.apply_to(&mut map).unwrap();
+            let (any, first, primary) = source_affinity_counts(&map, pool);
+            let expected = (10_000 / (6 - 2)) / 2;
+            for osd in 0..6 {
+                assert!(any[osd] > 0, "pool {pool}, osd {osd}");
+                if osd >= 2 {
+                    assert!(first[osd] > 0, "pool {pool}, osd {osd}");
+                    assert!(primary[osd] > 0, "pool {pool}, osd {osd}");
+                } else if osd == 1 {
+                    if pool == 2 {
+                        assert_eq!(first[osd], 0, "pool {pool}, osd {osd}");
+                    }
+                    assert_eq!(primary[osd], 0, "pool {pool}, osd {osd}");
+                } else {
+                    assert!(primary[0] > expected * 2 / 3, "pool {pool}");
+                    assert!(primary[0] < expected * 4 / 3, "pool {pool}");
+                }
+            }
+
+            let mut restore = OSDMapIncremental::new(Epoch::new(map.epoch.as_u32() + 1));
+            restore
+                .new_primary_affinity
+                .insert(0, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            restore
+                .new_primary_affinity
+                .insert(1, CEPH_OSD_DEFAULT_PRIMARY_AFFINITY);
+            restore.apply_to(&mut map).unwrap();
+        }
+    }
+
+    #[test]
+    fn upmap_replays_source_valid_out_and_invalid_target_transitions() {
+        let pg = PgId::new(2, 0);
+        let mut map = source_six_osd_map();
+        assert_eq!(map.pg_to_placement(&pg).unwrap().raw, vec![3, 5, 1]);
+
+        let mut invalid = OSDMapIncremental::new(Epoch::new(3));
+        invalid.new_pg_upmap.insert(pg, vec![99, 2, 4]);
+        invalid.apply_to(&mut map).unwrap();
+        assert_eq!(map.pg_upmap.get(&pg), Some(&vec![99, 2, 4]));
+        let mut raw = vec![3, 5, 1];
+        map.apply_upmap(&pg, &mut raw);
+        assert_eq!(raw, vec![99, 2, 4]);
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![2, 4]);
+        assert_eq!(placement.acting, vec![2, 4]);
+        assert_eq!(placement.up_primary, 2);
+        assert_eq!(placement.acting_primary, 2);
+
+        let mut remove = OSDMapIncremental::new(Epoch::new(4));
+        remove.old_pg_upmap.push(pg);
+        remove.apply_to(&mut map).unwrap();
+        assert_eq!(map.pg_to_placement(&pg).unwrap().raw, vec![3, 5, 1]);
+
+        let mut out = OSDMapIncremental::new(Epoch::new(5));
+        out.new_weight.insert(4, 0);
+        out.new_pg_upmap.insert(pg, vec![0, 4, 2]);
+        out.apply_to(&mut map).unwrap();
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![3, 5, 1]);
+        assert_eq!(placement.acting, vec![3, 5, 1]);
+        assert_eq!(placement.up_primary, 3);
+        assert_eq!(placement.acting_primary, 3);
+    }
+
+    // Client application of the CleanTemps removal sentinels. The monitor
+    // cleanup producer remains outside this crate.
+    #[test]
+    fn client_replays_temp_removal_sentinels_and_keeps_useful_temps() {
+        let pg = PgId::new(2, 0);
+        let mut map = source_six_osd_map();
+        let mut add = OSDMapIncremental::new(Epoch::new(3));
+        add.new_pg_temp.insert(pg, vec![3, 5, 1]);
+        add.new_primary_temp.insert(pg, 3);
+        add.apply_to(&mut map).unwrap();
+
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![3, 5, 1]);
+        assert_eq!(placement.acting, vec![3, 5, 1]);
+        assert_eq!(placement.up_primary, 3);
+        assert_eq!(placement.acting_primary, 3);
+
+        let mut remove = OSDMapIncremental::new(Epoch::new(4));
+        remove.new_pg_temp.insert(pg, vec![]);
+        remove.new_primary_temp.insert(pg, -1);
+        remove.apply_to(&mut map).unwrap();
+
+        assert!(!map.pg_temp.contains_key(&pg));
+        assert!(!map.primary_temp.contains_key(&pg));
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![3, 5, 1],
+                acting: vec![3, 5, 1],
+                up_primary: 3,
+                acting_primary: 3,
+            }
+        );
+
+        let mut useful = OSDMapIncremental::new(Epoch::new(5));
+        useful.new_pg_temp.insert(pg, vec![3, 0, 1]);
+        useful.new_primary_temp.insert(pg, 0);
+        useful.apply_to(&mut map).unwrap();
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![3, 5, 1]);
+        assert_eq!(placement.acting, vec![3, 0, 1]);
+        assert_eq!(placement.up_primary, 3);
+        assert_eq!(placement.acting_primary, 0);
+    }
+
+    // Client-side removal sentinels consumed by CleanPGUpmaps and
+    // CleanPGUpmapPrimaries; their monitor producers are not implemented.
+    #[test]
+    fn client_replays_full_item_and_primary_upmap_removals() {
+        let pg = PgId::new(2, 0);
+        let mut map = source_six_osd_map();
+        let mut add = OSDMapIncremental::new(Epoch::new(3));
+        add.new_pg_upmap.insert(pg, vec![0, 2, 4]);
+        add.new_pg_upmap_items.insert(pg, vec![(2, 1)]);
+        add.new_pg_upmap_primary.insert(pg, 4);
+        add.apply_to(&mut map).unwrap();
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![4, 1, 0],
+                acting: vec![4, 1, 0],
+                up_primary: 4,
+                acting_primary: 4,
+            }
+        );
+
+        let mut remove = OSDMapIncremental::new(Epoch::new(4));
+        remove.old_pg_upmap.push(pg);
+        remove.old_pg_upmap_items.push(pg);
+        remove.old_pg_upmap_primary.push(pg);
+        remove.apply_to(&mut map).unwrap();
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![3, 5, 1],
+                acting: vec![3, 5, 1],
+                up_primary: 3,
+                acting_primary: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn upmap_items_keep_source_collision_and_negative_target_semantics() {
+        let pg = PgId::new(2, 0);
+        let mut map = source_six_osd_map();
+        let mut items = OSDMapIncremental::new(Epoch::new(3));
+        items
+            .new_pg_upmap_items
+            .insert(pg, vec![(5, 3), (5, 99), (1, -2)]);
+        items.apply_to(&mut map).unwrap();
+
+        let mut raw = vec![3, 5, 1];
+        map.apply_upmap(&pg, &mut raw);
+        assert_eq!(raw, vec![3, 99, -2]);
+        let placement = map.pg_to_placement(&pg).unwrap();
+        assert_eq!(placement.raw, vec![3, 5, 1]);
+        assert_eq!(placement.up, vec![3]);
+        assert_eq!(placement.acting, vec![3]);
+        assert_eq!(placement.up_primary, 3);
+        assert_eq!(placement.acting_primary, 3);
+
+        let mut remove = OSDMapIncremental::new(Epoch::new(4));
+        remove.old_pg_upmap_items.push(pg);
+        remove.apply_to(&mut map).unwrap();
+        assert_eq!(map.pg_to_placement(&pg).unwrap().up, vec![3, 5, 1]);
+    }
+
+    // Upstream: v17.2.7/src/osd/OSDMap.cc::_apply_upmap
+    // Source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/osd/OSDMap.cc#L2432
+    // Upstream: v20.2.4/src/osd/OSDMap.cc::_apply_upmap
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/osd/OSDMap.cc#L2803
+    #[test]
+    fn upmap_special_values_follow_source_validity_predicates() {
+        let pg = PgId::new(2, 0);
+        let mut map = source_six_osd_map();
+
+        let mut full_none = OSDMapIncremental::new(Epoch::new(3));
+        full_none
+            .new_pg_upmap
+            .insert(pg, vec![CRUSH_ITEM_NONE, 2, 4]);
+        full_none.apply_to(&mut map).unwrap();
+        let mut raw = vec![3, 5, 1];
+        map.apply_upmap(&pg, &mut raw);
+        assert_eq!(raw, vec![CRUSH_ITEM_NONE, 2, 4]);
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![2, 4],
+                acting: vec![2, 4],
+                up_primary: 2,
+                acting_primary: 2,
+            }
+        );
+
+        let mut item_none = OSDMapIncremental::new(Epoch::new(4));
+        item_none.old_pg_upmap.push(pg);
+        item_none
+            .new_pg_upmap_items
+            .insert(pg, vec![(5, CRUSH_ITEM_NONE)]);
+        item_none.apply_to(&mut map).unwrap();
+        let mut raw = vec![3, 5, 1];
+        map.apply_upmap(&pg, &mut raw);
+        assert_eq!(raw, vec![3, CRUSH_ITEM_NONE, 1]);
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![3, 1],
+                acting: vec![3, 1],
+                up_primary: 3,
+                acting_primary: 3,
+            }
+        );
+
+        let mut no_items = OSDMapIncremental::new(Epoch::new(5));
+        no_items.old_pg_upmap_items.push(pg);
+        no_items.apply_to(&mut map).unwrap();
+        for (epoch, primary) in [(6, 99), (7, -2), (8, CRUSH_ITEM_NONE)] {
+            let mut ignored = OSDMapIncremental::new(Epoch::new(epoch));
+            ignored.new_pg_upmap_primary.insert(pg, primary);
+            ignored.apply_to(&mut map).unwrap();
+            assert_eq!(
+                map.pg_to_placement(&pg).unwrap(),
+                PgPlacement {
+                    raw: vec![3, 5, 1],
+                    up: vec![3, 5, 1],
+                    acting: vec![3, 5, 1],
+                    up_primary: 3,
+                    acting_primary: 3,
+                },
+                "primary {primary}"
+            );
+        }
+
+        let mut out = OSDMapIncremental::new(Epoch::new(9));
+        out.new_weight.insert(5, 0);
+        out.new_pg_upmap_primary.insert(pg, 5);
+        out.apply_to(&mut map).unwrap();
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 1, 0],
+                up: vec![3, 1, 0],
+                acting: vec![3, 1, 0],
+                up_primary: 3,
+                acting_primary: 3,
+            }
+        );
+
+        let mut valid = OSDMapIncremental::new(Epoch::new(10));
+        valid.new_weight.insert(5, 0x1_0000);
+        valid.new_pg_upmap_primary.insert(pg, 5);
+        valid.apply_to(&mut map).unwrap();
+        assert_eq!(
+            map.pg_to_placement(&pg).unwrap(),
+            PgPlacement {
+                raw: vec![3, 5, 1],
+                up: vec![5, 3, 1],
+                acting: vec![5, 3, 1],
+                up_primary: 5,
+                acting_primary: 5,
+            }
+        );
+    }
+
+    // Upstream: v20.2.4/src/test/osd/TestOSDMap.cc::OSDMapTest.pgtemp_primaryfirst
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/osd/TestOSDMap.cc#L3234
+    #[test]
+    fn pgtemp_primaryfirst_ports_every_mask_and_codec_direction() {
+        let set = vec![0, 1, 2, 3, 4, 5];
+        let pgid = PgId::new(1, 0);
+        let mut map = OSDMap::new();
+        let mut pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            size: 6,
+            ..Default::default()
+        };
+
+        assert_eq!(pool.pgtemp_primaryfirst_vec(&set), set);
+        assert_eq!(pool.pgtemp_undo_primaryfirst_vec(false, &set).unwrap(), set);
+
+        pool.flags = PgPool::FLAG_EC_OPTIMIZATIONS;
+        assert_eq!(pool.pgtemp_primaryfirst_vec(&set), set);
+        assert_eq!(pool.pgtemp_undo_primaryfirst_vec(false, &set).unwrap(), set);
+
+        pool.flags = 0;
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.new_pg_temp.insert(pgid, set.clone());
+        inc.apply_to(&mut map).unwrap();
+        assert_eq!(pool.pgtemp_primaryfirst_vec(&set), set);
+        assert_eq!(
+            pool.pgtemp_undo_primaryfirst_vec(map.pg_temp.contains_key(&pgid), &set)
+                .unwrap(),
+            set
+        );
+
+        pool.flags = PgPool::FLAG_EC_OPTIMIZATIONS;
+        assert_eq!(pool.pgtemp_primaryfirst_vec(&set), set);
+        assert_eq!(
+            pool.pgtemp_undo_primaryfirst_vec(map.pg_temp.contains_key(&pgid), &set)
+                .unwrap(),
+            set
+        );
+
+        for mask in (2..64).step_by(2) {
+            pool.nonprimary_shards.clear();
+            for shard in 0..6 {
+                if mask & (1 << shard) != 0 {
+                    pool.nonprimary_shards.insert(ShardId::new(shard));
+                }
+            }
+            let encoded = pool.pgtemp_primaryfirst_vec(&set);
+            let primary_count = pool.size as usize - pool.nonprimary_shards.iter().count();
+            for (position, &osd) in encoded.iter().enumerate() {
+                assert_eq!(
+                    position >= primary_count,
+                    pool.is_nonprimary_shard(ShardId::new(osd as i8)),
+                    "mask {mask}, position {position}"
+                );
+            }
+            for shard in 0..6 {
+                let shard = ShardId::new(shard);
+                let encoded_shard = pool.pgtemp_primaryfirst_shard(true, shard);
+                assert_eq!(
+                    pool.pgtemp_undo_primaryfirst_shard(true, encoded_shard),
+                    shard,
+                    "mask {mask}, shard {}",
+                    shard.0
+                );
+                assert_eq!(
+                    encoded_shard == shard,
+                    shard.0 == 0 || mask == 62,
+                    "mask {mask}, shard {}",
+                    shard.0
+                );
+            }
+            assert_eq!(
+                pool.pgtemp_undo_primaryfirst_vec(map.pg_temp.contains_key(&pgid), &encoded)
+                    .unwrap(),
+                set,
+                "mask {mask}"
+            );
+        }
+    }
+
+    // Upstream: v17.2.7/src/test/osd/TestOSDMap.cc::OSDMapTest.Features
+    // Source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/osd/TestOSDMap.cc#L222
+    // Upstream: v20.2.4/src/test/osd/TestOSDMap.cc::OSDMapTest.Features
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/osd/TestOSDMap.cc#L463
+    #[test]
+    fn get_features_derives_pool_and_rule_bits() {
+        let mut map = make_osdmap_with_states(vec![CEPH_OSD_EXISTS | CEPH_OSD_UP; 6]);
+        let mut crush = six_osd_crush_map();
+        crush.choose_local_tries = 0;
+        crush.choose_local_fallback_tries = 0;
+        crush.choose_total_tries = 50;
+        crush.chooseleaf_descend_once = 1;
+        crush.chooseleaf_vary_r = 1;
+        crush.rules = vec![
+            Some(CrushRule {
+                rule_id: 0,
+                rule_type: RuleType::Replicated,
+                steps: vec![],
+            }),
+            Some(CrushRule {
+                rule_id: 1,
+                rule_type: RuleType::Erasure,
+                steps: vec![CrushRuleStep {
+                    op: RuleOp::ChooseIndep,
+                    arg1: 0,
+                    arg2: 0,
+                }],
+            }),
+        ];
+        map.crush = Some(crush);
+        map.pools.insert(
+            1,
+            PgPool {
+                pool_type: PgPool::TYPE_ERASURE,
+                crush_rule: 1,
+                tier_of: -1,
+                ..Default::default()
+            },
+        );
+        map.pools.insert(
+            2,
+            PgPool {
+                pool_type: PgPool::TYPE_REPLICATED,
+                crush_rule: 0,
+                flags: PoolFlags::HASHPSPOOL.bits(),
+                tier_of: -1,
+                ..Default::default()
+            },
+        );
+        map.osd_primary_affinity = vec![CEPH_OSD_DEFAULT_PRIMARY_AFFINITY; 6];
+
+        let expected = CRUSH_TUNABLES
+            | CRUSH_TUNABLES2
+            | CRUSH_TUNABLES3
+            | CRUSH_TUNABLES5
+            | CRUSH_V2
+            | (1 << 48)
+            | OSDHASHPSPOOL
+            | OSD_PRIMARY_AFFINITY;
+        for release in [OSDMapFeatureRelease::Quincy, OSDMapFeatureRelease::Tentacle] {
+            let base_mask = match release {
+                OSDMapFeatureRelease::Quincy => CRUSH_FEATURE_MASK_QUINCY,
+                OSDMapFeatureRelease::Tentacle => CRUSH_FEATURE_MASK_TENTACLE | SERVER_REEF,
+            } | OSDMAP_PG_UPMAP
+                | OSDHASHPSPOOL
+                | (1 << 35)
+                | OSD_PRIMARY_AFFINITY
+                | (1 << 61);
+            assert_eq!(
+                map.get_features_for_release(release, crate::EntityType::CLIENT),
+                (expected, base_mask)
+            );
+            assert_eq!(
+                map.get_features_for_release(release, crate::EntityType::OSD),
+                (
+                    expected,
+                    base_mask | (1 << 57) | ((1 << 14) | (1 << 57)) | (1 << 59)
+                )
+            );
+        }
+
+        let mut inc = OSDMapIncremental::new(Epoch::new(1));
+        inc.old_pools.push(1);
+        inc.new_primary_affinity.insert(0, 0x8000);
+        inc.apply_to(&mut map).unwrap();
+        for release in [OSDMapFeatureRelease::Quincy, OSDMapFeatureRelease::Tentacle] {
+            let base_mask = match release {
+                OSDMapFeatureRelease::Quincy => CRUSH_FEATURE_MASK_QUINCY,
+                OSDMapFeatureRelease::Tentacle => CRUSH_FEATURE_MASK_TENTACLE | SERVER_REEF,
+            } | OSDMAP_PG_UPMAP
+                | OSDHASHPSPOOL
+                | (1 << 35)
+                | OSD_PRIMARY_AFFINITY
+                | (1 << 61);
+            assert_eq!(
+                map.get_features_for_release(release, crate::EntityType::MON),
+                (expected & !CRUSH_V2, base_mask)
+            );
+        }
+        map.stretch_mode_enabled = true;
+        for release in [OSDMapFeatureRelease::Quincy, OSDMapFeatureRelease::Tentacle] {
+            let (osd_features, osd_mask) =
+                map.get_features_for_release(release, crate::EntityType::OSD);
+            let (client_features, client_mask) =
+                map.get_features_for_release(release, crate::EntityType::CLIENT);
+            assert_eq!(osd_features & STRETCH_MODE, STRETCH_MODE);
+            assert_eq!(osd_mask & STRETCH_MODE, STRETCH_MODE);
+            assert_eq!(client_features & STRETCH_MODE, 0);
+            assert_eq!(client_mask & STRETCH_MODE, 0);
+        }
+    }
+
+    #[test]
+    fn get_features_ignores_empty_default_choose_arg() {
+        let mut map = OSDMap::new();
+        let mut crush = six_osd_crush_map();
+        // This is the decoder's wire shape for index -1, bucket 0, with zero
+        // weight-set positions and zero IDs.
+        crush.choose_args.insert(
+            -1,
+            vec![Some(crate::crush::CrushChooseArg::default()), None, None],
+        );
+        map.crush = Some(crush);
+
+        for release in [OSDMapFeatureRelease::Quincy, OSDMapFeatureRelease::Tentacle] {
+            assert_eq!(
+                map.get_features_for_release(release, crate::EntityType::CLIENT)
+                    .0
+                    & CRUSH_CHOOSE_ARGS,
+                0
+            );
+        }
+
+        map.crush
+            .as_mut()
+            .unwrap()
+            .choose_args
+            .get_mut(&-1)
+            .unwrap()[0] = Some(crate::crush::CrushChooseArg {
+            weight_set: Vec::new(),
+            ids: vec![-2],
+        });
+        for release in [OSDMapFeatureRelease::Quincy, OSDMapFeatureRelease::Tentacle] {
+            assert_eq!(
+                map.get_features_for_release(release, crate::EntityType::CLIENT)
+                    .0
+                    & CRUSH_CHOOSE_ARGS,
+                CRUSH_CHOOSE_ARGS
+            );
+        }
+    }
+
+    // Upstream: v17.2.7/src/test/osd/TestOSDMap.cc::OSDMapTest.get_osd_crush_node_flags
+    // Source: https://github.com/ceph/ceph/blob/b12291d110049b2f35e32e0de30d70e9a4c060d2/src/test/osd/TestOSDMap.cc#L537
+    // Upstream: v20.2.4/src/test/osd/TestOSDMap.cc::OSDMapTest.get_osd_crush_node_flags
+    // Source: https://github.com/ceph/ceph/blob/7f793731f1b39eb4f465e960113d2363c311b964/src/test/osd/TestOSDMap.cc#L778
+    #[test]
+    fn get_osd_crush_node_flags_inherits_and_replaces_root_flags() {
+        let mut map = make_osdmap_with_states(vec![CEPH_OSD_EXISTS | CEPH_OSD_UP; 6]);
+        map.crush = Some(six_osd_crush_map());
+        for osd in 0..6 {
+            assert_eq!(map.get_osd_crush_node_flags(osd), 0);
+        }
+
+        let mut first = OSDMapIncremental::new(Epoch::new(1));
+        first.new_crush_node_flags.insert(-1, 123);
+        first.apply_to(&mut map).unwrap();
+        for osd in 0..6 {
+            assert_eq!(map.get_osd_crush_node_flags(osd), 123);
+        }
+        assert_eq!(map.get_osd_crush_node_flags(1000), 0);
+
+        let mut second = OSDMapIncremental::new(Epoch::new(2));
+        second.new_crush_node_flags.insert(-1, 456);
+        second.apply_to(&mut map).unwrap();
+        for osd in 0..6 {
+            assert_eq!(map.get_osd_crush_node_flags(osd), 456);
+        }
+        assert_eq!(map.get_osd_crush_node_flags(1000), 0);
+
+        let mut third = OSDMapIncremental::new(Epoch::new(3));
+        third.new_crush_node_flags.insert(-1, 0);
+        third.apply_to(&mut map).unwrap();
+        for osd in 0..6 {
+            assert_eq!(map.get_osd_crush_node_flags(osd), 0);
+        }
+    }
 
     fn make_osdmap_with_states(states: Vec<u32>) -> OSDMap {
         let max_osd = states.len() as i32;
@@ -3672,71 +4868,6 @@ mod tests {
         assert_eq!(map.select_primary_index(0, &osds), None);
     }
 
-    #[test]
-    fn test_apply_pg_overrides_swaps_down_primary() {
-        // OSD 0 DOWN, OSD 1 UP, OSD 2 UP. CRUSH gives us [0, 1, 2].
-        // Expected: primary gets swapped to OSD 1, no explicit overrides
-        // interfere.
-        let map = make_osdmap_with_states(vec![0x1, 0x3, 0x3]);
-        let pg = PgId::new(1, 42);
-        let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
-        assert_eq!(
-            osds[0], 1,
-            "down primary should have been replaced with first up OSD"
-        );
-    }
-
-    #[test]
-    fn test_apply_pg_overrides_leaves_up_primary() {
-        // All OSDs up. CRUSH gives [0, 1, 2]. Primary should stay at 0.
-        let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3]);
-        let pg = PgId::new(1, 42);
-        let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
-        assert_eq!(osds, vec![0, 1, 2]);
-    }
-
-    #[test]
-    fn test_apply_pg_overrides_respects_primary_temp_over_down_filter() {
-        // OSD 0 DOWN, OSD 1 UP. primary_temp overrides to OSD 0 anyway.
-        // Admin override takes precedence over the down filter.
-        let mut map = make_osdmap_with_states(vec![0x1, 0x3]);
-        let pg = PgId::new(1, 42);
-        map.primary_temp.insert(pg, 0);
-        let mut osds = vec![0, 1];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
-        assert_eq!(
-            osds[0], 0,
-            "primary_temp should override the down-filter promotion"
-        );
-    }
-
-    /// Compute the C++ `pgtemp_primaryfirst` for a single shard id —
-    /// the inverse direction of `pgtemp_undo_primaryfirst_shard`.  Only
-    /// used by the roundtrip test below to lock in the bit-for-bit
-    /// match against the C++ math.
-    fn pgtemp_primaryfirst_shard(pool: &PgPool, has_pg_temp: bool, shard: ShardId) -> ShardId {
-        if shard == ShardId::NO_SHARD || shard.0 == 0 {
-            return shard;
-        }
-        if !pool.allows_ecoptimizations() || !has_pg_temp {
-            return shard;
-        }
-        let size = pool.size as i32;
-        let nonprimary_count = (0..size as usize)
-            .filter(|&i| pool.is_nonprimary_shard(ShardId::new(i as i8)))
-            .count() as i32;
-        let num_parity_shards = size - nonprimary_count - 1;
-        let s = shard.0 as i32;
-        let result = if s >= size - num_parity_shards {
-            s + num_parity_shards + 1 - size
-        } else {
-            s + num_parity_shards
-        };
-        ShardId::new(result as i8)
-    }
-
     fn make_optimized_ec_pool(size: u8, nonprimary: &[i8]) -> PgPool {
         let mut pool = PgPool {
             pool_type: PgPool::TYPE_ERASURE,
@@ -3757,7 +4888,7 @@ mod tests {
         let pool = make_optimized_ec_pool(6, &[4, 5]);
         for i in 0..6 {
             let s = ShardId::new(i);
-            let pf = pgtemp_primaryfirst_shard(&pool, true, s);
+            let pf = pool.pgtemp_primaryfirst_shard(true, s);
             let back = pool.pgtemp_undo_primaryfirst_shard(true, pf);
             assert_eq!(s, back, "roundtrip failed for shard {i}");
         }
@@ -3771,10 +4902,39 @@ mod tests {
         let pool = make_optimized_ec_pool(6, &[2, 3]);
         for i in 0..6 {
             let s = ShardId::new(i);
-            let pf = pgtemp_primaryfirst_shard(&pool, true, s);
+            let pf = pool.pgtemp_primaryfirst_shard(true, s);
             let back = pool.pgtemp_undo_primaryfirst_shard(true, pf);
             assert_eq!(s, back, "roundtrip failed for shard {i}");
         }
+    }
+
+    #[test]
+    fn test_pgtemp_primaryfirst_scalar_roundtrip_counts_decoded_shard_127() {
+        let mut encoded = bytes::BytesMut::new();
+        let mut nonprimary = ShardIdSet::default();
+        nonprimary.insert(ShardId::new(2));
+        nonprimary.insert(ShardId::new(3));
+        nonprimary.insert(ShardId::new(127));
+        nonprimary.encode(&mut encoded, 0).unwrap();
+        let mut encoded = encoded.freeze();
+        let nonprimary = ShardIdSet::decode(&mut encoded, 0).unwrap();
+        assert_eq!(
+            nonprimary.iter().collect::<Vec<_>>(),
+            vec![ShardId::new(2), ShardId::new(3), ShardId::new(127)]
+        );
+
+        let pool = PgPool {
+            pool_type: PgPool::TYPE_ERASURE,
+            flags: PgPool::FLAG_EC_OPTIMIZATIONS,
+            size: 6,
+            nonprimary_shards: nonprimary,
+            ..Default::default()
+        };
+        let shard = ShardId::new(1);
+        assert_eq!(
+            pool.pgtemp_undo_primaryfirst_shard(true, pool.pgtemp_primaryfirst_shard(true, shard)),
+            shard
+        );
     }
 
     #[test]
@@ -4076,25 +5236,27 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pg_overrides_rejects_pg_upmap_with_out_target() {
+    fn test_apply_upmap_rejects_pg_upmap_with_out_target() {
         // CRUSH gives [0, 1, 2]. Admin upmap targets [3, 4, 5] but OSD 4
-        // is OUT (weight 0). C++ rejects the entire upmap and falls back
-        // to the raw CRUSH result.
+        // is OUT (weight 0). C++ rejects the entire operation, including
+        // otherwise-valid item and primary overrides.
         let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3, 0x3, 0x3]);
         map.osd_weight = vec![0x10000, 0x10000, 0x10000, 0x10000, 0, 0x10000];
         let pg = PgId::new(1, 42);
         map.pg_upmap.insert(pg, vec![3, 4, 5]);
+        map.pg_upmap_items.insert(pg, vec![(1, 3)]);
+        map.pg_upmap_primaries.insert(pg, 2);
         let mut osds = vec![0, 1, 2];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
+        map.apply_upmap(&pg, &mut osds);
         assert_eq!(
             osds,
             vec![0, 1, 2],
-            "pg_upmap with OUT target should be rejected"
+            "invalid pg_upmap should stop all upmap processing"
         );
     }
 
     #[test]
-    fn test_apply_pg_overrides_pg_upmap_items_skips_duplicate() {
+    fn test_apply_upmap_items_skips_duplicate() {
         // CRUSH gives [1, 2, 3]. upmap_items wants to swap 2 → 3 but 3
         // is already in the set; would create a duplicate. Skip the swap.
         let map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3]);
@@ -4103,7 +5265,7 @@ mod tests {
         map.osd_weight = vec![0x10000; 4];
         map.pg_upmap_items.insert(pg, vec![(2, 3)]);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
+        map.apply_upmap(&pg, &mut osds);
         assert_eq!(
             osds,
             vec![1, 2, 3],
@@ -4112,7 +5274,7 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_pg_overrides_pg_upmap_items_skips_out_target() {
+    fn test_apply_upmap_items_skips_out_target() {
         // CRUSH gives [1, 2, 3]. upmap_items wants 2 → 4 but 4 is OUT.
         // Skip the swap.
         let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3, 0x3]);
@@ -4120,12 +5282,12 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.pg_upmap_items.insert(pg, vec![(2, 4)]);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
+        map.apply_upmap(&pg, &mut osds);
         assert_eq!(osds, vec![1, 2, 3], "OUT-target swap should be skipped");
     }
 
     #[test]
-    fn test_apply_pg_overrides_pg_upmap_primaries_rejects_out_target() {
+    fn test_apply_upmap_primaries_rejects_out_target() {
         // CRUSH gives [1, 2, 3]. Admin sets primary_upmap to OSD 2, but
         // OSD 2 is OUT. C++ skips the override entirely.
         let mut map = make_osdmap_with_states(vec![0x3, 0x3, 0x3, 0x3]);
@@ -4133,7 +5295,7 @@ mod tests {
         let pg = PgId::new(1, 42);
         map.pg_upmap_primaries.insert(pg, 2);
         let mut osds = vec![1, 2, 3];
-        map.apply_pg_overrides(&pg, 0, &mut osds);
+        map.apply_upmap(&pg, &mut osds);
         assert_eq!(
             osds[0], 1,
             "OUT primary override should not promote OSD 2 to primary"

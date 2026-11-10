@@ -25,4 +25,8 @@ pub enum RadosError {
     /// A wire-format encode or decode failure from a [`Denc`] implementation.
     #[error(transparent)]
     Codec(#[from] CodecError),
+
+    /// A rejected embedded CRUSH map, retaining the underlying decode error.
+    #[error("Invalid CRUSH map: {0}")]
+    Crush(#[source] Box<crate::crush::error::CrushError>),
 }
